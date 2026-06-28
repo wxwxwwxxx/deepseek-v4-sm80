@@ -7,10 +7,12 @@ import torch.nn.functional as F
 
 import minisgl.core as core
 import minisgl.distributed.info as dist_info
+from minisgl.attention import create_attention_backend
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
+from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
-from minisgl.models.deepseek_v4 import DSV4FallbackAttentionMetadata, DSV4MoEGate
+from minisgl.models.deepseek_v4 import DSV4MoEGate
 from minisgl.models.register import get_model_class
 
 
@@ -61,6 +63,22 @@ def _reset_globals() -> None:
     set_tp_info(0, 1)
 
 
+
+def _install_dsv4_context(cfg: ModelConfig, *, max_len: int) -> Context:
+    ctx = Context(page_size=1)
+    ctx.kv_cache = create_kvcache_pool(
+        cfg,
+        num_pages=max_len + 8,
+        page_size=1,
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+    )
+    ctx.page_table = torch.arange(max_len + 8, dtype=torch.int32).unsqueeze(0)
+    core.set_global_ctx(ctx)
+    ctx.attn_backend = create_attention_backend("dsv4", cfg)
+    return ctx
+
+
 def _fill_forward_weights(model) -> None:
     fp8 = getattr(torch, "float8_e4m3fn", None)
     e8m0 = getattr(torch, "float8_e8m0fnu", None)
@@ -97,9 +115,8 @@ def test_deepseek_v4_small_prefill_forward_fallback_reaches_logits():
     model = get_model_class(cfg.architectures[0], cfg)
     _fill_forward_weights(model)
 
-    ctx = Context(page_size=1)
-    core.set_global_ctx(ctx)
     input_ids = torch.tensor([1, 2, 3], dtype=torch.int32)
+    ctx = _install_dsv4_context(cfg, max_len=input_ids.numel())
     req = Req(
         input_ids=input_ids,
         table_idx=0,
@@ -114,9 +131,7 @@ def test_deepseek_v4_small_prefill_forward_fallback_reaches_logits():
     batch.input_ids = input_ids
     batch.positions = torch.arange(input_ids.numel(), dtype=torch.int32)
     batch.out_loc = torch.arange(input_ids.numel(), dtype=torch.int32)
-    batch.attn_metadata = DSV4FallbackAttentionMetadata(
-        torch.tensor([0, input_ids.numel()], dtype=torch.int32)
-    )
+    ctx.attn_backend.prepare_metadata(batch)
 
     with ctx.forward_batch(batch):
         logits = model.forward()
@@ -136,9 +151,8 @@ def test_deepseek_v4_ratio4_prefill_forward_fallback_reaches_logits():
     model = get_model_class(cfg.architectures[0], cfg)
     _fill_forward_weights(model)
 
-    ctx = Context(page_size=1)
-    core.set_global_ctx(ctx)
     input_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    ctx = _install_dsv4_context(cfg, max_len=input_ids.numel())
     req = Req(
         input_ids=input_ids,
         table_idx=0,
@@ -153,9 +167,7 @@ def test_deepseek_v4_ratio4_prefill_forward_fallback_reaches_logits():
     batch.input_ids = input_ids
     batch.positions = torch.arange(input_ids.numel(), dtype=torch.int32)
     batch.out_loc = torch.arange(input_ids.numel(), dtype=torch.int32)
-    batch.attn_metadata = DSV4FallbackAttentionMetadata(
-        torch.tensor([0, input_ids.numel()], dtype=torch.int32)
-    )
+    ctx.attn_backend.prepare_metadata(batch)
 
     with ctx.forward_batch(batch):
         logits = model.forward()

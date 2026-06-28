@@ -219,7 +219,13 @@ def _adjust_config(config: EngineConfig):
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)
 
-    if config.attention_backend == "auto":
+    if config.model_config.is_deepseek_v4:
+        if config.attention_backend != "dsv4":
+            override("attention_backend", "dsv4")
+            logger.info_rank0("Using DSV4 attention backend for DeepSeek V4")
+        override("cuda_graph_bs", [])
+        override("cuda_graph_max_bs", 0)
+    elif config.attention_backend == "auto":
         backend = "trtllm" if is_sm100_supported() else ("fa,fi" if is_sm90_supported() else "fi")
         override("attention_backend", backend)
         logger.info_rank0(f"Auto-selected attention backend: {config.attention_backend}")

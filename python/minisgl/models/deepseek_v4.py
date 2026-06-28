@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 from minisgl.attention import BaseAttnMetadata
+from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata
 from minisgl.core import Batch, get_global_ctx
 from minisgl.distributed import DistributedCommunicator, get_tp_info
 from minisgl.layers import BaseOP, OPList
@@ -378,10 +379,10 @@ class DSV4Indexer(BaseOP):
         q_lora: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        self.compressor.forward(x, positions)
+        compressed_kv = self.compressor.forward(x, positions)
         self.wq_b.forward(q_lora)
         self.weights_proj.forward(x)
-        return torch.empty((x.shape[0], 0), dtype=torch.int64, device=x.device)
+        return compressed_kv
 
 
 class DSV4Attention(BaseOP):
@@ -516,12 +517,35 @@ class DSV4Attention(BaseOP):
                 kv[..., : -self.rope_head_dim], block_size=64
             )
 
+        attn_backend = getattr(get_global_ctx(), "attn_backend", None)
+        attn_metadata = getattr(batch, "attn_metadata", None)
+        use_dsv4_backend = isinstance(attn_metadata, DSV4AttentionMetadata)
         if hasattr(self, "indexer"):
-            self.indexer.forward(x, q_lora, positions)
+            indexer_kv = self.indexer.forward(x, q_lora, positions)
+            if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
+                attn_backend.store_indexer(self.layer_id, indexer_kv, batch)
         if hasattr(self, "compressor"):
-            self.compressor.forward(x, positions)
+            compressed_kv = self.compressor.forward(x, positions)
+            if use_dsv4_backend and hasattr(attn_backend, "store_compressed"):
+                attn_backend.store_compressed(
+                    self.layer_id,
+                    compressed_kv,
+                    batch,
+                    self.compress_ratio,
+                )
 
-        o = self._fallback_attention(q, kv, batch)
+        if use_dsv4_backend and attn_backend is not None:
+            o = attn_backend.forward(
+                q,
+                kv,
+                kv,
+                self.layer_id,
+                batch,
+                compress_ratio=self.compress_ratio,
+                attn_sink=self.attn_sink,
+            )
+        else:
+            o = self._fallback_attention(q, kv, batch)
         _apply_rotary_tail(
             o,
             positions,
@@ -837,4 +861,4 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
         return self.lm_head.linear(output)
 
 
-__all__ = ["DeepseekV4ForCausalLM", "DSV4FallbackAttentionMetadata"]
+__all__ = ["DeepseekV4ForCausalLM", "DSV4FallbackAttentionMetadata", "DSV4AttentionMetadata"]
