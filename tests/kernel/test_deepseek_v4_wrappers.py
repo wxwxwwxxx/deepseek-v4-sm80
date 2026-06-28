@@ -11,6 +11,10 @@ import minisgl.attention.deepseek_v4 as dsv4_attention
 import minisgl.models.deepseek_v4 as dsv4_model
 
 
+def _has_sm80_cuda() -> bool:
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
+
+
 def test_dsv4_kernel_inventory_covers_sglang_main_exports():
     sources = "\n".join(entry.source_function for entry in dsv4_kernel.DSV4_KERNEL_INVENTORY)
     expected_exports = {
@@ -128,3 +132,158 @@ def test_dsv4_model_and_attention_do_not_import_optional_kernels_directly():
         assert "import sgl_kernel" not in source
         assert "import flashinfer" not in source
         assert "import deep_gemm" not in source
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
+    for name in (
+        "MINISGL_DSV4_SM80_SWIGLU",
+        "MINISGL_DSV4_SM80_ROPE",
+        "MINISGL_DSV4_SM80_Q_NORM_ROPE",
+        "MINISGL_DSV4_SM80_STORE_CACHE",
+        "MINISGL_DSV4_SM80_COMPRESS",
+        "MINISGL_DSV4_SM80_TOPK",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    device = torch.device("cuda")
+    torch.manual_seed(5)
+
+    gate = torch.randn(17, 513, device=device, dtype=torch.bfloat16)
+    up = torch.randn_like(gate)
+    weights = torch.rand(17, 1, device=device, dtype=torch.float32)
+    expected_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+        gate,
+        up,
+        swiglu_limit=2.0,
+        weights=weights,
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SWIGLU", "1")
+    actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+        gate,
+        up,
+        swiglu_limit=2.0,
+        weights=weights,
+    )
+    torch.cuda.synchronize()
+    assert actual_swiglu.dtype is torch.float32
+    assert torch.allclose(actual_swiglu, expected_swiglu, atol=2e-2, rtol=2e-2)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_SWIGLU", raising=False)
+
+    positions = torch.arange(7, device=device, dtype=torch.int64)
+    rope_x = torch.randn(7, 3, 12, device=device, dtype=torch.float32)
+    expected_rope = dsv4_kernel.apply_rotary_tail(
+        rope_x.clone(),
+        positions,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_ROPE", "1")
+    actual_rope = dsv4_kernel.apply_rotary_tail(
+        rope_x.clone(),
+        positions,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_rope, expected_rope, atol=1e-4, rtol=1e-4)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_ROPE", raising=False)
+
+    q = torch.randn(7, 2, 16, device=device, dtype=torch.float32)
+    expected_q = dsv4_kernel.q_norm_rope_fallback(
+        q.clone(),
+        positions,
+        rms_norm_eps=1e-6,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_Q_NORM_ROPE", "1")
+    actual_q = dsv4_kernel.q_norm_rope_fallback(
+        q.clone(),
+        positions,
+        rms_norm_eps=1e-6,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_q, expected_q, atol=1e-4, rtol=1e-4)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_Q_NORM_ROPE", raising=False)
+
+    class FakeCache:
+        def __init__(self) -> None:
+            self.cache = torch.zeros(32, 16, device=device, dtype=torch.bfloat16)
+
+        def swa_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return self.cache
+
+        def store_swa(self, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
+            assert layer_id == 0
+            self.cache[out_loc.long()] = kv.reshape(-1, 16).to(self.cache.dtype)
+
+    kv = torch.randn(5, 16, device=device, dtype=torch.bfloat16)
+    loc = torch.tensor([3, 7, 11, 13, 19], device=device, dtype=torch.int32)
+    expected_cache = FakeCache()
+    dsv4_kernel.store_swa_fallback(expected_cache, 0, kv, loc)
+    actual_cache = FakeCache()
+    monkeypatch.setenv("MINISGL_DSV4_SM80_STORE_CACHE", "1")
+    dsv4_kernel.store_swa_fallback(actual_cache, 0, kv, loc)
+    torch.cuda.synchronize()
+    assert torch.equal(actual_cache.cache, expected_cache.cache)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_STORE_CACHE", raising=False)
+
+    indices = torch.tensor([[1, 2, 3], [5, 8, 13]], device=device, dtype=torch.int32)
+    expected_topk = dsv4_kernel.topk_transform_512_fallback(indices, width=512)
+    monkeypatch.setenv("MINISGL_DSV4_SM80_TOPK", "1")
+    actual_topk = dsv4_kernel.topk_transform_512_fallback(indices, width=512)
+    torch.cuda.synchronize()
+    assert torch.equal(actual_topk, expected_topk)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_TOPK", raising=False)
+
+    class FakeWkvGate:
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            values = torch.arange(
+                x.shape[0] * 16,
+                device=x.device,
+                dtype=torch.float32,
+            ).view(x.shape[0], 16)
+            return values.to(x.dtype) / 16
+
+    class IdentityNorm:
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    x = torch.randn(12, 4, device=device, dtype=torch.bfloat16)
+    ape = torch.randn(4, 8, device=device, dtype=torch.float32)
+    compress_positions = torch.arange(12, device=device, dtype=torch.int64)
+    expected_compress = dsv4_kernel.compress_forward_fallback(
+        x,
+        compress_positions,
+        ratio=4,
+        head_dim=4,
+        overlap=True,
+        ape=ape,
+        wkv_gate=FakeWkvGate(),
+        norm=IdentityNorm(),
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_COMPRESS", "1")
+    actual_compress = dsv4_kernel.compress_forward_fallback(
+        x,
+        compress_positions,
+        ratio=4,
+        head_dim=4,
+        overlap=True,
+        ape=ape,
+        wkv_gate=FakeWkvGate(),
+        norm=IdentityNorm(),
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_compress, expected_compress, atol=1e-4, rtol=1e-4)

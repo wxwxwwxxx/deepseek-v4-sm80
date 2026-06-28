@@ -11,3 +11,9 @@
     a) 完成radix tree到DSV4 kvcache的适配。DSV4模型中涉及到多种不同的KV cache，如C4A attention、C4A indexer和C128A attention，以及SWA。请参考sglang中的设计，将其移植到本仓库。注意在本机sm80的环境下，我们存在两种选择，一是在算子中做低精度适配，并保存在低精度的kvcache中。二是算子中不做低精度适配，直接保存bf16 kvcache。代码中可以留下相应接口；适配可以分两步，第一步可以暂时不支持前缀缓存，待初步性能确认后再来实现SWA相关的前缀缓存。
     b) 找到sglang中的算子融合方案。并将其移植到本机。第一步我们可以找到sglang在sm90、sm100下如何设计sglang的计算图，调用了哪些大融合算子。你可以将其接口写出来，并标记todo。我会去寻找相关算子的实现，后续我们一起将其移植到sm80。sglang仓库中应当有这些算子的接口，不过如果他们依赖了第三方仓库，本机中可能没有安装，你可以列出来后，我去github下载它的最新代码。
 6、如果存在我没有提到的难点，你可以列出来并单独详细说明！
+
+## 阶段 Matrix
+
+| Stage | Prompt | Status | Completion Record |
+| --- | --- | --- | --- |
+| TARGET 05.5 | `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md` | planned | DSV4 sm80 高性能算子替换研发计划已创建。后续每次替代 kernel 时，需要在该文件的 R&D Completion Matrix 中记录 kernel、mode、toggle、correctness、microbench、E2E perf、decision 和 artifact 路径。 |

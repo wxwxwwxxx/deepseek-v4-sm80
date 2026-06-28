@@ -23,6 +23,10 @@ from minisgl.utils import div_ceil
 
 WeightKind = Literal["bf16", "fp8", "fp4"]
 KernelStatus = Literal["native", "fallback", "unsupported", "todo"]
+DSV4KernelMode = Literal["fallback", "bf16_direct", "fp8_act", "fp4_act"]
+
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -474,6 +478,23 @@ def unsupported_kernel(name: str, detail: str) -> None:
     raise NotImplementedError(f"{name} is not available for {sm}: {detail}")
 
 
+def dsv4_env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def dsv4_sm80_triton_enabled(toggle: str) -> bool:
+    if not dsv4_env_flag(toggle):
+        return False
+    cap = detect_dsv4_kernel_capabilities()
+    return bool(cap.is_sm80 and cap.triton_available)
+
+
+def _triton_dsv4_ops():
+    from minisgl.kernel.triton import deepseek_v4 as triton_dsv4
+
+    return triton_dsv4
+
+
 def fp8_dtype() -> torch.dtype:
     return getattr(torch, "float8_e4m3fn", torch.uint8)
 
@@ -587,6 +608,38 @@ def linear_bf16_fp32_fallback(x: torch.Tensor, weight: torch.Tensor) -> torch.Te
     return F.linear(x.float(), weight.float())
 
 
+def _compress_forward_vectorized(
+    x: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    ratio: int,
+    head_dim: int,
+    overlap: bool,
+    ape: torch.Tensor,
+    wkv_gate,
+    norm,
+) -> torch.Tensor | None:
+    usable_tokens = x.shape[0] // ratio * ratio
+    if usable_tokens == 0:
+        return x.new_empty((0, head_dim))
+    projected = wkv_gate.forward(x[:usable_tokens]).float()
+    kv, score = projected.chunk(2, dim=-1)
+    slot = (positions[:usable_tokens].long() % ratio).to(torch.long)
+    score = score + ape[slot].float()
+    kv = kv.view(-1, ratio, kv.shape[-1])
+    score = score.view(-1, ratio, score.shape[-1])
+    if overlap:
+        if kv.shape[-1] != 2 * head_dim or score.shape[-1] != 2 * head_dim:
+            return None
+        kv = torch.cat([kv[..., :head_dim], kv[..., head_dim:]], dim=1)
+        score = torch.cat([score[..., :head_dim], score[..., head_dim:]], dim=1)
+    else:
+        if kv.shape[-1] != head_dim or score.shape[-1] != head_dim:
+            return None
+    pooled = (kv * score.softmax(dim=1)).sum(dim=1)
+    return norm.forward(pooled.to(x.dtype))
+
+
 def apply_rotary_tail(
     x: torch.Tensor,
     positions: torch.Tensor,
@@ -603,6 +656,22 @@ def apply_rotary_tail(
         return x
     if rotary_dim % 2 != 0:
         raise ValueError(f"DeepSeek V4 rotary_dim must be even, got {rotary_dim}")
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_ROPE"):
+        try:
+            if _triton_dsv4_ops().apply_rotary_tail(
+                x,
+                positions,
+                rotary_dim=rotary_dim,
+                base=base,
+                inverse=inverse,
+                original_seq_len=original_seq_len,
+                factor=factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+            ):
+                return x
+        except Exception:
+            pass
 
     pos = positions.to(device=x.device, dtype=torch.float32)
     inv_freq = 1.0 / (
@@ -654,6 +723,22 @@ def q_norm_rope_fallback(
     beta_fast: int = 32,
     beta_slow: int = 1,
 ) -> torch.Tensor:
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_Q_NORM_ROPE"):
+        try:
+            if _triton_dsv4_ops().q_norm_rope(
+                q,
+                positions,
+                rms_norm_eps=rms_norm_eps,
+                rotary_dim=rotary_dim,
+                base=base,
+                original_seq_len=original_seq_len,
+                factor=factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+            ):
+                return q
+        except Exception:
+            pass
     q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + rms_norm_eps).to(q.dtype)
     return apply_rotary_tail(
         q,
@@ -744,6 +829,23 @@ def compress_forward_fallback(
 ) -> torch.Tensor:
     if x.numel() == 0:
         return x.new_empty((0, head_dim))
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS"):
+        if positions is None:
+            fast_positions = torch.arange(x.shape[0], device=x.device, dtype=torch.long)
+        else:
+            fast_positions = positions.to(device=x.device, dtype=torch.long)
+        fast = _compress_forward_vectorized(
+            x,
+            fast_positions,
+            ratio=ratio,
+            head_dim=head_dim,
+            overlap=overlap,
+            ape=ape,
+            wkv_gate=wkv_gate,
+            norm=norm,
+        )
+        if fast is not None:
+            return fast
     projected = wkv_gate.forward(x).float()
     kv, score = projected.chunk(2, dim=-1)
     if positions is None:
@@ -993,6 +1095,18 @@ def silu_and_mul_clamp_fallback(
     swiglu_limit: float = 0.0,
     weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_SWIGLU"):
+        try:
+            out = _triton_dsv4_ops().silu_and_mul_clamp(
+                gate,
+                up,
+                swiglu_limit=swiglu_limit,
+                weights=weights,
+            )
+            if out is not None:
+                return out
+        except Exception:
+            pass
     gate_f = gate.float()
     up_f = up.float()
     if swiglu_limit > 0:
@@ -1013,6 +1127,13 @@ def mega_moe_pre_dispatch_fallback(
 
 
 def topk_transform_512_fallback(indices: torch.Tensor, *, width: int = 512) -> torch.Tensor:
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_TOPK"):
+        try:
+            out = _triton_dsv4_ops().topk_transform_512(indices, width=width)
+            if out is not None:
+                return out
+        except Exception:
+            pass
     if indices.shape[-1] == width:
         return indices
     out = torch.full(
@@ -1035,6 +1156,12 @@ def plan_topk_v2_fallback(lengths: torch.Tensor, *, width: int = 512) -> dict[st
 
 
 def store_swa_fallback(kvcache, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_STORE_CACHE"):
+        try:
+            if _triton_dsv4_ops().store_cache(kvcache.swa_cache(layer_id), kv, out_loc):
+                return
+        except Exception:
+            pass
     kvcache.store_swa(layer_id, kv, out_loc)
 
 
@@ -1044,10 +1171,22 @@ def store_compressed_fallback(
     kv: torch.Tensor,
     loc: torch.Tensor,
 ) -> None:
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
+        try:
+            if _triton_dsv4_ops().store_cache(kvcache.component_cache(layer_id), kv, loc):
+                return
+        except Exception:
+            pass
     kvcache.store_compressed(layer_id, kv, loc)
 
 
 def store_indexer_fallback(kvcache, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
+        try:
+            if _triton_dsv4_ops().store_cache(kvcache.indexer_cache(layer_id), kv, loc):
+                return
+        except Exception:
+            pass
     kvcache.store_indexer(layer_id, kv, loc)
 
 
@@ -1104,6 +1243,7 @@ __all__ = [
     "DSV4_KERNEL_INVENTORY",
     "DSV4KernelCapability",
     "DSV4KernelInventoryEntry",
+    "DSV4KernelMode",
     "apply_rotary_tail",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
@@ -1116,7 +1256,9 @@ __all__ = [
     "dequant_fp4_weight",
     "dequant_fp8_weight",
     "detect_dsv4_kernel_capabilities",
+    "dsv4_env_flag",
     "dsv4_kernel_inventory_by_wrapper",
+    "dsv4_sm80_triton_enabled",
     "e8m0_dtype",
     "fp8_dtype",
     "fused_q_indexer_rope_first_quant",
