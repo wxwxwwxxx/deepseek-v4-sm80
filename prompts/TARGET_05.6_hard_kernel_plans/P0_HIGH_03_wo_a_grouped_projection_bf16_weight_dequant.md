@@ -77,3 +77,5 @@ and artifact paths.
 - microbench artifact: `/tmp/dsv4_wo_a_grouped_projection_bf16_weight_dequant_microbench_20260628.json`。
 
 当前策略仍是默认关闭。真实 DSV4 尺寸 G=8/R=1024/D=4096 下，tokens 1/8 约 1.21x；tokens 64/512 的直接 Triton dequant-on-load 会反复读取权重，因此最终实现对大 token 自动回退，避免 prefill 退化。
+
+一句话：这是一个“小 decode 去掉完整权重反量化”的 kernel，不是一个通用 wo_a prefill GEMM。后续如果要让大 token 也有收益，需要换设计，比如更好地复用 dequant 后的权重 tile，或者做更接近 grouped GEMM 的 persistent/cache-friendly 实现。
