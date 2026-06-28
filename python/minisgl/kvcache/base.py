@@ -24,6 +24,15 @@ class BaseKVCachePool(ABC):
         self, k: torch.Tensor, v: torch.Tensor, out_loc: torch.Tensor, layer_id: int
     ) -> None: ...
 
+    def on_pages_allocated(self, page_starts: torch.Tensor, page_size: int) -> None:
+        pass
+
+    def on_token_indices_freed(self, indices: torch.Tensor, page_size: int) -> None:
+        pass
+
+    def check_allocation_integrity(self, allocated_pages: int, page_size: int) -> None:
+        pass
+
     @property
     @abstractmethod
     def device(self) -> torch.device: ...

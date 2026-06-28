@@ -7,11 +7,11 @@ import torch
 from minisgl.attention import create_attention_backend
 from minisgl.core import Batch, Context, Req, set_global_ctx
 from minisgl.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
-from minisgl.kvcache import create_kvcache_pool
+from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
 from minisgl.layers import set_rope_device
 from minisgl.models import create_model, load_weight
 from minisgl.moe import create_moe_backend
-from minisgl.utils import div_even, init_logger, is_sm90_supported, is_sm100_supported, torch_dtype
+from minisgl.utils import init_logger, is_sm90_supported, is_sm100_supported, torch_dtype
 
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory, mem_GB
@@ -149,13 +149,11 @@ class Engine:
 
     def _determine_num_pages(self, old_free_memory: int, config: EngineConfig) -> int:
         new_free_memory = self._sync_get_memory()[1]
-        cache_per_page = (
-            2  # key + value
-            * config.model_config.head_dim
-            * div_even(config.model_config.num_kv_heads, config.tp_info.size, allow_replicate=True)
-            * config.page_size
-            * self.dtype.itemsize
-            * config.model_config.num_layers
+        cache_per_page = estimate_kvcache_bytes_per_page(
+            config.model_config,
+            page_size=config.page_size,
+            dtype=self.dtype,
+            tp_size=config.tp_info.size,
         )
         num_pages = config.num_page_override
         if num_pages is None:

@@ -31,7 +31,18 @@ def create_kvcache_pool(
     dtype: torch.dtype,
     device: torch.device,
 ) -> BaseKVCachePool:
-    from .mha_pool import MHAKVCache  # TODO: support other variants (e.g. MLA)
+    if model_config.is_deepseek_v4:
+        from .deepseek_v4_pool import DeepSeekV4KVCache
+
+        return DeepSeekV4KVCache(
+            model_config=model_config,
+            num_pages=num_pages,
+            page_size=page_size,
+            device=device,
+            dtype=dtype,
+        )
+
+    from .mha_pool import MHAKVCache
 
     return MHAKVCache(
         num_kv_heads=model_config.num_kv_heads,
@@ -41,6 +52,29 @@ def create_kvcache_pool(
         head_dim=model_config.head_dim,
         device=device,
         dtype=dtype,
+    )
+
+
+def estimate_kvcache_bytes_per_page(
+    model_config: ModelConfig,
+    page_size: int,
+    dtype: torch.dtype,
+    tp_size: int,
+) -> int:
+    if model_config.is_deepseek_v4:
+        from .deepseek_v4_pool import estimate_deepseek_v4_kvcache_bytes_per_page
+
+        return estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size)
+
+    from minisgl.utils import div_even
+
+    return (
+        2
+        * model_config.head_dim
+        * div_even(model_config.num_kv_heads, tp_size, allow_replicate=True)
+        * page_size
+        * dtype.itemsize
+        * model_config.num_layers
     )
 
 
@@ -65,6 +99,7 @@ def create_prefix_cache(device: torch.device, type: str) -> BasePrefixCache:
 __all__ = [
     "create_kvcache_pool",
     "create_prefix_cache",
+    "estimate_kvcache_bytes_per_page",
     "BaseKVCachePool",
     "BaseCacheHandle",
     "BasePrefixCache",

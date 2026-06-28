@@ -56,8 +56,17 @@ class Scheduler(SchedulerIOMixin):
 
         # initialize other managers
         self.table_manager = TableManager(config.max_running_req, self.engine.page_table)
+        cache_type = config.cache_type
+        if config.model_config.is_deepseek_v4:
+            if cache_type != "naive":
+                logger.info_rank0("Disabling radix prefix cache for DeepSeek V4 KV cache v1.")
+            cache_type = "naive"
         self.cache_manager = CacheManager(
-            self.engine.num_pages, config.page_size, self.engine.page_table, config.cache_type
+            self.engine.num_pages,
+            config.page_size,
+            self.engine.page_table,
+            cache_type,
+            kv_cache=self.engine.kv_cache,
         )
         self.decode_manager = DecodeManager(config.page_size)
         self.prefill_manager = PrefillManager(

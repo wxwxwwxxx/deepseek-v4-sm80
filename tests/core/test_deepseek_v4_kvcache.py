@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import torch
+
+from minisgl.core import Req, SamplingParams
+from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
+from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
+from minisgl.models.config import ModelConfig, RotaryConfig
+from minisgl.scheduler.cache import CacheManager
+from minisgl.scheduler.utils import PendingReq
+
+
+def _tiny_dsv4_config(compress_ratios: list[int]) -> ModelConfig:
+    return ModelConfig(
+        num_layers=len(compress_ratios),
+        num_qo_heads=4,
+        num_kv_heads=1,
+        head_dim=8,
+        hidden_size=16,
+        vocab_size=32,
+        intermediate_size=0,
+        rms_norm_eps=1e-6,
+        rotary_config=RotaryConfig(8, 2, 64, 10000.0, None),
+        hidden_act="silu",
+        tie_word_embeddings=False,
+        num_experts=2,
+        num_experts_per_tok=1,
+        moe_intermediate_size=8,
+        norm_topk_prob=True,
+        model_type="deepseek_v4",
+        architectures=["DeepseekV4ForCausalLM"],
+        q_lora_rank=4,
+        o_lora_rank=4,
+        qk_nope_head_dim=6,
+        qk_rope_head_dim=2,
+        v_head_dim=8,
+        window_size=4,
+        compress_ratios=compress_ratios,
+        index_head_dim=4,
+        index_n_heads=2,
+        index_topk=2,
+        n_routed_experts=2,
+        n_shared_experts=1,
+        scoring_func="sqrtsoftplus",
+        expert_dtype="fp4",
+        routed_scaling_factor=1.5,
+        hc_mult=1,
+        hc_sinkhorn_iters=1,
+        o_groups=1,
+        n_hash_layers=0,
+    )
+
+
+def _make_dsv4_pool(
+    compress_ratios: list[int],
+    *,
+    num_pages: int = 8,
+    page_size: int = 4,
+) -> DeepSeekV4KVCache:
+    pool = create_kvcache_pool(
+        _tiny_dsv4_config(compress_ratios),
+        num_pages=num_pages,
+        page_size=page_size,
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+    )
+    assert isinstance(pool, DeepSeekV4KVCache)
+    return pool
+
+
+def _make_cache_manager(pool: DeepSeekV4KVCache, num_pages: int, page_size: int) -> CacheManager:
+    page_table = torch.empty((2, num_pages * page_size), dtype=torch.int32)
+    return CacheManager(num_pages, page_size, page_table, type="naive", kv_cache=pool)
+
+
+def _allocate_req(cm: CacheManager, uid: int, input_len: int) -> Req:
+    input_ids = torch.arange(input_len, dtype=torch.int32) + uid * 100
+    sampling_params = SamplingParams(max_tokens=1)
+    pending = PendingReq(uid=uid, input_ids=input_ids, sampling_params=sampling_params)
+    handle = cm.match_req(pending).cuda_handle
+    cm.lock(handle)
+    req = Req(
+        input_ids=input_ids,
+        table_idx=uid % 2,
+        cached_len=handle.cached_len,
+        output_len=1,
+        uid=uid,
+        sampling_params=sampling_params,
+        cache_handle=handle,
+    )
+    cm.allocate_paged([req])
+    return req
+
+
+def _finish_req(cm: CacheManager, req: Req) -> None:
+    req.cached_len = req.device_len
+    cm.cache_req(req, finished=True)
+
+
+def test_deepseek_v4_pool_factory_defaults_to_bf16_and_maps_layers():
+    pool = _make_dsv4_pool([0, 4, 128, 4], num_pages=8, page_size=4)
+
+    assert pool.dtype is torch.bfloat16
+    assert pool.policy.layout == "bf16_flat"
+    assert [m.compress_ratio for m in pool.layer_mapping] == [0, 4, 128, 4]
+    assert pool.layer_mapping[0].normal_layer_id == 0
+    assert pool.layer_mapping[1].c4_layer_id == 0
+    assert pool.layer_mapping[1].indexer_layer_id == 0
+    assert pool.layer_mapping[2].c128_layer_id == 0
+    assert pool.layer_mapping[3].c4_layer_id == 1
+
+    assert pool.swa_cache(0).shape == (32, 8)
+    assert pool.c4_cache(1).shape == (8, 8)
+    assert pool.c128_cache(2).shape == (1, 8)
+    assert pool.indexer_cache(1).shape == (8, 4)
+    assert pool.attention_compress_state(1).last_dim == 32
+    assert pool.indexer_compress_state(1).last_dim == 16
+    assert pool.attention_compress_state(2).last_dim == 16
+
+    max_swa_loc = torch.tensor([pool.num_tokens - 1], dtype=torch.int32)
+    state_loc = pool.attention_compress_state(1).translate_from_swa_loc_to_state_loc(max_swa_loc)
+    state_size = pool.attention_compress_state(1).kv_score_buffer.kv_score.shape[0]
+    assert int(state_loc.item()) < state_size
+
+
+
+def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
+    cfg = _tiny_dsv4_config([4, 128, 0])
+
+    assert estimate_kvcache_bytes_per_page(
+        cfg,
+        page_size=1,
+        dtype=torch.float16,
+        tp_size=1,
+    ) == 4919
+
+def test_deepseek_v4_pool_can_write_and_read_all_cache_components():
+    pool = _make_dsv4_pool([0, 4, 128], num_pages=8, page_size=4)
+
+    loc = torch.tensor([0, 3], dtype=torch.int32)
+    swa_kv = torch.arange(16, dtype=torch.float32).view(2, 8).to(torch.bfloat16)
+    pool.store_swa(0, swa_kv, loc)
+    assert torch.equal(pool.swa_cache(0)[loc.long()], swa_kv)
+
+    c4_loc = torch.tensor([0, 1], dtype=torch.int32)
+    c4_kv = torch.full((2, 8), 2.0, dtype=torch.bfloat16)
+    pool.store_compressed(1, c4_kv, c4_loc)
+    assert torch.equal(pool.c4_cache(1)[c4_loc.long()], c4_kv)
+
+    index_kv = torch.full((2, 4), 3.0, dtype=torch.bfloat16)
+    pool.store_indexer(1, index_kv, c4_loc)
+    assert torch.equal(pool.indexer_cache(1)[c4_loc.long()], index_kv)
+
+    c128_loc = torch.tensor([0], dtype=torch.int32)
+    c128_kv = torch.full((1, 8), 4.0, dtype=torch.bfloat16)
+    pool.store_compressed(2, c128_kv, c128_loc)
+    assert torch.equal(pool.c128_cache(2)[c128_loc.long()], c128_kv)
+
+
+def test_deepseek_v4_cache_manager_allocates_and_frees_one_request_without_leak():
+    page_size = 4
+    num_pages = 4
+    pool = _make_dsv4_pool([0, 4, 128], num_pages=num_pages, page_size=page_size)
+    cm = _make_cache_manager(pool, num_pages, page_size)
+
+    req = _allocate_req(cm, uid=0, input_len=6)
+    counts = pool.allocation_counts
+    assert counts.full_slots == 8
+    assert counts.c4_slots == 2
+    assert counts.c128_slots == 1
+    assert counts.c4_indexer_slots == 2
+
+    _finish_req(cm, req)
+
+    cm.check_integrity()
+    pool.assert_no_leak()
+
+
+def test_deepseek_v4_cache_manager_handles_multiple_sequential_requests_without_leak():
+    page_size = 4
+    num_pages = 8
+    pool = _make_dsv4_pool([4, 128, 0], num_pages=num_pages, page_size=page_size)
+    cm = _make_cache_manager(pool, num_pages, page_size)
+
+    for uid, input_len in enumerate([5, 9, 3]):
+        req = _allocate_req(cm, uid=uid, input_len=input_len)
+        assert pool.allocation_counts.full_slots > 0
+        _finish_req(cm, req)
+        cm.check_integrity()
+        pool.assert_no_leak()
+
+
+def test_deepseek_v4_compressed_location_mapping_uses_full_token_namespace():
+    pool = _make_dsv4_pool([4, 128], num_pages=64, page_size=4)
+    full_locs = torch.arange(0, 256, dtype=torch.int32)
+    positions = torch.arange(0, 256, dtype=torch.int32)
+
+    assert torch.equal(
+        pool.compressed_locs_from_full_locs(full_locs[:8], 4, positions[:8]),
+        torch.tensor([0, 1]),
+    )
+    assert torch.equal(
+        pool.compressed_locs_from_full_locs(full_locs, 128, positions),
+        torch.tensor([0, 1]),
+    )
