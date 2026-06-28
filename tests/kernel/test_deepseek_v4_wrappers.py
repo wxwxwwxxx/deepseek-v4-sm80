@@ -112,9 +112,21 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
         softmax_scale=0.5,
         attn_sink=torch.zeros(2),
     )
+    metadata = dsv4_kernel.get_paged_mqa_logits_metadata_fallback(
+        [torch.tensor([0, 1], dtype=torch.int32), torch.tensor([1, 2], dtype=torch.int32)]
+    )
+    metadata_out = dsv4_kernel.paged_mqa_attention_fallback(
+        q,
+        cache,
+        metadata,
+        softmax_scale=0.5,
+        attn_sink=torch.zeros(2),
+    )
     assert out.shape == q.shape
     assert out.dtype is q.dtype
     assert torch.isfinite(out).all()
+    assert metadata.indptr.tolist() == [0, 2, 4]
+    assert torch.allclose(metadata_out, out)
 
     padded = dsv4_kernel.topk_transform_512_fallback(torch.tensor([[1, 2]], dtype=torch.int32))
     assert padded.shape == (1, 512)
@@ -194,6 +206,7 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         "MINISGL_DSV4_SM80_FP4_GEMM",
         "MINISGL_DSV4_SM80_MOE_ROUTE",
         "MINISGL_DSV4_SM80_WO_A_BF16",
+        "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -298,6 +311,56 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     torch.cuda.synchronize()
     assert torch.equal(actual_topk, expected_topk)
     monkeypatch.delenv("MINISGL_DSV4_SM80_TOPK", raising=False)
+
+    q_attn = torch.randn(4, 3, 64, device=device, dtype=torch.bfloat16)
+    cache_attn = torch.randn(192, 64, device=device, dtype=torch.bfloat16)
+    attn_contexts = [
+        torch.empty(0, device=device, dtype=torch.int32),
+        torch.tensor([3], device=device, dtype=torch.int32),
+        torch.arange(8, 104, 3, device=device, dtype=torch.int32),
+        torch.tensor([2, 4, 4, 6, 8, 16, 32, 64], device=device, dtype=torch.int32),
+    ]
+    attn_sink = torch.randn(3, device=device, dtype=torch.float32)
+    attn_metadata = dsv4_kernel.get_paged_mqa_logits_metadata_fallback(
+        attn_contexts,
+        device=device,
+    )
+    assert attn_metadata.indptr.cpu().tolist() == [0, 0, 1, 33, 41]
+    expected_attn = dsv4_kernel.paged_mqa_attention_fallback(
+        q_attn,
+        cache_attn,
+        attn_contexts,
+        softmax_scale=0.125,
+        attn_sink=attn_sink,
+    )
+    expected_attn_no_sink = dsv4_kernel.paged_mqa_attention_fallback(
+        q_attn,
+        cache_attn,
+        attn_contexts,
+        softmax_scale=0.125,
+        attn_sink=None,
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_PAGED_MQA_BF16", "1")
+    actual_attn = dsv4_kernel.paged_mqa_attention_fallback(
+        q_attn,
+        cache_attn,
+        attn_metadata,
+        softmax_scale=0.125,
+        attn_sink=attn_sink,
+    )
+    actual_attn_no_sink = dsv4_kernel.paged_mqa_attention_fallback(
+        q_attn,
+        cache_attn,
+        attn_metadata,
+        softmax_scale=0.125,
+        attn_sink=None,
+    )
+    torch.cuda.synchronize()
+    assert actual_attn.dtype is q_attn.dtype
+    assert torch.allclose(actual_attn, expected_attn, atol=3e-2, rtol=3e-2)
+    assert torch.allclose(actual_attn_no_sink, expected_attn_no_sink, atol=3e-2, rtol=3e-2)
+    assert torch.equal(actual_attn[0], torch.zeros_like(actual_attn[0]))
+    monkeypatch.delenv("MINISGL_DSV4_SM80_PAGED_MQA_BF16", raising=False)
 
     class FakeWkvGate:
         def forward(self, x: torch.Tensor) -> torch.Tensor:

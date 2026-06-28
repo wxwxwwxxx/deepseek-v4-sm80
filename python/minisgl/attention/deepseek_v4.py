@@ -421,16 +421,28 @@ class DSV4AttentionBackend(BaseAttnBackend):
         attn_sink: torch.Tensor | None,
     ) -> torch.Tensor:
         cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
-        context_indices = [
-            self._context_indices_for_query(metadata, row, compress_ratio)
-            for row in range(q.shape[0])
-        ]
+        context_indices = self._context_metadata_for_queries(metadata, q.shape[0], compress_ratio)
         return dsv4_kernel.paged_mqa_attention_fallback(
             q,
             cache,
             context_indices,
             softmax_scale=self.softmax_scale,
             attn_sink=attn_sink,
+        )
+
+    def _context_metadata_for_queries(
+        self,
+        metadata: DSV4CoreAttentionMetadata,
+        rows: int,
+        compress_ratio: DSV4CompressRatio,
+    ) -> dsv4_kernel.DSV4PagedMQAMetadata:
+        context_indices = [
+            self._context_indices_for_query(metadata, row, compress_ratio)
+            for row in range(rows)
+        ]
+        return dsv4_kernel.get_paged_mqa_logits_metadata_fallback(
+            context_indices,
+            device=self.device,
         )
 
     def _context_indices_for_query(

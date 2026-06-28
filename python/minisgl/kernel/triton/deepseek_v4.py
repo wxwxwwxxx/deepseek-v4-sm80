@@ -186,6 +186,73 @@ def _pad_indices_kernel(
 
 
 @triton.jit
+def _paged_mqa_attention_bf16_kernel(
+    q_ptr,
+    cache_ptr,
+    indptr_ptr,
+    indices_ptr,
+    lengths_ptr,
+    sink_ptr,
+    out_ptr,
+    num_heads: tl.constexpr,
+    dim: tl.constexpr,
+    softmax_scale: tl.constexpr,
+    max_length: tl.constexpr,
+    has_sink: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    head = tl.program_id(1)
+    d_offsets = tl.arange(0, BLOCK_D)
+    d_mask = d_offsets < dim
+
+    row_start = tl.load(indptr_ptr + row).to(tl.int64)
+    row_len = tl.load(lengths_ptr + row).to(tl.int32)
+    q_base = (row * num_heads + head) * dim
+    q_vec = tl.load(q_ptr + q_base + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+
+    acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    m_i = tl.full((), -3.4028234663852886e38, dtype=tl.float32)
+    l_i = tl.full((), 0.0, dtype=tl.float32)
+    if has_sink:
+        m_i = tl.load(sink_ptr + head).to(tl.float32)
+        l_i = 1.0
+
+    n_offsets = tl.arange(0, BLOCK_N)
+    for n_start in range(0, max_length, BLOCK_N):
+        local_offsets = n_start + n_offsets
+        n_mask = local_offsets < row_len
+        cache_rows = tl.load(
+            indices_ptr + row_start + local_offsets,
+            mask=n_mask,
+            other=0,
+        ).to(tl.int64)
+        kv = tl.load(
+            cache_ptr + cache_rows[:, None] * dim + d_offsets[None, :],
+            mask=n_mask[:, None] & d_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        scores = tl.sum(kv * q_vec[None, :], axis=1) * softmax_scale
+        scores = tl.where(n_mask, scores, -3.4028234663852886e38)
+
+        block_m = tl.max(scores, axis=0)
+        block_has_values = row_len > n_start
+        new_m = tl.where(block_has_values, tl.maximum(m_i, block_m), m_i)
+        alpha = tl.where(l_i == 0.0, 0.0, tl.exp(m_i - new_m))
+        probs = tl.where(n_mask, tl.exp(scores - new_m), 0.0)
+        p_sum = tl.sum(probs, axis=0)
+
+        acc = acc * alpha + tl.sum(probs[:, None] * kv, axis=0)
+        l_i = l_i * alpha + p_sum
+        m_i = new_m
+
+    out = acc / l_i
+    out = tl.where((row_len > 0) & d_mask, out, 0.0)
+    tl.store(out_ptr + q_base + d_offsets, out, mask=d_mask)
+
+
+@triton.jit
 def _fp4_e2m1_value(nibble):
     mag = nibble & 0x07
     value = tl.where(
@@ -694,6 +761,74 @@ def topk_transform_512(indices: torch.Tensor, *, width: int) -> torch.Tensor | N
     return out
 
 
+def paged_mqa_attention_bf16(
+    q: torch.Tensor,
+    cache: torch.Tensor,
+    indptr: torch.Tensor,
+    indices: torch.Tensor,
+    lengths: torch.Tensor,
+    *,
+    softmax_scale: float,
+    attn_sink: torch.Tensor | None,
+    max_length: int,
+) -> torch.Tensor | None:
+    if (
+        q.ndim != 3
+        or cache.ndim != 2
+        or q.numel() == 0
+        or cache.shape[-1] != q.shape[-1]
+        or not q.is_cuda
+        or not cache.is_cuda
+        or not indptr.is_cuda
+        or not indices.is_cuda
+        or not lengths.is_cuda
+        or not q.is_contiguous()
+        or not cache.is_contiguous()
+    ):
+        return None
+    if q.dtype not in (torch.bfloat16, torch.float32) or cache.dtype not in (
+        torch.bfloat16,
+        torch.float32,
+    ):
+        return None
+    if q.shape[0] != lengths.numel() or indptr.numel() != q.shape[0] + 1:
+        return None
+    if max_length == 0:
+        return torch.zeros_like(q)
+    if max_length > 1024 or q.shape[-1] > 256:
+        return None
+    if attn_sink is not None and (not attn_sink.is_cuda or attn_sink.numel() < q.shape[1]):
+        return None
+
+    tokens, heads, dim = q.shape
+    out = torch.empty_like(q)
+    sink = (
+        attn_sink[:heads].to(device=q.device, dtype=torch.float32).contiguous()
+        if attn_sink is not None
+        else q.new_empty((1,), dtype=torch.float32)
+    )
+    block_n = 32
+    block_d = triton.next_power_of_2(dim)
+    _paged_mqa_attention_bf16_kernel[(tokens, heads)](
+        q,
+        cache,
+        indptr.contiguous(),
+        indices.contiguous(),
+        lengths.contiguous(),
+        sink,
+        out,
+        num_heads=heads,
+        dim=dim,
+        softmax_scale=float(softmax_scale),
+        max_length=int(max_length),
+        has_sink=attn_sink is not None,
+        BLOCK_N=block_n,
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return out
+
+
 def _flatten_linear_input(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]] | None:
     if x.ndim == 0 or x.shape[-1] == 0 or x.numel() == 0:
         return None
@@ -1027,6 +1162,7 @@ def grouped_fp4_moe(
 __all__ = [
     "apply_rotary_tail",
     "grouped_fp4_moe",
+    "paged_mqa_attention_bf16",
     "q_norm_rope",
     "quantized_linear_fp4",
     "quantized_linear_fp8",

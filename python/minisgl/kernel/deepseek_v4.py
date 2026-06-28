@@ -42,6 +42,18 @@ class DSV4KernelInventoryEntry:
     port_target: str
 
 
+@dataclass(frozen=True)
+class DSV4PagedMQAMetadata:
+    indptr: torch.Tensor
+    indices: torch.Tensor
+    lengths: torch.Tensor
+    max_length: int
+
+    @property
+    def row_count(self) -> int:
+        return int(self.lengths.numel())
+
+
 DSV4_KERNEL_INVENTORY: tuple[DSV4KernelInventoryEntry, ...] = (
     DSV4KernelInventoryEntry(
         "apply_rotary_tail",
@@ -911,8 +923,59 @@ def flash_mla_sparse_prefill(*args, **kwargs):
     )
 
 
-def get_paged_mqa_logits_metadata_fallback(context_indices: list[torch.Tensor]) -> list[torch.Tensor]:
-    return context_indices
+def get_paged_mqa_logits_metadata_fallback(
+    context_indices: list[torch.Tensor] | DSV4PagedMQAMetadata,
+    *,
+    device: torch.device | None = None,
+) -> DSV4PagedMQAMetadata:
+    if isinstance(context_indices, DSV4PagedMQAMetadata):
+        if device is None or context_indices.indices.device == device:
+            return context_indices
+        return DSV4PagedMQAMetadata(
+            indptr=context_indices.indptr.to(device=device),
+            indices=context_indices.indices.to(device=device),
+            lengths=context_indices.lengths.to(device=device),
+            max_length=context_indices.max_length,
+        )
+
+    if not context_indices:
+        out_device = device if device is not None else torch.device("cpu")
+        indptr = torch.zeros(1, dtype=torch.int32, device=out_device)
+        empty = torch.empty(0, dtype=torch.int32, device=out_device)
+        return DSV4PagedMQAMetadata(indptr=indptr, indices=empty, lengths=empty, max_length=0)
+
+    out_device = device if device is not None else context_indices[0].device
+    lengths_list: list[int] = []
+    rows: list[torch.Tensor] = []
+    for row in context_indices:
+        row_indices = row.reshape(-1).to(device=out_device, dtype=torch.int32)
+        lengths_list.append(int(row_indices.numel()))
+        if row_indices.numel() > 0:
+            rows.append(row_indices)
+
+    lengths = torch.tensor(lengths_list, dtype=torch.int32, device=out_device)
+    indptr = F.pad(lengths.cumsum(dim=0), (1, 0))
+    indices = (
+        torch.cat(rows)
+        if rows
+        else torch.empty(0, dtype=torch.int32, device=out_device)
+    )
+    max_length = max(lengths_list) if lengths_list else 0
+    return DSV4PagedMQAMetadata(
+        indptr=indptr,
+        indices=indices,
+        lengths=lengths,
+        max_length=max_length,
+    )
+
+
+def _paged_mqa_row_indices(
+    metadata: DSV4PagedMQAMetadata,
+    row: int,
+) -> torch.Tensor:
+    start = int(metadata.indptr[row].item())
+    end = int(metadata.indptr[row + 1].item())
+    return metadata.indices[start:end]
 
 
 def hc_split_sinkhorn_ref(
@@ -1023,20 +1086,43 @@ def sequence_mqa_attention_fallback(
 def paged_mqa_attention_fallback(
     q: torch.Tensor,
     cache: torch.Tensor,
-    context_indices: list[torch.Tensor],
+    context_indices: list[torch.Tensor] | DSV4PagedMQAMetadata,
     *,
     softmax_scale: float,
     attn_sink: torch.Tensor | None,
 ) -> torch.Tensor:
     if q.ndim != 3:
         raise ValueError(f"DSV4 fallback expects q shape [tokens, heads, dim], got {q.shape}")
+    metadata = get_paged_mqa_logits_metadata_fallback(context_indices, device=q.device)
+    if metadata.row_count != q.shape[0]:
+        raise ValueError(
+            "DSV4 paged MQA metadata row count must match q tokens, "
+            f"got {metadata.row_count} rows for {q.shape[0]} tokens"
+        )
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_PAGED_MQA_BF16"):
+        try:
+            out = _triton_dsv4_ops().paged_mqa_attention_bf16(
+                q,
+                cache,
+                metadata.indptr,
+                metadata.indices,
+                metadata.lengths,
+                softmax_scale=softmax_scale,
+                attn_sink=attn_sink,
+                max_length=metadata.max_length,
+            )
+            if out is not None:
+                return out
+        except Exception:
+            pass
     out = torch.empty_like(q)
     sink = (
         attn_sink[: q.shape[1]].to(device=q.device, dtype=torch.float32)
         if attn_sink is not None
         else None
     )
-    for row, indices in enumerate(context_indices):
+    for row in range(metadata.row_count):
+        indices = _paged_mqa_row_indices(metadata, row)
         if indices.numel() == 0:
             out[row].zero_()
             continue
@@ -1409,6 +1495,7 @@ __all__ = [
     "DSV4KernelInventoryEntry",
     "DSV4KernelMode",
     "DSV4MoERoutePlan",
+    "DSV4PagedMQAMetadata",
     "apply_rotary_tail",
     "build_moe_route_plan",
     "compress_norm_rope_store_fallback",
