@@ -60,3 +60,20 @@ After implementation or a serious failed attempt, update
 `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md` in the R&D Completion Matrix row
 for `moe_gate/hash_topk/mega_moe_pre_dispatch` with correctness, microbench,
 decision, and artifact paths.
+
+## 实现结论
+
+本阶段已经落地一个 opt-in 的 `bf16-direct` grouped MoE 路径：
+
+- 新增本地 `DSV4MoERoutePlan`，把 `[tokens, topk]` route 精确展开、按 expert 排序并按 block padding。
+- 新增 Triton grouped fp4 linear kernel，在 grouped MoE 中对 w1/w3/w2 packed fp4 权重做 dequant-on-load，再走 bf16 Tensor Core dot。
+- `DSV4FusedRoutedExperts.forward` 在 `MINISGL_DSV4_SM80_MOE_ROUTE=1` 且 sm80/Triton 可用时尝试 grouped 路径，否则保持原逐 expert fallback。
+
+验证结果：
+
+- `pytest -q -o addopts='' tests/kernel/test_deepseek_v4_wrappers.py` 通过。
+- 默认 DSV4 smoke：`tests/models/test_deepseek_v4_forward_fallback.py`、config/weight、attention metadata、KV cache 均通过。
+- all-toggle smoke 20 passed，包括 `MINISGL_DSV4_SM80_MOE_ROUTE=1`。
+- microbench artifact: `/tmp/dsv4_moe_route_dispatch_bf16_grouped_microbench_20260628.json`。
+
+当前策略仍是默认关闭。原因是新路径按本计划使用 bf16 activations，不复刻当前 `quantized_linear_ref` 的 activation fp8 quant 语义；它已经对 bf16-direct oracle 做了 correctness gate，但还需要后续 E2E/oracle gate 再决定是否默认启用。

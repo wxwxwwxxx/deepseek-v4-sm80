@@ -389,6 +389,16 @@ class DSV4KernelCapability:
     marlin_error: str | None
 
 
+@dataclass(frozen=True)
+class DSV4MoERoutePlan:
+    sorted_route_ids: torch.Tensor
+    expert_ids: torch.Tensor
+    num_tokens_post_padded: torch.Tensor
+    route_count: int
+    topk: int
+    block_size_m: int
+
+
 def _module_available(name: str) -> tuple[bool, str | None]:
     if importlib.util.find_spec(name) is None:
         return False, "module not installed"
@@ -1052,6 +1062,19 @@ def wo_a_grouped_projection_fallback(
     o_lora_rank: int,
 ) -> torch.Tensor:
     d_per_group = o.shape[-1]
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_WO_A_BF16"):
+        try:
+            y = _triton_dsv4_ops().wo_a_grouped_projection_fp8(
+                o,
+                weight,
+                scale,
+                num_local_groups=num_local_groups,
+                o_lora_rank=o_lora_rank,
+            )
+            if y is not None:
+                return y
+        except Exception:
+            pass
     wo_a = dequant_fp8_weight(weight, scale, out_dtype=o.dtype)
     wo_a = wo_a.view(num_local_groups, o_lora_rank, d_per_group)
     return torch.einsum("tgd,grd->tgr", o, wo_a).reshape(o.shape[0], -1)
@@ -1059,6 +1082,81 @@ def wo_a_grouped_projection_fallback(
 
 def hash_topk_fallback(hash_topk, input_ids: torch.Tensor) -> torch.Tensor:
     return hash_topk.forward(input_ids.view(-1)).long()
+
+
+def build_moe_route_plan(
+    indices: torch.Tensor,
+    *,
+    num_experts: int,
+    block_size_m: int = 16,
+) -> DSV4MoERoutePlan:
+    if indices.ndim != 2:
+        raise ValueError(
+            f"DSV4 MoE route plan expects indices shape [tokens, topk], got {indices.shape}"
+        )
+    if num_experts <= 0:
+        raise ValueError(f"DSV4 MoE route plan requires num_experts > 0, got {num_experts}")
+    if block_size_m <= 0:
+        raise ValueError(f"DSV4 MoE route plan requires block_size_m > 0, got {block_size_m}")
+
+    route_count = indices.numel()
+    topk = indices.shape[1]
+    device = indices.device
+    flat_indices = indices.reshape(-1).to(torch.long)
+    valid = (flat_indices >= 0) & (flat_indices < num_experts)
+    valid_route_ids = torch.arange(route_count, device=device, dtype=torch.long)[valid]
+    valid_expert_ids = flat_indices[valid]
+
+    if valid_route_ids.numel() == 0:
+        empty_ids = torch.empty((0,), dtype=torch.int32, device=device)
+        return DSV4MoERoutePlan(
+            sorted_route_ids=empty_ids,
+            expert_ids=empty_ids,
+            num_tokens_post_padded=torch.zeros((1,), dtype=torch.int32, device=device),
+            route_count=route_count,
+            topk=topk,
+            block_size_m=block_size_m,
+        )
+
+    sort_key = valid_expert_ids * max(route_count, 1) + valid_route_ids
+    order = torch.argsort(sort_key)
+    sorted_valid_routes = valid_route_ids[order]
+    sorted_valid_experts = valid_expert_ids[order]
+
+    counts = torch.bincount(valid_expert_ids, minlength=num_experts).to(torch.long)
+    padded_counts = ((counts + block_size_m - 1) // block_size_m) * block_size_m
+    total_padded = int(padded_counts.sum().item())
+    sorted_route_ids = torch.full(
+        (total_padded,),
+        route_count,
+        dtype=torch.int32,
+        device=device,
+    )
+
+    counts_before = counts.cumsum(0) - counts
+    padded_offsets = padded_counts.cumsum(0) - padded_counts
+    compact_positions = torch.arange(
+        sorted_valid_routes.numel(),
+        device=device,
+        dtype=torch.long,
+    )
+    local_ranks = compact_positions - counts_before[sorted_valid_experts]
+    padded_positions = padded_offsets[sorted_valid_experts] + local_ranks
+    sorted_route_ids[padded_positions] = sorted_valid_routes.to(torch.int32)
+
+    blocks_per_expert = (padded_counts // block_size_m).to(torch.long)
+    expert_ids = torch.repeat_interleave(
+        torch.arange(num_experts, dtype=torch.int32, device=device),
+        blocks_per_expert,
+    )
+    return DSV4MoERoutePlan(
+        sorted_route_ids=sorted_route_ids,
+        expert_ids=expert_ids,
+        num_tokens_post_padded=torch.tensor([total_padded], dtype=torch.int32, device=device),
+        route_count=route_count,
+        topk=topk,
+        block_size_m=block_size_m,
+    )
 
 
 def moe_gate_fallback(
@@ -1130,8 +1228,66 @@ def mega_moe_pre_dispatch_fallback(
     hidden_states: torch.Tensor,
     weights: torch.Tensor,
     indices: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    *,
+    num_experts: int | None = None,
+    block_size_m: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | DSV4MoERoutePlan:
+    if num_experts is not None:
+        return build_moe_route_plan(
+            indices,
+            num_experts=num_experts,
+            block_size_m=block_size_m,
+        )
     return hidden_states, weights, indices
+
+
+def moe_route_dispatch_bf16_grouped(
+    hidden_states: torch.Tensor,
+    weights: torch.Tensor,
+    indices: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor,
+    *,
+    swiglu_limit: float = 0.0,
+) -> torch.Tensor | None:
+    if not dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_MOE_ROUTE"):
+        return None
+    if hidden_states.dtype is not torch.bfloat16 or not hidden_states.is_cuda:
+        return None
+    if hidden_states.ndim != 2 or weights.shape != indices.shape or indices.ndim != 2:
+        return None
+    if w13_weight.ndim != 4 or w13_weight.shape[1] != 2 or w2_weight.ndim != 3:
+        return None
+    if w13_weight.shape[0] != w2_weight.shape[0]:
+        return None
+    if hidden_states.shape[1] != w13_weight.shape[-1] * 2:
+        return None
+
+    try:
+        plan = build_moe_route_plan(
+            indices,
+            num_experts=w13_weight.shape[0],
+            block_size_m=16,
+        )
+        return _triton_dsv4_ops().grouped_fp4_moe(
+            hidden_states.contiguous(),
+            weights.to(device=hidden_states.device, dtype=torch.float32).contiguous(),
+            w13_weight.contiguous(),
+            w13_scale,
+            w2_weight.contiguous(),
+            w2_scale,
+            plan.sorted_route_ids,
+            plan.expert_ids,
+            plan.num_tokens_post_padded,
+            route_count=plan.route_count,
+            topk=plan.topk,
+            block_size_m=plan.block_size_m,
+            swiglu_limit=swiglu_limit,
+        )
+    except Exception:
+        return None
 
 
 def topk_transform_512_fallback(indices: torch.Tensor, *, width: int = 512) -> torch.Tensor:
@@ -1252,7 +1408,9 @@ __all__ = [
     "DSV4KernelCapability",
     "DSV4KernelInventoryEntry",
     "DSV4KernelMode",
+    "DSV4MoERoutePlan",
     "apply_rotary_tail",
+    "build_moe_route_plan",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
     "compressor_plan_fallback",
@@ -1281,6 +1439,7 @@ __all__ = [
     "linear_bf16_fp32_fallback",
     "mega_moe_pre_dispatch_fallback",
     "moe_gate_fallback",
+    "moe_route_dispatch_bf16_grouped",
     "norm_rope_inplace_fallback",
     "paged_mqa_attention_fallback",
     "plan_topk_v2_fallback",

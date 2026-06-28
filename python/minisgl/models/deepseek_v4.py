@@ -443,7 +443,25 @@ class DSV4FusedRoutedExperts(BaseOP):
             weight_kind="fp4",
         )
 
-    def forward(self, hidden_states: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> torch.Tensor:
+        grouped = dsv4_kernel.moe_route_dispatch_bf16_grouped(
+            hidden_states,
+            weights,
+            indices,
+            self.w13_weight,
+            self.w13_weight_scale_inv,
+            self.w2_weight,
+            self.w2_weight_scale_inv,
+            swiglu_limit=self.swiglu_limit,
+        )
+        if grouped is not None:
+            return grouped
+
         y = torch.zeros_like(hidden_states, dtype=torch.float32)
         for expert_idx in range(self.w13_weight.shape[0]):
             token_idx, top_idx = torch.where(indices == expert_idx)

@@ -55,3 +55,25 @@ After implementation or a serious failed attempt, update
 `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md` in the R&D Completion Matrix row
 for `wo_a_grouped_projection_fallback` with correctness, microbench, decision,
 and artifact paths.
+
+## 实现结论
+
+本阶段已经落地一个 opt-in、decode-gated 的 `bf16-direct` 路径：
+
+- 新增本地 Triton `wo_a_grouped_projection_fp8`，输入保持 bf16，fp8 e4m3 权重按 tile 反量化并直接参与 bf16 Tensor Core dot，不再在小 token decode 路径中 materialize 完整 bf16 `wo_a`。
+- `wo_a_grouped_projection_fallback` 在 `MINISGL_DSV4_SM80_WO_A_BF16=1` 时尝试新路径；默认关闭，且 `tokens > 16` 会自动回退到原 dequant+einsum。
+- `MINISGL_DSV4_SM80_WO_A_FP8` 暂未实现；本阶段没有引入 fp8 activation quant。
+
+外部 fast path 复测结论：
+
+- DeepGEMM 仍因缺少 `libcudart.so.13` 无法加载。
+- 已安装 `sgl_kernel` 可 import，但没有可用的 `fp8_einsum` 等价符号。
+- 上游 SGLang 也会在 sm80 上禁用 `SGLANG_OPT_FP8_WO_A_GEMM`，因此本地 Triton 是当前可控路线。
+
+验证结果：
+
+- `pytest -q -o addopts='' tests/kernel/test_deepseek_v4_wrappers.py::test_dsv4_sm80_opt_in_kernels_match_fallbacks` 通过。
+- 目标 smoke 通过：`tests/kernel/test_deepseek_v4_wrappers.py`、`tests/attention/test_deepseek_v4_backend_metadata.py`、`tests/core/test_deepseek_v4_kvcache.py`、`tests/models/test_deepseek_v4_forward_fallback.py`，共 20 passed。
+- microbench artifact: `/tmp/dsv4_wo_a_grouped_projection_bf16_weight_dequant_microbench_20260628.json`。
+
+当前策略仍是默认关闭。真实 DSV4 尺寸 G=8/R=1024/D=4096 下，tokens 1/8 约 1.21x；tokens 64/512 的直接 Triton dequant-on-load 会反复读取权重，因此最终实现对大 token 自动回退，避免 prefill 退化。

@@ -121,6 +121,53 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     assert padded[0, :2].tolist() == [1, 2]
     assert padded[0, 2:].eq(-1).all()
 
+    wo_o = torch.randn(2, 2, 8, dtype=torch.bfloat16)
+    wo_weight = torch.randn(10, 8, dtype=torch.float32).clamp(-4, 4).to(dsv4_kernel.fp8_dtype())
+    wo_scale = torch.rand(
+        dsv4_kernel.scale_dim(10),
+        dsv4_kernel.scale_dim(8),
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+    wo_out = dsv4_kernel.wo_a_grouped_projection_fallback(
+        wo_o,
+        wo_weight,
+        wo_scale,
+        num_local_groups=2,
+        o_lora_rank=5,
+    )
+    assert wo_out.shape == (2, 10)
+    assert wo_out.dtype is wo_o.dtype
+
+
+def test_dsv4_moe_route_plan_groups_and_pads_routes():
+    indices = torch.tensor(
+        [
+            [2, 1],
+            [0, -1],
+            [2, 0],
+        ],
+        dtype=torch.int64,
+    )
+
+    plan = dsv4_kernel.build_moe_route_plan(indices, num_experts=3, block_size_m=2)
+
+    assert plan.route_count == 6
+    assert plan.topk == 2
+    assert plan.block_size_m == 2
+    assert plan.num_tokens_post_padded.item() == 6
+    assert plan.expert_ids.tolist() == [0, 1, 2]
+    assert plan.sorted_route_ids.tolist() == [2, 5, 1, 6, 0, 4]
+
+    route_experts = torch.repeat_interleave(plan.expert_ids, plan.block_size_m)
+    valid = plan.sorted_route_ids < plan.route_count
+    pairs = list(
+        zip(
+            plan.sorted_route_ids[valid].tolist(),
+            route_experts[valid].tolist(),
+        )
+    )
+    assert pairs == [(2, 0), (5, 0), (1, 1), (0, 2), (4, 2)]
+
 
 def test_dsv4_model_and_attention_do_not_import_optional_kernels_directly():
     model_source = inspect.getsource(dsv4_model)
@@ -145,6 +192,8 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         "MINISGL_DSV4_SM80_TOPK",
         "MINISGL_DSV4_SM80_FP8_GEMM",
         "MINISGL_DSV4_SM80_FP4_GEMM",
+        "MINISGL_DSV4_SM80_MOE_ROUTE",
+        "MINISGL_DSV4_SM80_WO_A_BF16",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -317,6 +366,40 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     assert torch.allclose(actual_fp8, expected_fp8, atol=3e-2, rtol=3e-2)
     monkeypatch.delenv("MINISGL_DSV4_SM80_FP8_GEMM", raising=False)
 
+    wo_o = torch.randn(5, 2, 64, device=device, dtype=torch.bfloat16)
+    wo_rank = 48
+    wo_weight = torch.randn(
+        2 * wo_rank,
+        wo_o.shape[-1],
+        device=device,
+        dtype=torch.float32,
+    ).clamp(-4, 4).to(dsv4_kernel.fp8_dtype())
+    wo_scale = torch.rand(
+        dsv4_kernel.scale_dim(2 * wo_rank),
+        dsv4_kernel.scale_dim(wo_o.shape[-1]),
+        device=device,
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+    expected_wo_a = dsv4_kernel.wo_a_grouped_projection_fallback(
+        wo_o,
+        wo_weight,
+        wo_scale,
+        num_local_groups=2,
+        o_lora_rank=wo_rank,
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_WO_A_BF16", "1")
+    actual_wo_a = dsv4_kernel.wo_a_grouped_projection_fallback(
+        wo_o,
+        wo_weight,
+        wo_scale,
+        num_local_groups=2,
+        o_lora_rank=wo_rank,
+    )
+    torch.cuda.synchronize()
+    assert actual_wo_a.dtype is wo_o.dtype
+    assert torch.allclose(actual_wo_a, expected_wo_a, atol=4e-2, rtol=4e-2)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_WO_A_BF16", raising=False)
+
     fp4_weight = torch.randint(-128, 127, (96, 64), device=device, dtype=torch.int8)
     fp4_scale = torch.rand(96, 4, device=device, dtype=torch.float32).to(
         dsv4_kernel.e8m0_dtype()
@@ -336,3 +419,92 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     )
     torch.cuda.synchronize()
     assert torch.allclose(actual_fp4, expected_fp4, atol=3e-2, rtol=3e-2)
+
+    num_tokens = 5
+    topk = 2
+    num_experts = 4
+    hidden = 64
+    intermediate = 32
+    moe_x = torch.randn(num_tokens, hidden, device=device, dtype=torch.bfloat16)
+    moe_weights = torch.rand(num_tokens, topk, device=device, dtype=torch.float32)
+    moe_indices = torch.tensor(
+        [[0, 2], [1, 3], [2, 0], [3, 1], [0, 1]],
+        device=device,
+        dtype=torch.int64,
+    )
+    w13_weight = torch.randint(
+        -128,
+        127,
+        (num_experts, 2, intermediate, hidden // 2),
+        device=device,
+        dtype=torch.int8,
+    )
+    w13_scale = torch.rand(
+        num_experts,
+        2,
+        intermediate,
+        dsv4_kernel.scale_dim(hidden, block_size=32),
+        device=device,
+        dtype=torch.float32,
+    )
+    w2_weight = torch.randint(
+        -128,
+        127,
+        (num_experts, hidden, intermediate // 2),
+        device=device,
+        dtype=torch.int8,
+    )
+    w2_scale = torch.rand(
+        num_experts,
+        hidden,
+        dsv4_kernel.scale_dim(intermediate, block_size=32),
+        device=device,
+        dtype=torch.float32,
+    )
+    expected_moe = torch.zeros_like(moe_x, dtype=torch.float32)
+    for expert_idx in range(num_experts):
+        token_idx, top_idx = torch.where(moe_indices == expert_idx)
+        if token_idx.numel() == 0:
+            continue
+        expert_x = moe_x[token_idx]
+        w1 = dsv4_kernel.quantized_linear_ref(
+            expert_x,
+            w13_weight[expert_idx, 0],
+            w13_scale[expert_idx, 0],
+            weight_kind="fp4",
+        ).float()
+        w3 = dsv4_kernel.quantized_linear_ref(
+            expert_x,
+            w13_weight[expert_idx, 1],
+            w13_scale[expert_idx, 1],
+            weight_kind="fp4",
+        ).float()
+        expert_hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
+            w1,
+            w3,
+            swiglu_limit=2.5,
+            weights=moe_weights[token_idx, top_idx, None],
+        )
+        expected_moe[token_idx] += dsv4_kernel.quantized_linear_ref(
+            expert_hidden.to(moe_x.dtype),
+            w2_weight[expert_idx],
+            w2_scale[expert_idx],
+            weight_kind="fp4",
+        ).float()
+    expected_moe = expected_moe.to(moe_x.dtype)
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_ROUTE", "1")
+    actual_moe = dsv4_kernel.moe_route_dispatch_bf16_grouped(
+        moe_x,
+        moe_weights,
+        moe_indices,
+        w13_weight,
+        w13_scale,
+        w2_weight,
+        w2_scale,
+        swiglu_limit=2.5,
+    )
+    torch.cuda.synchronize()
+    assert actual_moe is not None
+    assert actual_moe.dtype is moe_x.dtype
+    assert torch.allclose(actual_moe, expected_moe, atol=8e-2, rtol=8e-2)

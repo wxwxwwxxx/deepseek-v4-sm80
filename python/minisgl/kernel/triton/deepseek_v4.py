@@ -273,6 +273,61 @@ def _quantized_linear_fp8_kernel(
 
 
 @triton.jit
+def _wo_a_grouped_projection_fp8_kernel(
+    o_ptr,
+    weight_ptr,
+    scale_ptr,
+    out_ptr,
+    T: tl.constexpr,
+    G: tl.constexpr,
+    D: tl.constexpr,
+    R: tl.constexpr,
+    SCALE_D: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    pid_t = tl.program_id(0)
+    group = tl.program_id(1)
+    pid_r = tl.program_id(2)
+
+    offs_t = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)
+    offs_r = pid_r * BLOCK_R + tl.arange(0, BLOCK_R)
+    offs_d_base = tl.arange(0, BLOCK_D)
+    global_r = group * R + offs_r
+
+    acc = tl.zeros((BLOCK_T, BLOCK_R), dtype=tl.float32)
+    for d_start in range(0, D, BLOCK_D):
+        offs_d = d_start + offs_d_base
+        a = tl.load(
+            o_ptr + (offs_t[:, None] * G + group) * D + offs_d[None, :],
+            mask=(offs_t[:, None] < T) & (offs_d[None, :] < D),
+            other=0.0,
+        )
+        b = tl.load(
+            weight_ptr + global_r[None, :] * D + offs_d[:, None],
+            mask=(offs_r[None, :] < R) & (offs_d[:, None] < D),
+            other=0,
+        ).to(tl.int32)
+        b = _fp8_e4m3fn_value(b).to(tl.float32)
+        if HAS_SCALE:
+            scale = tl.load(
+                scale_ptr + (global_r[None, :] // 128) * SCALE_D + (offs_d[:, None] // 128),
+                mask=(offs_r[None, :] < R) & (offs_d[:, None] < D),
+                other=0.0,
+            ).to(tl.float32)
+            b *= scale
+        acc += tl.dot(a, b.to(tl.bfloat16), out_dtype=tl.float32)
+
+    tl.store(
+        out_ptr + offs_t[:, None] * (G * R) + global_r[None, :],
+        acc,
+        mask=(offs_t[:, None] < T) & (offs_r[None, :] < R),
+    )
+
+
+@triton.jit
 def _quantized_linear_fp4_kernel(
     x_ptr,
     weight_ptr,
@@ -322,6 +377,89 @@ def _quantized_linear_fp4_kernel(
         out_ptr + offs_m[:, None] * N + offs_n[None, :],
         acc,
         mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
+    )
+
+
+@triton.jit
+def _grouped_fp4_linear_kernel(
+    a_ptr,
+    weight_ptr,
+    scale_ptr,
+    sorted_route_ids_ptr,
+    expert_ids_ptr,
+    num_tokens_post_padded_ptr,
+    out_ptr,
+    route_count: tl.constexpr,
+    topk: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    WEIGHT_K_BYTES: tl.constexpr,
+    SCALE_K: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
+    HAS_SLOT: tl.constexpr,
+    SLOT: tl.constexpr,
+    A_ROWS_ARE_ROUTES: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+) -> None:
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    padded_tokens = tl.load(num_tokens_post_padded_ptr)
+    route_offsets = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    route_ids = tl.load(
+        sorted_route_ids_ptr + route_offsets,
+        mask=route_offsets < padded_tokens,
+        other=route_count,
+    ).to(tl.int64)
+    valid_routes = route_ids < route_count
+    expert = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_k_base = tl.arange(0, BLOCK_SIZE_K)
+    a_rows = route_ids
+    if not A_ROWS_ARE_ROUTES:
+        a_rows = route_ids // topk
+
+    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k_start in range(0, K, BLOCK_SIZE_K):
+        offs_k = k_start + offs_k_base
+        a = tl.load(
+            a_ptr + a_rows[:, None] * K + offs_k[None, :],
+            mask=valid_routes[:, None] & (offs_k[None, :] < K),
+            other=0.0,
+        )
+        if HAS_SLOT:
+            weight_offsets = (
+                ((expert * 2 + SLOT) * N + offs_n[None, :]) * WEIGHT_K_BYTES
+                + (offs_k[:, None] // 2)
+            )
+            scale_offsets = (
+                ((expert * 2 + SLOT) * N + offs_n[None, :]) * SCALE_K
+                + (offs_k[:, None] // 32)
+            )
+        else:
+            weight_offsets = (
+                (expert * N + offs_n[None, :]) * WEIGHT_K_BYTES
+                + (offs_k[:, None] // 2)
+            )
+            scale_offsets = (
+                (expert * N + offs_n[None, :]) * SCALE_K
+                + (offs_k[:, None] // 32)
+            )
+        weight_mask = (offs_n[None, :] < N) & (offs_k[:, None] < K)
+        packed = tl.load(weight_ptr + weight_offsets, mask=weight_mask, other=0).to(tl.int32)
+        nibble = tl.where((offs_k[:, None] & 1) == 0, packed & 0x0F, (packed >> 4) & 0x0F)
+        b = _fp4_e2m1_value(nibble).to(tl.float32)
+        if HAS_SCALE:
+            scale = tl.load(scale_ptr + scale_offsets, mask=weight_mask, other=0.0).to(tl.float32)
+            b *= scale
+        acc += tl.dot(a, b.to(tl.bfloat16), out_dtype=tl.float32)
+
+    tl.store(
+        out_ptr + route_ids[:, None] * N + offs_n[None, :],
+        acc,
+        mask=valid_routes[:, None] & (offs_n[None, :] < N),
     )
 
 
@@ -608,6 +746,72 @@ def quantized_linear_fp8(
     return out
 
 
+def wo_a_grouped_projection_fp8(
+    o: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    *,
+    num_local_groups: int,
+    o_lora_rank: int,
+) -> torch.Tensor | None:
+    if (
+        o.ndim != 3
+        or o.dtype is not torch.bfloat16
+        or not o.is_cuda
+        or not weight.is_cuda
+        or o.shape[1] != num_local_groups
+        or weight.ndim != 2
+        or weight.shape[0] != num_local_groups * o_lora_rank
+        or weight.shape[1] != o.shape[-1]
+        or o.stride(-1) != 1
+    ):
+        return None
+    if o.shape[0] > 16:
+        return None
+    if getattr(torch, "float8_e4m3fn", None) is None or weight.dtype is not torch.float8_e4m3fn:
+        return None
+    if scale is not None and (scale.ndim != 2 or not scale.is_cuda):
+        return None
+
+    o_c = o.contiguous()
+    weight_c = weight.contiguous().view(torch.uint8)
+    scale_c = (
+        scale.float().contiguous()
+        if scale is not None
+        else weight_c.new_empty((1, 1), dtype=torch.float32)
+    )
+    tokens, groups, d_per_group = o_c.shape
+    out = torch.empty(
+        (tokens, num_local_groups * o_lora_rank),
+        dtype=o.dtype,
+        device=o.device,
+    )
+    block_t = 16
+    block_r = 64
+    block_d = 64
+    grid = (
+        triton.cdiv(tokens, block_t),
+        num_local_groups,
+        triton.cdiv(o_lora_rank, block_r),
+    )
+    _wo_a_grouped_projection_fp8_kernel[grid](
+        o_c,
+        weight_c,
+        scale_c,
+        out,
+        T=tokens,
+        G=groups,
+        D=d_per_group,
+        R=o_lora_rank,
+        SCALE_D=triton.cdiv(d_per_group, 128),
+        HAS_SCALE=scale is not None,
+        BLOCK_T=block_t,
+        BLOCK_R=block_r,
+        BLOCK_D=block_d,
+    )
+    return out
+
+
 def quantized_linear_fp4(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -654,12 +858,180 @@ def quantized_linear_fp4(
     return out
 
 
+def _grouped_fp4_linear(
+    a: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    sorted_route_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    *,
+    route_count: int,
+    topk: int,
+    block_size_m: int,
+    slot: int | None,
+    a_rows_are_routes: bool,
+) -> torch.Tensor | None:
+    if (
+        a.ndim != 2
+        or a.dtype is not torch.bfloat16
+        or not a.is_cuda
+        or not weight.is_cuda
+        or not sorted_route_ids.is_cuda
+        or not expert_ids.is_cuda
+        or not num_tokens_post_padded.is_cuda
+        or a.stride(-1) != 1
+    ):
+        return None
+    if route_count == 0:
+        n = weight.shape[-2]
+        return torch.empty((0, n), dtype=a.dtype, device=a.device)
+    if weight.dtype is not torch.int8 or weight.shape[-1] * 2 < a.shape[-1]:
+        return None
+    if slot is None:
+        if weight.ndim != 3:
+            return None
+        n = weight.shape[1]
+        has_slot = False
+        slot_value = 0
+    else:
+        if weight.ndim != 4 or weight.shape[1] <= slot:
+            return None
+        n = weight.shape[2]
+        has_slot = True
+        slot_value = int(slot)
+    if a.shape[-1] % 2 != 0:
+        return None
+
+    weight_c = weight.contiguous()
+    scale_c = (
+        scale.float().contiguous()
+        if scale is not None
+        else weight_c.new_empty((1,), dtype=torch.float32)
+    )
+    out = torch.zeros((route_count, n), dtype=a.dtype, device=a.device)
+    block_n = 64
+    block_k = 64
+    grid = (
+        triton.cdiv(sorted_route_ids.numel(), block_size_m),
+        triton.cdiv(n, block_n),
+    )
+    _grouped_fp4_linear_kernel[grid](
+        a.contiguous(),
+        weight_c,
+        scale_c,
+        sorted_route_ids.contiguous(),
+        expert_ids.contiguous(),
+        num_tokens_post_padded.contiguous(),
+        out,
+        route_count=route_count,
+        topk=topk,
+        N=n,
+        K=a.shape[-1],
+        WEIGHT_K_BYTES=weight_c.shape[-1],
+        SCALE_K=triton.cdiv(a.shape[-1], 32),
+        HAS_SCALE=scale is not None,
+        HAS_SLOT=has_slot,
+        SLOT=slot_value,
+        A_ROWS_ARE_ROUTES=bool(a_rows_are_routes),
+        BLOCK_SIZE_M=block_size_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+    )
+    return out
+
+
+def grouped_fp4_moe(
+    hidden_states: torch.Tensor,
+    weights: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor | None,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor | None,
+    sorted_route_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    *,
+    route_count: int,
+    topk: int,
+    block_size_m: int,
+    swiglu_limit: float,
+) -> torch.Tensor | None:
+    if hidden_states.ndim != 2 or weights.numel() != route_count:
+        return None
+    if hidden_states.dtype is not torch.bfloat16 or not hidden_states.is_cuda:
+        return None
+    if w13_weight.ndim != 4 or w13_weight.shape[1] != 2 or w2_weight.ndim != 3:
+        return None
+
+    if route_count == 0:
+        return torch.zeros_like(hidden_states)
+
+    gate = _grouped_fp4_linear(
+        hidden_states,
+        w13_weight,
+        w13_scale,
+        sorted_route_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        route_count=route_count,
+        topk=topk,
+        block_size_m=block_size_m,
+        slot=0,
+        a_rows_are_routes=False,
+    )
+    up = _grouped_fp4_linear(
+        hidden_states,
+        w13_weight,
+        w13_scale,
+        sorted_route_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        route_count=route_count,
+        topk=topk,
+        block_size_m=block_size_m,
+        slot=1,
+        a_rows_are_routes=False,
+    )
+    if gate is None or up is None:
+        return None
+
+    activated = silu_and_mul_clamp(
+        gate,
+        up,
+        swiglu_limit=swiglu_limit,
+        weights=weights.reshape(-1, 1),
+    )
+    if activated is None:
+        return None
+    hidden = activated.to(hidden_states.dtype)
+
+    routed = _grouped_fp4_linear(
+        hidden,
+        w2_weight,
+        w2_scale,
+        sorted_route_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        route_count=route_count,
+        topk=topk,
+        block_size_m=block_size_m,
+        slot=None,
+        a_rows_are_routes=True,
+    )
+    if routed is None:
+        return None
+    return routed.view(hidden_states.shape[0], topk, hidden_states.shape[1]).sum(dim=1)
+
+
 __all__ = [
     "apply_rotary_tail",
+    "grouped_fp4_moe",
     "q_norm_rope",
     "quantized_linear_fp4",
     "quantized_linear_fp8",
     "silu_and_mul_clamp",
     "store_cache",
     "topk_transform_512",
+    "wo_a_grouped_projection_fp8",
 ]
