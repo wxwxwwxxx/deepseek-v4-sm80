@@ -143,6 +143,8 @@ class Engine:
                 for k, v in self.model.state_dict().items()
             }
         else:
+            if config.model_config.is_deepseek_v4:
+                return dict(load_weight(config.model_path, self.device))
             return {k: v.to(self.dtype) for k, v in load_weight(config.model_path, self.device)}
 
     def _determine_num_pages(self, old_free_memory: int, config: EngineConfig) -> int:

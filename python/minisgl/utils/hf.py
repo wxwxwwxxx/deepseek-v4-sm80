@@ -29,12 +29,24 @@ def load_tokenizer(model_path: str) -> PreTrainedTokenizerBase:
 
 @functools.cache
 def _load_hf_config(model_path: str) -> Any:
-    return AutoConfig.from_pretrained(model_path)
+    try:
+        return AutoConfig.from_pretrained(model_path)
+    except ValueError:
+        config_path = os.path.join(model_path, "config.json")
+        if not os.path.isfile(config_path):
+            raise
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return PretrainedConfig.from_dict(data)
 
 
 def cached_load_hf_config(model_path: str) -> PretrainedConfig:
     config = _load_hf_config(model_path)
-    return type(config)(**config.to_dict())
+    data = config.to_dict()
+    model_type = getattr(config, "model_type", None)
+    if model_type:
+        data["model_type"] = model_type
+    return type(config)(**data)
 
 
 def download_hf_weight(model_path: str) -> str:
