@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,205 +10,13 @@ from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata
 from minisgl.core import Batch, get_global_ctx
 from minisgl.distributed import DistributedCommunicator, get_tp_info
 from minisgl.layers import BaseOP, OPList
+from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.utils import div_ceil, div_even
 
 from .base import BaseLLMModel
 
 if TYPE_CHECKING:
     from .config import ModelConfig
-
-
-def _fp8_dtype() -> torch.dtype:
-    return getattr(torch, "float8_e4m3fn", torch.uint8)
-
-
-def _e8m0_dtype() -> torch.dtype:
-    return getattr(torch, "float8_e8m0fnu", torch.uint8)
-
-
-def _scale_dim(size: int, block_size: int = 128) -> int:
-    return div_ceil(size, block_size)
-
-
-_FP4_TABLE_CACHE: dict[tuple[str, int | None], torch.Tensor] = {}
-
-
-def _fp4_table(device: torch.device) -> torch.Tensor:
-    key = (device.type, device.index)
-    table = _FP4_TABLE_CACHE.get(key)
-    if table is None:
-        table = torch.tensor(
-            [
-                0.0,
-                0.5,
-                1.0,
-                1.5,
-                2.0,
-                3.0,
-                4.0,
-                6.0,
-                0.0,
-                -0.5,
-                -1.0,
-                -1.5,
-                -2.0,
-                -3.0,
-                -4.0,
-                -6.0,
-            ],
-            dtype=torch.float32,
-            device=device,
-        )
-        _FP4_TABLE_CACHE[key] = table
-    return table
-
-
-def _dequant_fp8_weight(
-    weight: torch.Tensor,
-    scale: torch.Tensor | None,
-    *,
-    out_dtype: torch.dtype,
-) -> torch.Tensor:
-    w = weight.float()
-    if scale is None:
-        return w.to(out_dtype)
-    out_features, in_features = w.shape
-    expanded = scale.float().repeat_interleave(128, dim=0).repeat_interleave(128, dim=1)
-    expanded = expanded[:out_features, :in_features]
-    return (w * expanded).to(out_dtype)
-
-
-def _dequant_fp4_weight(
-    weight: torch.Tensor,
-    scale: torch.Tensor | None,
-    *,
-    out_dtype: torch.dtype,
-) -> torch.Tensor:
-    packed = weight.contiguous().view(torch.uint8)
-    low = packed & 0x0F
-    high = (packed >> 4) & 0x0F
-    table = _fp4_table(weight.device)
-    unpacked = torch.stack((table[low.long()], table[high.long()]), dim=-1).flatten(-2)
-    if scale is None:
-        return unpacked.to(out_dtype)
-    expanded = scale.float().repeat_interleave(32, dim=-1)
-    expanded = expanded[..., : unpacked.shape[-1]]
-    return (unpacked * expanded).to(out_dtype)
-
-
-def _quantize_fp8_activation_ref(x: torch.Tensor, *, block_size: int = 128) -> torch.Tensor:
-    fp8_dtype = getattr(torch, "float8_e4m3fn", None)
-    if fp8_dtype is None or x.numel() == 0 or x.shape[-1] % block_size != 0:
-        return x
-    dtype = x.dtype
-    flat = x.contiguous().view(-1, x.shape[-1]).float()
-    groups = flat.view(flat.shape[0], flat.shape[1] // block_size, block_size)
-    scale = groups.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4) / 448.0
-    scale = torch.pow(2.0, torch.ceil(torch.log2(scale)))
-    y = (groups / scale).clamp(-448.0, 448.0).to(fp8_dtype).float() * scale
-    return y.reshape_as(flat).reshape_as(x).to(dtype)
-
-
-def _quantized_linear_ref(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    scale: torch.Tensor | None,
-    *,
-    weight_kind: str,
-) -> torch.Tensor:
-    if weight_kind == "fp4":
-        x = _quantize_fp8_activation_ref(x)
-        w = _dequant_fp4_weight(weight, scale, out_dtype=x.dtype)
-    elif weight_kind == "fp8":
-        x = _quantize_fp8_activation_ref(x)
-        w = _dequant_fp8_weight(weight, scale, out_dtype=x.dtype)
-    else:
-        w = weight.to(x.dtype)
-    return F.linear(x, w)
-
-
-def _apply_rotary_tail(
-    x: torch.Tensor,
-    positions: torch.Tensor,
-    *,
-    rotary_dim: int,
-    base: float,
-    inverse: bool = False,
-    original_seq_len: int = 0,
-    factor: float = 1.0,
-    beta_fast: int = 32,
-    beta_slow: int = 1,
-) -> torch.Tensor:
-    if rotary_dim <= 0:
-        return x
-    if rotary_dim % 2 != 0:
-        raise ValueError(f"DeepSeek V4 rotary_dim must be even, got {rotary_dim}")
-
-    pos = positions.to(device=x.device, dtype=torch.float32)
-    inv_freq = 1.0 / (
-        base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=x.device) / rotary_dim)
-    )
-    if original_seq_len > 0:
-
-        def correction_dim(num_rotations: float) -> float:
-            return rotary_dim * math.log(
-                original_seq_len / (num_rotations * 2 * math.pi)
-            ) / (2 * math.log(base))
-
-        low = max(math.floor(correction_dim(beta_fast)), 0)
-        high = min(math.ceil(correction_dim(beta_slow)), rotary_dim // 2 - 1)
-        ramp = torch.clamp(
-            (torch.arange(rotary_dim // 2, dtype=torch.float32, device=x.device) - low)
-            / max(high - low, 1),
-            0,
-            1,
-        )
-        smooth = 1 - ramp
-        inv_freq = inv_freq / factor * (1 - smooth) + inv_freq * smooth
-
-    freqs = torch.outer(pos, inv_freq)
-    if inverse:
-        freqs = -freqs
-    cos = freqs.cos()
-    sin = freqs.sin()
-    while cos.ndim < x[..., -rotary_dim:].ndim:
-        cos = cos.unsqueeze(-2)
-        sin = sin.unsqueeze(-2)
-
-    rope = x[..., -rotary_dim:].float().unflatten(-1, (-1, 2))
-    a, b = rope[..., 0], rope[..., 1]
-    rotated = torch.stack((a * cos - b * sin, a * sin + b * cos), dim=-1).flatten(-2)
-    x[..., -rotary_dim:] = rotated.to(x.dtype)
-    return x
-
-
-def _hc_split_sinkhorn_ref(
-    mixes: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    hc_mult: int,
-    sinkhorn_iters: int,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    mix_hc = (2 + hc_mult) * hc_mult
-    mixes = mixes.view(-1, mix_hc).float()
-    hc_scale = hc_scale.float()
-    hc_base = hc_base.float()
-
-    pre = torch.sigmoid(mixes[:, :hc_mult] * hc_scale[0] + hc_base[:hc_mult]) + eps
-    post_start = hc_mult
-    post_end = 2 * hc_mult
-    post = 2 * torch.sigmoid(
-        mixes[:, post_start:post_end] * hc_scale[1] + hc_base[post_start:post_end]
-    )
-    comb_raw = mixes[:, post_end:].view(-1, hc_mult, hc_mult)
-    comb_base = hc_base[post_end:].view(hc_mult, hc_mult)
-    comb = torch.softmax(comb_raw * hc_scale[2] + comb_base, dim=-1) + eps
-    comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
-    for _ in range(max(sinkhorn_iters - 1, 0)):
-        comb = comb / (comb.sum(dim=-1, keepdim=True) + eps)
-        comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
-    return pre, post, comb
 
 
 @dataclass
@@ -290,17 +97,17 @@ class DSV4Linear(BaseOP):
         self.weight = torch.empty(local_output_size, local_input_size, dtype=weight_dtype)
         if scale_dtype is not None:
             self.weight_scale_inv = torch.empty(
-                _scale_dim(local_output_size),
-                _scale_dim(local_input_size),
+                dsv4_kernel.scale_dim(local_output_size),
+                dsv4_kernel.scale_dim(local_input_size),
                 dtype=scale_dtype,
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         if self.weight.dtype is torch.int8:
-            y = _quantized_linear_ref(x, self.weight, scale, weight_kind="fp4")
-        elif self.weight.dtype is _fp8_dtype():
-            y = _quantized_linear_ref(x, self.weight, scale, weight_kind="fp8")
+            y = dsv4_kernel.quantized_linear_ref(x, self.weight, scale, weight_kind="fp4")
+        elif self.weight.dtype is dsv4_kernel.fp8_dtype():
+            y = dsv4_kernel.quantized_linear_ref(x, self.weight, scale, weight_kind="fp8")
         else:
             y = F.linear(x, self.weight.to(x.dtype))
         if self.row_parallel and self._tp_size > 1:
@@ -323,38 +130,16 @@ class DSV4Compressor(BaseOP):
         self.norm = DSV4RMSNorm(head_dim, config.rms_norm_eps)
 
     def forward(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> torch.Tensor:
-        if x.numel() == 0:
-            return x.new_empty((0, self.head_dim))
-        ratio = self.ratio
-        projected = self.wkv_gate.forward(x).float()
-        kv, score = projected.chunk(2, dim=-1)
-        if positions is None:
-            positions = torch.arange(x.shape[0], device=x.device, dtype=torch.long)
-        positions = positions.long()
-
-        rows = []
-        start = 0
-        while start < x.shape[0]:
-            end = min(start + ratio, x.shape[0])
-            if end - start < ratio:
-                break
-            slot = (positions[start:end] % ratio).to(torch.long)
-            local_score = score[start:end] + self.ape[slot].float()
-            local_kv = kv[start:end]
-            if self.overlap:
-                left = local_kv[:, : self.head_dim]
-                right = local_kv[:, self.head_dim :]
-                local_score = torch.cat(
-                    [local_score[:, : self.head_dim], local_score[:, self.head_dim :]],
-                    dim=0,
-                )
-                local_kv = torch.cat([left, right], dim=0)
-            pooled = (local_kv * local_score.softmax(dim=0)).sum(dim=0, keepdim=True)
-            rows.append(self.norm.forward(pooled.to(x.dtype)))
-            start = end
-        if not rows:
-            return x.new_empty((0, self.head_dim))
-        return torch.cat(rows, dim=0)
+        return dsv4_kernel.compress_forward_fallback(
+            x,
+            positions,
+            ratio=self.ratio,
+            head_dim=self.head_dim,
+            overlap=self.overlap,
+            ape=self.ape,
+            wkv_gate=self.wkv_gate,
+            norm=self.norm,
+        )
 
 
 class DSV4Indexer(BaseOP):
@@ -363,8 +148,8 @@ class DSV4Indexer(BaseOP):
         self.wq_b = DSV4Linear(
             config.q_lora_rank,
             config.index_n_heads * config.index_head_dim,
-            weight_dtype=_fp8_dtype(),
-            scale_dtype=_e8m0_dtype(),
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
         )
         self.weights_proj = DSV4Linear(
             config.hidden_size,
@@ -414,36 +199,36 @@ class DSV4Attention(BaseOP):
         self.wq_a = DSV4Linear(
             config.hidden_size,
             config.q_lora_rank,
-            weight_dtype=_fp8_dtype(),
-            scale_dtype=_e8m0_dtype(),
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
         )
         self.wq_b = DSV4Linear(
             config.q_lora_rank,
             config.num_qo_heads * config.head_dim,
-            weight_dtype=_fp8_dtype(),
-            scale_dtype=_e8m0_dtype(),
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
             col_parallel=True,
         )
         self.q_norm = DSV4RMSNorm(config.q_lora_rank, config.rms_norm_eps)
         self.wkv = DSV4Linear(
             config.hidden_size,
             config.head_dim,
-            weight_dtype=_fp8_dtype(),
-            scale_dtype=_e8m0_dtype(),
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
         )
         self.kv_norm = DSV4RMSNorm(config.head_dim, config.rms_norm_eps)
         self.wo_a = DSV4Linear(
             config.num_qo_heads * config.head_dim // config.o_groups,
             config.o_groups * config.o_lora_rank,
-            weight_dtype=_fp8_dtype(),
-            scale_dtype=_e8m0_dtype(),
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
             col_parallel=True,
         )
         self.wo_b = DSV4Linear(
             config.o_groups * config.o_lora_rank,
             config.hidden_size,
-            weight_dtype=_fp8_dtype(),
-            scale_dtype=_e8m0_dtype(),
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
             row_parallel=True,
         )
 
@@ -465,34 +250,25 @@ class DSV4Attention(BaseOP):
         return spans
 
     def _fallback_attention(self, q: torch.Tensor, kv: torch.Tensor, batch: Batch) -> torch.Tensor:
-        out = torch.empty_like(q)
-        sink = self.attn_sink[: q.shape[1]].to(device=q.device, dtype=torch.float32)
         spans = self._sequence_spans(batch, q.shape[0])
-        for start, end in spans:
-            q_seq = q[start:end].float()
-            kv_seq = kv[start:end].float()
-            seq_len = end - start
-            for local_idx in range(seq_len):
-                ctx_start = max(0, local_idx - self.window_size + 1) if self.window_size else 0
-                candidates = kv_seq[ctx_start : local_idx + 1]
-                scores = torch.einsum("hd,td->ht", q_seq[local_idx], candidates)
-                scores = scores * self.softmax_scale
-                max_score = torch.maximum(scores.max(dim=-1).values, sink)
-                exp_scores = torch.exp(scores - max_score[:, None])
-                denom = exp_scores.sum(dim=-1) + torch.exp(sink - max_score)
-                attn = exp_scores / denom[:, None]
-                out[start + local_idx] = torch.einsum("ht,td->hd", attn, candidates).to(q.dtype)
-        return out
+        return dsv4_kernel.sequence_mqa_attention_fallback(
+            q,
+            kv,
+            spans,
+            window_size=self.window_size,
+            softmax_scale=self.softmax_scale,
+            attn_sink=self.attn_sink,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
         positions = batch.positions.to(device=x.device, dtype=torch.long)
         q_lora = self.q_norm.forward(self.wq_a.forward(x))
         q = self.wq_b.forward(q_lora).view(-1, self.num_local_heads, self.head_dim)
-        q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + self.rms_norm_eps).to(q.dtype)
-        _apply_rotary_tail(
+        dsv4_kernel.q_norm_rope_fallback(
             q,
             positions,
+            rms_norm_eps=self.rms_norm_eps,
             rotary_dim=self.rope_head_dim,
             base=float(self.rope_base),
             original_seq_len=self.original_seq_len,
@@ -502,7 +278,7 @@ class DSV4Attention(BaseOP):
         )
 
         kv = self.kv_norm.forward(self.wkv.forward(x))
-        _apply_rotary_tail(
+        dsv4_kernel.k_norm_rope_cache_fallback(
             kv,
             positions,
             rotary_dim=self.rope_head_dim,
@@ -513,7 +289,7 @@ class DSV4Attention(BaseOP):
             beta_slow=self.beta_slow,
         )
         if self.rope_head_dim < kv.shape[-1]:
-            kv[..., : -self.rope_head_dim] = _quantize_fp8_activation_ref(
+            kv[..., : -self.rope_head_dim] = dsv4_kernel.quantize_fp8_activation_ref(
                 kv[..., : -self.rope_head_dim], block_size=64
             )
 
@@ -546,7 +322,7 @@ class DSV4Attention(BaseOP):
             )
         else:
             o = self._fallback_attention(q, kv, batch)
-        _apply_rotary_tail(
+        dsv4_kernel.apply_rotary_tail(
             o,
             positions,
             rotary_dim=self.rope_head_dim,
@@ -559,13 +335,13 @@ class DSV4Attention(BaseOP):
         )
         d_per_group = self.num_local_heads * self.head_dim // self.num_local_groups
         o = o.reshape(x.shape[0], self.num_local_groups, d_per_group)
-        wo_a = _dequant_fp8_weight(
+        o = dsv4_kernel.wo_a_grouped_projection_fallback(
+            o,
             self.wo_a.weight,
             getattr(self.wo_a, "weight_scale_inv", None),
-            out_dtype=o.dtype,
+            num_local_groups=self.num_local_groups,
+            o_lora_rank=self.o_lora_rank,
         )
-        wo_a = wo_a.view(self.num_local_groups, self.o_lora_rank, d_per_group)
-        o = torch.einsum("tgd,grd->tgr", o, wo_a).reshape(x.shape[0], -1)
         return self.wo_b.forward(o)
 
 
@@ -597,28 +373,16 @@ class DSV4MoEGate(BaseOP):
         routed_scaling_factor: float,
         hash_topk: DSV4TopK | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        scores = F.linear(hidden_states.float(), self.weight.float())
-        if scoring_func == "softmax":
-            original_scores = scores.softmax(dim=-1)
-        elif scoring_func == "sigmoid":
-            original_scores = scores.sigmoid()
-        else:
-            original_scores = F.softplus(scores).sqrt()
-
-        if hash_topk is not None:
-            if input_ids is None:
-                raise ValueError("DeepSeek V4 hash routing requires input_ids")
-            indices = hash_topk.forward(input_ids.view(-1)).long()
-        else:
-            scores_for_topk = original_scores
-            if hasattr(self, "e_score_correction_bias"):
-                scores_for_topk = scores_for_topk + self.e_score_correction_bias.float()
-            indices = scores_for_topk.topk(topk, dim=-1).indices
-
-        weights = original_scores.gather(1, indices)
-        if scoring_func != "softmax":
-            weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
-        return weights * routed_scaling_factor, indices
+        return dsv4_kernel.moe_gate_fallback(
+            hidden_states,
+            self.weight,
+            input_ids=input_ids,
+            topk=topk,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            correction_bias=getattr(self, "e_score_correction_bias", None),
+            hash_topk=hash_topk,
+        )
 
 
 class DSV4FusedRoutedExperts(BaseOP):
@@ -638,7 +402,7 @@ class DSV4FusedRoutedExperts(BaseOP):
             2,
             local_intermediate,
             div_ceil(config.hidden_size, 32),
-            dtype=_e8m0_dtype(),
+            dtype=dsv4_kernel.e8m0_dtype(),
         )
         self.w2_weight = torch.empty(
             config.n_routed_experts,
@@ -650,27 +414,29 @@ class DSV4FusedRoutedExperts(BaseOP):
             config.n_routed_experts,
             config.hidden_size,
             div_ceil(local_intermediate, 32),
-            dtype=_e8m0_dtype(),
+            dtype=dsv4_kernel.e8m0_dtype(),
         )
 
     def _expert_forward(self, local_idx: int, x: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        w1 = _quantized_linear_ref(
+        w1 = dsv4_kernel.quantized_linear_ref(
             x,
             self.w13_weight[local_idx, 0],
             self.w13_weight_scale_inv[local_idx, 0],
             weight_kind="fp4",
         ).float()
-        w3 = _quantized_linear_ref(
+        w3 = dsv4_kernel.quantized_linear_ref(
             x,
             self.w13_weight[local_idx, 1],
             self.w13_weight_scale_inv[local_idx, 1],
             weight_kind="fp4",
         ).float()
-        if self.swiglu_limit > 0:
-            w3 = torch.clamp(w3, min=-self.swiglu_limit, max=self.swiglu_limit)
-            w1 = torch.clamp(w1, max=self.swiglu_limit)
-        hidden = F.silu(w1) * w3 * weights
-        return _quantized_linear_ref(
+        hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
+            w1,
+            w3,
+            swiglu_limit=self.swiglu_limit,
+            weights=weights,
+        )
+        return dsv4_kernel.quantized_linear_ref(
             hidden.to(x.dtype),
             self.w2_weight[local_idx],
             self.w2_weight_scale_inv[local_idx],
@@ -698,27 +464,27 @@ class DSV4SharedExperts(BaseOP):
         self.gate_up_proj = DSV4Linear(
             config.hidden_size,
             2 * intermediate,
-            weight_dtype=_fp8_dtype(),
-            scale_dtype=_e8m0_dtype(),
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
             col_parallel=True,
         )
         self.down_proj = DSV4Linear(
             intermediate,
             config.hidden_size,
-            weight_dtype=_fp8_dtype(),
-            scale_dtype=_e8m0_dtype(),
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
             row_parallel=True,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate_up = self.gate_up_proj.forward(hidden_states)
         gate, up = gate_up.chunk(2, dim=-1)
-        gate_f = gate.float()
-        up_f = up.float()
-        if self.swiglu_limit > 0:
-            up_f = torch.clamp(up_f, min=-self.swiglu_limit, max=self.swiglu_limit)
-            gate_f = torch.clamp(gate_f, max=self.swiglu_limit)
-        return self.down_proj.forward((F.silu(gate_f) * up_f).to(up.dtype))
+        hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
+            gate,
+            up,
+            swiglu_limit=self.swiglu_limit,
+        )
+        return self.down_proj.forward(hidden.to(up.dtype))
 
 
 class DSV4MoE(BaseOP):
@@ -777,20 +543,16 @@ class DeepseekV4DecoderLayer(BaseOP):
         scale: torch.Tensor,
         base: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        shape = x.shape
-        flat = x.flatten(1).float()
-        rsqrt = torch.rsqrt(flat.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(flat, fn.float()) * rsqrt
-        pre, post, comb = _hc_split_sinkhorn_ref(
-            mixes,
+        return dsv4_kernel.hc_pre_fallback(
+            x,
+            fn,
             scale,
             base,
-            self.hc_mult,
-            self.hc_sinkhorn_iters,
-            self.hc_eps,
+            hc_mult=self.hc_mult,
+            sinkhorn_iters=self.hc_sinkhorn_iters,
+            eps=self.hc_eps,
+            norm_eps=self.norm_eps,
         )
-        y = torch.sum(pre.to(x.dtype).unsqueeze(-1) * x.view(shape), dim=1)
-        return y, post.to(x.dtype), comb.to(x.dtype)
 
     def _hc_post(
         self,
@@ -799,9 +561,7 @@ class DeepseekV4DecoderLayer(BaseOP):
         post: torch.Tensor,
         comb: torch.Tensor,
     ) -> torch.Tensor:
-        return post.unsqueeze(-1) * x.unsqueeze(1) + torch.sum(
-            comb.unsqueeze(-1) * residual.unsqueeze(2), dim=1
-        )
+        return dsv4_kernel.hc_post_fallback(x, residual, post, comb)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         residual = x
@@ -831,13 +591,14 @@ class DeepseekV4Model(BaseOP):
         self.hc_head_scale = torch.empty(1, dtype=torch.float32)
 
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
-        shape = x.shape
-        flat = x.flatten(1).float()
-        rsqrt = torch.rsqrt(flat.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(flat, self.hc_head_fn.float()) * rsqrt
-        pre = torch.sigmoid(mixes * self.hc_head_scale.float() + self.hc_head_base.float())
-        pre = pre + self.hc_eps
-        return torch.sum(pre.to(x.dtype).unsqueeze(-1) * x.view(shape), dim=1)
+        return dsv4_kernel.hc_head_fallback(
+            x,
+            self.hc_head_fn,
+            self.hc_head_scale,
+            self.hc_head_base,
+            eps=self.hc_eps,
+            norm_eps=self.norm_eps,
+        )
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         x = self.embed_tokens.forward(input_ids)

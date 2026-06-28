@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, List, Literal
 import torch
 import torch.nn.functional as F
 from minisgl.core import Batch, get_global_ctx
+from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
 from minisgl.utils import div_ceil
 
@@ -159,7 +160,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         ratio = compress_ratio
         if ratio is None:
             ratio = self.get_layer_compress_ratio(layer_id)
-        self.kvcache.store_swa(layer_id, k, batch.out_loc)
+        dsv4_kernel.store_swa_fallback(self.kvcache, layer_id, k, batch.out_loc)
         return self._fallback_attention(q, layer_id, metadata.core_metadata, ratio, attn_sink)
 
     def store_compressed(
@@ -180,7 +181,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if loc is None or loc.numel() == 0 or kv.numel() == 0:
             return
         n = min(loc.numel(), kv.shape[0])
-        self.kvcache.store_compressed(layer_id, kv[:n], loc[:n])
+        dsv4_kernel.compress_norm_rope_store_fallback(self.kvcache, layer_id, kv[:n], loc[:n])
 
     def store_indexer(self, layer_id: int, kv: torch.Tensor, batch: Batch) -> None:
         metadata = batch.attn_metadata
@@ -190,7 +191,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if loc is None or loc.numel() == 0 or kv.numel() == 0:
             return
         n = min(loc.numel(), kv.shape[0])
-        self.kvcache.store_indexer(layer_id, kv[:n], loc[:n])
+        dsv4_kernel.store_indexer_fallback(self.kvcache, layer_id, kv[:n], loc[:n])
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
         self.capture_bs = sorted(bs_list)
@@ -419,31 +420,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
         compress_ratio: DSV4CompressRatio,
         attn_sink: torch.Tensor | None,
     ) -> torch.Tensor:
-        if q.ndim != 3:
-            raise ValueError(f"DSV4 fallback expects q shape [tokens, heads, dim], got {q.shape}")
-        out = torch.empty_like(q)
         cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
-        sink = (
-            attn_sink[: q.shape[1]].to(device=q.device, dtype=torch.float32)
-            if attn_sink is not None
-            else None
+        context_indices = [
+            self._context_indices_for_query(metadata, row, compress_ratio)
+            for row in range(q.shape[0])
+        ]
+        return dsv4_kernel.paged_mqa_attention_fallback(
+            q,
+            cache,
+            context_indices,
+            softmax_scale=self.softmax_scale,
+            attn_sink=attn_sink,
         )
-        for row in range(q.shape[0]):
-            indices = self._context_indices_for_query(metadata, row, compress_ratio)
-            if indices.numel() == 0:
-                out[row].zero_()
-                continue
-            candidates = cache[indices.to(torch.long)].float()
-            scores = torch.einsum("hd,td->ht", q[row].float(), candidates) * self.softmax_scale
-            if sink is None:
-                attn = torch.softmax(scores, dim=-1)
-            else:
-                max_score = torch.maximum(scores.max(dim=-1).values, sink)
-                exp_scores = torch.exp(scores - max_score[:, None])
-                denom = exp_scores.sum(dim=-1) + torch.exp(sink - max_score)
-                attn = exp_scores / denom[:, None]
-            out[row] = torch.einsum("ht,td->hd", attn, candidates).to(q.dtype)
-        return out
 
     def _context_indices_for_query(
         self,
