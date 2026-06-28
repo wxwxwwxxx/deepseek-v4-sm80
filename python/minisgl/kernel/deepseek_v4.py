@@ -595,9 +595,17 @@ def quantized_linear_ref(
 ) -> torch.Tensor:
     if weight_kind == "fp4":
         x = quantize_fp8_activation_ref(x)
+        if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FP4_GEMM"):
+            y = _triton_dsv4_ops().quantized_linear_fp4(x, weight, scale)
+            if y is not None:
+                return y
         w = dequant_fp4_weight(weight, scale, out_dtype=x.dtype)
     elif weight_kind == "fp8":
         x = quantize_fp8_activation_ref(x)
+        if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FP8_GEMM"):
+            y = _triton_dsv4_ops().quantized_linear_fp8(x, weight, scale)
+            if y is not None:
+                return y
         w = dequant_fp8_weight(weight, scale, out_dtype=x.dtype)
     else:
         w = weight.to(x.dtype)

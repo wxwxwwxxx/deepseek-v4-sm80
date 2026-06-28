@@ -185,6 +185,146 @@ def _pad_indices_kernel(
     tl.store(out_ptr + offsets, values, mask=mask)
 
 
+@triton.jit
+def _fp4_e2m1_value(nibble):
+    mag = nibble & 0x07
+    value = tl.where(
+        mag == 0,
+        0.0,
+        tl.where(
+            mag == 1,
+            0.5,
+            tl.where(
+                mag == 2,
+                1.0,
+                tl.where(
+                    mag == 3,
+                    1.5,
+                    tl.where(mag == 4, 2.0, tl.where(mag == 5, 3.0, tl.where(mag == 6, 4.0, 6.0))),
+                ),
+            ),
+        ),
+    )
+    return tl.where(nibble >= 8, -value, value)
+
+
+@triton.jit
+def _fp8_e4m3fn_value(bits):
+    sign = bits & 0x80
+    exp = (bits >> 3) & 0x0F
+    mant = bits & 0x07
+    abs_bits = bits & 0x7F
+    normal = tl.exp2(exp.to(tl.float32) - 7.0) * (1.0 + mant.to(tl.float32) * 0.125)
+    subnormal = mant.to(tl.float32) * 0.001953125
+    value = tl.where(exp == 0, subnormal, normal)
+    value = tl.where(abs_bits == 0, 0.0, value)
+    return tl.where(sign != 0, -value, value)
+
+
+@triton.jit
+def _quantized_linear_fp8_kernel(
+    x_ptr,
+    weight_ptr,
+    scale_ptr,
+    out_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    SCALE_K: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+) -> None:
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k_base = tl.arange(0, BLOCK_K)
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_start in range(0, K, BLOCK_K):
+        offs_k = k_start + offs_k_base
+        a = tl.load(
+            x_ptr + offs_m[:, None] * K + offs_k[None, :],
+            mask=(offs_m[:, None] < M) & (offs_k[None, :] < K),
+            other=0.0,
+        )
+        b = tl.load(
+            weight_ptr + offs_n[None, :] * K + offs_k[:, None],
+            mask=(offs_n[None, :] < N) & (offs_k[:, None] < K),
+            other=0.0,
+        ).to(tl.int32)
+        b = _fp8_e4m3fn_value(b).to(tl.float32)
+        if HAS_SCALE:
+            scale = tl.load(
+                scale_ptr + (offs_n[None, :] // 128) * SCALE_K + (offs_k[:, None] // 128),
+                mask=(offs_n[None, :] < N) & (offs_k[:, None] < K),
+                other=0.0,
+            ).to(tl.float32)
+            b *= scale
+        acc += tl.dot(a, b.to(tl.bfloat16), out_dtype=tl.float32)
+
+    tl.store(
+        out_ptr + offs_m[:, None] * N + offs_n[None, :],
+        acc,
+        mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
+    )
+
+
+@triton.jit
+def _quantized_linear_fp4_kernel(
+    x_ptr,
+    weight_ptr,
+    scale_ptr,
+    out_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    WEIGHT_K_BYTES: tl.constexpr,
+    SCALE_K: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+) -> None:
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k_base = tl.arange(0, BLOCK_K)
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_start in range(0, K, BLOCK_K):
+        offs_k = k_start + offs_k_base
+        a = tl.load(
+            x_ptr + offs_m[:, None] * K + offs_k[None, :],
+            mask=(offs_m[:, None] < M) & (offs_k[None, :] < K),
+            other=0.0,
+        )
+        packed = tl.load(
+            weight_ptr + offs_n[None, :] * WEIGHT_K_BYTES + (offs_k[:, None] // 2),
+            mask=(offs_n[None, :] < N) & (offs_k[:, None] < K),
+            other=0,
+        ).to(tl.int32)
+        nibble = tl.where((offs_k[:, None] & 1) == 0, packed & 0x0F, (packed >> 4) & 0x0F)
+        b = _fp4_e2m1_value(nibble).to(tl.float32)
+        if HAS_SCALE:
+            scale = tl.load(
+                scale_ptr + offs_n[None, :] * SCALE_K + (offs_k[:, None] // 32),
+                mask=(offs_n[None, :] < N) & (offs_k[:, None] < K),
+                other=0.0,
+            ).to(tl.float32)
+            b *= scale
+        acc += tl.dot(a, b.to(tl.bfloat16), out_dtype=tl.float32)
+
+    tl.store(
+        out_ptr + offs_m[:, None] * N + offs_n[None, :],
+        acc,
+        mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
+    )
+
+
 def _rope_scaling(
     *,
     rotary_dim: int,
@@ -416,9 +556,109 @@ def topk_transform_512(indices: torch.Tensor, *, width: int) -> torch.Tensor | N
     return out
 
 
+def _flatten_linear_input(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]] | None:
+    if x.ndim == 0 or x.shape[-1] == 0 or x.numel() == 0:
+        return None
+    if x.dtype is not torch.bfloat16 or not x.is_cuda or x.stride(-1) != 1:
+        return None
+    shape = tuple(x.shape[:-1])
+    return x.contiguous().view(-1, x.shape[-1]), shape
+
+
+def quantized_linear_fp8(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+) -> torch.Tensor | None:
+    flattened = _flatten_linear_input(x)
+    if flattened is None:
+        return None
+    if weight.ndim != 2 or not weight.is_cuda or weight.shape[-1] != x.shape[-1]:
+        return None
+    x_2d, leading_shape = flattened
+    m, k = x_2d.shape
+    if m > 16:
+        return None
+    weight_c = weight.contiguous().view(torch.uint8)
+    scale_c = (
+        scale.float().contiguous()
+        if scale is not None
+        else weight_c.new_empty((1, 1), dtype=torch.float32)
+    )
+    out = torch.empty((*leading_shape, weight.shape[0]), dtype=x.dtype, device=x.device)
+    out_2d = out.view(x_2d.shape[0], weight.shape[0])
+    n = weight.shape[0]
+    block_m = 16 if m <= 16 else 32
+    block_n = 64
+    block_k = 64
+    _quantized_linear_fp8_kernel[(triton.cdiv(m, block_m), triton.cdiv(n, block_n))](
+        x_2d,
+        weight_c,
+        scale_c,
+        out_2d,
+        M=m,
+        N=n,
+        K=k,
+        SCALE_K=triton.cdiv(k, 128),
+        HAS_SCALE=scale is not None,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+    )
+    return out
+
+
+def quantized_linear_fp4(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+) -> torch.Tensor | None:
+    flattened = _flatten_linear_input(x)
+    if flattened is None:
+        return None
+    if weight.ndim != 2 or not weight.is_cuda or weight.shape[-1] * 2 < x.shape[-1]:
+        return None
+    x_2d, leading_shape = flattened
+    m, k = x_2d.shape
+    if m > 8:
+        return None
+    weight_c = weight.contiguous()
+    scale_c = (
+        scale.float().contiguous()
+        if scale is not None
+        else weight_c.new_empty((1, 1), dtype=torch.float32)
+    )
+    out = torch.empty((*leading_shape, weight_c.shape[0]), dtype=x.dtype, device=x.device)
+    out_2d = out.view(x_2d.shape[0], weight_c.shape[0])
+    n = weight_c.shape[0]
+    if k % 2 != 0:
+        return None
+    block_m = 16 if m <= 16 else 32
+    block_n = 64
+    block_k = 64
+    _quantized_linear_fp4_kernel[(triton.cdiv(m, block_m), triton.cdiv(n, block_n))](
+        x_2d,
+        weight_c,
+        scale_c,
+        out_2d,
+        M=m,
+        N=n,
+        K=k,
+        WEIGHT_K_BYTES=weight_c.shape[-1],
+        SCALE_K=triton.cdiv(k, 32),
+        HAS_SCALE=scale is not None,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+    )
+    return out
+
+
 __all__ = [
     "apply_rotary_tail",
     "q_norm_rope",
+    "quantized_linear_fp4",
+    "quantized_linear_fp8",
     "silu_and_mul_clamp",
     "store_cache",
     "topk_transform_512",

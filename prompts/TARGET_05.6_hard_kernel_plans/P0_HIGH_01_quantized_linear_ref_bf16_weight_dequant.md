@@ -69,3 +69,28 @@ After implementation or a serious failed attempt, update
 `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md` in the R&D Completion Matrix row
 for `quantized_linear_ref` with correctness, microbench, decision, and artifact
 paths.
+
+## 实现结论
+
+是的，这次实验的结论可以简化为：
+
+当前 `quantized_linear_ref` 仍然应该默认使用 PyTorch fallback。
+
+我加的 Triton kernel 已经能跑、能 opt-in，但不适合直接默认启用。原因是：
+
+- `fp8` dense projection：Triton dequant-on-load 比当前 fallback 慢，大约 `0.62x-0.82x`。
+- `fp4 w13`：也略慢，大约 `0.87x-0.90x`。
+- `fp4 w2` 小 batch decode：有收益，大约 `1.50x`，但范围窄。
+- 大 `m` 已经自动 fallback，避免数值/性能风险。
+
+所以当前策略是：保留 PyTorch fallback 作为默认正确路径，Triton 路径只作为实验开关和后续 grouped MoE 的参考。
+
+`torch.compile` 我不建议现在加。
+
+原因是这个 fallback 的核心问题不是 Python 调度，而是“每次调用都 materialize dequant weight，然后再 cuBLAS matmul”。`torch.compile` 很难把 `fp8/fp4 weight dequant + F.linear` 真正融合成 dequant-on-load GEMM，尤其还涉及 float8/int8 packed weight、scale expansion、动态 shape。它可能减少一点 Python overhead，但不太可能改变主要瓶颈，反而会引入 compile latency、graph break 和调试复杂度。
+
+更值得做的下一步是：
+
+1. 继续用当前 PyTorch fallback 作为默认。
+2. 后续在 MoE grouped route 上做真正的 grouped fp4 dequant-on-load GEMM。
+3. 如果要优化 decode 小 batch，可以单独围绕 `fp4 w2` 小 m 路径继续实验，而不是全局替换。

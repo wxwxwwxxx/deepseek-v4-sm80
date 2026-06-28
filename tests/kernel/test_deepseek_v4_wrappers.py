@@ -143,6 +143,8 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         "MINISGL_DSV4_SM80_STORE_CACHE",
         "MINISGL_DSV4_SM80_COMPRESS",
         "MINISGL_DSV4_SM80_TOPK",
+        "MINISGL_DSV4_SM80_FP8_GEMM",
+        "MINISGL_DSV4_SM80_FP4_GEMM",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -287,3 +289,50 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     )
     torch.cuda.synchronize()
     assert torch.allclose(actual_compress, expected_compress, atol=1e-4, rtol=1e-4)
+
+    x_linear = torch.randn(5, 128, device=device, dtype=torch.bfloat16)
+    fp8_weight = torch.randn(96, 128, device=device, dtype=torch.float32).clamp(-4, 4).to(
+        dsv4_kernel.fp8_dtype()
+    )
+    fp8_scale = torch.rand(
+        dsv4_kernel.scale_dim(96),
+        dsv4_kernel.scale_dim(128),
+        device=device,
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+    expected_fp8 = dsv4_kernel.quantized_linear_ref(
+        x_linear,
+        fp8_weight,
+        fp8_scale,
+        weight_kind="fp8",
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_FP8_GEMM", "1")
+    actual_fp8 = dsv4_kernel.quantized_linear_ref(
+        x_linear,
+        fp8_weight,
+        fp8_scale,
+        weight_kind="fp8",
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_fp8, expected_fp8, atol=3e-2, rtol=3e-2)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_FP8_GEMM", raising=False)
+
+    fp4_weight = torch.randint(-128, 127, (96, 64), device=device, dtype=torch.int8)
+    fp4_scale = torch.rand(96, 4, device=device, dtype=torch.float32).to(
+        dsv4_kernel.e8m0_dtype()
+    )
+    expected_fp4 = dsv4_kernel.quantized_linear_ref(
+        x_linear,
+        fp4_weight,
+        fp4_scale,
+        weight_kind="fp4",
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_FP4_GEMM", "1")
+    actual_fp4 = dsv4_kernel.quantized_linear_ref(
+        x_linear,
+        fp4_weight,
+        fp4_scale,
+        weight_kind="fp4",
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_fp4, expected_fp4, atol=3e-2, rtol=3e-2)
