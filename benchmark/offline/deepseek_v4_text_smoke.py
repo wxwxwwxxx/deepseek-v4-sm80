@@ -34,6 +34,7 @@ DEFAULT_EXPECTATIONS = {
     DEFAULT_PROMPTS[2]: ("杭州",),
 }
 DSV4_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
+DSV4_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
 BASELINE_TP_SIZE = 8
 
 
@@ -47,6 +48,11 @@ class Variant:
 VARIANTS: tuple[Variant, ...] = (
     Variant("fallback", {}, "All MINISGL_DSV4_SM80_* toggles cleared."),
     Variant("v0_bf16", {DSV4_V0_BF16_TOGGLE: "1"}, "TARGET 05.7 v0 BF16 whitelist bundle."),
+    Variant(
+        "v1_moe",
+        {DSV4_V1_MOE_TOGGLE: "1"},
+        "V1 exact grouped MoE bundle: v0 BF16 whitelist plus grouped MoE route.",
+    ),
 )
 
 

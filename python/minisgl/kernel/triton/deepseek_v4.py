@@ -739,6 +739,382 @@ def _grouped_fp4_linear_kernel(
     )
 
 
+@triton.jit
+def _moe_route_count_kernel(
+    indices_ptr,
+    counts_ptr,
+    route_count,
+    num_experts: tl.constexpr,
+    BLOCK_ROUTES: tl.constexpr,
+) -> None:
+    offsets = tl.program_id(0) * BLOCK_ROUTES + tl.arange(0, BLOCK_ROUTES)
+    mask = offsets < route_count
+    expert = tl.load(indices_ptr + offsets, mask=mask, other=-1).to(tl.int64)
+    valid = mask & (expert >= 0) & (expert < num_experts)
+    tl.atomic_add(counts_ptr + expert, 1, sem="relaxed", mask=valid)
+
+
+@triton.jit
+def _moe_route_offsets_kernel(
+    counts_ptr,
+    padded_offsets_ptr,
+    blocks_per_expert_ptr,
+    num_tokens_post_padded_ptr,
+    block_size_m: tl.constexpr,
+    num_experts: tl.constexpr,
+    BLOCK_EXPERTS: tl.constexpr,
+) -> None:
+    offsets = tl.arange(0, BLOCK_EXPERTS)
+    mask = offsets < num_experts
+    counts = tl.load(counts_ptr + offsets, mask=mask, other=0)
+    padded = ((counts + block_size_m - 1) // block_size_m) * block_size_m
+    prefix = tl.cumsum(padded, 0)
+    padded_offsets = prefix - padded
+    tl.store(padded_offsets_ptr + offsets, padded_offsets, mask=mask)
+    tl.store(blocks_per_expert_ptr + offsets, padded // block_size_m, mask=mask)
+    tl.store(num_tokens_post_padded_ptr, tl.sum(padded, axis=0))
+
+
+@triton.jit
+def _moe_route_fill_kernel(
+    indices_ptr,
+    counts_ptr,
+    padded_offsets_ptr,
+    blocks_per_expert_ptr,
+    sorted_route_ids_ptr,
+    expert_ids_ptr,
+    route_count,
+    block_size_m: tl.constexpr,
+    BLOCK_ROUTES: tl.constexpr,
+) -> None:
+    expert = tl.program_id(0)
+    count = tl.load(counts_ptr + expert)
+    padded_offset = tl.load(padded_offsets_ptr + expert)
+    padded_count = ((count + block_size_m - 1) // block_size_m) * block_size_m
+    block_offset = padded_offset // block_size_m
+    route_offsets_base = tl.arange(0, BLOCK_ROUTES)
+
+    running_count = tl.full((), 0, dtype=tl.int32)
+    start = 0
+    while start < route_count:
+        route_offsets = start + route_offsets_base
+        mask = route_offsets < route_count
+        route_expert = tl.load(indices_ptr + route_offsets, mask=mask, other=-1).to(tl.int64)
+        matches = (route_expert == expert) & mask
+        match_i32 = matches.to(tl.int32)
+        local_rank = tl.cumsum(match_i32, 0) - 1
+        tl.store(
+            sorted_route_ids_ptr + padded_offset + running_count + local_rank,
+            route_offsets.to(tl.int32),
+            mask=matches,
+        )
+        running_count += tl.sum(match_i32, axis=0)
+        start += BLOCK_ROUTES
+
+    pad_start = count
+    while pad_start < padded_count:
+        pad_offsets = pad_start + route_offsets_base
+        pad_mask = pad_offsets < padded_count
+        tl.store(
+            sorted_route_ids_ptr + padded_offset + pad_offsets,
+            route_count,
+            mask=pad_mask,
+        )
+        pad_start += BLOCK_ROUTES
+
+    blocks = tl.load(blocks_per_expert_ptr + expert)
+    block_start = 0
+    while block_start < blocks:
+        block_offsets = block_start + route_offsets_base
+        block_mask = block_offsets < blocks
+        tl.store(expert_ids_ptr + block_offset + block_offsets, expert, mask=block_mask)
+        block_start += BLOCK_ROUTES
+
+
+@triton.jit
+def _grouped_fp4_w13_kernel(
+    a_ptr,
+    weight_ptr,
+    scale_ptr,
+    sorted_route_ids_ptr,
+    expert_ids_ptr,
+    num_tokens_post_padded_ptr,
+    gate_ptr,
+    up_ptr,
+    route_count: tl.constexpr,
+    topk: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    WEIGHT_K_BYTES: tl.constexpr,
+    SCALE_K: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+) -> None:
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    padded_tokens = tl.load(num_tokens_post_padded_ptr)
+    route_offsets = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    route_ids = tl.load(
+        sorted_route_ids_ptr + route_offsets,
+        mask=route_offsets < padded_tokens,
+        other=route_count,
+    ).to(tl.int64)
+    valid_routes = route_ids < route_count
+    expert = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_k_base = tl.arange(0, BLOCK_SIZE_K)
+    a_rows = route_ids // topk
+
+    gate_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    up_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k_start in range(0, K, BLOCK_SIZE_K):
+        offs_k = k_start + offs_k_base
+        a = tl.load(
+            a_ptr + a_rows[:, None] * K + offs_k[None, :],
+            mask=valid_routes[:, None] & (offs_k[None, :] < K),
+            other=0.0,
+        )
+        weight_mask = (offs_n[None, :] < N) & (offs_k[:, None] < K)
+        gate_weight_offsets = (
+            ((expert * 2) * N + offs_n[None, :]) * WEIGHT_K_BYTES
+            + (offs_k[:, None] // 2)
+        )
+        up_weight_offsets = (
+            ((expert * 2 + 1) * N + offs_n[None, :]) * WEIGHT_K_BYTES
+            + (offs_k[:, None] // 2)
+        )
+        gate_packed = tl.load(weight_ptr + gate_weight_offsets, mask=weight_mask, other=0).to(
+            tl.int32
+        )
+        up_packed = tl.load(weight_ptr + up_weight_offsets, mask=weight_mask, other=0).to(
+            tl.int32
+        )
+        gate_nibble = tl.where(
+            (offs_k[:, None] & 1) == 0,
+            gate_packed & 0x0F,
+            (gate_packed >> 4) & 0x0F,
+        )
+        up_nibble = tl.where(
+            (offs_k[:, None] & 1) == 0,
+            up_packed & 0x0F,
+            (up_packed >> 4) & 0x0F,
+        )
+        gate_b = _fp4_e2m1_value(gate_nibble).to(tl.float32)
+        up_b = _fp4_e2m1_value(up_nibble).to(tl.float32)
+        if HAS_SCALE:
+            gate_scale_offsets = (
+                ((expert * 2) * N + offs_n[None, :]) * SCALE_K
+                + (offs_k[:, None] // 32)
+            )
+            up_scale_offsets = (
+                ((expert * 2 + 1) * N + offs_n[None, :]) * SCALE_K
+                + (offs_k[:, None] // 32)
+            )
+            gate_scale = tl.load(
+                scale_ptr + gate_scale_offsets,
+                mask=weight_mask,
+                other=0.0,
+            ).to(tl.float32)
+            up_scale = tl.load(
+                scale_ptr + up_scale_offsets,
+                mask=weight_mask,
+                other=0.0,
+            ).to(tl.float32)
+            gate_b *= gate_scale
+            up_b *= up_scale
+        gate_acc += tl.dot(a, gate_b.to(tl.bfloat16), out_dtype=tl.float32)
+        up_acc += tl.dot(a, up_b.to(tl.bfloat16), out_dtype=tl.float32)
+
+    tl.store(
+        gate_ptr + route_ids[:, None] * N + offs_n[None, :],
+        gate_acc,
+        mask=valid_routes[:, None] & (offs_n[None, :] < N),
+    )
+    tl.store(
+        up_ptr + route_ids[:, None] * N + offs_n[None, :],
+        up_acc,
+        mask=valid_routes[:, None] & (offs_n[None, :] < N),
+    )
+
+
+@triton.jit
+def _moe_route_sum_kernel(
+    routed_ptr,
+    out_ptr,
+    tokens: tl.constexpr,
+    hidden: tl.constexpr,
+    topk: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+) -> None:
+    token = tl.program_id(0)
+    block_n = tl.program_id(1)
+    offs_n = block_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = offs_n < hidden
+    acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    for top_idx in range(0, topk):
+        route = token * topk + top_idx
+        values = tl.load(routed_ptr + route * hidden + offs_n, mask=mask, other=0.0).to(
+            tl.float32
+        )
+        acc += values
+    tl.store(out_ptr + token * hidden + offs_n, acc, mask=mask)
+
+
+@triton.jit
+def _grouped_fp4_moe_fused_compute_kernel(
+    a_ptr,
+    weights_ptr,
+    w13_weight_ptr,
+    w13_scale_ptr,
+    w2_weight_ptr,
+    w2_scale_ptr,
+    sorted_route_ids_ptr,
+    expert_ids_ptr,
+    num_tokens_post_padded_ptr,
+    out_ptr,
+    route_count: tl.constexpr,
+    topk: tl.constexpr,
+    H: tl.constexpr,
+    I: tl.constexpr,
+    W13_K_BYTES: tl.constexpr,
+    W13_SCALE_K: tl.constexpr,
+    W2_K_BYTES: tl.constexpr,
+    W2_SCALE_K: tl.constexpr,
+    HAS_W13_SCALE: tl.constexpr,
+    HAS_W2_SCALE: tl.constexpr,
+    swiglu_limit: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_I: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+) -> None:
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    padded_tokens = tl.load(num_tokens_post_padded_ptr)
+    route_offsets = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    route_ids = tl.load(
+        sorted_route_ids_ptr + route_offsets,
+        mask=route_offsets < padded_tokens,
+        other=route_count,
+    ).to(tl.int64)
+    valid_routes = route_ids < route_count
+    token_rows = route_ids // topk
+    expert = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+    route_weights = tl.load(weights_ptr + route_ids, mask=valid_routes, other=0.0).to(tl.float32)
+
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_i_base = tl.arange(0, BLOCK_SIZE_I)
+    offs_k_base = tl.arange(0, BLOCK_SIZE_K)
+    out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    for i_start in range(0, I, BLOCK_SIZE_I):
+        offs_i = i_start + offs_i_base
+        gate_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_I), dtype=tl.float32)
+        up_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_I), dtype=tl.float32)
+
+        for k_start in range(0, H, BLOCK_SIZE_K):
+            offs_k = k_start + offs_k_base
+            a = tl.load(
+                a_ptr + token_rows[:, None] * H + offs_k[None, :],
+                mask=valid_routes[:, None] & (offs_k[None, :] < H),
+                other=0.0,
+            )
+            weight_mask = (offs_i[None, :] < I) & (offs_k[:, None] < H)
+            gate_weight_offsets = (
+                ((expert * 2) * I + offs_i[None, :]) * W13_K_BYTES
+                + (offs_k[:, None] // 2)
+            )
+            up_weight_offsets = (
+                ((expert * 2 + 1) * I + offs_i[None, :]) * W13_K_BYTES
+                + (offs_k[:, None] // 2)
+            )
+            gate_packed = tl.load(
+                w13_weight_ptr + gate_weight_offsets,
+                mask=weight_mask,
+                other=0,
+            ).to(tl.int32)
+            up_packed = tl.load(
+                w13_weight_ptr + up_weight_offsets,
+                mask=weight_mask,
+                other=0,
+            ).to(tl.int32)
+            gate_nibble = tl.where(
+                (offs_k[:, None] & 1) == 0,
+                gate_packed & 0x0F,
+                (gate_packed >> 4) & 0x0F,
+            )
+            up_nibble = tl.where(
+                (offs_k[:, None] & 1) == 0,
+                up_packed & 0x0F,
+                (up_packed >> 4) & 0x0F,
+            )
+            gate_b = _fp4_e2m1_value(gate_nibble).to(tl.float32)
+            up_b = _fp4_e2m1_value(up_nibble).to(tl.float32)
+            if HAS_W13_SCALE:
+                gate_scale_offsets = (
+                    ((expert * 2) * I + offs_i[None, :]) * W13_SCALE_K
+                    + (offs_k[:, None] // 32)
+                )
+                up_scale_offsets = (
+                    ((expert * 2 + 1) * I + offs_i[None, :]) * W13_SCALE_K
+                    + (offs_k[:, None] // 32)
+                )
+                gate_scale = tl.load(
+                    w13_scale_ptr + gate_scale_offsets,
+                    mask=weight_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                up_scale = tl.load(
+                    w13_scale_ptr + up_scale_offsets,
+                    mask=weight_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                gate_b *= gate_scale
+                up_b *= up_scale
+            gate_acc += tl.dot(a, gate_b.to(tl.bfloat16), out_dtype=tl.float32)
+            up_acc += tl.dot(a, up_b.to(tl.bfloat16), out_dtype=tl.float32)
+
+        gate_act = gate_acc.to(tl.bfloat16).to(tl.float32)
+        up_act = up_acc.to(tl.bfloat16).to(tl.float32)
+        if swiglu_limit > 0.0:
+            up_act = tl.minimum(tl.maximum(up_act, -swiglu_limit), swiglu_limit)
+            gate_act = tl.minimum(gate_act, swiglu_limit)
+        activated = gate_act * tl.sigmoid(gate_act) * up_act
+        activated *= route_weights[:, None]
+
+        w2_mask = (offs_i[:, None] < I) & (offs_n[None, :] < H)
+        w2_offsets = (
+            (expert * H + offs_n[None, :]) * W2_K_BYTES
+            + (offs_i[:, None] // 2)
+        )
+        w2_packed = tl.load(w2_weight_ptr + w2_offsets, mask=w2_mask, other=0).to(tl.int32)
+        w2_nibble = tl.where(
+            (offs_i[:, None] & 1) == 0,
+            w2_packed & 0x0F,
+            (w2_packed >> 4) & 0x0F,
+        )
+        w2_b = _fp4_e2m1_value(w2_nibble).to(tl.float32)
+        if HAS_W2_SCALE:
+            w2_scale_offsets = (
+                (expert * H + offs_n[None, :]) * W2_SCALE_K
+                + (offs_i[:, None] // 32)
+            )
+            w2_scale = tl.load(w2_scale_ptr + w2_scale_offsets, mask=w2_mask, other=0.0).to(
+                tl.float32
+            )
+            w2_b *= w2_scale
+        out_acc += tl.dot(activated.to(tl.bfloat16), w2_b.to(tl.bfloat16), out_dtype=tl.float32)
+
+    tl.store(
+        out_ptr + route_ids[:, None] * H + offs_n[None, :],
+        out_acc,
+        mask=valid_routes[:, None] & (offs_n[None, :] < H),
+    )
+
+
 def _rope_scaling(
     *,
     rotary_dim: int,
@@ -1363,6 +1739,65 @@ def wo_a_grouped_projection_fp8(
     return out
 
 
+def build_moe_route_plan(
+    indices: torch.Tensor,
+    *,
+    num_experts: int,
+    block_size_m: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    if (
+        indices.ndim != 2
+        or indices.numel() == 0
+        or not indices.is_cuda
+        or num_experts <= 0
+        or block_size_m <= 0
+        or num_experts > 1024
+    ):
+        return None
+
+    route_count = indices.numel()
+    max_padded = route_count + min(num_experts, route_count) * (block_size_m - 1)
+    max_blocks = triton.cdiv(max_padded, block_size_m)
+    indices_c = indices.contiguous()
+    counts = torch.zeros((num_experts,), dtype=torch.int32, device=indices.device)
+    padded_offsets = torch.empty_like(counts)
+    blocks_per_expert = torch.empty_like(counts)
+    num_tokens_post_padded = torch.empty((1,), dtype=torch.int32, device=indices.device)
+    sorted_route_ids = torch.empty((max_padded,), dtype=torch.int32, device=indices.device)
+    expert_ids = torch.zeros((max_blocks,), dtype=torch.int32, device=indices.device)
+
+    block_routes = 256
+    _moe_route_count_kernel[(triton.cdiv(route_count, block_routes),)](
+        indices_c,
+        counts,
+        route_count,
+        num_experts=int(num_experts),
+        BLOCK_ROUTES=block_routes,
+    )
+    block_experts = triton.next_power_of_2(num_experts)
+    _moe_route_offsets_kernel[(1,)](
+        counts,
+        padded_offsets,
+        blocks_per_expert,
+        num_tokens_post_padded,
+        block_size_m=int(block_size_m),
+        num_experts=int(num_experts),
+        BLOCK_EXPERTS=block_experts,
+    )
+    _moe_route_fill_kernel[(num_experts,)](
+        indices_c,
+        counts,
+        padded_offsets,
+        blocks_per_expert,
+        sorted_route_ids,
+        expert_ids,
+        route_count,
+        block_size_m=int(block_size_m),
+        BLOCK_ROUTES=block_routes,
+    )
+    return sorted_route_ids, expert_ids, num_tokens_post_padded
+
+
 def quantized_linear_fp4(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1407,6 +1842,77 @@ def quantized_linear_fp4(
         BLOCK_K=block_k,
     )
     return out
+
+
+def _grouped_fp4_w13(
+    a: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    sorted_route_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    *,
+    route_count: int,
+    topk: int,
+    block_size_m: int,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if (
+        a.ndim != 2
+        or a.dtype is not torch.bfloat16
+        or not a.is_cuda
+        or not weight.is_cuda
+        or not sorted_route_ids.is_cuda
+        or not expert_ids.is_cuda
+        or not num_tokens_post_padded.is_cuda
+        or a.stride(-1) != 1
+        or weight.ndim != 4
+        or weight.shape[1] != 2
+        or weight.dtype is not torch.int8
+        or a.shape[-1] % 2 != 0
+        or weight.shape[-1] * 2 < a.shape[-1]
+    ):
+        return None
+    if route_count == 0:
+        n = weight.shape[2]
+        empty = torch.empty((0, n), dtype=a.dtype, device=a.device)
+        return empty, empty
+
+    weight_c = weight.contiguous()
+    scale_c = (
+        scale.float().contiguous()
+        if scale is not None
+        else weight_c.new_empty((1,), dtype=torch.float32)
+    )
+    n = weight_c.shape[2]
+    gate = torch.zeros((route_count, n), dtype=a.dtype, device=a.device)
+    up = torch.zeros_like(gate)
+    block_n = 64
+    block_k = 64
+    grid = (
+        triton.cdiv(sorted_route_ids.numel(), block_size_m),
+        triton.cdiv(n, block_n),
+    )
+    _grouped_fp4_w13_kernel[grid](
+        a.contiguous(),
+        weight_c,
+        scale_c,
+        sorted_route_ids.contiguous(),
+        expert_ids.contiguous(),
+        num_tokens_post_padded.contiguous(),
+        gate,
+        up,
+        route_count=route_count,
+        topk=topk,
+        N=n,
+        K=a.shape[-1],
+        WEIGHT_K_BYTES=weight_c.shape[-1],
+        SCALE_K=triton.cdiv(a.shape[-1], 32),
+        HAS_SCALE=scale is not None,
+        BLOCK_SIZE_M=block_size_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+    )
+    return gate, up
 
 
 def _grouped_fp4_linear(
@@ -1492,6 +1998,127 @@ def _grouped_fp4_linear(
     return out
 
 
+def _sum_grouped_routes(
+    routed: torch.Tensor,
+    *,
+    tokens: int,
+    hidden: int,
+    topk: int,
+) -> torch.Tensor | None:
+    if routed.ndim != 2 or not routed.is_cuda or routed.shape != (tokens * topk, hidden):
+        return None
+    out = torch.empty((tokens, hidden), dtype=routed.dtype, device=routed.device)
+    block_n = 64
+    _moe_route_sum_kernel[(tokens, triton.cdiv(hidden, block_n))](
+        routed.contiguous(),
+        out,
+        tokens=int(tokens),
+        hidden=int(hidden),
+        topk=int(topk),
+        BLOCK_N=block_n,
+    )
+    return out
+
+
+def grouped_fp4_moe_fused_compute(
+    hidden_states: torch.Tensor,
+    weights: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor | None,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor | None,
+    sorted_route_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    *,
+    route_count: int,
+    topk: int,
+    block_size_m: int,
+    swiglu_limit: float,
+) -> torch.Tensor | None:
+    if (
+        hidden_states.ndim != 2
+        or weights.numel() != route_count
+        or hidden_states.dtype is not torch.bfloat16
+        or not hidden_states.is_cuda
+        or not weights.is_cuda
+        or not sorted_route_ids.is_cuda
+        or not expert_ids.is_cuda
+        or not num_tokens_post_padded.is_cuda
+        or w13_weight.ndim != 4
+        or w13_weight.shape[1] != 2
+        or w13_weight.dtype is not torch.int8
+        or w2_weight.ndim != 3
+        or w2_weight.dtype is not torch.int8
+        or w13_weight.shape[0] != w2_weight.shape[0]
+        or hidden_states.stride(-1) != 1
+        or hidden_states.shape[-1] % 2 != 0
+    ):
+        return None
+    if route_count == 0:
+        return torch.empty((0, hidden_states.shape[-1]), dtype=hidden_states.dtype, device=hidden_states.device)
+    hidden = hidden_states.shape[-1]
+    intermediate = w13_weight.shape[2]
+    if w13_weight.shape[-1] * 2 < hidden or w2_weight.shape[-1] * 2 < intermediate:
+        return None
+
+    block_n = 64
+    block_i = 32
+    block_k = 64
+    output_tiles = triton.cdiv(hidden, block_n)
+    # This fused layout recomputes w1/w3 for each output-hidden tile.  Keep it
+    # on shapes where that tradeoff is still plausible; larger DSV4 shapes use
+    # the materialized V1 pipeline below.
+    if output_tiles > 8:
+        return None
+
+    w13_c = w13_weight.contiguous()
+    w2_c = w2_weight.contiguous()
+    w13_scale_c = (
+        w13_scale.float().contiguous()
+        if w13_scale is not None
+        else w13_c.new_empty((1,), dtype=torch.float32)
+    )
+    w2_scale_c = (
+        w2_scale.float().contiguous()
+        if w2_scale is not None
+        else w2_c.new_empty((1,), dtype=torch.float32)
+    )
+    routed = torch.empty((route_count, hidden), dtype=hidden_states.dtype, device=hidden_states.device)
+    grid = (
+        triton.cdiv(sorted_route_ids.numel(), block_size_m),
+        output_tiles,
+    )
+    _grouped_fp4_moe_fused_compute_kernel[grid](
+        hidden_states.contiguous(),
+        weights.contiguous(),
+        w13_c,
+        w13_scale_c,
+        w2_c,
+        w2_scale_c,
+        sorted_route_ids.contiguous(),
+        expert_ids.contiguous(),
+        num_tokens_post_padded.contiguous(),
+        routed,
+        route_count=route_count,
+        topk=topk,
+        H=hidden,
+        I=intermediate,
+        W13_K_BYTES=w13_c.shape[-1],
+        W13_SCALE_K=triton.cdiv(hidden, 32),
+        W2_K_BYTES=w2_c.shape[-1],
+        W2_SCALE_K=triton.cdiv(intermediate, 32),
+        HAS_W13_SCALE=w13_scale is not None,
+        HAS_W2_SCALE=w2_scale is not None,
+        swiglu_limit=float(swiglu_limit),
+        BLOCK_SIZE_M=block_size_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_I=block_i,
+        BLOCK_SIZE_K=block_k,
+    )
+    return routed
+
+
 def grouped_fp4_moe(
     hidden_states: torch.Tensor,
     weights: torch.Tensor,
@@ -1518,7 +2145,30 @@ def grouped_fp4_moe(
     if route_count == 0:
         return torch.zeros_like(hidden_states)
 
-    gate = _grouped_fp4_linear(
+    fused_routed = grouped_fp4_moe_fused_compute(
+        hidden_states,
+        weights,
+        w13_weight,
+        w13_scale,
+        w2_weight,
+        w2_scale,
+        sorted_route_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        route_count=route_count,
+        topk=topk,
+        block_size_m=block_size_m,
+        swiglu_limit=swiglu_limit,
+    )
+    if fused_routed is not None:
+        return _sum_grouped_routes(
+            fused_routed,
+            tokens=hidden_states.shape[0],
+            hidden=hidden_states.shape[1],
+            topk=topk,
+        )
+
+    w13 = _grouped_fp4_w13(
         hidden_states,
         w13_weight,
         w13_scale,
@@ -1528,24 +2178,10 @@ def grouped_fp4_moe(
         route_count=route_count,
         topk=topk,
         block_size_m=block_size_m,
-        slot=0,
-        a_rows_are_routes=False,
     )
-    up = _grouped_fp4_linear(
-        hidden_states,
-        w13_weight,
-        w13_scale,
-        sorted_route_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        route_count=route_count,
-        topk=topk,
-        block_size_m=block_size_m,
-        slot=1,
-        a_rows_are_routes=False,
-    )
-    if gate is None or up is None:
+    if w13 is None:
         return None
+    gate, up = w13
 
     activated = silu_and_mul_clamp(
         gate,
@@ -1572,13 +2208,20 @@ def grouped_fp4_moe(
     )
     if routed is None:
         return None
-    return routed.view(hidden_states.shape[0], topk, hidden_states.shape[1]).sum(dim=1)
+    return _sum_grouped_routes(
+        routed,
+        tokens=hidden_states.shape[0],
+        hidden=hidden_states.shape[1],
+        topk=topk,
+    )
 
 
 __all__ = [
     "apply_rotary_tail",
     "compress_norm_rope_store_bf16",
+    "build_moe_route_plan",
     "grouped_fp4_moe",
+    "grouped_fp4_moe_fused_compute",
     "indexer_bf16_logits",
     "k_norm_rope_cache_bf16",
     "paged_mqa_attention_bf16",

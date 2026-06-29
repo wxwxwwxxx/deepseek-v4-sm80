@@ -25,6 +25,7 @@ os.environ.setdefault("MINISGL_DISABLE_OVERLAP_SCHEDULING", "1")
 
 
 DSV4_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
+DSV4_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,11 @@ DEFAULT_VARIANTS: tuple[Variant, ...] = (
         name="v0_bf16",
         env={DSV4_V0_BF16_TOGGLE: "1"},
         description="TARGET 05.7 v0 BF16 whitelist bundle.",
+    ),
+    Variant(
+        name="v1_moe",
+        env={DSV4_V1_MOE_TOGGLE: "1"},
+        description="V1 exact grouped MoE bundle: v0 BF16 whitelist plus grouped MoE route.",
     ),
 )
 

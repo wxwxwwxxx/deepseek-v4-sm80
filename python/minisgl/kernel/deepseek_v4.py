@@ -27,6 +27,7 @@ DSV4KernelMode = Literal["fallback", "bf16_direct", "fp8_act", "fp4_act"]
 
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 DSV4_SM80_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
+DSV4_SM80_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
 DSV4_LINEAR_BF16_FP32_TOGGLE = "MINISGL_DSV4_SM80_LINEAR_BF16_FP32"
 DSV4_SM80_V0_BF16_WHITELIST: tuple[str, ...] = (
     "MINISGL_DSV4_SM80_SWIGLU",
@@ -39,6 +40,10 @@ DSV4_SM80_V0_BF16_WHITELIST: tuple[str, ...] = (
     "MINISGL_DSV4_SM80_INDEXER_BF16",
     "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
     "MINISGL_DSV4_SM80_SPARSE_ATTN_BF16",
+)
+DSV4_SM80_V1_MOE_WHITELIST: tuple[str, ...] = (
+    *DSV4_SM80_V0_BF16_WHITELIST,
+    "MINISGL_DSV4_SM80_MOE_ROUTE",
 )
 DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     "MINISGL_DSV4_SM80_STORE_CACHE",
@@ -56,6 +61,7 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
 )
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_V0_BF16_TOGGLE,
+    DSV4_SM80_V1_MOE_TOGGLE,
     *DSV4_SM80_V0_BF16_WHITELIST,
     *DSV4_SM80_EXPERIMENTAL_TOGGLES,
 )
@@ -576,6 +582,10 @@ def unsupported_kernel(name: str, detail: str) -> None:
 
 def dsv4_env_flag(name: str) -> bool:
     if os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES:
+        return True
+    if name in DSV4_SM80_V1_MOE_WHITELIST and (
+        os.environ.get(DSV4_SM80_V1_MOE_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
+    ):
         return True
     return name in DSV4_SM80_V0_BF16_WHITELIST and (
         os.environ.get(DSV4_SM80_V0_BF16_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
@@ -1663,6 +1673,26 @@ def build_moe_route_plan(
     route_count = indices.numel()
     topk = indices.shape[1]
     device = indices.device
+    if route_count and indices.is_cuda and dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_MOE_ROUTE"):
+        try:
+            route_plan = _triton_dsv4_ops().build_moe_route_plan(
+                indices,
+                num_experts=num_experts,
+                block_size_m=block_size_m,
+            )
+            if route_plan is not None:
+                sorted_route_ids, expert_ids, num_tokens_post_padded = route_plan
+                return DSV4MoERoutePlan(
+                    sorted_route_ids=sorted_route_ids,
+                    expert_ids=expert_ids,
+                    num_tokens_post_padded=num_tokens_post_padded,
+                    route_count=route_count,
+                    topk=topk,
+                    block_size_m=block_size_m,
+                )
+        except Exception:
+            pass
+
     flat_indices = indices.reshape(-1).to(torch.long)
     valid = (flat_indices >= 0) & (flat_indices < num_experts)
     valid_route_ids = torch.arange(route_count, device=device, dtype=torch.long)[valid]
@@ -2267,6 +2297,8 @@ __all__ = [
     "DSV4_SM80_KNOWN_TOGGLES",
     "DSV4_SM80_V0_BF16_TOGGLE",
     "DSV4_SM80_V0_BF16_WHITELIST",
+    "DSV4_SM80_V1_MOE_TOGGLE",
+    "DSV4_SM80_V1_MOE_WHITELIST",
     "DSV4MoERoutePlan",
     "DSV4PagedMQAMetadata",
     "DSV4TopKTransformOutput",

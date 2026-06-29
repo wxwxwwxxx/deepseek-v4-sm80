@@ -25,7 +25,7 @@ def _parse_args() -> argparse.Namespace:
         description="Minimal DeepSeek V4 offline E2E generation smoke for mini-sglang."
     )
     parser.add_argument("--model-path", required=True)
-    parser.add_argument("--variant", required=True, choices=("fallback", "v0_bf16"))
+    parser.add_argument("--variant", required=True, choices=("fallback", "v0_bf16", "v1_moe"))
     parser.add_argument("--prompt-len", type=int, default=16)
     parser.add_argument("--decode-len", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -51,6 +51,8 @@ def _configure_variant(variant: str) -> list[str]:
         os.environ.pop(name, None)
     if variant == "v0_bf16":
         os.environ[dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE] = "1"
+    elif variant == "v1_moe":
+        os.environ[dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE] = "1"
     return cleared
 
 

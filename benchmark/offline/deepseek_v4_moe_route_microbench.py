@@ -182,9 +182,25 @@ def _run_case(name: str, spec: dict[str, int], *, warmup: int, iters: int) -> di
 
     reference = _routed_reference_bf16(**tensors, swiglu_limit=swiglu_limit)
     current = _routed_current_fallback(**tensors, swiglu_limit=swiglu_limit)
-    old_env = os.environ.get("MINISGL_DSV4_SM80_MOE_ROUTE")
-    os.environ["MINISGL_DSV4_SM80_MOE_ROUTE"] = "1"
+    old_route_env = os.environ.get("MINISGL_DSV4_SM80_MOE_ROUTE")
+    old_v1_env = os.environ.get("MINISGL_DSV4_SM80_V1_MOE")
+    os.environ.pop("MINISGL_DSV4_SM80_MOE_ROUTE", None)
+    os.environ["MINISGL_DSV4_SM80_V1_MOE"] = "1"
     try:
+        route_plan = dsv4_kernel.build_moe_route_plan(
+            tensors["indices"],
+            num_experts=tensors["w13_weight"].shape[0],
+            block_size_m=16,
+        )
+        route_metadata_ms = _time_cuda(
+            lambda: dsv4_kernel.build_moe_route_plan(
+                tensors["indices"],
+                num_experts=tensors["w13_weight"].shape[0],
+                block_size_m=16,
+            ),
+            warmup=warmup,
+            iters=iters,
+        )
         grouped = dsv4_kernel.moe_route_dispatch_bf16_grouped(**tensors, swiglu_limit=swiglu_limit)
         if grouped is None:
             raise RuntimeError("grouped MoE route dispatch returned None")
@@ -197,10 +213,14 @@ def _run_case(name: str, spec: dict[str, int], *, warmup: int, iters: int) -> di
             iters=iters,
         )
     finally:
-        if old_env is None:
+        if old_route_env is None:
             os.environ.pop("MINISGL_DSV4_SM80_MOE_ROUTE", None)
         else:
-            os.environ["MINISGL_DSV4_SM80_MOE_ROUTE"] = old_env
+            os.environ["MINISGL_DSV4_SM80_MOE_ROUTE"] = old_route_env
+        if old_v1_env is None:
+            os.environ.pop("MINISGL_DSV4_SM80_V1_MOE", None)
+        else:
+            os.environ["MINISGL_DSV4_SM80_V1_MOE"] = old_v1_env
 
     current_ms = _time_cuda(
         lambda: _routed_current_fallback(**tensors, swiglu_limit=swiglu_limit),
@@ -222,7 +242,10 @@ def _run_case(name: str, spec: dict[str, int], *, warmup: int, iters: int) -> di
         **spec,
         "current_fallback_ms": current_ms,
         "bf16_reference_ms": ref_ms,
+        "route_metadata_ms": route_metadata_ms,
+        "route_metadata_padded_tokens": int(route_plan.num_tokens_post_padded.item()),
         "grouped_ms": grouped_ms,
+        "v1_grouped_full_ms": grouped_ms,
         "speedup_vs_current_fallback": current_ms / grouped_ms,
         "speedup_vs_bf16_reference": ref_ms / grouped_ms,
         "grouped_vs_bf16_max_abs": max_abs,

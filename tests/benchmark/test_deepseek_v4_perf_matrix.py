@@ -28,7 +28,7 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
     variants = bench._select_variants(args)
 
     assert args.page_size == 256
-    assert [variant.name for variant in variants] == ["fallback", "v0_bf16"]
+    assert [variant.name for variant in variants] == ["fallback", "v0_bf16", "v1_moe"]
     assert {scenario.name for scenario in scenarios} >= {
         "long_prefill_bs1",
         "batch_prefill_bs8",
@@ -77,6 +77,39 @@ def test_configure_variant_clears_existing_sm80_env_and_sets_v0(monkeypatch):
     assert result["active_dsv4_toggles"] == [
         "MINISGL_DSV4_SM80_SWIGLU",
         "MINISGL_DSV4_SM80_V0_BF16",
+    ]
+
+
+def test_configure_variant_sets_v1_moe_without_int8_or_linear_experiment(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_SWIGLU",
+            "MINISGL_DSV4_SM80_MOE_ROUTE",
+            "MINISGL_DSV4_SM80_LINEAR_BF16_FP32",
+            "MINISGL_DSV4_SM80_MOE_INT8",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if os.environ.get(name) in {"1", "true"}:
+                return True
+            return (
+                name in {"MINISGL_DSV4_SM80_SWIGLU", "MINISGL_DSV4_SM80_MOE_ROUTE"}
+                and os.environ.get("MINISGL_DSV4_SM80_V1_MOE") == "1"
+            )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_INT8", "1")
+    result = bench.configure_variant(FakeKernel, bench._variant_map()["v1_moe"])
+
+    assert "MINISGL_DSV4_SM80_MOE_INT8" in result["cleared_dsv4_sm80_env"]
+    assert result["raw_dsv4_sm80_env"] == {"MINISGL_DSV4_SM80_V1_MOE": "1"}
+    assert result["active_dsv4_toggles"] == [
+        "MINISGL_DSV4_SM80_MOE_ROUTE",
+        "MINISGL_DSV4_SM80_SWIGLU",
+        "MINISGL_DSV4_SM80_V1_MOE",
     ]
 
 

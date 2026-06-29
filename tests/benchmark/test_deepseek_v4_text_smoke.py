@@ -148,6 +148,36 @@ def test_configure_variant_clears_existing_sm80_env_and_sets_v0(monkeypatch):
     ]
 
 
+def test_configure_variant_sets_v1_moe(monkeypatch):
+    smoke = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_SWIGLU",
+            "MINISGL_DSV4_SM80_MOE_ROUTE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if os.environ.get(name) in {"1", "true"}:
+                return True
+            return (
+                name in {"MINISGL_DSV4_SM80_SWIGLU", "MINISGL_DSV4_SM80_MOE_ROUTE"}
+                and os.environ.get("MINISGL_DSV4_SM80_V1_MOE") == "1"
+            )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_ROUTE", "1")
+    result = smoke.configure_variant(FakeKernel, smoke._variant_map()["v1_moe"])
+
+    assert result["raw_dsv4_sm80_env"] == {"MINISGL_DSV4_SM80_V1_MOE": "1"}
+    assert result["active_dsv4_toggles"] == [
+        "MINISGL_DSV4_SM80_MOE_ROUTE",
+        "MINISGL_DSV4_SM80_SWIGLU",
+        "MINISGL_DSV4_SM80_V1_MOE",
+    ]
+
+
 def test_tp_rank_size_defaults_to_tp8_under_torchrun_env(monkeypatch):
     smoke = _load_module()
     args = smoke.parse_args([])

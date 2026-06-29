@@ -122,7 +122,7 @@ class DSV4Linear(BaseOP):
                 dtype=scale_dtype,
             )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         if self.weight.dtype is torch.int8:
             y = dsv4_kernel.quantized_linear_ref(x, self.weight, scale, weight_kind="fp4")
@@ -130,7 +130,7 @@ class DSV4Linear(BaseOP):
             y = dsv4_kernel.quantized_linear_ref(x, self.weight, scale, weight_kind="fp8")
         else:
             y = F.linear(x, self.weight.to(x.dtype))
-        if self.row_parallel and self._tp_size > 1:
+        if reduce and self.row_parallel and self._tp_size > 1:
             y = self._comm.all_reduce(y)
         return y
 
@@ -608,6 +608,8 @@ class DSV4FusedRoutedExperts(BaseOP):
         hidden_states: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
+        *,
+        reduce: bool = True,
     ) -> torch.Tensor:
         grouped = dsv4_kernel.moe_route_dispatch_bf16_grouped(
             hidden_states,
@@ -620,7 +622,7 @@ class DSV4FusedRoutedExperts(BaseOP):
             swiglu_limit=self.swiglu_limit,
         )
         if grouped is not None:
-            if self._tp_size > 1:
+            if reduce and self._tp_size > 1:
                 grouped = self._comm.all_reduce(grouped.float()).to(grouped.dtype)
             return grouped
 
@@ -634,7 +636,7 @@ class DSV4FusedRoutedExperts(BaseOP):
                 hidden_states[token_idx],
                 weights[token_idx, top_idx, None],
             ).float()
-        if self._tp_size > 1:
+        if reduce and self._tp_size > 1:
             y = self._comm.all_reduce(y)
         return y.to(hidden_states.dtype)
 
@@ -658,7 +660,7 @@ class DSV4SharedExperts(BaseOP):
             row_parallel=True,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
         gate_up = self.gate_up_proj.forward(hidden_states)
         gate, up = gate_up.chunk(2, dim=-1)
         hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
@@ -666,11 +668,14 @@ class DSV4SharedExperts(BaseOP):
             up,
             swiglu_limit=self.swiglu_limit,
         )
-        return self.down_proj.forward(hidden.to(up.dtype))
+        return self.down_proj.forward(hidden.to(up.dtype), reduce=reduce)
 
 
 class DSV4MoE(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int):
+        tp = get_tp_info()
+        self._tp_size = tp.size
+        self._comm = DistributedCommunicator()
         is_hash_layer = layer_id < config.n_hash_layers
         self.topk_count = config.num_experts_per_tok
         self.scoring_func = config.scoring_func or "sqrtsoftplus"
@@ -692,9 +697,12 @@ class DSV4MoE(BaseOP):
             routed_scaling_factor=self.routed_scaling_factor,
             hash_topk=getattr(self, "topk", None),
         )
-        y = self.experts.forward(flat, weights, indices).float()
+        reduce_once = dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
+        y = self.experts.forward(flat, weights, indices, reduce=not reduce_once).float()
         if hasattr(self, "shared_experts"):
-            y = y + self.shared_experts.forward(flat).float()
+            y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()
+        if reduce_once and self._tp_size > 1:
+            y = self._comm.all_reduce(y)
         return y.to(flat.dtype).view_as(hidden_states)
 
 

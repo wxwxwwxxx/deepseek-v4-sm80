@@ -246,6 +246,7 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
     _clear_dsv4_sm80_env(monkeypatch)
 
     assert dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    assert dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE)
     assert not any(
         dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST
@@ -273,6 +274,26 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
 
     monkeypatch.setenv("MINISGL_DSV4_SM80_STORE_CACHE", "true")
     assert dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_STORE_CACHE")
+
+
+def test_dsv4_sm80_v1_moe_bundle_env_policy(monkeypatch):
+    _clear_dsv4_sm80_env(monkeypatch)
+
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
+    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_MOE_ROUTE")
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE, "1")
+    enabled = {
+        name
+        for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+        if dsv4_kernel.dsv4_env_flag(name)
+    }
+    assert enabled == {
+        dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE,
+        *dsv4_kernel.DSV4_SM80_V1_MOE_WHITELIST,
+    }
+    assert "MINISGL_DSV4_SM80_MOE_ROUTE" in enabled
+    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE not in enabled
 
 
 def test_dsv4_capability_detection_keeps_sm80_gates_explicit():
@@ -853,6 +874,40 @@ def test_dsv4_moe_route_plan_groups_and_pads_routes():
         )
     )
     assert pairs == [(2, 0), (5, 0), (1, 1), (0, 2), (4, 2)]
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_moe_route_plan_triton_matches_torch_fallback(monkeypatch):
+    _clear_dsv4_sm80_env(monkeypatch)
+    indices = torch.tensor(
+        [
+            [2, 1],
+            [0, -1],
+            [2, 0],
+            [3, 1],
+            [9, 2],
+        ],
+        dtype=torch.int64,
+    )
+    expected = dsv4_kernel.build_moe_route_plan(indices, num_experts=4, block_size_m=2)
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_ROUTE", "1")
+    actual = dsv4_kernel.build_moe_route_plan(
+        indices.cuda(),
+        num_experts=4,
+        block_size_m=2,
+    )
+    torch.cuda.synchronize()
+
+    actual_padded = int(actual.num_tokens_post_padded.item())
+    assert actual.route_count == expected.route_count
+    assert actual.topk == expected.topk
+    assert actual.block_size_m == expected.block_size_m
+    assert actual_padded == int(expected.num_tokens_post_padded.item())
+    assert actual.sorted_route_ids[:actual_padded].cpu().tolist() == expected.sorted_route_ids.tolist()
+    assert actual.expert_ids[: actual_padded // actual.block_size_m].cpu().tolist() == (
+        expected.expert_ids.tolist()
+    )
 
 
 def test_dsv4_model_and_attention_do_not_import_optional_kernels_directly():
@@ -1968,6 +2023,32 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     expected_moe = expected_moe.to(moe_x.dtype)
 
     monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_ROUTE", "1")
+    from minisgl.kernel.triton import deepseek_v4 as triton_dsv4
+
+    plan = dsv4_kernel.build_moe_route_plan(
+        moe_indices,
+        num_experts=num_experts,
+        block_size_m=16,
+    )
+    fused_routed = triton_dsv4.grouped_fp4_moe_fused_compute(
+        moe_x,
+        moe_weights.reshape(-1).contiguous(),
+        w13_weight,
+        w13_scale,
+        w2_weight,
+        w2_scale,
+        plan.sorted_route_ids,
+        plan.expert_ids,
+        plan.num_tokens_post_padded,
+        route_count=plan.route_count,
+        topk=plan.topk,
+        block_size_m=plan.block_size_m,
+        swiglu_limit=2.5,
+    )
+    assert fused_routed is not None
+    fused_moe = fused_routed.view(num_tokens, topk, hidden).sum(dim=1)
+    assert torch.allclose(fused_moe, expected_moe, atol=8e-2, rtol=8e-2)
+
     actual_moe = dsv4_kernel.moe_route_dispatch_bf16_grouped(
         moe_x,
         moe_weights,

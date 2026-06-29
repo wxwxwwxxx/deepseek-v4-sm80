@@ -13,7 +13,7 @@ from minisgl.distributed import set_tp_info
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
-from minisgl.models.deepseek_v4 import DSV4FusedRoutedExperts, DSV4MoEGate
+from minisgl.models.deepseek_v4 import DSV4FusedRoutedExperts, DSV4MoE, DSV4MoEGate
 from minisgl.models.register import get_model_class
 
 
@@ -321,3 +321,51 @@ def test_deepseek_v4_grouped_routed_experts_all_reduce_tp_sharded_output(monkeyp
     assert len(fake_comm.calls) == 1
     assert fake_comm.calls[0].dtype is torch.float32
     assert torch.equal(out, torch.full_like(hidden, 23.0))
+
+
+def test_deepseek_v4_v1_moe_sums_routed_and_shared_before_one_all_reduce(monkeypatch):
+    _reset_globals(tp_rank=0, tp_size=2)
+    cfg = _tiny_dsv4_config()
+    moe = DSV4MoE(cfg, layer_id=0)
+
+    class FakeComm:
+        def __init__(self) -> None:
+            self.calls: list[torch.Tensor] = []
+
+        def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+            self.calls.append(x.clone())
+            return x + 30.0
+
+    fake_comm = FakeComm()
+    moe._comm = fake_comm
+    calls: list[tuple[str, bool]] = []
+
+    def fake_gate_forward(*args, **kwargs):
+        hidden = args[0]
+        return (
+            torch.ones(hidden.shape[0], 1, dtype=torch.float32),
+            torch.zeros(hidden.shape[0], 1, dtype=torch.long),
+        )
+
+    def fake_experts_forward(hidden, weights, indices, *, reduce=True):
+        del weights, indices
+        calls.append(("routed", reduce))
+        return torch.full_like(hidden, 1.25)
+
+    def fake_shared_forward(hidden, *, reduce=True):
+        calls.append(("shared", reduce))
+        return torch.full_like(hidden, 2.75)
+
+    moe.gate.forward = fake_gate_forward
+    moe.experts.forward = fake_experts_forward
+    moe.shared_experts.forward = fake_shared_forward
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE, "1")
+
+    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
+    input_ids = torch.zeros(2, 1, dtype=torch.long)
+    out = moe.forward(hidden, input_ids)
+
+    assert calls == [("routed", False), ("shared", False)]
+    assert len(fake_comm.calls) == 1
+    assert fake_comm.calls[0].dtype is torch.float32
+    assert torch.equal(out, torch.full_like(hidden, 34.0))
