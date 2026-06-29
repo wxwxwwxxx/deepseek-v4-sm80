@@ -17,3 +17,5 @@
 | Stage | Prompt | Status | Completion Record |
 | --- | --- | --- | --- |
 | TARGET 05.5 | `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md` | planned | DSV4 sm80 高性能算子替换研发计划已创建。后续每次替代 kernel 时，需要在该文件的 R&D Completion Matrix 中记录 kernel、mode、toggle、correctness、microbench、E2E perf、decision 和 artifact 路径。 |
+| TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | 已新增 `MINISGL_DSV4_SM80_V0_BF16` 白名单 bundle、语义测试、wrapper bundle smoke、最小离线 E2E smoke 脚本，并验证 `/models/DeepSeek-V4-Flash` fallback/v0_bf16 在 A100 sm80 TP=4 下均生成 4 tokens。Artifact: `/tmp/dsv4_v0_fallback_smoke.json`, `/tmp/dsv4_v0_bf16_smoke.json`。正式性能矩阵交给 TARGET 06。 |
+| TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | planned | 等 TARGET 05.7 E2E smoke 通过后，使用 v0 bf16 bundle 作为主要 baseline 进入可重复性能评测、吞吐统计和瓶颈归因。 |

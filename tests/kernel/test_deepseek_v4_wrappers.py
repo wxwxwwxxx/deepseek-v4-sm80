@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 
 import minisgl.attention.deepseek_v4 as dsv4_attention
 import minisgl.models.deepseek_v4 as dsv4_model
@@ -16,6 +17,14 @@ from minisgl.models.config import ModelConfig, RotaryConfig
 
 def _has_sm80_cuda() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
+
+
+def _clear_dsv4_sm80_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in tuple(os.environ):
+        if name.startswith("MINISGL_DSV4_SM80_"):
+            monkeypatch.delenv(name, raising=False)
+    for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _assert_full_topk_transform(
@@ -231,6 +240,39 @@ def test_dsv4_kernel_inventory_covers_sglang_main_exports():
         "unsupported",
         "todo",
     }
+
+
+def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
+    _clear_dsv4_sm80_env(monkeypatch)
+
+    assert dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE)
+    assert not any(
+        dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST
+    )
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE, "1")
+    enabled = {
+        name
+        for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+        if dsv4_kernel.dsv4_env_flag(name)
+    }
+    assert enabled == {
+        dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE,
+        *dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST,
+    }
+    assert not any(
+        dsv4_kernel.dsv4_env_flag(name)
+        for name in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
+    )
+
+    _clear_dsv4_sm80_env(monkeypatch)
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SWIGLU", "yes")
+    assert dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_SWIGLU")
+    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_ROPE")
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_STORE_CACHE", "true")
+    assert dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_STORE_CACHE")
 
 
 def test_dsv4_capability_detection_keeps_sm80_gates_explicit():
@@ -972,26 +1014,333 @@ def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
+    _clear_dsv4_sm80_env(monkeypatch)
+    device = torch.device("cuda")
+    torch.manual_seed(37)
+
+    gate = torch.randn(9, 129, device=device, dtype=torch.bfloat16)
+    up = torch.randn_like(gate)
+    weights = torch.rand(9, 1, device=device, dtype=torch.float32)
+    expected_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+        gate,
+        up,
+        swiglu_limit=2.0,
+        weights=weights,
+    )
+
+    positions = torch.arange(6, device=device, dtype=torch.int64)
+    rope_x = torch.randn(6, 2, 16, device=device, dtype=torch.float32)
+    expected_rope = dsv4_kernel.apply_rotary_tail(
+        rope_x.clone(),
+        positions,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    q = torch.randn(6, 2, 16, device=device, dtype=torch.bfloat16)
+    expected_q = dsv4_kernel.q_norm_rope_fallback(
+        q.clone(),
+        positions,
+        rms_norm_eps=1e-6,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+
+    kv = torch.randn(5, 16, device=device, dtype=torch.bfloat16)
+    k_weight = torch.randn(16, device=device, dtype=torch.bfloat16)
+    k_positions = torch.tensor([0, 127, 255, 511, 777], device=device, dtype=torch.int64)
+    k_loc = torch.tensor([3, 7, 11, 13, 19], device=device, dtype=torch.int32)
+    expected_k_cache = torch.zeros(32, 16, device=device, dtype=torch.bfloat16)
+    expected_k = dsv4_kernel.k_norm_rope_cache_fallback(
+        kv.clone(),
+        k_positions,
+        norm_weight=k_weight,
+        rms_norm_eps=1e-6,
+        cache=expected_k_cache,
+        out_loc=k_loc,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+
+    class FakeCompressedCache:
+        def __init__(self) -> None:
+            self.cache = torch.zeros(32, 16, device=device, dtype=torch.bfloat16)
+
+        def component_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return self.cache
+
+        def store_compressed(self, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
+            assert layer_id == 0
+            valid = out_loc >= 0
+            self.cache[out_loc[valid].long()] = kv.reshape(-1, 16)[valid].to(self.cache.dtype)
+
+    compressed = torch.randn(5, 16, device=device, dtype=torch.bfloat16)
+    compressed_weight = torch.randn(16, device=device, dtype=torch.bfloat16)
+    compressed_positions = torch.tensor([3, 7, 11, 15, 19], device=device, dtype=torch.int64)
+    compressed_loc = torch.tensor([4, 8, 12, -1, 20], device=device, dtype=torch.int32)
+    expected_compressed_cache = FakeCompressedCache()
+    expected_compressed = compressed.clone()
+    dsv4_kernel.compress_norm_rope_store_fallback(
+        expected_compressed_cache,
+        0,
+        expected_compressed,
+        compressed_loc,
+        positions=compressed_positions,
+        norm_weight=compressed_weight,
+        rms_norm_eps=1e-6,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+
+    class FakeWkvGate:
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            values = torch.arange(
+                x.shape[0] * 16,
+                device=x.device,
+                dtype=torch.float32,
+            ).view(x.shape[0], 16)
+            return values.to(x.dtype) / 16
+
+    class IdentityNorm:
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    compress_x = torch.randn(12, 4, device=device, dtype=torch.bfloat16)
+    ape = torch.randn(4, 8, device=device, dtype=torch.float32)
+    compress_positions = torch.arange(12, device=device, dtype=torch.int64)
+    expected_compress = dsv4_kernel.compress_forward_fallback(
+        compress_x,
+        compress_positions,
+        ratio=4,
+        head_dim=4,
+        overlap=True,
+        ape=ape,
+        wkv_gate=FakeWkvGate(),
+        norm=IdentityNorm(),
+    )
+
+    topk_scores = torch.randn(3, 1024, device=device, dtype=torch.float32)
+    topk_seq_lens = torch.tensor([16, 900, 1024], device=device, dtype=torch.int32)
+    topk_page_table = torch.arange(3 * 16, device=device, dtype=torch.int32).reshape(3, 16) + 100
+    expected_topk = dsv4_kernel.topk_transform_512_full_fallback(
+        topk_scores,
+        topk_seq_lens,
+        topk_page_table,
+        page_size=64,
+        width=512,
+        ratio=4,
+    )
+
+    q_attn = torch.randn(4, 3, 64, device=device, dtype=torch.bfloat16)
+    cache_attn = torch.randn(192, 64, device=device, dtype=torch.bfloat16)
+    attn_contexts = [
+        torch.empty(0, device=device, dtype=torch.int32),
+        torch.tensor([3], device=device, dtype=torch.int32),
+        torch.arange(8, 104, 3, device=device, dtype=torch.int32),
+        torch.tensor([2, 4, 4, 6, 8, 16, 32, 64], device=device, dtype=torch.int32),
+    ]
+    attn_sink = torch.randn(3, device=device, dtype=torch.float32)
+    attn_metadata = dsv4_kernel.get_paged_mqa_logits_metadata_fallback(
+        attn_contexts,
+        device=device,
+    )
+    expected_attn = dsv4_kernel.paged_mqa_attention_fallback(
+        q_attn,
+        cache_attn,
+        attn_contexts,
+        softmax_scale=0.125,
+        attn_sink=attn_sink,
+    )
+
+    q_indexer = torch.randn(3, 4, 128, device=device, dtype=torch.bfloat16)
+    indexer_cache = torch.randn(192, 128, device=device, dtype=torch.bfloat16)
+    indexer_weights = torch.randn(3, 4, device=device, dtype=torch.float32)
+    indexer_seq_lens = torch.tensor([16, 64, 97], device=device, dtype=torch.int32)
+    indexer_page_table = torch.tensor([[0, 1], [0, 1], [0, 1]], device=device, dtype=torch.int32)
+    expected_indexer_logits = dsv4_kernel.indexer_bf16_logits_fallback(
+        q_indexer,
+        indexer_cache,
+        indexer_seq_lens,
+        indexer_page_table,
+        page_size=64,
+        weights=indexer_weights,
+    )
+
+    q_sparse = torch.randn(2, 2, 512, device=device, dtype=torch.bfloat16)
+    swa_cache = torch.randn(32, 512, device=device, dtype=torch.bfloat16)
+    compressed_cache = torch.randn(32, 512, device=device, dtype=torch.bfloat16)
+    swa_indices = torch.tensor([[0, 1, 2, -1], [3, 4, 4, 5]], device=device, dtype=torch.int32)
+    compressed_indices = torch.tensor(
+        [[6, 7, -1, -1], [8, 9, 10, -1]],
+        device=device,
+        dtype=torch.int32,
+    )
+    swa_lengths = torch.tensor([3, 4], device=device, dtype=torch.int32)
+    compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+    sparse_sink = torch.randn(2, device=device, dtype=torch.float32)
+    sparse_scale = 512**-0.5
+    expected_sparse = _manual_two_source_sparse_attention(
+        q_sparse,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=compressed_cache,
+        compressed_indices=compressed_indices,
+        compressed_lengths=compressed_lengths,
+        softmax_scale=sparse_scale,
+        attn_sink=sparse_sink,
+    )
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE, "1")
+    assert all(
+        dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST
+    )
+    assert not any(
+        dsv4_kernel.dsv4_env_flag(name)
+        for name in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
+    )
+
+    actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+        gate,
+        up,
+        swiglu_limit=2.0,
+        weights=weights,
+    )
+    actual_rope = dsv4_kernel.apply_rotary_tail(
+        rope_x.clone(),
+        positions,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    actual_q = dsv4_kernel.q_norm_rope_fallback(
+        q.clone(),
+        positions,
+        rms_norm_eps=1e-6,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    actual_k_cache = torch.zeros_like(expected_k_cache)
+    actual_k = dsv4_kernel.k_norm_rope_cache_fallback(
+        kv.clone(),
+        k_positions,
+        norm_weight=k_weight,
+        rms_norm_eps=1e-6,
+        cache=actual_k_cache,
+        out_loc=k_loc,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    actual_compressed_cache = FakeCompressedCache()
+    actual_compressed = compressed.clone()
+    dsv4_kernel.compress_norm_rope_store_fallback(
+        actual_compressed_cache,
+        0,
+        actual_compressed,
+        compressed_loc,
+        positions=compressed_positions,
+        norm_weight=compressed_weight,
+        rms_norm_eps=1e-6,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    actual_compress = dsv4_kernel.compress_forward_fallback(
+        compress_x,
+        compress_positions,
+        ratio=4,
+        head_dim=4,
+        overlap=True,
+        ape=ape,
+        wkv_gate=FakeWkvGate(),
+        norm=IdentityNorm(),
+    )
+    actual_topk = dsv4_kernel.topk_transform_512_full_fallback(
+        topk_scores,
+        topk_seq_lens,
+        topk_page_table,
+        page_size=64,
+        width=512,
+        ratio=4,
+    )
+    actual_attn = dsv4_kernel.paged_mqa_attention_fallback(
+        q_attn,
+        cache_attn,
+        attn_metadata,
+        softmax_scale=0.125,
+        attn_sink=attn_sink,
+    )
+    actual_indexer_logits = dsv4_kernel.indexer_bf16_logits_fallback(
+        q_indexer,
+        indexer_cache,
+        indexer_seq_lens,
+        indexer_page_table,
+        page_size=64,
+        weights=indexer_weights,
+    )
+    actual_sparse = dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
+        q_sparse,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=compressed_cache,
+        compressed_indices=compressed_indices,
+        compressed_lengths=compressed_lengths,
+        softmax_scale=sparse_scale,
+        attn_sink=sparse_sink,
+    )
+
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_swiglu, expected_swiglu, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(actual_rope, expected_rope, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(actual_q, expected_q, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(actual_k, expected_k, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(actual_k_cache, expected_k_cache, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(actual_compressed, expected_compressed, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(
+        actual_compressed_cache.cache,
+        expected_compressed_cache.cache,
+        atol=2e-2,
+        rtol=2e-2,
+    )
+    assert torch.allclose(actual_compress, expected_compress, atol=1e-4, rtol=1e-4)
+    _assert_full_topk_transform(
+        actual_topk,
+        topk_scores,
+        topk_seq_lens,
+        topk_page_table,
+        page_size=64,
+        width=512,
+        ratio=4,
+    )
+    for row in range(topk_scores.shape[0]):
+        assert sorted(actual_topk.raw_indices[row].cpu().tolist()) == sorted(
+            expected_topk.raw_indices[row].cpu().tolist()
+        )
+    assert torch.allclose(actual_attn, expected_attn, atol=3e-2, rtol=3e-2)
+    assert torch.allclose(actual_indexer_logits, expected_indexer_logits, atol=3e-2, rtol=3e-2)
+    assert actual_sparse is not None
+    assert torch.allclose(actual_sparse, expected_sparse, atol=6e-2, rtol=6e-2)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
-    for name in (
-        "MINISGL_DSV4_SM80_SWIGLU",
-        "MINISGL_DSV4_SM80_ROPE",
-        "MINISGL_DSV4_SM80_Q_NORM_ROPE",
-        "MINISGL_DSV4_SM80_KV_BF16",
-        "MINISGL_DSV4_SM80_STORE_CACHE",
-        "MINISGL_DSV4_SM80_COMPRESS_STORE",
-        "MINISGL_DSV4_SM80_COMPRESS",
-        "MINISGL_DSV4_SM80_TOPK",
-        "MINISGL_DSV4_SM80_FP8_GEMM",
-        "MINISGL_DSV4_SM80_FP4_GEMM",
-        "MINISGL_DSV4_SM80_MOE_ROUTE",
-        "MINISGL_DSV4_SM80_WO_A_BF16",
-        "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
-        "MINISGL_DSV4_SM80_INDEXER_BF16",
-        "MINISGL_DSV4_SM80_SPARSE_ATTN_BF16",
-        dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE,
-    ):
-        monkeypatch.delenv(name, raising=False)
+    _clear_dsv4_sm80_env(monkeypatch)
 
     device = torch.device("cuda")
     torch.manual_seed(5)

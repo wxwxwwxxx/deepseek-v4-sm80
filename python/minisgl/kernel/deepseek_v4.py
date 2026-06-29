@@ -26,7 +26,39 @@ DSV4KernelMode = Literal["fallback", "bf16_direct", "fp8_act", "fp4_act"]
 
 
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+DSV4_SM80_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
 DSV4_LINEAR_BF16_FP32_TOGGLE = "MINISGL_DSV4_SM80_LINEAR_BF16_FP32"
+DSV4_SM80_V0_BF16_WHITELIST: tuple[str, ...] = (
+    "MINISGL_DSV4_SM80_SWIGLU",
+    "MINISGL_DSV4_SM80_ROPE",
+    "MINISGL_DSV4_SM80_Q_NORM_ROPE",
+    "MINISGL_DSV4_SM80_KV_BF16",
+    "MINISGL_DSV4_SM80_COMPRESS",
+    "MINISGL_DSV4_SM80_COMPRESS_STORE",
+    "MINISGL_DSV4_SM80_TOPK",
+    "MINISGL_DSV4_SM80_INDEXER_BF16",
+    "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
+    "MINISGL_DSV4_SM80_SPARSE_ATTN_BF16",
+)
+DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
+    "MINISGL_DSV4_SM80_STORE_CACHE",
+    "MINISGL_DSV4_SM80_FP4_GEMM",
+    "MINISGL_DSV4_SM80_FP8_GEMM",
+    "MINISGL_DSV4_SM80_WO_A_BF16",
+    "MINISGL_DSV4_SM80_MOE_ROUTE",
+    DSV4_LINEAR_BF16_FP32_TOGGLE,
+    "MINISGL_DSV4_SM80_KV_FP8",
+    "MINISGL_DSV4_SM80_PAGED_MQA_FP8",
+    "MINISGL_DSV4_SM80_WO_A_FP8",
+    "MINISGL_DSV4_SM80_INDEXER_FP8",
+    "MINISGL_DSV4_SM80_INDEXER_FP4",
+    "MINISGL_DSV4_SM80_HC",
+)
+DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
+    DSV4_SM80_V0_BF16_TOGGLE,
+    *DSV4_SM80_V0_BF16_WHITELIST,
+    *DSV4_SM80_EXPERIMENTAL_TOGGLES,
+)
 
 
 @dataclass(frozen=True)
@@ -543,7 +575,11 @@ def unsupported_kernel(name: str, detail: str) -> None:
 
 
 def dsv4_env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+    if os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES:
+        return True
+    return name in DSV4_SM80_V0_BF16_WHITELIST and (
+        os.environ.get(DSV4_SM80_V0_BF16_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
+    )
 
 
 def dsv4_sm80_triton_enabled(toggle: str) -> bool:
@@ -2225,6 +2261,10 @@ __all__ = [
     "DSV4KernelMode",
     "DSV4IndexerSelectOutput",
     "DSV4_LINEAR_BF16_FP32_TOGGLE",
+    "DSV4_SM80_EXPERIMENTAL_TOGGLES",
+    "DSV4_SM80_KNOWN_TOGGLES",
+    "DSV4_SM80_V0_BF16_TOGGLE",
+    "DSV4_SM80_V0_BF16_WHITELIST",
     "DSV4MoERoutePlan",
     "DSV4PagedMQAMetadata",
     "DSV4TopKTransformOutput",

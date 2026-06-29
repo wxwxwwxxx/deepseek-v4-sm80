@@ -110,13 +110,17 @@ class Engine:
         )
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
+        init_method = config.distributed_init_method or config.distributed_addr
+        init_kwargs = {
+            "rank": config.tp_info.rank,
+            "world_size": config.tp_info.size,
+            "timeout": timedelta(seconds=config.distributed_timeout),
+            "init_method": init_method,
+        }
         if config.tp_info.size == 1 or config.use_pynccl:
             torch.distributed.init_process_group(
                 backend="gloo",
-                rank=config.tp_info.rank,
-                world_size=config.tp_info.size,
-                timeout=timedelta(seconds=config.distributed_timeout),
-                init_method=config.distributed_addr,
+                **init_kwargs,
             )
             tp_cpu_group = torch.distributed.group.WORLD
             assert tp_cpu_group is not None
@@ -127,10 +131,7 @@ class Engine:
         else:
             torch.distributed.init_process_group(
                 backend="nccl",
-                rank=config.tp_info.rank,
-                world_size=config.tp_info.size,
-                timeout=timedelta(seconds=config.distributed_timeout),
-                init_method=config.distributed_addr,
+                **init_kwargs,
             )
             tp_cpu_group = torch.distributed.new_group(backend="gloo")
             assert tp_cpu_group is not None
