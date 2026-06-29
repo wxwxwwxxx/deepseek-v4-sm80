@@ -149,6 +149,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         *,
         compress_ratio: DSV4CompressRatio | None = None,
         attn_sink: torch.Tensor | None = None,
+        swa_cache_written: bool = False,
     ) -> torch.Tensor:
         del v
         metadata = batch.attn_metadata
@@ -160,7 +161,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
         ratio = compress_ratio
         if ratio is None:
             ratio = self.get_layer_compress_ratio(layer_id)
-        dsv4_kernel.store_swa_fallback(self.kvcache, layer_id, k, batch.out_loc)
+        if not swa_cache_written:
+            dsv4_kernel.store_swa_fallback(self.kvcache, layer_id, k, batch.out_loc)
         return self._fallback_attention(q, layer_id, metadata.core_metadata, ratio, attn_sink)
 
     def store_compressed(

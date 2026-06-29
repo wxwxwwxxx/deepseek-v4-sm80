@@ -802,6 +802,10 @@ def k_norm_rope_cache_fallback(
     kv: torch.Tensor,
     positions: torch.Tensor,
     *,
+    norm_weight: torch.Tensor | None = None,
+    rms_norm_eps: float | None = None,
+    cache: torch.Tensor | None = None,
+    out_loc: torch.Tensor | None = None,
     rotary_dim: int,
     base: float,
     original_seq_len: int = 0,
@@ -809,7 +813,48 @@ def k_norm_rope_cache_fallback(
     beta_fast: int = 32,
     beta_slow: int = 1,
 ) -> torch.Tensor:
-    return apply_rotary_tail(
+    if (norm_weight is None) != (rms_norm_eps is None):
+        raise ValueError(
+            "k_norm_rope_cache_fallback requires norm_weight and rms_norm_eps together"
+        )
+    if (cache is None) != (out_loc is None):
+        raise ValueError("k_norm_rope_cache_fallback requires cache and out_loc together")
+
+    has_cache = cache is not None and out_loc is not None
+    if norm_weight is not None:
+        if kv.ndim != 2:
+            raise ValueError(
+                f"DSV4 K norm/cache path expects kv shape [tokens, dim], got {kv.shape}"
+            )
+        if norm_weight.numel() != kv.shape[-1]:
+            raise ValueError(
+                "DSV4 K norm weight must match kv dim, "
+                f"got weight={norm_weight.numel()} dim={kv.shape[-1]}"
+            )
+        if has_cache and dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_KV_BF16"):
+            try:
+                if _triton_dsv4_ops().k_norm_rope_cache_bf16(
+                    kv,
+                    positions,
+                    norm_weight,
+                    cache,
+                    out_loc,
+                    rms_norm_eps=float(rms_norm_eps),
+                    rotary_dim=rotary_dim,
+                    base=base,
+                    original_seq_len=original_seq_len,
+                    factor=factor,
+                    beta_fast=beta_fast,
+                    beta_slow=beta_slow,
+                ):
+                    return kv
+            except Exception:
+                pass
+        y = kv.float()
+        y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + float(rms_norm_eps))
+        kv.copy_((y * norm_weight.float()).to(kv.dtype))
+
+    out = apply_rotary_tail(
         kv,
         positions,
         rotary_dim=rotary_dim,
@@ -819,6 +864,23 @@ def k_norm_rope_cache_fallback(
         beta_fast=beta_fast,
         beta_slow=beta_slow,
     )
+    if has_cache:
+        dim = out.shape[-1]
+        flat = out.reshape(-1, dim)
+        if cache.shape[-1] != dim:
+            raise ValueError(
+                f"DSV4 K cache dim mismatch: cache dim={cache.shape[-1]} kv dim={dim}"
+            )
+        loc = out_loc.to(device=cache.device, dtype=torch.long).reshape(-1)
+        if loc.numel() != flat.shape[0]:
+            raise ValueError(
+                "DSV4 K cache loc count must match kv rows, "
+                f"got loc={loc.numel()} rows={flat.shape[0]}"
+            )
+        valid = loc >= 0
+        if bool(torch.any(valid)):
+            cache[loc[valid]] = flat[valid].to(cache.dtype)
+    return out
 
 
 def make_name(*parts: object) -> str:

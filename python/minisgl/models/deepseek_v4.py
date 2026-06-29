@@ -263,6 +263,9 @@ class DSV4Attention(BaseOP):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
         positions = batch.positions.to(device=x.device, dtype=torch.long)
+        attn_backend = getattr(get_global_ctx(), "attn_backend", None)
+        attn_metadata = getattr(batch, "attn_metadata", None)
+        use_dsv4_backend = isinstance(attn_metadata, DSV4AttentionMetadata)
         q_lora = self.q_norm.forward(self.wq_a.forward(x))
         q = self.wq_b.forward(q_lora).view(-1, self.num_local_heads, self.head_dim)
         dsv4_kernel.q_norm_rope_fallback(
@@ -277,25 +280,46 @@ class DSV4Attention(BaseOP):
             beta_slow=self.beta_slow,
         )
 
-        kv = self.kv_norm.forward(self.wkv.forward(x))
-        dsv4_kernel.k_norm_rope_cache_fallback(
-            kv,
-            positions,
-            rotary_dim=self.rope_head_dim,
-            base=float(self.rope_base),
-            original_seq_len=self.original_seq_len,
-            factor=self.rope_factor,
-            beta_fast=self.beta_fast,
-            beta_slow=self.beta_slow,
-        )
+        kv = self.wkv.forward(x)
+        kv_cache_written = False
+        if (
+            use_dsv4_backend
+            and attn_backend is not None
+            and x.is_cuda
+            and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_KV_BF16")
+        ):
+            dsv4_kernel.k_norm_rope_cache_fallback(
+                kv,
+                positions,
+                norm_weight=self.kv_norm.weight,
+                rms_norm_eps=self.rms_norm_eps,
+                cache=attn_backend.kvcache.swa_cache(self.layer_id),
+                out_loc=batch.out_loc,
+                rotary_dim=self.rope_head_dim,
+                base=float(self.rope_base),
+                original_seq_len=self.original_seq_len,
+                factor=self.rope_factor,
+                beta_fast=self.beta_fast,
+                beta_slow=self.beta_slow,
+            )
+            kv_cache_written = True
+        else:
+            kv = self.kv_norm.forward(kv)
+            dsv4_kernel.k_norm_rope_cache_fallback(
+                kv,
+                positions,
+                rotary_dim=self.rope_head_dim,
+                base=float(self.rope_base),
+                original_seq_len=self.original_seq_len,
+                factor=self.rope_factor,
+                beta_fast=self.beta_fast,
+                beta_slow=self.beta_slow,
+            )
         if self.rope_head_dim < kv.shape[-1]:
             kv[..., : -self.rope_head_dim] = dsv4_kernel.quantize_fp8_activation_ref(
                 kv[..., : -self.rope_head_dim], block_size=64
             )
 
-        attn_backend = getattr(get_global_ctx(), "attn_backend", None)
-        attn_metadata = getattr(batch, "attn_metadata", None)
-        use_dsv4_backend = isinstance(attn_metadata, DSV4AttentionMetadata)
         if hasattr(self, "indexer"):
             indexer_kv = self.indexer.forward(x, q_lora, positions)
             if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
@@ -319,6 +343,7 @@ class DSV4Attention(BaseOP):
                 batch,
                 compress_ratio=self.compress_ratio,
                 attn_sink=self.attn_sink,
+                swa_cache_written=kv_cache_written,
             )
         else:
             o = self._fallback_attention(q, kv, batch)

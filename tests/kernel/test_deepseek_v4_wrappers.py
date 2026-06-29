@@ -128,6 +128,38 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     assert metadata.indptr.tolist() == [0, 2, 4]
     assert torch.allclose(metadata_out, out)
 
+    kv = torch.randn(4, 8, dtype=torch.float32)
+    norm_weight = torch.linspace(0.5, 1.25, 8, dtype=torch.float32)
+    kv_positions = torch.tensor([0, 2, 4, 7], dtype=torch.int64)
+    kv_loc = torch.tensor([5, 2, 9, 0], dtype=torch.int32)
+    expected_kv = kv.clone()
+    normed = expected_kv.float()
+    normed = normed * torch.rsqrt(normed.square().mean(-1, keepdim=True) + 1e-6)
+    expected_kv.copy_((normed * norm_weight.float()).to(expected_kv.dtype))
+    dsv4_kernel.apply_rotary_tail(
+        expected_kv,
+        kv_positions,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    expected_cache = torch.zeros(12, 8, dtype=torch.bfloat16)
+    expected_cache[kv_loc.long()] = expected_kv.to(expected_cache.dtype)
+    actual_kv = kv.clone()
+    actual_cache = torch.zeros_like(expected_cache)
+    returned_kv = dsv4_kernel.k_norm_rope_cache_fallback(
+        actual_kv,
+        kv_positions,
+        norm_weight=norm_weight,
+        rms_norm_eps=1e-6,
+        cache=actual_cache,
+        out_loc=kv_loc,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    assert returned_kv.data_ptr() == actual_kv.data_ptr()
+    assert torch.allclose(actual_kv, expected_kv, atol=1e-5, rtol=1e-5)
+    assert torch.equal(actual_cache, expected_cache)
+
     padded = dsv4_kernel.topk_transform_512_fallback(torch.tensor([[1, 2]], dtype=torch.int32))
     assert padded.shape == (1, 512)
     assert padded[0, :2].tolist() == [1, 2]
@@ -199,6 +231,7 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         "MINISGL_DSV4_SM80_SWIGLU",
         "MINISGL_DSV4_SM80_ROPE",
         "MINISGL_DSV4_SM80_Q_NORM_ROPE",
+        "MINISGL_DSV4_SM80_KV_BF16",
         "MINISGL_DSV4_SM80_STORE_CACHE",
         "MINISGL_DSV4_SM80_COMPRESS",
         "MINISGL_DSV4_SM80_TOPK",
@@ -280,6 +313,67 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     torch.cuda.synchronize()
     assert torch.allclose(actual_q, expected_q, atol=1e-4, rtol=1e-4)
     monkeypatch.delenv("MINISGL_DSV4_SM80_Q_NORM_ROPE", raising=False)
+
+    high_positions = torch.tensor([0, 127, 255, 511], device=device, dtype=torch.int64)
+    high_q = torch.randn(4, 1, 128, device=device, dtype=torch.bfloat16)
+    expected_high_q = dsv4_kernel.q_norm_rope_fallback(
+        high_q.clone(),
+        high_positions,
+        rms_norm_eps=1e-6,
+        rotary_dim=64,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_Q_NORM_ROPE", "1")
+    actual_high_q = dsv4_kernel.q_norm_rope_fallback(
+        high_q.clone(),
+        high_positions,
+        rms_norm_eps=1e-6,
+        rotary_dim=64,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_high_q, expected_high_q, atol=2e-2, rtol=2e-2)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_Q_NORM_ROPE", raising=False)
+
+    kv_for_fused = torch.randn(5, 16, device=device, dtype=torch.bfloat16)
+    k_weight = torch.randn(16, device=device, dtype=torch.bfloat16)
+    k_positions = torch.tensor([0, 127, 255, 511, 777], device=device, dtype=torch.int64)
+    k_loc = torch.tensor([3, 7, 11, 13, 19], device=device, dtype=torch.int32)
+    expected_k_cache = torch.zeros(32, 16, device=device, dtype=torch.bfloat16)
+    expected_k = dsv4_kernel.k_norm_rope_cache_fallback(
+        kv_for_fused.clone(),
+        k_positions,
+        norm_weight=k_weight,
+        rms_norm_eps=1e-6,
+        cache=expected_k_cache,
+        out_loc=k_loc,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    actual_k_cache = torch.zeros_like(expected_k_cache)
+    monkeypatch.setenv("MINISGL_DSV4_SM80_KV_BF16", "1")
+    actual_k = dsv4_kernel.k_norm_rope_cache_fallback(
+        kv_for_fused.clone(),
+        k_positions,
+        norm_weight=k_weight,
+        rms_norm_eps=1e-6,
+        cache=actual_k_cache,
+        out_loc=k_loc,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_k, expected_k, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(actual_k_cache, expected_k_cache, atol=2e-2, rtol=2e-2)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_KV_BF16", raising=False)
 
     class FakeCache:
         def __init__(self) -> None:
