@@ -178,3 +178,10 @@ torchrun --standalone --nproc_per_node=8 \
 - Tensor-parallel scaling study; TP8 is the only official TARGET 06 baseline.
 - PyNCCL repair or PyNCCL-vs-NCCL benchmarking.
 - CUDA graph benchmarking unless already available.
+
+## Completion Record
+
+- Added `benchmark/offline/deepseek_v4_perf_matrix.py` for torchrun-native TP8 baseline runs with `page_size=256`, PyTorch/NCCL collectives, fallback/v0_bf16 variants, JSON/JSONL artifacts, environment capture, memory metrics, fallback counters, and bottleneck labels.
+- Added pre-benchmark text correctness gate `benchmark/offline/deepseek_v4_text_smoke.py`; it loads `/models/DeepSeek-V4-Flash` with the same TP8/page_size=256 shape as formal runs and checks simple Chinese/English prompts for sane text, expected substrings, repeated symbols, prompt echo, and parse quality.
+- Fixed correctness blockers found by the smoke: TP routed expert outputs now all-reduce across ranks, DSV4 `attn_sink` weights are local-head sharded, fallback `q_norm_rope` writes query updates in-place, and fallback two-source sparse attention reads compressed cache separately from SWA cache.
+- Verified TP8/page_size=256 text smoke for both `fallback` and `v0_bf16`; artifact: `/tmp/dsv4_text_smoke_full_after_qnorm_fix.json`.

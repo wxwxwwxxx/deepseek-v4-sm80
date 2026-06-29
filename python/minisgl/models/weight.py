@@ -122,6 +122,7 @@ def _shard_deepseek_v4_tensor(key: str, value: torch.Tensor, r: int, n: int):
     split_dim0 = (
         ".self_attn.wq_b.",
         ".self_attn.wo_a.",
+        ".self_attn.attn_sink",
         ".mlp.shared_experts.gate_proj.",
         ".mlp.shared_experts.up_proj.",
     )

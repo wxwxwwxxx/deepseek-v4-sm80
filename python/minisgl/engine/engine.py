@@ -65,7 +65,7 @@ class Engine:
         # ======================= Page table initialization ========================
         # NOTE: 1. aligned to 128 bytes; 2. store raw locations instead of pages
         self.max_seq_len = min(config.max_seq_len, num_tokens)
-        aligned_max_seq_len = _align_up_32(self.max_seq_len)
+        aligned_max_seq_len = _align_up(self.max_seq_len, max(32, config.page_size))
         self.ctx.page_table = self.page_table = torch.zeros(  # + 1 for dummy request
             (config.max_running_req + 1, aligned_max_seq_len),
             dtype=torch.int32,
@@ -212,8 +212,8 @@ class Engine:
         destroy_distributed()
 
 
-def _align_up_32(num: int) -> int:
-    return (num + 31) // 32 * 32
+def _align_up(num: int, multiple: int) -> int:
+    return (num + multiple - 1) // multiple * multiple
 
 
 def _adjust_config(config: EngineConfig):

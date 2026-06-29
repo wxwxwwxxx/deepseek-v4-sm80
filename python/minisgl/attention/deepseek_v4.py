@@ -581,6 +581,59 @@ class DSV4AttentionBackend(BaseAttnBackend):
             attn_sink=attn_sink,
         )
 
+    def _two_source_attention_torch(
+        self,
+        q: torch.Tensor,
+        swa_cache: torch.Tensor,
+        swa_indices: torch.Tensor,
+        swa_lengths: torch.Tensor,
+        *,
+        compressed_cache: torch.Tensor | None,
+        compressed_indices: torch.Tensor | None,
+        compressed_lengths: torch.Tensor | None,
+        attn_sink: torch.Tensor | None,
+    ) -> torch.Tensor:
+        out = torch.empty_like(q)
+        sink = (
+            attn_sink[: q.shape[1]].to(device=q.device, dtype=torch.float32)
+            if attn_sink is not None
+            else None
+        )
+        for row in range(q.shape[0]):
+            parts: list[torch.Tensor] = []
+            if (
+                compressed_cache is not None
+                and compressed_indices is not None
+                and compressed_lengths is not None
+            ):
+                comp_len = max(0, int(compressed_lengths[row].item()))
+                comp_idx = compressed_indices[row, :comp_len].to(device=q.device, dtype=torch.long)
+                comp_idx = comp_idx[comp_idx >= 0]
+                if comp_idx.numel() > 0:
+                    parts.append(compressed_cache[comp_idx].to(device=q.device, dtype=q.dtype))
+
+            swa_len = max(0, int(swa_lengths[row].item()))
+            swa_idx = swa_indices[row, :swa_len].to(device=q.device, dtype=torch.long)
+            swa_idx = swa_idx[swa_idx >= 0]
+            if swa_idx.numel() > 0:
+                parts.append(swa_cache[swa_idx].to(device=q.device, dtype=q.dtype))
+
+            if not parts:
+                out[row].zero_()
+                continue
+
+            candidates = torch.cat(parts, dim=0).float()
+            scores = torch.einsum("hd,td->ht", q[row].float(), candidates) * self.softmax_scale
+            if sink is None:
+                attn = torch.softmax(scores, dim=-1)
+            else:
+                max_score = torch.maximum(scores.max(dim=-1).values, sink)
+                exp_scores = torch.exp(scores - max_score[:, None])
+                denom = exp_scores.sum(dim=-1) + torch.exp(sink - max_score)
+                attn = exp_scores / denom[:, None]
+            out[row] = torch.einsum("ht,td->hd", attn, candidates).to(q.dtype)
+        return out
+
     def _sparse_attention_two_source(
         self,
         q: torch.Tensor,
@@ -614,7 +667,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )
             compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
 
-        return dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
+        fast = dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
             q,
             self.kvcache.swa_cache(layer_id).to(q.dtype),
             swa_indices,
@@ -623,6 +676,20 @@ class DSV4AttentionBackend(BaseAttnBackend):
             compressed_indices=compressed_indices,
             compressed_lengths=compressed_lengths,
             softmax_scale=self.softmax_scale,
+            attn_sink=attn_sink,
+        )
+        if fast is not None:
+            return fast
+        if compressed_cache is None:
+            return None
+        return self._two_source_attention_torch(
+            q,
+            self.kvcache.swa_cache(layer_id).to(q.dtype),
+            swa_indices,
+            swa_lengths,
+            compressed_cache=compressed_cache,
+            compressed_indices=compressed_indices,
+            compressed_lengths=compressed_lengths,
             attn_sink=attn_sink,
         )
 

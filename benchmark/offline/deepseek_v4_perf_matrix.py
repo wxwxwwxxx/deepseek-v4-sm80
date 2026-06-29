@@ -1,0 +1,1463 @@
+from __future__ import annotations
+
+import argparse
+import importlib
+import importlib.metadata
+import json
+import os
+import random
+import statistics
+import subprocess
+import sys
+import time
+import traceback
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+from typing import Any, Callable, Sequence
+
+
+ROOT = Path(__file__).resolve().parents[2]
+PYTHON_ROOT = ROOT / "python"
+if str(PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(PYTHON_ROOT))
+
+os.environ.setdefault("MINISGL_DISABLE_OVERLAP_SCHEDULING", "1")
+
+
+DSV4_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
+
+
+@dataclass(frozen=True)
+class Scenario:
+    name: str
+    kind: str
+    batch_size: int
+    prompt_len: int
+    decode_len: int
+    description: str
+    repeats: int = 3
+    warmup_repeats: int = 1
+    shared_prefix_len: int = 0
+    suffix_len: int = 0
+
+    @property
+    def max_input_len(self) -> int:
+        if self.kind == "shared_prefix":
+            return self.shared_prefix_len + self.suffix_len
+        if self.kind == "mixed_prefill_decode":
+            return self.prompt_len
+        return self.prompt_len
+
+    @property
+    def max_seq_len(self) -> int:
+        return self.max_input_len + self.decode_len
+
+
+@dataclass(frozen=True)
+class Variant:
+    name: str
+    env: dict[str, str]
+    description: str
+
+
+DEFAULT_SCENARIOS: tuple[Scenario, ...] = (
+    Scenario(
+        name="long_prefill_bs1",
+        kind="random",
+        batch_size=1,
+        prompt_len=4096,
+        decode_len=1,
+        description="Single-request long prefill with one generated token.",
+    ),
+    Scenario(
+        name="batch_prefill_bs8",
+        kind="random",
+        batch_size=8,
+        prompt_len=1024,
+        decode_len=1,
+        description="Batch prefill with one generated token per request.",
+    ),
+    Scenario(
+        name="decode_throughput_bs8",
+        kind="random",
+        batch_size=8,
+        prompt_len=128,
+        decode_len=64,
+        description="Decode-heavy batch throughput workload.",
+    ),
+    Scenario(
+        name="mixed_prefill_decode_bs4",
+        kind="mixed_prefill_decode",
+        batch_size=4,
+        prompt_len=1024,
+        decode_len=32,
+        description=(
+            "Varied prompt lengths and decode budgets. The current offline scheduler "
+            "does not inject new arrivals while decode is already running."
+        ),
+    ),
+    Scenario(
+        name="shared_prompt_no_radix_bs8",
+        kind="shared_prefix",
+        batch_size=8,
+        prompt_len=1088,
+        decode_len=16,
+        shared_prefix_len=1024,
+        suffix_len=64,
+        description="Repeated shared prompt with DeepSeek V4 radix prefix cache disabled.",
+    ),
+)
+
+
+DEFAULT_VARIANTS: tuple[Variant, ...] = (
+    Variant(
+        name="fallback",
+        env={},
+        description="All MINISGL_DSV4_SM80_* toggles cleared.",
+    ),
+    Variant(
+        name="v0_bf16",
+        env={DSV4_V0_BF16_TOGGLE: "1"},
+        description="TARGET 05.7 v0 BF16 whitelist bundle.",
+    ),
+)
+
+
+FALLBACK_COUNTER_NAMES = {
+    "apply_rotary_tail",
+    "compress_forward_fallback",
+    "compress_norm_rope_store_fallback",
+    "compressor_plan_fallback",
+    "dequant_fp4_weight",
+    "dequant_fp8_weight",
+    "dsv4_sparse_attention_two_source_bf16",
+    "get_paged_mqa_logits_metadata_fallback",
+    "hash_topk_fallback",
+    "hc_head_fallback",
+    "hc_post_fallback",
+    "hc_pre_fallback",
+    "indexer_bf16_logits_fallback",
+    "indexer_kv_hadamard_fallback",
+    "indexer_q_rope_hadamard_bf16_fallback",
+    "indexer_select_bf16_fallback",
+    "k_norm_rope_cache_fallback",
+    "linear_bf16_fp32_fallback",
+    "mega_moe_pre_dispatch_fallback",
+    "moe_gate_fallback",
+    "moe_route_dispatch_bf16_grouped",
+    "norm_rope_inplace_fallback",
+    "paged_mqa_attention_fallback",
+    "plan_topk_v2_fallback",
+    "q_norm_rope_fallback",
+    "quantized_linear_ref",
+    "sequence_mqa_attention_fallback",
+    "silu_and_mul_clamp_fallback",
+    "store_compressed_fallback",
+    "store_indexer_fallback",
+    "store_swa_fallback",
+    "topk_transform_512_fallback",
+    "topk_transform_512_full_fallback",
+    "topk_transform_512_v2_fallback",
+    "wo_a_grouped_projection_fallback",
+}
+
+
+OPTIONAL_NONE_MEANS_SKIP = {
+    "dsv4_sparse_attention_two_source_bf16",
+    "moe_route_dispatch_bf16_grouped",
+}
+
+
+BOTTLENECK_COUNTER_GROUPS: dict[str, tuple[str, ...]] = {
+    "attention": (
+        "apply_rotary_tail",
+        "dsv4_sparse_attention_two_source_bf16",
+        "indexer_bf16_logits_fallback",
+        "indexer_select_bf16_fallback",
+        "paged_mqa_attention_fallback",
+        "q_norm_rope_fallback",
+        "sequence_mqa_attention_fallback",
+        "topk_transform_512_full_fallback",
+    ),
+    "MoE / expert GEMM": (
+        "mega_moe_pre_dispatch_fallback",
+        "moe_gate_fallback",
+        "moe_route_dispatch_bf16_grouped",
+        "quantized_linear_ref",
+        "silu_and_mul_clamp_fallback",
+    ),
+    "fp4 expert handling": (
+        "dequant_fp4_weight",
+        "moe_route_dispatch_bf16_grouped",
+        "quantized_linear_ref",
+    ),
+    "KV cache writes": (
+        "compress_norm_rope_store_fallback",
+        "k_norm_rope_cache_fallback",
+        "store_compressed_fallback",
+        "store_indexer_fallback",
+        "store_swa_fallback",
+    ),
+    "metadata construction": (
+        "compressor_plan_fallback",
+        "get_paged_mqa_logits_metadata_fallback",
+        "plan_topk_v2_fallback",
+        "topk_transform_512_fallback",
+        "topk_transform_512_full_fallback",
+    ),
+}
+
+
+def _scenario_map() -> dict[str, Scenario]:
+    return {scenario.name: scenario for scenario in DEFAULT_SCENARIOS}
+
+
+def _variant_map() -> dict[str, Variant]:
+    return {variant.name: variant for variant in DEFAULT_VARIANTS}
+
+
+def _dist_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _module_version(name: str) -> str | None:
+    try:
+        module = importlib.import_module(name)
+    except Exception:
+        return _dist_version(name)
+    return getattr(module, "__version__", None) or _dist_version(name)
+
+
+def _git_output(args: list[str]) -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", *args],
+            cwd=ROOT,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return None
+
+
+def git_info() -> dict[str, Any]:
+    status = _git_output(["status", "--short"]) or ""
+    return {
+        "branch": _git_output(["branch", "--show-current"]),
+        "commit": _git_output(["rev-parse", "HEAD"]),
+        "short_commit": _git_output(["rev-parse", "--short", "HEAD"]),
+        "dirty": bool(status),
+        "status_short": status.splitlines(),
+    }
+
+
+def _all_dsv4_sm80_env_names(dsv4_kernel) -> list[str]:
+    names = set(getattr(dsv4_kernel, "DSV4_SM80_KNOWN_TOGGLES", ()))
+    names.update(name for name in os.environ if name.startswith("MINISGL_DSV4_SM80_"))
+    return sorted(names)
+
+
+def configure_variant(dsv4_kernel, variant: Variant) -> dict[str, Any]:
+    cleared = _all_dsv4_sm80_env_names(dsv4_kernel)
+    for name in cleared:
+        os.environ.pop(name, None)
+    for name, value in variant.env.items():
+        os.environ[name] = value
+    return {
+        "cleared_dsv4_sm80_env": cleared,
+        "active_dsv4_toggles": active_dsv4_toggles(dsv4_kernel),
+        "raw_dsv4_sm80_env": raw_dsv4_env(),
+    }
+
+
+def active_dsv4_toggles(dsv4_kernel) -> list[str]:
+    return [
+        name
+        for name in _all_dsv4_sm80_env_names(dsv4_kernel)
+        if dsv4_kernel.dsv4_env_flag(name)
+    ]
+
+
+def raw_dsv4_env() -> dict[str, str]:
+    return {
+        name: os.environ[name]
+        for name in sorted(os.environ)
+        if name.startswith("MINISGL_DSV4_SM80_")
+    }
+
+
+def run_classification(*, tp_size: int, page_size: int, smoke: bool) -> str:
+    if tp_size == 8 and page_size == 256 and not smoke:
+        return "baseline"
+    return "smoke_debug"
+
+
+def _jsonify_dataclass(value: Any) -> Any:
+    if hasattr(value, "__dataclass_fields__"):
+        return asdict(value)
+    return value
+
+
+def collect_runtime_environment(torch, dsv4_kernel, *, rank: int) -> dict[str, Any]:
+    cuda_available = torch.cuda.is_available()
+    cuda: dict[str, Any] = {"available": cuda_available}
+    if cuda_available:
+        device = torch.cuda.current_device()
+        cap = torch.cuda.get_device_capability(device)
+        cuda.update(
+            {
+                "rank": rank,
+                "current_device": device,
+                "device_count": torch.cuda.device_count(),
+                "device_name": torch.cuda.get_device_name(device),
+                "capability": [int(cap[0]), int(cap[1])],
+                "capability_name": f"sm{cap[0]}{cap[1]}",
+                "runtime": torch.version.cuda,
+            }
+        )
+        try:
+            nccl_version = torch.cuda.nccl.version()
+            if isinstance(nccl_version, tuple):
+                nccl_version = ".".join(str(part) for part in nccl_version)
+        except Exception:
+            nccl_version = None
+    else:
+        nccl_version = None
+
+    capabilities = dsv4_kernel.detect_dsv4_kernel_capabilities()
+    return {
+        "python": sys.version.split()[0],
+        "packages": {
+            "torch": torch.__version__,
+            "triton": _module_version("triton"),
+            "sgl_kernel": _module_version("sgl_kernel"),
+            "flashinfer": _module_version("flashinfer"),
+            "deep_gemm": _module_version("deep_gemm"),
+            "tilelang": _module_version("tilelang"),
+            "tvm_ffi": _module_version("tvm_ffi"),
+        },
+        "cuda": cuda,
+        "nccl": {"version": nccl_version},
+        "dsv4_kernel_capabilities": _jsonify_dataclass(capabilities),
+    }
+
+
+def _random_tokens(
+    rng: random.Random,
+    length: int,
+    vocab_size: int,
+    *,
+    token_id_range: int = 1024,
+) -> list[int]:
+    low = 10 if vocab_size > 64 else 1
+    high = min(max(low, int(token_id_range)), max(vocab_size - 1, low))
+    usable = max(high - low + 1, 1)
+    return [low + rng.randrange(usable) for _ in range(length)]
+
+
+def build_workload(
+    scenario: Scenario,
+    *,
+    vocab_size: int,
+    seed: int,
+    token_id_range: int = 1024,
+) -> tuple[list[list[int]], list[Any]]:
+    from minisgl.core import SamplingParams
+
+    rng = random.Random(seed)
+    prompts: list[list[int]] = []
+    output_lens: list[int] = []
+
+    if scenario.kind == "shared_prefix":
+        prefix = _random_tokens(
+            rng,
+            scenario.shared_prefix_len,
+            vocab_size,
+            token_id_range=token_id_range,
+        )
+        for _ in range(scenario.batch_size):
+            suffix = _random_tokens(
+                rng,
+                scenario.suffix_len,
+                vocab_size,
+                token_id_range=token_id_range,
+            )
+            prompts.append(prefix + suffix)
+            output_lens.append(scenario.decode_len)
+    elif scenario.kind == "mixed_prefill_decode":
+        min_prompt_len = max(1, scenario.prompt_len // 4)
+        min_decode_len = max(1, scenario.decode_len // 4)
+        for idx in range(scenario.batch_size):
+            frac = idx / max(scenario.batch_size - 1, 1)
+            prompt_len = int(round(min_prompt_len + frac * (scenario.prompt_len - min_prompt_len)))
+            decode_len = int(round(min_decode_len + frac * (scenario.decode_len - min_decode_len)))
+            prompts.append(
+                _random_tokens(
+                    rng,
+                    prompt_len,
+                    vocab_size,
+                    token_id_range=token_id_range,
+                )
+            )
+            output_lens.append(max(1, decode_len))
+    else:
+        for _ in range(scenario.batch_size):
+            prompts.append(
+                _random_tokens(
+                    rng,
+                    scenario.prompt_len,
+                    vocab_size,
+                    token_id_range=token_id_range,
+                )
+            )
+            output_lens.append(scenario.decode_len)
+
+    sampling_params = [
+        SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=output_len)
+        for output_len in output_lens
+    ]
+    return prompts, sampling_params
+
+
+@dataclass
+class BenchRequestStatus:
+    uid: int
+    input_ids: list[int]
+    output_ids: list[int]
+    started_at: float | None = None
+    first_token_at: float | None = None
+    finished_at: float | None = None
+    token_times: list[float] | None = None
+
+    def record_token(self, timestamp: float) -> None:
+        if self.token_times is None:
+            self.token_times = []
+        if self.first_token_at is None:
+            self.first_token_at = timestamp
+        self.token_times.append(timestamp)
+
+    def mark_finished(self, timestamp: float) -> None:
+        self.finished_at = timestamp
+
+
+def make_benchmark_llm_class():
+    import torch
+    from minisgl.llm.llm import LLM, RequestAllFinished
+    from minisgl.message import BaseBackendMsg, DetokenizeMsg, UserMsg
+
+    class BenchmarkLLM(LLM):
+        def __init__(self, *args, **kwargs):
+            self.bench_batch_trace: list[dict[str, Any]] = []
+            self._bench_prepare_s: dict[int, float] = {}
+            self._bench_batch_info: dict[int, dict[str, Any]] = {}
+            self._active_generation_started_at: float | None = None
+            self._active_generation_finished_at: float | None = None
+            super().__init__(*args, **kwargs)
+
+        def offline_receive_msg(self, blocking: bool = False) -> list[BaseBackendMsg]:
+            if blocking and len(self.pending_requests) == 0:
+                raise RequestAllFinished()
+            results: list[BaseBackendMsg] = []
+            added, sum_input_len = 0, 0
+            for tokens_or_prompt, sampling_params in self.pending_requests:
+                if sum_input_len >= self.prefill_budget:
+                    break
+                input_ids = self._tokenize_one(tokens_or_prompt)
+                sum_input_len += len(input_ids)
+                uid, added = self.counter + added, added + 1
+                results.append(
+                    UserMsg(uid=uid, input_ids=input_ids, sampling_params=sampling_params)
+                )
+                self.status_map[uid] = BenchRequestStatus(
+                    uid=uid,
+                    input_ids=(
+                        input_ids.tolist()
+                        if isinstance(tokens_or_prompt, str)
+                        else list(tokens_or_prompt)
+                    ),
+                    output_ids=[],
+                    started_at=self._active_generation_started_at,
+                )
+            self.counter += added
+            self.pending_requests = self.pending_requests[added:]
+            return results
+
+        def offline_send_result(self, reply: list[DetokenizeMsg]) -> None:
+            timestamp = time.perf_counter()
+            for msg in reply:
+                status = self.status_map[msg.uid]
+                emitted_output_token = not (msg.finished and msg.next_token == self.eos_token_id)
+                if emitted_output_token:
+                    status.output_ids.append(msg.next_token)
+                    status.record_token(timestamp)
+                if msg.finished:
+                    status.mark_finished(timestamp)
+
+        def _prepare_batch(self, batch):
+            tic = time.perf_counter()
+            forward_input = super()._prepare_batch(batch)
+            toc = time.perf_counter()
+            batch_id = id(forward_input.batch)
+            self._bench_prepare_s[batch_id] = toc - tic
+            self._bench_batch_info[batch_id] = {
+                "phase": batch.phase,
+                "batch_size": batch.size,
+                "padded_size": batch.padded_size,
+                "input_tokens": int(sum(req.extend_len for req in batch.reqs)),
+                "decode_tokens": int(batch.size if batch.is_decode else 0),
+                "max_extend_len": int(max((req.extend_len for req in batch.reqs), default=0)),
+                "max_device_len": int(max((req.device_len for req in batch.reqs), default=0)),
+                "reqs": [
+                    {
+                        "uid": req.uid,
+                        "cached_len": int(req.cached_len),
+                        "extend_len": int(req.extend_len),
+                        "device_len": int(req.device_len),
+                        "remain_len": int(req.remain_len),
+                        "is_chunked": type(req).__name__ == "ChunkedReq",
+                    }
+                    for req in batch.reqs
+                ],
+            }
+            return forward_input
+
+        def _forward(self, forward_input):
+            batch = forward_input.batch
+            batch_id = id(batch)
+            torch.cuda.synchronize(self.device)
+            tic = time.perf_counter()
+            output = super()._forward(forward_input)
+            torch.cuda.synchronize(self.device)
+            toc = time.perf_counter()
+            info = self._bench_batch_info.pop(batch_id, {})
+            info.update(
+                {
+                    "prepare_s": self._bench_prepare_s.pop(batch_id, 0.0),
+                    "forward_s": toc - tic,
+                }
+            )
+            self.bench_batch_trace.append(info)
+            return output
+
+        def generate(self, prompts, sampling_params):
+            self.bench_batch_trace = []
+            self._active_generation_started_at = time.perf_counter()
+            self._active_generation_finished_at = None
+            try:
+                return super().generate(prompts, sampling_params)
+            finally:
+                self._active_generation_finished_at = time.perf_counter()
+
+        def request_metrics(self) -> list[dict[str, Any]]:
+            finished_at = self._active_generation_finished_at
+            metrics = []
+            for uid in sorted(self.status_map):
+                status = self.status_map[uid]
+                token_times = status.token_times or []
+                req_finished_at = status.finished_at or finished_at
+                started_at = status.started_at
+                metrics.append(
+                    {
+                        "uid": uid,
+                        "input_tokens": len(status.input_ids),
+                        "output_tokens": len(status.output_ids),
+                        "ttft_s": (
+                            None
+                            if started_at is None or status.first_token_at is None
+                            else status.first_token_at - started_at
+                        ),
+                        "latency_s": (
+                            None
+                            if started_at is None or req_finished_at is None
+                            else req_finished_at - started_at
+                        ),
+                        "topt_s": (
+                            None
+                            if len(token_times) <= 1
+                            else (token_times[-1] - token_times[0]) / (len(token_times) - 1)
+                        ),
+                        "token_times_s": (
+                            []
+                            if started_at is None
+                            else [timestamp - started_at for timestamp in token_times]
+                        ),
+                    }
+                )
+            return metrics
+
+    return BenchmarkLLM
+
+
+class KernelCallTracer:
+    def __init__(self, module) -> None:
+        self.module = module
+        self.originals: dict[str, Callable[..., Any]] = {}
+        self.call_counts: dict[str, int] = {}
+        self.none_skip_counts: dict[str, int] = {}
+        self.unsupported_counts: dict[str, int] = {}
+        self.exception_counts: dict[str, int] = {}
+
+    def install(self) -> None:
+        for name in sorted(FALLBACK_COUNTER_NAMES):
+            value = getattr(self.module, name, None)
+            if callable(value):
+                self._wrap(name, value)
+        unsupported = getattr(self.module, "unsupported_kernel", None)
+        if callable(unsupported):
+            self._wrap_unsupported(unsupported)
+
+    def reset(self) -> None:
+        self.call_counts.clear()
+        self.none_skip_counts.clear()
+        self.unsupported_counts.clear()
+        self.exception_counts.clear()
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "fallback_wrapper_calls_total": int(sum(self.call_counts.values())),
+            "fallback_wrapper_calls": dict(sorted(self.call_counts.items())),
+            "optional_kernel_none_skips_total": int(sum(self.none_skip_counts.values())),
+            "optional_kernel_none_skips": dict(sorted(self.none_skip_counts.items())),
+            "unsupported_kernel_skips_total": int(sum(self.unsupported_counts.values())),
+            "unsupported_kernel_skips": dict(sorted(self.unsupported_counts.items())),
+            "wrapper_exceptions": dict(sorted(self.exception_counts.items())),
+        }
+
+    def _wrap(self, name: str, func: Callable[..., Any]) -> None:
+        if name in self.originals:
+            return
+        self.originals[name] = func
+
+        def wrapper(*args, **kwargs):
+            self.call_counts[name] = self.call_counts.get(name, 0) + 1
+            try:
+                result = func(*args, **kwargs)
+            except Exception:
+                self.exception_counts[name] = self.exception_counts.get(name, 0) + 1
+                raise
+            if result is None and name in OPTIONAL_NONE_MEANS_SKIP:
+                self.none_skip_counts[name] = self.none_skip_counts.get(name, 0) + 1
+            return result
+
+        setattr(self.module, name, wrapper)
+
+    def _wrap_unsupported(self, func: Callable[..., Any]) -> None:
+        name = "unsupported_kernel"
+        if name in self.originals:
+            return
+        self.originals[name] = func
+
+        def wrapper(kernel_name, detail):
+            key = str(kernel_name)
+            self.unsupported_counts[key] = self.unsupported_counts.get(key, 0) + 1
+            return func(kernel_name, detail)
+
+        setattr(self.module, name, wrapper)
+
+
+def _dtype_from_name(name: str):
+    import torch
+
+    mapping = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }
+    return mapping[name]
+
+
+def _tp_rank_size(args: argparse.Namespace) -> tuple[int, int, int]:
+    env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    env_rank = int(os.environ.get("RANK", "0"))
+    env_local_rank = int(os.environ.get("LOCAL_RANK", str(env_rank)))
+    tp_size = args.tensor_parallel_size or env_world_size
+    tp_rank = args.tp_rank if args.tp_rank is not None else env_local_rank
+    if tp_size <= 0:
+        raise ValueError("tensor parallel size must be positive")
+    if not 0 <= tp_rank < tp_size:
+        raise ValueError(f"invalid TP rank {tp_rank} for TP size {tp_size}")
+    return tp_rank, tp_size, env_world_size
+
+
+def _distributed_init_method(args: argparse.Namespace, tp_size: int) -> str | None:
+    if args.distributed_init_method is not None:
+        return args.distributed_init_method
+    if tp_size > 1 and "MASTER_ADDR" in os.environ:
+        return "env://"
+    return None
+
+
+def _select_scenarios(args: argparse.Namespace) -> list[Scenario]:
+    if args.smoke:
+        scenario = Scenario(
+            name="smoke_debug",
+            kind="random",
+            batch_size=args.batch_size or 1,
+            prompt_len=args.prompt_len or 16,
+            decode_len=args.decode_len or 2,
+            repeats=args.repeats or 1,
+            warmup_repeats=args.warmup_repeats if args.warmup_repeats is not None else 0,
+            description="Tiny smoke/debug workload, excluded from official baseline summaries.",
+        )
+        return [scenario]
+
+    selected = args.scenarios or [scenario.name for scenario in DEFAULT_SCENARIOS]
+    scenario_map = _scenario_map()
+    scenarios = [scenario_map[name] for name in selected]
+    output = []
+    for scenario in scenarios:
+        overrides: dict[str, int] = {}
+        if args.batch_size is not None:
+            overrides["batch_size"] = args.batch_size
+        if args.prompt_len is not None:
+            overrides["prompt_len"] = args.prompt_len
+            if scenario.kind == "shared_prefix":
+                overrides["shared_prefix_len"] = max(args.prompt_len - scenario.suffix_len, 1)
+        if args.decode_len is not None:
+            overrides["decode_len"] = args.decode_len
+        if args.repeats is not None:
+            overrides["repeats"] = args.repeats
+        if args.warmup_repeats is not None:
+            overrides["warmup_repeats"] = args.warmup_repeats
+        output.append(replace(scenario, **overrides))
+    return output
+
+
+def _select_variants(args: argparse.Namespace) -> list[Variant]:
+    names = args.variants or [variant.name for variant in DEFAULT_VARIANTS]
+    variant_map = _variant_map()
+    return [variant_map[name] for name in names]
+
+
+def _max_running_req(scenarios: Sequence[Scenario]) -> int:
+    return max((scenario.batch_size for scenario in scenarios), default=1)
+
+
+def _max_seq_len(scenarios: Sequence[Scenario]) -> int:
+    return max((scenario.max_seq_len for scenario in scenarios), default=1)
+
+
+def _max_extend_tokens(scenarios: Sequence[Scenario]) -> int:
+    return max((scenario.batch_size * scenario.max_input_len for scenario in scenarios), default=1)
+
+
+def _safe_mean(values: Sequence[float]) -> float | None:
+    filtered = [value for value in values if value is not None]
+    if not filtered:
+        return None
+    return float(statistics.mean(filtered))
+
+
+def _safe_median(values: Sequence[float]) -> float | None:
+    filtered = [value for value in values if value is not None]
+    if not filtered:
+        return None
+    return float(statistics.median(filtered))
+
+
+def _sum_phase(trace: Sequence[dict[str, Any]], phase: str, key: str) -> float:
+    return float(sum(float(row.get(key, 0.0)) for row in trace if row.get("phase") == phase))
+
+
+def _sum_trace_int(trace: Sequence[dict[str, Any]], phase: str, key: str) -> int:
+    return int(sum(int(row.get(key, 0)) for row in trace if row.get("phase") == phase))
+
+
+def _rank_memory_report(torch, llm) -> dict[str, int]:
+    return {
+        "memory_allocated_bytes": int(torch.cuda.memory_allocated(llm.device)),
+        "memory_reserved_bytes": int(torch.cuda.memory_reserved(llm.device)),
+        "max_memory_allocated_bytes": int(torch.cuda.max_memory_allocated(llm.device)),
+        "max_memory_reserved_bytes": int(torch.cuda.max_memory_reserved(llm.device)),
+    }
+
+
+def _estimate_kv_cache_bytes_from_config(llm, *, page_size: int, dtype, tp_size: int) -> int:
+    from minisgl.kvcache import estimate_kvcache_bytes_per_page
+
+    model_config = llm.engine.attn_backend.config
+    pages = int(getattr(llm.engine.kv_cache, "_num_pages", llm.engine.num_pages))
+    return int(
+        pages
+        * estimate_kvcache_bytes_per_page(
+            model_config,
+            page_size=page_size,
+            dtype=dtype,
+            tp_size=tp_size,
+        )
+    )
+
+
+def _run_one_repeat(
+    *,
+    llm,
+    torch,
+    scenario: Scenario,
+    vocab_size: int,
+    seed: int,
+    token_id_range: int,
+) -> dict[str, Any]:
+    prompts, sampling_params = build_workload(
+        scenario,
+        vocab_size=vocab_size,
+        seed=seed,
+        token_id_range=token_id_range,
+    )
+    target_output_tokens = int(sum(param.max_tokens for param in sampling_params))
+    prompt_tokens = int(sum(len(prompt) for prompt in prompts))
+    torch.cuda.synchronize(llm.device)
+    torch.cuda.reset_peak_memory_stats(llm.device)
+    tic = time.perf_counter()
+    outputs = llm.generate(prompts, sampling_params)
+    torch.cuda.synchronize(llm.device)
+    elapsed_s = time.perf_counter() - tic
+    output_lens = [len(output["token_ids"]) for output in outputs]
+    trace = list(llm.bench_batch_trace)
+    request_metrics = llm.request_metrics()
+    return {
+        "elapsed_s": elapsed_s,
+        "prompt_tokens": prompt_tokens,
+        "target_output_tokens": target_output_tokens,
+        "actual_output_tokens": int(sum(output_lens)),
+        "output_lens": output_lens,
+        "sample_output_token_ids": [output["token_ids"][:16] for output in outputs[:2]],
+        "requests": request_metrics,
+        "schedule_trace": trace,
+        "phase_totals": {
+            "prefill_forward_s": _sum_phase(trace, "prefill", "forward_s"),
+            "decode_forward_s": _sum_phase(trace, "decode", "forward_s"),
+            "prefill_prepare_s": _sum_phase(trace, "prefill", "prepare_s"),
+            "decode_prepare_s": _sum_phase(trace, "decode", "prepare_s"),
+            "prefill_input_tokens": _sum_trace_int(trace, "prefill", "input_tokens"),
+            "decode_tokens": _sum_trace_int(trace, "decode", "decode_tokens"),
+        },
+        "memory": _rank_memory_report(torch, llm),
+    }
+
+
+def _run_warmups(
+    *,
+    llm,
+    torch,
+    scenario: Scenario,
+    vocab_size: int,
+    seed: int,
+    token_id_range: int,
+) -> dict[str, Any]:
+    elapsed: list[float] = []
+    for idx in range(scenario.warmup_repeats):
+        prompts, sampling_params = build_workload(
+            scenario,
+            vocab_size=vocab_size,
+            seed=seed + idx,
+            token_id_range=token_id_range,
+        )
+        torch.cuda.synchronize(llm.device)
+        tic = time.perf_counter()
+        llm.generate(prompts, sampling_params)
+        torch.cuda.synchronize(llm.device)
+        elapsed.append(time.perf_counter() - tic)
+        llm.sync_all_ranks()
+    return {
+        "repeats": scenario.warmup_repeats,
+        "elapsed_s": elapsed,
+        "total_elapsed_s": float(sum(elapsed)),
+    }
+
+
+def _counter_categories(calls: dict[str, int]) -> dict[str, int]:
+    return {
+        label: int(sum(calls.get(name, 0) for name in names))
+        for label, names in BOTTLENECK_COUNTER_GROUPS.items()
+    }
+
+
+def _label_bottlenecks(
+    *,
+    metrics: dict[str, Any],
+    counters: dict[str, Any],
+) -> list[dict[str, Any]]:
+    calls = counters.get("fallback_wrapper_calls", {})
+    categories = _counter_categories(calls)
+    phase = metrics.get("phase_totals", {})
+    elapsed = float(metrics.get("elapsed_s") or 0.0)
+    prefill = float(phase.get("prefill_forward_s") or 0.0)
+    decode = float(phase.get("decode_forward_s") or 0.0)
+    prepare = float(phase.get("prefill_prepare_s") or 0.0) + float(
+        phase.get("decode_prepare_s") or 0.0
+    )
+    scheduler_overhead = max(0.0, elapsed - prefill - decode - prepare)
+
+    labels: list[dict[str, Any]] = []
+    dominant_phase = "prefill" if prefill >= decode else "decode"
+    labels.append(
+        {
+            "label": f"{dominant_phase} dominated",
+            "evidence": {
+                "prefill_forward_s": prefill,
+                "decode_forward_s": decode,
+                "elapsed_s": elapsed,
+            },
+        }
+    )
+    for label, count in categories.items():
+        if count > 0:
+            labels.append({"label": label, "evidence": {"wrapper_calls": count}})
+    if elapsed > 0 and prepare / elapsed >= 0.05:
+        labels.append(
+            {
+                "label": "metadata construction",
+                "evidence": {"prepare_s": prepare, "fraction_of_elapsed": prepare / elapsed},
+            }
+        )
+    if elapsed > 0 and scheduler_overhead / elapsed >= 0.10:
+        labels.append(
+            {
+                "label": "scheduler overhead",
+                "evidence": {
+                    "estimated_overhead_s": scheduler_overhead,
+                    "fraction_of_elapsed": scheduler_overhead / elapsed,
+                },
+            }
+        )
+    return labels
+
+
+def _aggregate_case_report(
+    *,
+    base: dict[str, Any],
+    rank_payloads: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    rank0 = next((payload for payload in rank_payloads if payload.get("rank") == 0), rank_payloads[0])
+    rank_elapsed = [sum(r["elapsed_s"] for r in payload["repeats"]) for payload in rank_payloads]
+    elapsed_s = float(max(rank_elapsed) if rank_elapsed else 0.0)
+    repeats0 = rank0["repeats"]
+    prompt_tokens = int(sum(repeat["prompt_tokens"] for repeat in repeats0))
+    actual_output_tokens = int(sum(repeat["actual_output_tokens"] for repeat in repeats0))
+    target_output_tokens = int(sum(repeat["target_output_tokens"] for repeat in repeats0))
+    all_requests = [request for repeat in repeats0 for request in repeat["requests"]]
+    ttft_values = [
+        request["ttft_s"] for request in all_requests if request.get("ttft_s") is not None
+    ]
+    topt_values = [
+        request["topt_s"] for request in all_requests if request.get("topt_s") is not None
+    ]
+    latency_values = [
+        request["latency_s"] for request in all_requests if request.get("latency_s") is not None
+    ]
+    phase_totals: dict[str, float | int] = {
+        "prefill_forward_s": max(
+            sum(repeat["phase_totals"]["prefill_forward_s"] for repeat in payload["repeats"])
+            for payload in rank_payloads
+        ),
+        "decode_forward_s": max(
+            sum(repeat["phase_totals"]["decode_forward_s"] for repeat in payload["repeats"])
+            for payload in rank_payloads
+        ),
+        "prefill_prepare_s": max(
+            sum(repeat["phase_totals"]["prefill_prepare_s"] for repeat in payload["repeats"])
+            for payload in rank_payloads
+        ),
+        "decode_prepare_s": max(
+            sum(repeat["phase_totals"]["decode_prepare_s"] for repeat in payload["repeats"])
+            for payload in rank_payloads
+        ),
+        "prefill_input_tokens": int(
+            sum(repeat["phase_totals"]["prefill_input_tokens"] for repeat in repeats0)
+        ),
+        "decode_tokens": int(sum(repeat["phase_totals"]["decode_tokens"] for repeat in repeats0)),
+    }
+
+    prefill_forward_s = float(phase_totals["prefill_forward_s"])
+    decode_forward_s = float(phase_totals["decode_forward_s"])
+    prepare_s = float(phase_totals["prefill_prepare_s"]) + float(
+        phase_totals["decode_prepare_s"]
+    )
+    scheduler_overhead_s = max(0.0, elapsed_s - prefill_forward_s - decode_forward_s - prepare_s)
+
+    aggregate_counters: dict[str, int] = {}
+    aggregate_none_skips: dict[str, int] = {}
+    aggregate_unsupported: dict[str, int] = {}
+    for payload in rank_payloads:
+        counters = payload.get("kernel_counters", {})
+        for name, count in counters.get("fallback_wrapper_calls", {}).items():
+            aggregate_counters[name] = aggregate_counters.get(name, 0) + int(count)
+        for name, count in counters.get("optional_kernel_none_skips", {}).items():
+            aggregate_none_skips[name] = aggregate_none_skips.get(name, 0) + int(count)
+        for name, count in counters.get("unsupported_kernel_skips", {}).items():
+            aggregate_unsupported[name] = aggregate_unsupported.get(name, 0) + int(count)
+
+    kernel_counters = {
+        "fallback_wrapper_calls_total": int(sum(aggregate_counters.values())),
+        "fallback_wrapper_calls": dict(sorted(aggregate_counters.items())),
+        "optional_kernel_none_skips_total": int(sum(aggregate_none_skips.values())),
+        "optional_kernel_none_skips": dict(sorted(aggregate_none_skips.items())),
+        "unsupported_kernel_skips_total": int(sum(aggregate_unsupported.values())),
+        "unsupported_kernel_skips": dict(sorted(aggregate_unsupported.items())),
+        "rank0": rank0.get("kernel_counters", {}),
+    }
+    peak_allocated = max(
+        repeat["memory"]["max_memory_allocated_bytes"]
+        for payload in rank_payloads
+        for repeat in payload["repeats"]
+    )
+    peak_reserved = max(
+        repeat["memory"]["max_memory_reserved_bytes"]
+        for payload in rank_payloads
+        for repeat in payload["repeats"]
+    )
+    kv_cache_per_rank = [int(payload["kv_cache_memory_bytes"]) for payload in rank_payloads]
+    metrics = {
+        "elapsed_s": elapsed_s,
+        "prompt_tokens": prompt_tokens,
+        "actual_output_tokens": actual_output_tokens,
+        "target_output_tokens": target_output_tokens,
+        "ttft_s_mean": _safe_mean(ttft_values),
+        "ttft_s_median": _safe_median(ttft_values),
+        "topt_s_mean": _safe_mean(topt_values),
+        "request_latency_s_mean": _safe_mean(latency_values),
+        "prefill_tokens_per_s": (
+            None
+            if prefill_forward_s <= 0
+            else float(phase_totals["prefill_input_tokens"]) / prefill_forward_s
+        ),
+        "decode_tokens_per_s": (
+            None
+            if decode_forward_s <= 0
+            else float(phase_totals["decode_tokens"]) / decode_forward_s
+        ),
+        "end_to_end_output_tokens_per_s": (
+            None if elapsed_s <= 0 else actual_output_tokens / elapsed_s
+        ),
+        "end_to_end_total_tokens_per_s": (
+            None if elapsed_s <= 0 else (prompt_tokens + actual_output_tokens) / elapsed_s
+        ),
+        "phase_totals": phase_totals,
+        "scheduler_overhead_s": scheduler_overhead_s,
+        "peak_gpu_memory_allocated_bytes": int(peak_allocated),
+        "peak_gpu_memory_reserved_bytes": int(peak_reserved),
+        "kv_cache_memory_bytes_per_rank_max": max(kv_cache_per_rank),
+        "kv_cache_memory_bytes_per_rank": kv_cache_per_rank,
+        "kv_cache_memory_bytes_total_tp": int(sum(kv_cache_per_rank)),
+    }
+    report = {
+        **base,
+        "status": "pass",
+        "metrics": metrics,
+        "kernel_counters": kernel_counters,
+        "bottlenecks": _label_bottlenecks(metrics=metrics, counters=kernel_counters),
+        "requests": all_requests,
+        "repeats": repeats0,
+        "per_rank": list(rank_payloads),
+    }
+    return report
+
+
+def _summary_row(report: dict[str, Any]) -> dict[str, Any]:
+    metrics = report.get("metrics", {})
+    return {
+        "status": report.get("status"),
+        "classification": report.get("classification"),
+        "variant": report.get("variant", {}).get("name"),
+        "scenario": report.get("scenario", {}).get("name"),
+        "report_path": report.get("report_path"),
+        "elapsed_s": metrics.get("elapsed_s"),
+        "ttft_s_mean": metrics.get("ttft_s_mean"),
+        "prefill_tokens_per_s": metrics.get("prefill_tokens_per_s"),
+        "decode_tokens_per_s": metrics.get("decode_tokens_per_s"),
+        "end_to_end_output_tokens_per_s": metrics.get("end_to_end_output_tokens_per_s"),
+        "peak_gpu_memory_allocated_bytes": metrics.get("peak_gpu_memory_allocated_bytes"),
+        "kv_cache_memory_bytes_per_rank_max": metrics.get("kv_cache_memory_bytes_per_rank_max"),
+        "fallback_wrapper_calls_total": report.get("kernel_counters", {}).get(
+            "fallback_wrapper_calls_total"
+        ),
+        "unsupported_kernel_skips_total": report.get("kernel_counters", {}).get(
+            "unsupported_kernel_skips_total"
+        ),
+        "bottleneck_labels": [row["label"] for row in report.get("bottlenecks", [])],
+    }
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _append_jsonl(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _gather_payloads(torch, llm, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if torch.distributed.is_initialized():
+        world_size = torch.distributed.get_world_size(group=llm.tp_cpu_group)
+        gathered: list[Any] = [None for _ in range(world_size)]
+        torch.distributed.all_gather_object(gathered, payload, group=llm.tp_cpu_group)
+        return list(gathered)
+    return [payload]
+
+
+def run_case(
+    *,
+    args: argparse.Namespace,
+    llm,
+    torch,
+    dsv4_kernel,
+    tracer: KernelCallTracer,
+    scenario: Scenario,
+    variant: Variant,
+    case_index: int,
+    output_dir: Path,
+    rank: int,
+    tp_size: int,
+    distributed_init_method: str | None,
+    communication_backend: str,
+    load_init: dict[str, Any],
+    runtime_environment: dict[str, Any],
+    git: dict[str, Any],
+    dtype,
+) -> dict[str, Any] | None:
+    case_name = f"{case_index:03d}_{scenario.name}__{variant.name}"
+    report_path = output_dir / "reports" / f"{case_name}.json"
+    rank_path = output_dir / "reports" / f"{case_name}.rank{rank}.json"
+    variant_env = configure_variant(dsv4_kernel, variant)
+    llm.sync_all_ranks()
+
+    warmup = _run_warmups(
+        llm=llm,
+        torch=torch,
+        scenario=scenario,
+        vocab_size=llm.engine.sampler.vocab_size,
+        seed=args.seed + 100000 + case_index * 1000,
+        token_id_range=args.token_id_range,
+    )
+    llm.sync_all_ranks()
+    tracer.reset()
+    repeats = []
+    error: dict[str, Any] | None = None
+    try:
+        for repeat_idx in range(scenario.repeats):
+            repeat_payload = _run_one_repeat(
+                llm=llm,
+                torch=torch,
+                scenario=scenario,
+                vocab_size=llm.engine.sampler.vocab_size,
+                seed=args.seed + case_index * 1000 + repeat_idx,
+                token_id_range=args.token_id_range,
+            )
+            repeat_payload["repeat_index"] = repeat_idx
+            repeats.append(repeat_payload)
+            llm.sync_all_ranks()
+    except BaseException as exc:
+        error = {
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "traceback": traceback.format_exc(limit=20),
+        }
+
+    kv_cache_memory_bytes = _estimate_kv_cache_bytes_from_config(
+        llm,
+        page_size=args.page_size,
+        dtype=dtype,
+        tp_size=tp_size,
+    )
+    rank_payload = {
+        "rank": rank,
+        "is_primary_rank": rank == 0,
+        "warmup": warmup,
+        "repeats": repeats,
+        "kernel_counters": tracer.snapshot(),
+        "memory_after_case": _rank_memory_report(torch, llm),
+        "kv_cache_memory_bytes": kv_cache_memory_bytes,
+        "runtime_environment": runtime_environment,
+        "error": error,
+    }
+    _write_json(rank_path, rank_payload)
+    gathered = _gather_payloads(torch, llm, rank_payload)
+
+    if rank != 0:
+        return None
+
+    base = {
+        "case_name": case_name,
+        "report_path": str(report_path),
+        "model_path": args.model_path,
+        "git": git,
+        "variant": {
+            "name": variant.name,
+            "description": variant.description,
+            "env": variant.env,
+            **variant_env,
+        },
+        "scenario": {
+            **asdict(scenario),
+            "scheduler_supports_interleaved_arrivals": False,
+            "radix_prefix_enabled": False,
+        },
+        "classification": run_classification(
+            tp_size=tp_size,
+            page_size=args.page_size,
+            smoke=args.smoke,
+        ),
+        "config": {
+            "tensor_parallel_size": tp_size,
+            "rank_count": tp_size,
+            "distributed_init_method": distributed_init_method,
+            "communication_backend": communication_backend,
+            "use_pynccl": False,
+            "page_size": args.page_size,
+            "num_pages": args.num_pages,
+            "memory_ratio": args.memory_ratio,
+            "dtype": args.dtype,
+            "max_seq_len": args.max_seq_len,
+            "max_extend_tokens": args.max_extend_tokens,
+            "max_running_req": args.max_running_req,
+            "token_id_range": args.token_id_range,
+            "radix_prefix_enabled": False,
+        },
+        "load_init": load_init,
+        "runtime_environment_rank0": runtime_environment,
+    }
+    errors = [payload.get("error") for payload in gathered if payload.get("error")]
+    if errors:
+        report = {
+            **base,
+            "status": "fail",
+            "errors": errors,
+            "per_rank": gathered,
+        }
+    else:
+        report = _aggregate_case_report(base=base, rank_payloads=gathered)
+    _write_json(report_path, report)
+    _append_jsonl(output_dir / "matrix.jsonl", _summary_row(report))
+    return report
+
+
+def _init_llm(
+    *,
+    args: argparse.Namespace,
+    scenarios: Sequence[Scenario],
+    rank: int,
+    tp_size: int,
+    distributed_init_method: str | None,
+):
+    import torch
+    from minisgl.distributed import DistributedInfo
+
+    BenchmarkLLM = make_benchmark_llm_class()
+    dtype = _dtype_from_name(args.dtype)
+    max_seq_len = args.max_seq_len or _max_seq_len(scenarios)
+    max_extend_tokens = args.max_extend_tokens or _max_extend_tokens(scenarios)
+    max_running_req = args.max_running_req or _max_running_req(scenarios)
+    kwargs: dict[str, Any] = {}
+    if distributed_init_method is not None:
+        kwargs["distributed_init_method"] = distributed_init_method
+    tic = time.perf_counter()
+    llm = BenchmarkLLM(
+        args.model_path,
+        dtype=dtype,
+        tp_info=DistributedInfo(rank, tp_size),
+        max_running_req=max_running_req,
+        max_seq_len_override=max_seq_len,
+        max_extend_tokens=max_extend_tokens,
+        num_page_override=args.num_pages,
+        page_size=args.page_size,
+        memory_ratio=args.memory_ratio,
+        use_pynccl=False,
+        **kwargs,
+    )
+    torch.cuda.synchronize(llm.device)
+    load_init_s = time.perf_counter() - tic
+    return llm, torch, dtype, {
+        "seconds": load_init_s,
+        "rank": rank,
+        "memory": _rank_memory_report(torch, llm),
+    }
+
+
+def run_matrix(args: argparse.Namespace) -> int:
+    scenarios = _select_scenarios(args)
+    variants = _select_variants(args)
+    rank, tp_size, env_world_size = _tp_rank_size(args)
+    if env_world_size != tp_size:
+        raise SystemExit(
+            f"WORLD_SIZE={env_world_size} does not match tensor parallel size {tp_size}; "
+            "launch TARGET 06 with torchrun --standalone --nproc_per_node=8."
+        )
+    distributed_init_method = _distributed_init_method(args, tp_size)
+    output_dir = Path(args.output_dir)
+    if rank == 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        matrix_path = output_dir / "matrix.jsonl"
+        if matrix_path.exists():
+            matrix_path.unlink()
+
+    from minisgl.kernel import deepseek_v4 as dsv4_kernel
+
+    configure_variant(dsv4_kernel, DEFAULT_VARIANTS[0])
+    tracer = KernelCallTracer(dsv4_kernel)
+    tracer.install()
+    llm = None
+    reports: list[dict[str, Any]] = []
+    failures = 0
+    try:
+        llm, torch, dtype, local_load_init = _init_llm(
+            args=args,
+            scenarios=scenarios,
+            rank=rank,
+            tp_size=tp_size,
+            distributed_init_method=distributed_init_method,
+        )
+        gathered_load_init = _gather_payloads(torch, llm, local_load_init)
+        runtime_environment = collect_runtime_environment(torch, dsv4_kernel, rank=rank)
+        communication_backend = (
+            torch.distributed.get_backend()
+            if torch.distributed.is_initialized()
+            else "single_process"
+        )
+        load_init = {
+            "seconds_max": max(float(payload["seconds"]) for payload in gathered_load_init),
+            "seconds_per_rank": gathered_load_init,
+        }
+        git = git_info()
+        if rank == 0:
+            _write_json(
+                output_dir / "run_config.json",
+                {
+                    "model_path": args.model_path,
+                    "git": git,
+                    "variants": [asdict(variant) for variant in variants],
+                    "scenarios": [asdict(scenario) for scenario in scenarios],
+                    "config": {
+                        "tensor_parallel_size": tp_size,
+                        "distributed_init_method": distributed_init_method,
+                        "communication_backend": communication_backend,
+                        "use_pynccl": False,
+                        "page_size": args.page_size,
+                        "classification": run_classification(
+                            tp_size=tp_size,
+                            page_size=args.page_size,
+                            smoke=args.smoke,
+                        ),
+                        "token_id_range": args.token_id_range,
+                    },
+                    "load_init": load_init,
+                    "runtime_environment_rank0": runtime_environment,
+                },
+            )
+
+        case_index = 0
+        for scenario in scenarios:
+            for variant in variants:
+                report = run_case(
+                    args=args,
+                    llm=llm,
+                    torch=torch,
+                    dsv4_kernel=dsv4_kernel,
+                    tracer=tracer,
+                    scenario=scenario,
+                    variant=variant,
+                    case_index=case_index,
+                    output_dir=output_dir,
+                    rank=rank,
+                    tp_size=tp_size,
+                    distributed_init_method=distributed_init_method,
+                    communication_backend=communication_backend,
+                    load_init=load_init,
+                    runtime_environment=runtime_environment,
+                    git=git,
+                    dtype=dtype,
+                )
+                case_index += 1
+                if rank == 0 and report is not None:
+                    reports.append(report)
+                    if report.get("status") != "pass":
+                        failures += 1
+                        if not args.keep_going:
+                            raise RuntimeError(f"case failed: {report.get('case_name')}")
+    finally:
+        if llm is not None:
+            try:
+                llm.shutdown()
+            except BaseException:
+                if rank == 0:
+                    traceback.print_exc()
+
+    if rank == 0:
+        summary = [_summary_row(report) for report in reports]
+        _write_json(output_dir / "summary.json", summary)
+        print(json.dumps({"summary_path": str(output_dir / "summary.json"), "cases": summary}, indent=2))
+    return 1 if failures else 0
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Torchrun-native DeepSeek V4 TP8 sm80 baseline benchmark matrix."
+    )
+    parser.add_argument("--model-path", default="/models/DeepSeek-V4-Flash")
+    parser.add_argument("--variants", nargs="*", choices=tuple(_variant_map()))
+    parser.add_argument("--scenarios", nargs="*", choices=tuple(_scenario_map()))
+    parser.add_argument("--output-dir", default="/tmp/dsv4_sm80_target06_tp8")
+    parser.add_argument("--tensor-parallel-size", type=int, default=None)
+    parser.add_argument("--tp-rank", type=int, default=None)
+    parser.add_argument("--distributed-init-method", default=None)
+    parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="bfloat16")
+    parser.add_argument("--page-size", type=int, default=256)
+    parser.add_argument("--num-pages", type=int, default=None)
+    parser.add_argument("--memory-ratio", type=float, default=0.9)
+    parser.add_argument("--max-seq-len", type=int, default=None)
+    parser.add_argument("--max-extend-tokens", type=int, default=None)
+    parser.add_argument("--max-running-req", type=int, default=None)
+    parser.add_argument("--prompt-len", type=int, default=None)
+    parser.add_argument("--decode-len", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--repeats", type=int, default=None)
+    parser.add_argument("--warmup-repeats", type=int, default=None)
+    parser.add_argument(
+        "--token-id-range",
+        type=int,
+        default=1024,
+        help="Generate synthetic prompt token ids in [10, token-id-range] by default.",
+    )
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--keep-going", action="store_true")
+    parser.add_argument("--list-scenarios", action="store_true")
+    parser.add_argument("--list-variants", action="store_true")
+    args = parser.parse_args(argv)
+    if args.page_size <= 0:
+        parser.error("--page-size must be positive")
+    for name in ("prompt_len", "decode_len", "batch_size", "repeats"):
+        value = getattr(args, name)
+        if value is not None and value <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.warmup_repeats is not None and args.warmup_repeats < 0:
+        parser.error("--warmup-repeats must be non-negative")
+    if args.memory_ratio <= 0:
+        parser.error("--memory-ratio must be positive")
+    if args.token_id_range <= 0:
+        parser.error("--token-id-range must be positive")
+    if args.num_pages is not None and args.num_pages <= 1:
+        parser.error("--num-pages must be greater than 1")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    if args.list_scenarios:
+        for scenario in DEFAULT_SCENARIOS:
+            print(f"{scenario.name}\t{scenario.kind}\t{scenario.description}")
+        return
+    if args.list_variants:
+        for variant in DEFAULT_VARIANTS:
+            print(f"{variant.name}\t{variant.description}")
+        return
+    raise SystemExit(run_matrix(args))
+
+
+if __name__ == "__main__":
+    main()

@@ -18,4 +18,28 @@
 | --- | --- | --- | --- |
 | TARGET 05.5 | `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md` | planned | DSV4 sm80 高性能算子替换研发计划已创建。后续每次替代 kernel 时，需要在该文件的 R&D Completion Matrix 中记录 kernel、mode、toggle、correctness、microbench、E2E perf、decision 和 artifact 路径。 |
 | TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | 已新增 `MINISGL_DSV4_SM80_V0_BF16` 白名单 bundle、语义测试、wrapper bundle smoke、最小离线 E2E smoke 脚本，并验证 `/models/DeepSeek-V4-Flash` fallback/v0_bf16 在 A100 sm80 TP=4 下均生成 4 tokens。Artifact: `/tmp/dsv4_v0_fallback_smoke.json`, `/tmp/dsv4_v0_bf16_smoke.json`。正式性能矩阵交给 TARGET 06。 |
-| TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | planned | 等 TARGET 05.7 E2E smoke 通过后，使用 v0 bf16 bundle 作为主要 baseline 进入可重复性能评测、吞吐统计和瓶颈归因。 |
+| TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | 已新增 torchrun-native TP8 benchmark harness `benchmark/offline/deepseek_v4_perf_matrix.py`，默认 page_size=256、PyTorch/NCCL、radix disabled，覆盖 fallback/v0_bf16、prefill/decode/shared-prefix 场景，输出 JSON/JSONL、环境、内存、fallback counters 和瓶颈标签；修复 Engine page table 对 page_size=256 尾页写入的对齐问题；新增正式评测前的文本正确性 smoke `benchmark/offline/deepseek_v4_text_smoke.py`，同样默认 TP8/page_size=256，并记录回复文本、解析结果和乱码/复读/期望答案检查。本轮修复了 TP8 正确性问题：DSV4 TP routed experts 缺失 all-reduce、`attn_sink` 权重未按 local heads 分片、fallback q_norm_rope 未原地写回 query，并补齐 fallback two-source sparse attention 读取压缩 cache。验证：纯逻辑/schema 测试通过，TP8 page_size=256 tiny smoke 通过 fallback/v0_bf16，artifact: `/tmp/dsv4_target06_smoke_variants/summary.json`；decode phase smoke artifact: `/tmp/dsv4_target06_smoke_decode/summary.json`；text smoke artifacts: `/tmp/dsv4_text_smoke_after_qnorm_fix.json`、`/tmp/dsv4_text_smoke_full_after_qnorm_fix.json`，fallback/v0_bf16 在 3 条简单提示上均为 `pass`。正式长 baseline 可用 TARGET 06 suggested command 直接生成，smoke/debug 结果不计入官方 baseline。 |
+
+Target 6 baseline命令
+
+```python
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_perf_matrix.py \
+  --model-path /models/DeepSeek-V4-Flash \
+  --variants fallback v0_bf16 \
+  --page-size 256 \
+  --output-dir /tmp/dsv4_sm80_target06_tp8 \
+  --keep-going
+  ```
+
+Target 6 text correctness smoke命令
+
+```python
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_text_smoke.py \
+  --model-path /models/DeepSeek-V4-Flash \
+  --variants fallback v0_bf16 \
+  --output /tmp/dsv4_text_smoke.json
+  ```

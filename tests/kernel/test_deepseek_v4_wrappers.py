@@ -375,6 +375,29 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     assert restored.dtype is rope_x.dtype
     assert torch.allclose(restored, rope_x, atol=1e-5)
 
+    q_rope = torch.randn(3, 2, 8, dtype=torch.bfloat16)
+    q_positions = torch.tensor([0, 3, 9], dtype=torch.int64)
+    expected_q_rope = q_rope.clone()
+    expected_q_fp32 = expected_q_rope.float()
+    expected_q_scale = torch.rsqrt(expected_q_fp32.square().mean(-1, keepdim=True) + 1e-6)
+    expected_q_rope.copy_((expected_q_fp32 * expected_q_scale).to(expected_q_rope.dtype))
+    dsv4_kernel.apply_rotary_tail(
+        expected_q_rope,
+        q_positions,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    q_rope_ptr = q_rope.data_ptr()
+    returned_q_rope = dsv4_kernel.q_norm_rope_fallback(
+        q_rope,
+        q_positions,
+        rms_norm_eps=1e-6,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    assert returned_q_rope.data_ptr() == q_rope_ptr
+    assert torch.allclose(q_rope.float(), expected_q_rope.float(), atol=1e-2, rtol=1e-2)
+
     q = torch.randn(2, 2, 4, dtype=torch.float32)
     cache = torch.randn(4, 4, dtype=torch.float32)
     out = dsv4_kernel.paged_mqa_attention_fallback(
@@ -577,6 +600,65 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     )
     assert wo_out.shape == (2, 10)
     assert wo_out.dtype is wo_o.dtype
+
+
+def test_dsv4_rotary_yarn_fallback_matches_configured_ramp_range():
+    rotary_dim = 64
+    base = 10000.0
+    original_seq_len = 65536
+    factor = 16.0
+    beta_fast = 32
+    beta_slow = 1
+    positions = torch.tensor([0, 127, 511, 1023], dtype=torch.int64)
+    x = torch.randn(positions.numel(), 2, 96, dtype=torch.float32)
+
+    def correction_dim(num_rotations: float) -> float:
+        return (
+            rotary_dim
+            * torch.log(torch.tensor(original_seq_len / (num_rotations * 2 * torch.pi))).item()
+            / (2 * torch.log(torch.tensor(base)).item())
+        )
+
+    low = max(int(torch.floor(torch.tensor(correction_dim(beta_fast))).item()), 0)
+    high = min(
+        int(torch.ceil(torch.tensor(correction_dim(beta_slow))).item()),
+        rotary_dim // 2 - 1,
+    )
+    assert high == rotary_dim // 2 - 1
+
+    inv_freq = 1.0 / (
+        base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+    )
+    ramp = torch.clamp(
+        (torch.arange(rotary_dim // 2, dtype=torch.float32) - low) / max(high - low, 1),
+        0,
+        1,
+    )
+    smooth = 1 - ramp
+    inv_freq = inv_freq / factor * (1 - smooth) + inv_freq * smooth
+    freqs = torch.outer(positions.to(torch.float32), inv_freq)
+    cos = freqs.cos().unsqueeze(-2)
+    sin = freqs.sin().unsqueeze(-2)
+    rope = x[..., -rotary_dim:].float().unflatten(-1, (-1, 2))
+    a, b = rope[..., 0], rope[..., 1]
+    expected = x.clone()
+    expected[..., -rotary_dim:] = torch.stack(
+        (a * cos - b * sin, a * sin + b * cos),
+        dim=-1,
+    ).flatten(-2)
+
+    actual = dsv4_kernel.apply_rotary_tail(
+        x.clone(),
+        positions,
+        rotary_dim=rotary_dim,
+        base=base,
+        original_seq_len=original_seq_len,
+        factor=factor,
+        beta_fast=beta_fast,
+        beta_slow=beta_slow,
+    )
+
+    assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
 
 
 def test_indexer_bf16_query_logits_and_topk_are_fallback_clean():

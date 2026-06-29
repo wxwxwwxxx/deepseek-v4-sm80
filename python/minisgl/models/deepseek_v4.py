@@ -256,7 +256,7 @@ class DSV4Attention(BaseOP):
         self.rope_factor = config.rope_factor
         self.beta_fast = config.beta_fast
         self.beta_slow = config.beta_slow
-        self.attn_sink = torch.empty(config.num_qo_heads, dtype=torch.float32)
+        self.attn_sink = torch.empty(self.num_local_heads, dtype=torch.float32)
         self.wq_a = DSV4Linear(
             config.hidden_size,
             config.q_lora_rank,
@@ -546,6 +546,8 @@ class DSV4MoEGate(BaseOP):
 class DSV4FusedRoutedExperts(BaseOP):
     def __init__(self, config: ModelConfig):
         tp = get_tp_info()
+        self._tp_size = tp.size
+        self._comm = DistributedCommunicator()
         local_intermediate = div_even(config.moe_intermediate_size, tp.size)
         self.swiglu_limit = config.swiglu_limit or 0.0
         self.w13_weight = torch.empty(
@@ -618,6 +620,8 @@ class DSV4FusedRoutedExperts(BaseOP):
             swiglu_limit=self.swiglu_limit,
         )
         if grouped is not None:
+            if self._tp_size > 1:
+                grouped = self._comm.all_reduce(grouped.float()).to(grouped.dtype)
             return grouped
 
         y = torch.zeros_like(hidden_states, dtype=torch.float32)
@@ -630,6 +634,8 @@ class DSV4FusedRoutedExperts(BaseOP):
                 hidden_states[token_idx],
                 weights[token_idx, top_idx, None],
             ).float()
+        if self._tp_size > 1:
+            y = self._comm.all_reduce(y)
         return y.to(hidden_states.dtype)
 
 

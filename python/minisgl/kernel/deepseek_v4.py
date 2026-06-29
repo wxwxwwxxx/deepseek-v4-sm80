@@ -877,7 +877,9 @@ def q_norm_rope_fallback(
                 return q
         except Exception:
             pass
-    q = q * torch.rsqrt(q.float().square().mean(-1, keepdim=True) + rms_norm_eps).to(q.dtype)
+    q_fp32 = q.float()
+    scale = torch.rsqrt(q_fp32.square().mean(-1, keepdim=True) + rms_norm_eps)
+    q.copy_((q_fp32 * scale).to(q.dtype))
     return apply_rotary_tail(
         q,
         positions,

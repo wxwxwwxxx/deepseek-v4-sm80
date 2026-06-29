@@ -12,7 +12,8 @@ from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
-from minisgl.models.deepseek_v4 import DSV4MoEGate
+from minisgl.kernel import deepseek_v4 as dsv4_kernel
+from minisgl.models.deepseek_v4 import DSV4FusedRoutedExperts, DSV4MoEGate
 from minisgl.models.register import get_model_class
 
 
@@ -57,10 +58,10 @@ def _tiny_dsv4_config() -> ModelConfig:
     )
 
 
-def _reset_globals() -> None:
+def _reset_globals(*, tp_rank: int = 0, tp_size: int = 1) -> None:
     core._GLOBAL_CTX = None
     dist_info._TP_INFO = None
-    set_tp_info(0, 1)
+    set_tp_info(tp_rank, tp_size)
 
 
 
@@ -251,3 +252,72 @@ def test_deepseek_v4_moe_gate_matches_sqrtsoftplus_oracle():
 
     assert torch.equal(indices, expected_indices)
     assert torch.allclose(weights, expected_weights)
+
+
+def test_deepseek_v4_routed_experts_all_reduce_tp_sharded_output(monkeypatch):
+    _reset_globals(tp_rank=0, tp_size=2)
+    cfg = _tiny_dsv4_config()
+    experts = DSV4FusedRoutedExperts(cfg)
+
+    class FakeComm:
+        def __init__(self) -> None:
+            self.calls: list[torch.Tensor] = []
+
+        def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+            self.calls.append(x.clone())
+            return x + 10.0
+
+    fake_comm = FakeComm()
+    experts._comm = fake_comm
+
+    def fake_expert_forward(local_idx, x, weights):
+        del weights
+        return torch.full_like(x, float(local_idx + 1), dtype=x.dtype)
+
+    monkeypatch.setattr(experts, "_expert_forward", fake_expert_forward)
+    monkeypatch.setattr(dsv4_kernel, "moe_route_dispatch_bf16_grouped", lambda *_, **__: None)
+
+    hidden = torch.zeros(3, cfg.hidden_size, dtype=torch.bfloat16)
+    weights = torch.ones(3, 1, dtype=torch.float32)
+    indices = torch.tensor([[0], [1], [0]], dtype=torch.long)
+
+    out = experts.forward(hidden, weights, indices)
+
+    expected_local = torch.tensor([1.0, 2.0, 1.0], dtype=torch.float32).view(3, 1)
+    expected = (expected_local + 10.0).expand_as(hidden).to(torch.bfloat16)
+    assert len(fake_comm.calls) == 1
+    assert fake_comm.calls[0].dtype is torch.float32
+    assert torch.equal(out, expected)
+
+
+def test_deepseek_v4_grouped_routed_experts_all_reduce_tp_sharded_output(monkeypatch):
+    _reset_globals(tp_rank=0, tp_size=2)
+    cfg = _tiny_dsv4_config()
+    experts = DSV4FusedRoutedExperts(cfg)
+
+    class FakeComm:
+        def __init__(self) -> None:
+            self.calls: list[torch.Tensor] = []
+
+        def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+            self.calls.append(x.clone())
+            return x + 20.0
+
+    fake_comm = FakeComm()
+    experts._comm = fake_comm
+
+    hidden = torch.zeros(2, cfg.hidden_size, dtype=torch.bfloat16)
+    weights = torch.ones(2, 1, dtype=torch.float32)
+    indices = torch.tensor([[0], [1]], dtype=torch.long)
+    grouped_local = torch.full_like(hidden, 3.0)
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "moe_route_dispatch_bf16_grouped",
+        lambda *_, **__: grouped_local,
+    )
+
+    out = experts.forward(hidden, weights, indices)
+
+    assert len(fake_comm.calls) == 1
+    assert fake_comm.calls[0].dtype is torch.float32
+    assert torch.equal(out, torch.full_like(hidden, 23.0))

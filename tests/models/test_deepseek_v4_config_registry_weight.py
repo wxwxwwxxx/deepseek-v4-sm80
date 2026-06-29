@@ -13,7 +13,7 @@ from minisgl.distributed import set_tp_info
 from minisgl.models import create_model
 from minisgl.models.config import ModelConfig
 from minisgl.models.deepseek_v4 import DeepseekV4ForCausalLM
-from minisgl.models.weight import _remap_deepseek_v4_weight_name
+from minisgl.models.weight import _remap_deepseek_v4_weight_name, _shard_deepseek_v4_tensor
 from minisgl.utils import cached_load_hf_config, torch_dtype
 
 MODEL_DIR = Path("/models/DeepSeek-V4-Flash")
@@ -94,6 +94,7 @@ def test_deepseek_v4_registry_builds_model_skeleton_on_meta():
     assert state["model.layers.0.self_attn.wq_a.weight"].dtype is torch.float8_e4m3fn
     assert state["model.layers.0.self_attn.wq_a.weight_scale_inv"].shape == torch.Size([8, 32])
     assert state["model.layers.0.self_attn.wq_a.weight_scale_inv"].dtype is torch.float8_e8m0fnu
+    assert state["model.layers.0.self_attn.attn_sink"].shape == torch.Size([64])
     assert state["model.layers.0.self_attn.wkv.weight"].shape == torch.Size([512, 4096])
     assert state["model.layers.0.self_attn.wo_a.weight"].shape == torch.Size([8192, 4096])
     assert state["model.layers.0.self_attn.wo_b.weight"].shape == torch.Size([4096, 8192])
@@ -116,6 +117,16 @@ def test_deepseek_v4_registry_builds_model_skeleton_on_meta():
     assert state["model.layers.0.mlp.experts.w2_weight_scale_inv"].shape == torch.Size([256, 4096, 64])
     assert state["model.layers.0.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size([4096, 4096])
     assert state["model.layers.0.mlp.shared_experts.down_proj.weight"].shape == torch.Size([4096, 2048])
+
+
+def test_deepseek_v4_tp8_model_uses_local_attention_sink_shape():
+    set_tp_info(3, 8)
+    cfg = ModelConfig.from_hf(_local_hf_config())
+
+    with torch.device("meta"), torch_dtype(torch.bfloat16):
+        state = create_model(cfg).state_dict()
+
+    assert state["model.layers.0.self_attn.attn_sink"].shape == torch.Size([8])
 
 
 def test_deepseek_v4_checkpoint_metadata_maps_to_runtime_shapes():
@@ -154,6 +165,14 @@ def test_deepseek_v4_checkpoint_metadata_maps_to_runtime_shapes():
     assert state["model.layers.0.mlp.experts.w13_weight"].shape[1:] == torch.Size([2, 2048, 2048])
     assert _tensor_shape("layers.0.ffn.experts.0.w2.weight") == (4096, 1024)
     assert state["model.layers.0.mlp.experts.w2_weight"].shape[1:] == torch.Size([4096, 1024])
+
+
+def test_deepseek_v4_weight_sharding_splits_attention_sink_by_local_heads():
+    raw = torch.arange(64, dtype=torch.float32)
+
+    shard = _shard_deepseek_v4_tensor("model.layers.0.self_attn.attn_sink", raw, r=3, n=8)
+
+    assert torch.equal(shard, torch.arange(24, 32, dtype=torch.float32))
 
 
 

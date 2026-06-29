@@ -177,7 +177,7 @@ def test_dsv4_swa_window_boundaries_below_equal_and_above_128():
 
 def test_dsv4_ratio_dispatch_and_fallback_attention_shapes():
     cfg = _tiny_dsv4_config([0, 4, 128])
-    _install_context(cfg, page_size=1, table_bases=[0], max_len=260)
+    ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=260)
     batch = _prepare_batch([_req(0, 0, 256)])
     backend = core.get_global_ctx().attn_backend
     backend.prepare_metadata(batch)
@@ -186,6 +186,12 @@ def test_dsv4_ratio_dispatch_and_fallback_attention_shapes():
     assert [backend.get_layer_compress_ratio(i) for i in range(3)] == [0, 4, 128]
     assert meta.c4_out_loc[:3].tolist() == [3 // 4, 7 // 4, 11 // 4]
     assert meta.c128_out_loc.tolist() == [127 // 128, 255 // 128]
+
+    ctx.kv_cache.swa_cache(0).zero_()
+    ctx.kv_cache.swa_cache(1).zero_()
+    ctx.kv_cache.swa_cache(2).zero_()
+    ctx.kv_cache.c4_cache(1).zero_()
+    ctx.kv_cache.c128_cache(2).zero_()
 
     q = torch.randn(256, 4, 8, dtype=torch.bfloat16)
     kv = torch.randn(256, 8, dtype=torch.bfloat16)
@@ -201,6 +207,37 @@ def test_dsv4_ratio_dispatch_and_fallback_attention_shapes():
         )
         assert out.shape == q.shape
         assert torch.isfinite(out.float()).all()
+
+
+def test_dsv4_fallback_attention_reads_compressed_cache_as_separate_source():
+    cfg = _tiny_dsv4_config([4])
+    ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=16)
+    batch = _prepare_decode_batch([_req(0, 0, 8, cached_len=7)])
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+
+    ctx.kv_cache.swa_cache(0).zero_()
+    ctx.kv_cache.c4_cache(0).zero_()
+    ctx.kv_cache.c4_cache(0)[0, 0] = 10.0
+    ctx.kv_cache.c4_cache(0)[1, 0] = 20.0
+
+    q = torch.zeros(1, cfg.num_qo_heads, cfg.head_dim, dtype=torch.bfloat16)
+    q[..., 0] = 8.0
+    kv = torch.zeros(1, cfg.head_dim, dtype=torch.bfloat16)
+
+    out = backend.forward(
+        q,
+        kv,
+        kv,
+        0,
+        batch,
+        compress_ratio=4,
+        attn_sink=None,
+        swa_cache_written=True,
+    )
+
+    assert out[..., 0].float().mean().item() > 15.0
+    assert torch.allclose(out[..., 1:].float(), torch.zeros_like(out[..., 1:].float()))
 
 
 def test_dsv4_indexer_select_updates_c4_sparse_metadata():
