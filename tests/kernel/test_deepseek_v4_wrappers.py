@@ -2,20 +2,61 @@ from __future__ import annotations
 
 import inspect
 
+import minisgl.attention.deepseek_v4 as dsv4_attention
+import minisgl.models.deepseek_v4 as dsv4_model
 import pytest
 import torch
 import torch.nn.functional as F
-
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
 from minisgl.models.config import ModelConfig, RotaryConfig
-import minisgl.attention.deepseek_v4 as dsv4_attention
-import minisgl.models.deepseek_v4 as dsv4_model
 
 
 def _has_sm80_cuda() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
+
+
+def _assert_full_topk_transform(
+    out: dsv4_kernel.DSV4TopKTransformOutput,
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    width: int,
+    ratio: int,
+) -> None:
+    assert out.raw_indices.shape == (scores.shape[0], width)
+    assert out.page_indices.shape == out.raw_indices.shape
+    assert out.full_indices.shape == out.raw_indices.shape
+    cpu_scores = scores.detach().cpu()
+    cpu_lens = seq_lens.detach().cpu().tolist()
+    cpu_pages = page_table.detach().cpu()
+    raw = out.raw_indices.detach().cpu()
+    pages = out.page_indices.detach().cpu()
+    full = out.full_indices.detach().cpu()
+    for row, seq_len in enumerate(cpu_lens):
+        valid_raw = [int(x) for x in raw[row].tolist() if x >= 0]
+        if seq_len <= width:
+            assert raw[row, :seq_len].tolist() == list(range(seq_len))
+            assert raw[row, seq_len:].eq(-1).all()
+        else:
+            expected = torch.topk(cpu_scores[row, :seq_len], width, sorted=False).indices.tolist()
+            assert sorted(valid_raw) == sorted(int(x) for x in expected)
+        for raw_idx, page_idx, full_idx in zip(
+            raw[row].tolist(),
+            pages[row].tolist(),
+            full[row].tolist(),
+        ):
+            if raw_idx < 0:
+                assert page_idx == -1
+                assert full_idx == -1
+                continue
+            physical_page = int(cpu_pages[row, raw_idx // page_size].item())
+            expected_page = physical_page * page_size + raw_idx % page_size
+            assert page_idx == expected_page
+            assert full_idx == expected_page * ratio + (ratio - 1)
 
 
 def _tiny_dsv4_cache_config(compress_ratios: list[int]) -> ModelConfig:
@@ -296,6 +337,42 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     assert padded.shape == (1, 512)
     assert padded[0, :2].tolist() == [1, 2]
     assert padded[0, 2:].eq(-1).all()
+
+    scores = torch.tensor(
+        [
+            [0.1, 0.2, 0.3, -1.0, -2.0, -3.0, -4.0, -5.0],
+            [0.0, 5.0, 1.0, 7.0, 3.0, 6.0, 2.0, 4.0],
+            [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    seq_lens = torch.tensor([3, 7, 0], dtype=torch.int32)
+    page_table = torch.tensor(
+        [
+            [10, 11],
+            [20, 21],
+            [30, 31],
+        ],
+        dtype=torch.int32,
+    )
+    full_topk = dsv4_kernel.topk_transform_512_full_fallback(
+        scores,
+        seq_lens,
+        page_table,
+        page_size=4,
+        width=4,
+        ratio=4,
+    )
+    assert full_topk.backend == "torch"
+    _assert_full_topk_transform(
+        full_topk,
+        scores,
+        seq_lens,
+        page_table,
+        page_size=4,
+        width=4,
+        ratio=4,
+    )
 
     wo_o = torch.randn(2, 2, 8, dtype=torch.bfloat16)
     wo_weight = torch.randn(10, 8, dtype=torch.float32).clamp(-4, 4).to(dsv4_kernel.fp8_dtype())
@@ -687,6 +764,44 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     assert torch.equal(actual_topk, expected_topk)
     monkeypatch.delenv("MINISGL_DSV4_SM80_TOPK", raising=False)
 
+    topk_scores = torch.randn(3, 1024, device=device, dtype=torch.float32)
+    topk_seq_lens = torch.tensor([16, 900, 1024], device=device, dtype=torch.int32)
+    topk_page_table = torch.arange(3 * 16, device=device, dtype=torch.int32).reshape(3, 16) + 100
+    expected_full_topk = dsv4_kernel.topk_transform_512_full_fallback(
+        topk_scores,
+        topk_seq_lens,
+        topk_page_table,
+        page_size=64,
+        width=512,
+        ratio=4,
+    )
+    assert expected_full_topk.backend == "torch"
+    monkeypatch.setenv("MINISGL_DSV4_SM80_TOPK", "1")
+    actual_full_topk = dsv4_kernel.topk_transform_512_full_fallback(
+        topk_scores,
+        topk_seq_lens,
+        topk_page_table,
+        page_size=64,
+        width=512,
+        ratio=4,
+    )
+    torch.cuda.synchronize()
+    assert actual_full_topk.backend in {"torch", "local_cuda_v1"}
+    _assert_full_topk_transform(
+        actual_full_topk,
+        topk_scores,
+        topk_seq_lens,
+        topk_page_table,
+        page_size=64,
+        width=512,
+        ratio=4,
+    )
+    for row in range(topk_scores.shape[0]):
+        assert sorted(actual_full_topk.raw_indices[row].cpu().tolist()) == sorted(
+            expected_full_topk.raw_indices[row].cpu().tolist()
+        )
+    monkeypatch.delenv("MINISGL_DSV4_SM80_TOPK", raising=False)
+
     q_attn = torch.randn(4, 3, 64, device=device, dtype=torch.bfloat16)
     cache_attn = torch.randn(192, 64, device=device, dtype=torch.bfloat16)
     attn_contexts = [
@@ -778,8 +893,10 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     assert torch.allclose(actual_compress, expected_compress, atol=1e-4, rtol=1e-4)
 
     x_linear = torch.randn(5, 128, device=device, dtype=torch.bfloat16)
-    fp8_weight = torch.randn(96, 128, device=device, dtype=torch.float32).clamp(-4, 4).to(
-        dsv4_kernel.fp8_dtype()
+    fp8_weight = (
+        torch.randn(96, 128, device=device, dtype=torch.float32)
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
     )
     fp8_scale = torch.rand(
         dsv4_kernel.scale_dim(96),
@@ -806,12 +923,16 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
 
     wo_o = torch.randn(5, 2, 64, device=device, dtype=torch.bfloat16)
     wo_rank = 48
-    wo_weight = torch.randn(
-        2 * wo_rank,
-        wo_o.shape[-1],
-        device=device,
-        dtype=torch.float32,
-    ).clamp(-4, 4).to(dsv4_kernel.fp8_dtype())
+    wo_weight = (
+        torch.randn(
+            2 * wo_rank,
+            wo_o.shape[-1],
+            device=device,
+            dtype=torch.float32,
+        )
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
+    )
     wo_scale = torch.rand(
         dsv4_kernel.scale_dim(2 * wo_rank),
         dsv4_kernel.scale_dim(wo_o.shape[-1]),
@@ -839,9 +960,7 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     monkeypatch.delenv("MINISGL_DSV4_SM80_WO_A_BF16", raising=False)
 
     fp4_weight = torch.randint(-128, 127, (96, 64), device=device, dtype=torch.int8)
-    fp4_scale = torch.rand(96, 4, device=device, dtype=torch.float32).to(
-        dsv4_kernel.e8m0_dtype()
-    )
+    fp4_scale = torch.rand(96, 4, device=device, dtype=torch.float32).to(dsv4_kernel.e8m0_dtype())
     expected_fp4 = dsv4_kernel.quantized_linear_ref(
         x_linear,
         fp4_weight,

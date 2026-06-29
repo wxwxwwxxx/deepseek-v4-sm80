@@ -17,9 +17,8 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
-
+from minisgl.kernel.utils import load_jit
 from minisgl.utils import div_ceil
-
 
 WeightKind = Literal["bf16", "fp8", "fp4"]
 KernelStatus = Literal["native", "fallback", "unsupported", "todo"]
@@ -52,6 +51,14 @@ class DSV4PagedMQAMetadata:
     @property
     def row_count(self) -> int:
         return int(self.lengths.numel())
+
+
+@dataclass(frozen=True)
+class DSV4TopKTransformOutput:
+    raw_indices: torch.Tensor
+    page_indices: torch.Tensor
+    full_indices: torch.Tensor
+    backend: str
 
 
 DSV4_KERNEL_INVENTORY: tuple[DSV4KernelInventoryEntry, ...] = (
@@ -496,7 +503,11 @@ def dsv4_kernel_inventory_by_wrapper() -> dict[str, DSV4KernelInventoryEntry]:
 
 def unsupported_kernel(name: str, detail: str) -> None:
     cap = detect_dsv4_kernel_capabilities()
-    sm = "no CUDA" if cap.cuda_capability is None else f"sm{cap.cuda_capability[0]}{cap.cuda_capability[1]}"
+    sm = (
+        "no CUDA"
+        if cap.cuda_capability is None
+        else f"sm{cap.cuda_capability[0]}{cap.cuda_capability[1]}"
+    )
     raise NotImplementedError(f"{name} is not available for {sm}: {detail}")
 
 
@@ -711,9 +722,11 @@ def apply_rotary_tail(
     if original_seq_len > 0:
 
         def correction_dim(num_rotations: float) -> float:
-            return rotary_dim * math.log(
-                original_seq_len / (num_rotations * 2 * math.pi)
-            ) / (2 * math.log(base))
+            return (
+                rotary_dim
+                * math.log(original_seq_len / (num_rotations * 2 * math.pi))
+                / (2 * math.log(base))
+            )
 
         low = max(math.floor(correction_dim(beta_fast)), 0)
         high = min(math.ceil(correction_dim(beta_slow)), rotary_dim // 2 - 1)
@@ -869,9 +882,7 @@ def k_norm_rope_cache_fallback(
         dim = out.shape[-1]
         flat = out.reshape(-1, dim)
         if cache.shape[-1] != dim:
-            raise ValueError(
-                f"DSV4 K cache dim mismatch: cache dim={cache.shape[-1]} kv dim={dim}"
-            )
+            raise ValueError(f"DSV4 K cache dim mismatch: cache dim={cache.shape[-1]} kv dim={dim}")
         loc = out_loc.to(device=cache.device, dtype=torch.long).reshape(-1)
         if loc.numel() != flat.shape[0]:
             raise ValueError(
@@ -1021,11 +1032,7 @@ def get_paged_mqa_logits_metadata_fallback(
 
     lengths = torch.tensor(lengths_list, dtype=torch.int32, device=out_device)
     indptr = F.pad(lengths.cumsum(dim=0), (1, 0))
-    indices = (
-        torch.cat(rows)
-        if rows
-        else torch.empty(0, dtype=torch.int32, device=out_device)
-    )
+    indices = torch.cat(rows) if rows else torch.empty(0, dtype=torch.int32, device=out_device)
     max_length = max(lengths_list) if lengths_list else 0
     return DSV4PagedMQAMetadata(
         indptr=indptr,
@@ -1442,6 +1449,187 @@ def moe_route_dispatch_bf16_grouped(
         return None
 
 
+@lru_cache(maxsize=1)
+def _local_dsv4_topk_v1_module(width: int):
+    return load_jit(
+        "dsv4_topk_v1",
+        str(int(width)),
+        cuda_files=["dsv4_topk_v1.cu"],
+        cuda_wrappers=[
+            ("topk_transform", f"DSV4TopKTransformKernel<{int(width)}>::run"),
+        ],
+    )
+
+
+def _run_local_cuda_topk_transform_512(
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    page_indices: torch.Tensor,
+    page_size: int,
+    raw_indices: torch.Tensor,
+    width: int,
+) -> bool:
+    if not (
+        dsv4_env_flag("MINISGL_DSV4_SM80_TOPK")
+        and scores.is_cuda
+        and detect_dsv4_kernel_capabilities().is_sm80
+        and width in (512, 1024)
+    ):
+        return False
+    try:
+        module = _local_dsv4_topk_v1_module(int(width))
+        module.topk_transform(
+            scores.contiguous(),
+            seq_lens.contiguous(),
+            page_table.contiguous(),
+            page_indices,
+            page_size,
+            raw_indices,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _validate_full_topk_inputs(
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    width: int,
+    ratio: int,
+) -> None:
+    if scores.dim() != 2:
+        raise ValueError(f"scores must have shape [B, max_seq_len], got {tuple(scores.shape)}")
+    if seq_lens.dim() != 1 or seq_lens.shape[0] != scores.shape[0]:
+        raise ValueError("seq_lens must be int32/int64 with shape [B]")
+    if page_table.dim() != 2 or page_table.shape[0] != scores.shape[0]:
+        raise ValueError("page_table must have shape [B, num_pages]")
+    if scores.shape[1] > 0 and page_table.shape[1] == 0:
+        raise ValueError("page_table must contain at least one page when scores are non-empty")
+    if width <= 0:
+        raise ValueError(f"width must be positive, got {width}")
+    if page_size <= 0 or page_size & (page_size - 1):
+        raise ValueError(f"page_size must be a positive power of two, got {page_size}")
+    if ratio <= 0:
+        raise ValueError(f"ratio must be positive, got {ratio}")
+
+
+def _topk_transform_512_full_torch(
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    width: int,
+    ratio: int,
+) -> DSV4TopKTransformOutput:
+    _validate_full_topk_inputs(
+        scores,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        width=width,
+        ratio=ratio,
+    )
+    batch, max_seq_len = scores.shape
+    device = scores.device
+    raw_indices = torch.full((batch, width), -1, dtype=torch.int32, device=device)
+    page_indices = torch.full_like(raw_indices, -1)
+    full_indices = torch.full_like(raw_indices, -1)
+    if batch == 0 or max_seq_len == 0:
+        return DSV4TopKTransformOutput(raw_indices, page_indices, full_indices, "torch")
+
+    lens = seq_lens.to(device=device, dtype=torch.long).clamp(min=0, max=max_seq_len)
+    actual_k = min(width, max_seq_len)
+    if actual_k > 0:
+        positions = torch.arange(max_seq_len, dtype=torch.long, device=device)
+        masked_scores = scores.float().clone()
+        masked_scores.masked_fill_(positions[None, :] >= lens[:, None], float("-inf"))
+        _values, topk_raw = torch.topk(masked_scores, k=actual_k, dim=1, largest=True, sorted=False)
+        raw_indices[:, :actual_k] = topk_raw.to(torch.int32)
+
+    sequential = torch.arange(width, dtype=torch.int32, device=device).expand(batch, -1)
+    sequential_valid = sequential.to(torch.long) < lens[:, None]
+    raw_indices = torch.where(
+        (lens <= width)[:, None],
+        torch.where(sequential_valid, sequential, torch.full_like(sequential, -1)),
+        raw_indices,
+    )
+
+    page_bits = (page_size - 1).bit_length()
+    page_mask = page_size - 1
+    page_idx = raw_indices.to(torch.long) >> page_bits
+    offset = raw_indices.to(torch.long) & page_mask
+    valid = raw_indices >= 0
+    valid = valid & (page_idx >= 0) & (page_idx < page_table.shape[1])
+    clamped_page_idx = page_idx.clamp(min=0, max=max(page_table.shape[1] - 1, 0))
+    physical_pages = torch.gather(
+        page_table.to(device=device, dtype=torch.int32),
+        dim=1,
+        index=clamped_page_idx,
+    ).to(torch.long)
+    valid = valid & (physical_pages >= 0)
+    page_values = (physical_pages << page_bits) | offset
+    page_indices = torch.where(valid, page_values.to(torch.int32), page_indices)
+    full_values = page_indices.to(torch.long) * int(ratio) + (int(ratio) - 1)
+    full_indices = torch.where(valid, full_values.to(torch.int32), full_indices)
+    return DSV4TopKTransformOutput(raw_indices, page_indices, full_indices, "torch")
+
+
+def topk_transform_512_full_fallback(
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    width: int = 512,
+    ratio: int = 4,
+) -> DSV4TopKTransformOutput:
+    _validate_full_topk_inputs(
+        scores,
+        seq_lens,
+        page_table,
+        page_size=int(page_size),
+        width=int(width),
+        ratio=int(ratio),
+    )
+    raw_indices = torch.empty(
+        (scores.shape[0], int(width)), dtype=torch.int32, device=scores.device
+    )
+    page_indices = torch.empty_like(raw_indices)
+    clamped_lens = seq_lens.to(device=scores.device, dtype=torch.int32).clamp(
+        min=0, max=scores.shape[1]
+    )
+    if _run_local_cuda_topk_transform_512(
+        scores.to(torch.float32),
+        clamped_lens,
+        page_table.to(device=scores.device, dtype=torch.int32),
+        page_indices,
+        int(page_size),
+        raw_indices,
+        int(width),
+    ):
+        valid = page_indices >= 0
+        full_values = page_indices.to(torch.long) * int(ratio) + (int(ratio) - 1)
+        full_indices = torch.where(
+            valid,
+            full_values.to(torch.int32),
+            torch.full_like(page_indices, -1),
+        )
+        return DSV4TopKTransformOutput(raw_indices, page_indices, full_indices, "local_cuda_v1")
+    return _topk_transform_512_full_torch(
+        scores,
+        seq_lens,
+        page_table,
+        page_size=int(page_size),
+        width=int(width),
+        ratio=int(ratio),
+    )
+
+
 def topk_transform_512_fallback(indices: torch.Tensor, *, width: int = 512) -> torch.Tensor:
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_TOPK"):
         try:
@@ -1467,7 +1655,9 @@ def topk_transform_512_v2_fallback(indices: torch.Tensor, *, width: int = 512) -
     return topk_transform_512_fallback(indices, width=width)
 
 
-def plan_topk_v2_fallback(lengths: torch.Tensor, *, width: int = 512) -> dict[str, torch.Tensor | int]:
+def plan_topk_v2_fallback(
+    lengths: torch.Tensor, *, width: int = 512
+) -> dict[str, torch.Tensor | int]:
     return {"lengths": lengths.to(torch.int32), "width": width}
 
 
@@ -1657,6 +1847,7 @@ __all__ = [
     "DSV4KernelMode",
     "DSV4MoERoutePlan",
     "DSV4PagedMQAMetadata",
+    "DSV4TopKTransformOutput",
     "apply_rotary_tail",
     "build_moe_route_plan",
     "compress_norm_rope_store_fallback",
@@ -1703,6 +1894,7 @@ __all__ = [
     "store_indexer_fallback",
     "store_swa_fallback",
     "topk_transform_512_fallback",
+    "topk_transform_512_full_fallback",
     "topk_transform_512_v2_fallback",
     "unsupported_kernel",
     "wo_a_grouped_projection_fallback",
