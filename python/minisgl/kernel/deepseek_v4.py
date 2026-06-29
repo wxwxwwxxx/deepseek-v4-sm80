@@ -54,6 +54,18 @@ class DSV4PagedMQAMetadata:
 
 
 @dataclass(frozen=True)
+class DSV4TwoSourceAttentionMetadata:
+    compressed_indices: torch.Tensor
+    compressed_lengths: torch.Tensor
+    swa_indices: torch.Tensor
+    swa_lengths: torch.Tensor
+
+    @property
+    def row_count(self) -> int:
+        return int(self.swa_lengths.numel())
+
+
+@dataclass(frozen=True)
 class DSV4TopKTransformOutput:
     raw_indices: torch.Tensor
     page_indices: torch.Tensor
@@ -266,6 +278,17 @@ DSV4_KERNEL_INVENTORY: tuple[DSV4KernelInventoryEntry, ...] = (
         ("deep_gemm", "triton"),
         "fallback",
         "sm80 paged-MQA logits + value reduction",
+    ),
+    DSV4KernelInventoryEntry(
+        "dsv4_sparse_attention_two_source_bf16",
+        "SGLang DSV4 FlashMLA sparse decode contract",
+        "q, SWA cache, optional C4/C128 cache, per-source sparse rows",
+        "attention output[tokens, heads, dim]",
+        "attention.deepseek_v4._fallback_attention",
+        "local CUDA bf16 two-source sparse decode",
+        ("tvm_ffi", "CUDA"),
+        "fallback",
+        "sm80 DSV4 sparse attention with compressed C4/C128 + SWA",
     ),
     DSV4KernelInventoryEntry(
         "linear_bf16_fp32_fallback",
@@ -1056,6 +1079,134 @@ def _paged_mqa_row_indices(
     start = int(metadata.indptr[row].item())
     end = int(metadata.indptr[row + 1].item())
     return metadata.indices[start:end]
+
+
+@lru_cache(maxsize=1)
+def _local_dsv4_sparse_attention_module():
+    return load_jit(
+        "dsv4_sparse_attention_two_source_bf16",
+        cuda_files=["dsv4_sparse_attention_two_source_bf16.cu"],
+        cuda_wrappers=[
+            (
+                "sparse_attention_with_compressed",
+                "DSV4SparseAttentionTwoSourceBF16Kernel<true>::run",
+            ),
+            (
+                "sparse_attention_swa_only",
+                "DSV4SparseAttentionTwoSourceBF16Kernel<false>::run",
+            ),
+        ],
+        extra_cuda_cflags=["-use_fast_math"],
+    )
+
+
+def dsv4_sparse_attention_two_source_bf16(
+    q: torch.Tensor,
+    swa_cache: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_lengths: torch.Tensor,
+    *,
+    compressed_cache: torch.Tensor | None = None,
+    compressed_indices: torch.Tensor | None = None,
+    compressed_lengths: torch.Tensor | None = None,
+    softmax_scale: float,
+    attn_sink: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if not (
+        dsv4_env_flag("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16")
+        and detect_dsv4_kernel_capabilities().is_sm80
+    ):
+        return None
+    if (
+        q.ndim != 3
+        or swa_cache.ndim != 2
+        or swa_indices.ndim != 2
+        or swa_lengths.ndim != 1
+        or q.shape[-1] != 512
+        or swa_cache.shape[-1] != q.shape[-1]
+        or q.shape[0] != swa_indices.shape[0]
+        or q.shape[0] != swa_lengths.numel()
+        or not q.is_cuda
+        or not swa_cache.is_cuda
+        or not swa_indices.is_cuda
+        or not swa_lengths.is_cuda
+        or q.dtype is not torch.bfloat16
+        or swa_cache.dtype is not torch.bfloat16
+        or swa_indices.dtype is not torch.int32
+        or swa_lengths.dtype is not torch.int32
+        or not q.is_contiguous()
+        or not swa_cache.is_contiguous()
+        or swa_indices.stride(-1) != 1
+    ):
+        return None
+
+    has_compressed = (
+        compressed_cache is not None
+        and compressed_indices is not None
+        and compressed_lengths is not None
+        and compressed_cache.numel() > 0
+    )
+    if has_compressed:
+        if (
+            compressed_cache.ndim != 2
+            or compressed_indices.ndim != 2
+            or compressed_lengths.ndim != 1
+            or compressed_cache.shape[-1] != q.shape[-1]
+            or compressed_indices.shape[0] != q.shape[0]
+            or compressed_lengths.numel() != q.shape[0]
+            or not compressed_cache.is_cuda
+            or not compressed_indices.is_cuda
+            or not compressed_lengths.is_cuda
+            or compressed_cache.dtype is not torch.bfloat16
+            or compressed_indices.dtype is not torch.int32
+            or compressed_lengths.dtype is not torch.int32
+            or not compressed_cache.is_contiguous()
+            or compressed_indices.stride(-1) != 1
+        ):
+            return None
+        compressed_cache_arg = compressed_cache
+        compressed_indices_arg = compressed_indices
+        compressed_lengths_arg = compressed_lengths
+    else:
+        compressed_cache_arg = swa_cache[:0]
+        compressed_indices_arg = swa_indices[:, :1]
+        compressed_lengths_arg = torch.zeros_like(swa_lengths)
+
+    if attn_sink is None:
+        sink = q.new_empty((1,), dtype=torch.float32)
+    else:
+        if (
+            not attn_sink.is_cuda
+            or attn_sink.dtype is not torch.float32
+            or attn_sink.numel() < q.shape[1]
+        ):
+            return None
+        sink = attn_sink[: q.shape[1]].contiguous()
+
+    out = torch.empty_like(q)
+    try:
+        module = _local_dsv4_sparse_attention_module()
+        run = (
+            module.sparse_attention_with_compressed
+            if has_compressed
+            else module.sparse_attention_swa_only
+        )
+        run(
+            q,
+            compressed_cache_arg,
+            compressed_indices_arg,
+            compressed_lengths_arg,
+            swa_cache,
+            swa_indices,
+            swa_lengths,
+            sink,
+            out,
+            float(softmax_scale),
+            attn_sink is not None,
+        )
+        return out
+    except Exception:
+        return None
 
 
 def hadamard_transform_ref(x: torch.Tensor) -> torch.Tensor:
@@ -2046,6 +2197,7 @@ __all__ = [
     "DSV4MoERoutePlan",
     "DSV4PagedMQAMetadata",
     "DSV4TopKTransformOutput",
+    "DSV4TwoSourceAttentionMetadata",
     "apply_rotary_tail",
     "build_moe_route_plan",
     "compress_norm_rope_store_fallback",
@@ -2061,6 +2213,7 @@ __all__ = [
     "detect_dsv4_kernel_capabilities",
     "dsv4_env_flag",
     "dsv4_kernel_inventory_by_wrapper",
+    "dsv4_sparse_attention_two_source_bf16",
     "dsv4_sm80_triton_enabled",
     "e8m0_dtype",
     "fp8_dtype",

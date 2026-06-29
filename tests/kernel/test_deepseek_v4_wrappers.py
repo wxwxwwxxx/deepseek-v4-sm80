@@ -82,6 +82,75 @@ def _manual_indexer_logits(
     return logits
 
 
+def _manual_two_source_sparse_attention(
+    q: torch.Tensor,
+    swa_cache: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_lengths: torch.Tensor,
+    *,
+    compressed_cache: torch.Tensor | None,
+    compressed_indices: torch.Tensor | None,
+    compressed_lengths: torch.Tensor | None,
+    softmax_scale: float,
+    attn_sink: torch.Tensor | None,
+) -> torch.Tensor:
+    out = torch.empty_like(q)
+    sink = (
+        attn_sink[: q.shape[1]].to(device=q.device, dtype=torch.float32)
+        if attn_sink is not None
+        else None
+    )
+
+    def _source_candidates(
+        cache: torch.Tensor,
+        indices: torch.Tensor,
+        lengths: torch.Tensor,
+        row: int,
+    ) -> torch.Tensor | None:
+        row_len = max(0, min(int(lengths[row].item()), indices.shape[-1]))
+        if row_len == 0:
+            return None
+        row_indices = indices[row, :row_len]
+        row_indices = row_indices[row_indices >= 0]
+        if row_indices.numel() == 0:
+            return None
+        return cache[row_indices.to(torch.long)].float()
+
+    for row in range(q.shape[0]):
+        sources = []
+        if (
+            compressed_cache is not None
+            and compressed_indices is not None
+            and compressed_lengths is not None
+        ):
+            compressed = _source_candidates(
+                compressed_cache,
+                compressed_indices,
+                compressed_lengths,
+                row,
+            )
+            if compressed is not None:
+                sources.append(compressed)
+        swa = _source_candidates(swa_cache, swa_indices, swa_lengths, row)
+        if swa is not None:
+            sources.append(swa)
+        if not sources:
+            out[row].zero_()
+            continue
+
+        candidates = torch.cat(sources, dim=0)
+        scores = torch.einsum("hd,td->ht", q[row].float(), candidates) * softmax_scale
+        if sink is None:
+            attn = torch.softmax(scores, dim=-1)
+        else:
+            max_score = torch.maximum(scores.max(dim=-1).values, sink)
+            exp_scores = torch.exp(scores - max_score[:, None])
+            denom = exp_scores.sum(dim=-1) + torch.exp(sink - max_score)
+            attn = exp_scores / denom[:, None]
+        out[row] = torch.einsum("ht,td->hd", attn, candidates).to(q.dtype)
+    return out
+
+
 def _tiny_dsv4_cache_config(compress_ratios: list[int]) -> ModelConfig:
     return ModelConfig(
         num_layers=len(compress_ratios),
@@ -622,6 +691,234 @@ def test_dsv4_model_and_attention_do_not_import_optional_kernels_directly():
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_sparse_attention_two_source_bf16_matches_reference(monkeypatch):
+    device = torch.device("cuda")
+    torch.manual_seed(17)
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
+
+    q = (torch.randn(4, 3, 512, device=device, dtype=torch.bfloat16) * 0.25).contiguous()
+    swa_cache = (
+        torch.randn(96, 512, device=device, dtype=torch.bfloat16) * 0.25 + 0.5
+    ).contiguous()
+    compressed_cache = (
+        torch.randn(64, 512, device=device, dtype=torch.bfloat16) * 0.25 - 0.75
+    ).contiguous()
+    compressed_indices = torch.tensor(
+        [
+            [1, 2, 2, -1, -1],
+            [-1, -1, -1, -1, -1],
+            [4, 7, 9, 11, 13],
+            [3, -1, -1, -1, -1],
+        ],
+        device=device,
+        dtype=torch.int32,
+    )
+    compressed_lengths = torch.tensor([4, 0, 5, 1], device=device, dtype=torch.int32)
+    swa_indices = torch.tensor(
+        [
+            [5, 6, 7, -1, -1, -1],
+            [8, 9, 10, 11, -1, -1],
+            [-1, -1, -1, -1, -1, -1],
+            [3, 3, 4, 5, 6, 7],
+        ],
+        device=device,
+        dtype=torch.int32,
+    )
+    swa_lengths = torch.tensor([3, 5, 0, 6], device=device, dtype=torch.int32)
+    attn_sink = torch.randn(3, device=device, dtype=torch.float32)
+    softmax_scale = 512**-0.5
+
+    expected = _manual_two_source_sparse_attention(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=compressed_cache,
+        compressed_indices=compressed_indices,
+        compressed_lengths=compressed_lengths,
+        softmax_scale=softmax_scale,
+        attn_sink=attn_sink,
+    )
+    actual = dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=compressed_cache,
+        compressed_indices=compressed_indices,
+        compressed_lengths=compressed_lengths,
+        softmax_scale=softmax_scale,
+        attn_sink=attn_sink,
+    )
+    assert actual is not None
+    torch.cuda.synchronize()
+    assert actual.dtype is q.dtype
+    assert torch.allclose(actual, expected, atol=6e-2, rtol=6e-2)
+
+    expected_no_sink = _manual_two_source_sparse_attention(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=compressed_cache,
+        compressed_indices=compressed_indices,
+        compressed_lengths=compressed_lengths,
+        softmax_scale=softmax_scale,
+        attn_sink=None,
+    )
+    actual_no_sink = dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=compressed_cache,
+        compressed_indices=compressed_indices,
+        compressed_lengths=compressed_lengths,
+        softmax_scale=softmax_scale,
+        attn_sink=None,
+    )
+    assert actual_no_sink is not None
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_no_sink, expected_no_sink, atol=6e-2, rtol=6e-2)
+
+    expected_swa_only = _manual_two_source_sparse_attention(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=None,
+        compressed_indices=None,
+        compressed_lengths=None,
+        softmax_scale=softmax_scale,
+        attn_sink=attn_sink,
+    )
+    actual_swa_only = dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        softmax_scale=softmax_scale,
+        attn_sink=attn_sink,
+    )
+    assert actual_swa_only is not None
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_swa_only, expected_swa_only, atol=6e-2, rtol=6e-2)
+    assert torch.equal(actual_swa_only[2], torch.zeros_like(actual_swa_only[2]))
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
+    device = torch.device("cuda")
+    torch.manual_seed(23)
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
+
+    q = (torch.randn(2, 2, 512, device=device, dtype=torch.bfloat16) * 0.2).contiguous()
+    swa_cache = (
+        torch.randn(16, 512, device=device, dtype=torch.bfloat16) * 0.2 + 0.25
+    ).contiguous()
+    compressed_cache = (
+        torch.randn(16, 512, device=device, dtype=torch.bfloat16) * 0.2 - 1.0
+    ).contiguous()
+    swa_indices = torch.tensor(
+        [[0, 1, -1], [2, 3, 4]],
+        device=device,
+        dtype=torch.int32,
+    )
+    swa_lengths = torch.tensor([2, 3], device=device, dtype=torch.int32)
+    compressed_indices = torch.tensor(
+        [[5, 6, -1, -1], [7, -1, -1, -1]],
+        device=device,
+        dtype=torch.int32,
+    )
+    softmax_scale = 512**-0.5
+    attn_sink = torch.randn(2, device=device, dtype=torch.float32)
+
+    empty = torch.empty(0, device=device, dtype=torch.int32)
+    meta = dsv4_attention.DSV4CoreAttentionMetadata(
+        raw_out_loc=empty,
+        page_table=empty,
+        cu_seqlens_q=empty,
+        seq_lens=empty,
+        req_seq_lens=empty,
+        extend_lens=empty,
+        positions=empty,
+        req_table_indices=empty,
+        max_seqlen_q=0,
+        max_seqlen_k=0,
+        swa_page_indices=swa_indices,
+        swa_topk_lengths=swa_lengths,
+        c4_out_loc=None,
+        c128_out_loc=None,
+        c4_indexer_out_loc=None,
+        c4_topk_lengths_raw=empty,
+        c4_topk_lengths_clamp1=empty,
+        c4_sparse_topk_lengths=empty,
+        c4_sparse_raw_indices=empty,
+        c4_sparse_page_indices=compressed_indices,
+        c4_sparse_full_indices=empty,
+        c128_topk_lengths_clamp1=empty,
+        c128_raw_indices=empty,
+        c128_page_indices=empty.reshape(0, 0),
+        c128_full_indices=empty,
+    )
+
+    class FakeKVCache:
+        def swa_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return swa_cache
+
+        def c4_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return compressed_cache
+
+        def c128_cache(self, layer_id: int) -> torch.Tensor:
+            raise AssertionError("ratio 4 path must not read c128 cache")
+
+    class FakeBackend:
+        pass
+
+    fake_backend = FakeBackend()
+    fake_backend.kvcache = FakeKVCache()
+    fake_backend.softmax_scale = softmax_scale
+
+    actual = dsv4_attention.DSV4AttentionBackend._sparse_attention_two_source(
+        fake_backend,
+        q,
+        0,
+        meta,
+        4,
+        attn_sink,
+    )
+    expected = _manual_two_source_sparse_attention(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=compressed_cache,
+        compressed_indices=compressed_indices,
+        compressed_lengths=(compressed_indices >= 0).sum(dim=-1).to(torch.int32),
+        softmax_scale=softmax_scale,
+        attn_sink=attn_sink,
+    )
+    swa_only = _manual_two_source_sparse_attention(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=None,
+        compressed_indices=None,
+        compressed_lengths=None,
+        softmax_scale=softmax_scale,
+        attn_sink=attn_sink,
+    )
+
+    assert actual is not None
+    torch.cuda.synchronize()
+    assert torch.allclose(actual, expected, atol=6e-2, rtol=6e-2)
+    assert not torch.allclose(actual, swa_only, atol=6e-2, rtol=6e-2)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     for name in (
         "MINISGL_DSV4_SM80_SWIGLU",
@@ -638,6 +935,7 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         "MINISGL_DSV4_SM80_WO_A_BF16",
         "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
         "MINISGL_DSV4_SM80_INDEXER_BF16",
+        "MINISGL_DSV4_SM80_SPARSE_ATTN_BF16",
     ):
         monkeypatch.delenv(name, raising=False)
 

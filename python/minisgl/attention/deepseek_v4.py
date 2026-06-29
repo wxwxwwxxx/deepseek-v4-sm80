@@ -562,12 +562,66 @@ class DSV4AttentionBackend(BaseAttnBackend):
         compress_ratio: DSV4CompressRatio,
         attn_sink: torch.Tensor | None,
     ) -> torch.Tensor:
+        fast = self._sparse_attention_two_source(
+            q,
+            layer_id,
+            metadata,
+            compress_ratio,
+            attn_sink,
+        )
+        if fast is not None:
+            return fast
         cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
         context_indices = self._context_metadata_for_queries(metadata, q.shape[0], compress_ratio)
         return dsv4_kernel.paged_mqa_attention_fallback(
             q,
             cache,
             context_indices,
+            softmax_scale=self.softmax_scale,
+            attn_sink=attn_sink,
+        )
+
+    def _sparse_attention_two_source(
+        self,
+        q: torch.Tensor,
+        layer_id: int,
+        metadata: DSV4CoreAttentionMetadata,
+        compress_ratio: DSV4CompressRatio,
+        attn_sink: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        rows = q.shape[0]
+        if rows == 0:
+            return q.new_empty(q.shape)
+        swa_indices = metadata.swa_page_indices[:rows].to(device=q.device, dtype=torch.int32)
+        swa_lengths = metadata.swa_topk_lengths[:rows].to(device=q.device, dtype=torch.int32)
+        swa_lengths = swa_lengths.clamp(max=swa_indices.shape[-1])
+
+        compressed_cache = None
+        compressed_indices = None
+        compressed_lengths = None
+        if compress_ratio == 4:
+            compressed_cache = self.kvcache.c4_cache(layer_id).to(q.dtype)
+            compressed_indices = metadata.c4_sparse_page_indices[:rows].to(
+                device=q.device,
+                dtype=torch.int32,
+            )
+            compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+        elif compress_ratio == 128:
+            compressed_cache = self.kvcache.c128_cache(layer_id).to(q.dtype)
+            compressed_indices = metadata.c128_page_indices[:rows].to(
+                device=q.device,
+                dtype=torch.int32,
+            )
+            compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+
+        return dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
+            q,
+            self.kvcache.swa_cache(layer_id).to(q.dtype),
+            swa_indices,
+            swa_lengths,
+            compressed_cache=compressed_cache,
+            compressed_indices=compressed_indices,
+            compressed_lengths=compressed_lengths,
             softmax_scale=self.softmax_scale,
             attn_sink=attn_sink,
         )
