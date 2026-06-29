@@ -26,6 +26,7 @@ DSV4KernelMode = Literal["fallback", "bf16_direct", "fp8_act", "fp4_act"]
 
 
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+DSV4_LINEAR_BF16_FP32_TOGGLE = "MINISGL_DSV4_SM80_LINEAR_BF16_FP32"
 
 
 @dataclass(frozen=True)
@@ -296,10 +297,10 @@ DSV4_KERNEL_INVENTORY: tuple[DSV4KernelInventoryEntry, ...] = (
         "x[..., k], weight[n, k]",
         "fp32/bf16 linear output",
         "models.deepseek_v4 HC/router helpers",
-        "torch linear fallback",
-        ("triton",),
+        "torch linear fallback; opt-in cuBLAS bf16/bf16->fp32 path for cached HC weights",
+        ("torch CUDA/cuBLAS",),
         "fallback",
-        "sm80 matmul where torch overhead is visible",
+        "upstream torch.mm out_dtype path before any custom matmul",
     ),
     DSV4KernelInventoryEntry(
         "quantized_linear_ref",
@@ -552,6 +553,17 @@ def dsv4_sm80_triton_enabled(toggle: str) -> bool:
     return bool(cap.is_sm80 and cap.triton_available)
 
 
+def dsv4_sm80_cuda_enabled(toggle: str) -> bool:
+    if not dsv4_env_flag(toggle):
+        return False
+    cap = detect_dsv4_kernel_capabilities()
+    return bool(cap.is_sm80 and cap.cuda_available)
+
+
+def linear_bf16_fp32_upstream_enabled() -> bool:
+    return dsv4_sm80_cuda_enabled(DSV4_LINEAR_BF16_FP32_TOGGLE)
+
+
 def _triton_dsv4_ops():
     from minisgl.kernel.triton import deepseek_v4 as triton_dsv4
 
@@ -675,7 +687,23 @@ def quantized_linear_ref(
     return F.linear(x, w)
 
 
+def _linear_bf16_fp32_upstream(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    out_shape = tuple(x.shape[:-1]) + (weight.shape[0],)
+    x_2d = x.reshape(-1, x.shape[-1]).contiguous()
+    weight_t = weight.contiguous().t()
+    return torch.mm(x_2d, weight_t, out_dtype=torch.float32).reshape(out_shape)
+
+
 def linear_bf16_fp32_fallback(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    if (
+        linear_bf16_fp32_upstream_enabled()
+        and x.is_cuda
+        and weight.is_cuda
+        and x.dtype is torch.bfloat16
+        and weight.dtype is torch.bfloat16
+        and x.shape[-1] == weight.shape[-1]
+    ):
+        return _linear_bf16_fp32_upstream(x, weight)
     return F.linear(x.float(), weight.float())
 
 
@@ -1426,9 +1454,10 @@ def hc_pre_fallback(
     norm_eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     shape = x.shape
-    flat = x.flatten(1).float()
-    rsqrt = torch.rsqrt(flat.square().mean(-1, keepdim=True) + norm_eps)
-    mixes = linear_bf16_fp32_fallback(flat, fn.float()) * rsqrt
+    flat = x.flatten(1)
+    flat_float = flat.float()
+    rsqrt = torch.rsqrt(flat_float.square().mean(-1, keepdim=True) + norm_eps)
+    mixes = linear_bf16_fp32_fallback(flat, fn) * rsqrt
     pre, post, comb = hc_split_sinkhorn_ref(mixes, scale, base, hc_mult, sinkhorn_iters, eps)
     y = torch.sum(pre.to(x.dtype).unsqueeze(-1) * x.view(shape), dim=1)
     return y, post.to(x.dtype), comb.to(x.dtype)
@@ -1455,9 +1484,10 @@ def hc_head_fallback(
     norm_eps: float,
 ) -> torch.Tensor:
     shape = x.shape
-    flat = x.flatten(1).float()
-    rsqrt = torch.rsqrt(flat.square().mean(-1, keepdim=True) + norm_eps)
-    mixes = linear_bf16_fp32_fallback(flat, fn.float()) * rsqrt
+    flat = x.flatten(1)
+    flat_float = flat.float()
+    rsqrt = torch.rsqrt(flat_float.square().mean(-1, keepdim=True) + norm_eps)
+    mixes = linear_bf16_fp32_fallback(flat, fn) * rsqrt
     pre = torch.sigmoid(mixes * scale.float() + base.float()) + eps
     return torch.sum(pre.to(x.dtype).unsqueeze(-1) * x.view(shape), dim=1)
 
@@ -2194,6 +2224,7 @@ __all__ = [
     "DSV4KernelInventoryEntry",
     "DSV4KernelMode",
     "DSV4IndexerSelectOutput",
+    "DSV4_LINEAR_BF16_FP32_TOGGLE",
     "DSV4MoERoutePlan",
     "DSV4PagedMQAMetadata",
     "DSV4TopKTransformOutput",
@@ -2214,6 +2245,7 @@ __all__ = [
     "dsv4_env_flag",
     "dsv4_kernel_inventory_by_wrapper",
     "dsv4_sparse_attention_two_source_bf16",
+    "dsv4_sm80_cuda_enabled",
     "dsv4_sm80_triton_enabled",
     "e8m0_dtype",
     "fp8_dtype",
@@ -2232,6 +2264,7 @@ __all__ = [
     "indexer_select_bf16_fallback",
     "k_norm_rope_cache_fallback",
     "linear_bf16_fp32_fallback",
+    "linear_bf16_fp32_upstream_enabled",
     "mega_moe_pre_dispatch_fallback",
     "moe_gate_fallback",
     "moe_route_dispatch_bf16_grouped",

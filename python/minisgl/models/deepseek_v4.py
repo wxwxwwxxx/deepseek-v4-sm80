@@ -19,6 +19,26 @@ if TYPE_CHECKING:
     from .config import ModelConfig
 
 
+def _cached_hc_bf16_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
+    if not (dsv4_kernel.linear_bf16_fp32_upstream_enabled() and weight.is_cuda):
+        return weight
+    meta_name = f"{cache_name}_meta"
+    meta = (
+        weight.data_ptr(),
+        int(getattr(weight, "_version", 0)),
+        weight.device.type,
+        weight.device.index,
+        tuple(weight.shape),
+        tuple(weight.stride()),
+    )
+    cached = getattr(owner, cache_name, None)
+    if cached is None or getattr(owner, meta_name, None) != meta:
+        cached = weight.to(torch.bfloat16).contiguous()
+        setattr(owner, cache_name, cached)
+        setattr(owner, meta_name, meta)
+    return cached
+
+
 @dataclass
 class DSV4FallbackAttentionMetadata(BaseAttnMetadata):
     cu_seqlens_q: torch.Tensor
@@ -691,6 +711,10 @@ class DeepseekV4DecoderLayer(BaseOP):
         self.hc_ffn_base = torch.empty(mix_hc, dtype=torch.float32)
         self.hc_attn_scale = torch.empty(3, dtype=torch.float32)
         self.hc_ffn_scale = torch.empty(3, dtype=torch.float32)
+        self._hc_attn_fn_bf16: torch.Tensor | None = None
+        self._hc_attn_fn_bf16_meta: tuple | None = None
+        self._hc_ffn_fn_bf16: torch.Tensor | None = None
+        self._hc_ffn_fn_bf16_meta: tuple | None = None
 
     def _hc_pre(
         self,
@@ -721,12 +745,14 @@ class DeepseekV4DecoderLayer(BaseOP):
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         residual = x
-        y, post, comb = self._hc_pre(x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        attn_fn = _cached_hc_bf16_weight(self, "_hc_attn_fn_bf16", self.hc_attn_fn)
+        y, post, comb = self._hc_pre(x, attn_fn, self.hc_attn_scale, self.hc_attn_base)
         y = self.self_attn.forward(self.input_layernorm.forward(y))
         x = self._hc_post(y, residual, post, comb)
 
         residual = x
-        y, post, comb = self._hc_pre(x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        ffn_fn = _cached_hc_bf16_weight(self, "_hc_ffn_fn_bf16", self.hc_ffn_fn)
+        y, post, comb = self._hc_pre(x, ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         y = self.mlp.forward(self.post_attention_layernorm.forward(y), input_ids)
         return self._hc_post(y, residual, post, comb)
 
@@ -745,11 +771,14 @@ class DeepseekV4Model(BaseOP):
         self.hc_head_fn = torch.empty(config.hc_mult, hc_dim, dtype=torch.float32)
         self.hc_head_base = torch.empty(config.hc_mult, dtype=torch.float32)
         self.hc_head_scale = torch.empty(1, dtype=torch.float32)
+        self._hc_head_fn_bf16: torch.Tensor | None = None
+        self._hc_head_fn_bf16_meta: tuple | None = None
 
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
+        hc_head_fn = _cached_hc_bf16_weight(self, "_hc_head_fn_bf16", self.hc_head_fn)
         return dsv4_kernel.hc_head_fallback(
             x,
-            self.hc_head_fn,
+            hc_head_fn,
             self.hc_head_scale,
             self.hc_head_base,
             eps=self.hc_eps,

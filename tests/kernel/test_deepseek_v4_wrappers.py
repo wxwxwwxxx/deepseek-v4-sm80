@@ -7,6 +7,7 @@ import minisgl.models.deepseek_v4 as dsv4_model
 import pytest
 import torch
 import torch.nn.functional as F
+from minisgl.distributed import set_tp_info
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
@@ -253,6 +254,58 @@ def test_dsv4_unsupported_sm80_paths_fail_clearly():
     message = str(exc.value)
     assert "fused_q_indexer_rope_hadamard_fp4_quant" in message
     assert "sm" in message or "no CUDA" in message
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_linear_bf16_fp32_upstream_opt_in_matches_bf16_mm(monkeypatch):
+    device = torch.device("cuda")
+    torch.manual_seed(23)
+    x = torch.randn(3, 2, 128, device=device, dtype=torch.bfloat16)
+    weight_bf16 = torch.randn(5, 128, device=device, dtype=torch.bfloat16)
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
+    actual = dsv4_kernel.linear_bf16_fp32_fallback(x, weight_bf16)
+    expected = torch.mm(
+        x.reshape(-1, x.shape[-1]).contiguous(),
+        weight_bf16.contiguous().t(),
+        out_dtype=torch.float32,
+    ).reshape(3, 2, 5)
+
+    assert actual.dtype is torch.float32
+    assert torch.allclose(actual, expected)
+
+    weight_fp32 = weight_bf16.float()
+    fp32_weight_actual = dsv4_kernel.linear_bf16_fp32_fallback(x, weight_fp32)
+    fp32_weight_expected = F.linear(x.float(), weight_fp32)
+    assert torch.allclose(fp32_weight_actual, fp32_weight_expected)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_hc_head_maintains_bf16_linear_weight_cache(monkeypatch):
+    device = torch.device("cuda")
+    set_tp_info(0, 1)
+    cfg = _tiny_dsv4_cache_config([0])
+    model = dsv4_model.DeepseekV4Model(cfg)
+    torch.manual_seed(29)
+    model.hc_head_fn = (torch.randn_like(model.hc_head_fn, device=device) * 0.01).contiguous()
+    model.hc_head_base = torch.zeros_like(model.hc_head_base, device=device)
+    model.hc_head_scale = torch.full_like(model.hc_head_scale, 0.1, device=device)
+    x = torch.randn(7, cfg.hc_mult, cfg.hidden_size, device=device, dtype=torch.bfloat16)
+
+    monkeypatch.delenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, raising=False)
+    expected = model._hc_head(x)
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
+    actual = model._hc_head(x)
+    assert model._hc_head_fn_bf16 is not None
+    assert model._hc_head_fn_bf16.dtype is torch.bfloat16
+    assert torch.allclose(actual, expected, atol=5e-3, rtol=5e-3)
+
+    old_cache = model._hc_head_fn_bf16
+    with torch.no_grad():
+        model.hc_head_fn.add_(0.01)
+    _ = model._hc_head(x)
+    assert model._hc_head_fn_bf16 is not old_cache
 
 
 def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
@@ -936,6 +989,7 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
         "MINISGL_DSV4_SM80_INDEXER_BF16",
         "MINISGL_DSV4_SM80_SPARSE_ATTN_BF16",
+        dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE,
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -1313,6 +1367,16 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     )
     torch.cuda.synchronize()
     assert torch.allclose(actual_compress, expected_compress, atol=1e-4, rtol=1e-4)
+
+    linear_x = torch.randn(6, 128, device=device, dtype=torch.bfloat16)
+    linear_weight = torch.randn(11, 128, device=device, dtype=torch.bfloat16)
+    expected_linear = dsv4_kernel.linear_bf16_fp32_fallback(linear_x, linear_weight)
+    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
+    actual_linear = dsv4_kernel.linear_bf16_fp32_fallback(linear_x, linear_weight)
+    torch.cuda.synchronize()
+    assert actual_linear.dtype is torch.float32
+    assert torch.allclose(actual_linear, expected_linear, atol=2e-2, rtol=2e-2)
+    monkeypatch.delenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, raising=False)
 
     x_linear = torch.randn(5, 128, device=device, dtype=torch.bfloat16)
     fp8_weight = (
