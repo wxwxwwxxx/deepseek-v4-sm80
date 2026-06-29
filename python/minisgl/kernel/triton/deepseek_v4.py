@@ -406,6 +406,62 @@ def _paged_mqa_attention_bf16_kernel(
 
 
 @triton.jit
+def _indexer_bf16_logits_kernel(
+    q_ptr,
+    cache_ptr,
+    weights_ptr,
+    seq_lens_ptr,
+    page_table_ptr,
+    logits_ptr,
+    num_pages: tl.constexpr,
+    num_heads: tl.constexpr,
+    dim: tl.constexpr,
+    page_size: tl.constexpr,
+    page_bits: tl.constexpr,
+    max_seq_len: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    block = tl.program_id(1)
+    n_offsets = block * BLOCK_N + tl.arange(0, BLOCK_N)
+    d_offsets = tl.arange(0, BLOCK_D)
+    d_mask = d_offsets < dim
+
+    seq_len = tl.load(seq_lens_ptr + row).to(tl.int32)
+    valid_n = n_offsets < seq_len
+    page_idx = n_offsets >> page_bits
+    offset = n_offsets & (page_size - 1)
+    physical_page = tl.load(
+        page_table_ptr + row * num_pages + page_idx,
+        mask=valid_n & (page_idx < num_pages),
+        other=-1,
+    ).to(tl.int64)
+    valid = valid_n & (physical_page >= 0)
+    cache_rows = physical_page * page_size + offset
+    kv = tl.load(
+        cache_ptr + cache_rows[:, None] * dim + d_offsets[None, :],
+        mask=valid[:, None] & d_mask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+
+    acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    for head in range(0, num_heads):
+        q = tl.load(
+            q_ptr + (row * num_heads + head) * dim + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        ).to(tl.float32)
+        score = tl.sum(kv * q[None, :], axis=1)
+        score = tl.maximum(score, 0.0)
+        weight = tl.load(weights_ptr + row * num_heads + head).to(tl.float32)
+        acc += score * weight
+
+    out = tl.where(valid, acc, -float("inf"))
+    tl.store(logits_ptr + row * max_seq_len + n_offsets, out, mask=n_offsets < max_seq_len)
+
+
+@triton.jit
 def _fp4_e2m1_value(nibble):
     mag = nibble & 0x07
     value = tl.where(
@@ -1116,6 +1172,79 @@ def paged_mqa_attention_bf16(
     return out
 
 
+def indexer_bf16_logits(
+    q: torch.Tensor,
+    cache: torch.Tensor,
+    weights: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+) -> torch.Tensor | None:
+    if (
+        q.ndim != 3
+        or cache.ndim != 2
+        or weights.ndim not in (2, 3)
+        or seq_lens.ndim != 1
+        or page_table.ndim != 2
+        or q.numel() == 0
+        or cache.shape[-1] != q.shape[-1]
+        or weights.shape[0] != q.shape[0]
+        or weights.shape[1] != q.shape[1]
+        or seq_lens.shape[0] != q.shape[0]
+        or page_table.shape[0] != q.shape[0]
+        or not q.is_cuda
+        or not cache.is_cuda
+        or not weights.is_cuda
+        or not seq_lens.is_cuda
+        or not page_table.is_cuda
+        or not q.is_contiguous()
+        or not cache.is_contiguous()
+    ):
+        return None
+    if q.dtype not in (torch.bfloat16, torch.float32) or cache.dtype not in (
+        torch.bfloat16,
+        torch.float32,
+    ):
+        return None
+    if page_size <= 0 or page_size & (page_size - 1):
+        return None
+    if q.shape[-1] > 256:
+        return None
+
+    max_seq_len = int(seq_lens.clamp_min(0).max().item())
+    if max_seq_len <= 0:
+        return torch.empty((q.shape[0], 0), dtype=torch.float32, device=q.device)
+
+    q_c = q.contiguous()
+    cache_c = cache.contiguous()
+    weights_c = weights.squeeze(-1).to(device=q.device, dtype=torch.float32).contiguous()
+    seq_lens_c = seq_lens.to(device=q.device, dtype=torch.int32).contiguous()
+    page_table_c = page_table.to(device=q.device, dtype=torch.int32).contiguous()
+    logits = torch.empty((q.shape[0], max_seq_len), dtype=torch.float32, device=q.device)
+    block_n = 16
+    block_d = triton.next_power_of_2(q.shape[-1])
+    grid = (q.shape[0], triton.cdiv(max_seq_len, block_n))
+    _indexer_bf16_logits_kernel[grid](
+        q_c,
+        cache_c,
+        weights_c,
+        seq_lens_c,
+        page_table_c,
+        logits,
+        num_pages=page_table_c.shape[1],
+        num_heads=q.shape[1],
+        dim=q.shape[-1],
+        page_size=int(page_size),
+        page_bits=(int(page_size) - 1).bit_length(),
+        max_seq_len=max_seq_len,
+        BLOCK_N=block_n,
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return logits
+
+
 def _flatten_linear_input(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]] | None:
     if x.ndim == 0 or x.shape[-1] == 0 or x.numel() == 0:
         return None
@@ -1450,6 +1579,7 @@ __all__ = [
     "apply_rotary_tail",
     "compress_norm_rope_store_bf16",
     "grouped_fp4_moe",
+    "indexer_bf16_logits",
     "k_norm_rope_cache_bf16",
     "paged_mqa_attention_bf16",
     "q_norm_rope",

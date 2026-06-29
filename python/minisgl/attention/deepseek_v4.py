@@ -233,6 +233,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         factor: float = 1.0,
         beta_fast: int = 32,
         beta_slow: int = 1,
+        apply_hadamard: bool = False,
     ) -> None:
         metadata = batch.attn_metadata
         if not isinstance(metadata, DSV4AttentionMetadata):
@@ -266,7 +267,73 @@ class DSV4AttentionBackend(BaseAttnBackend):
             beta_fast=beta_fast,
             beta_slow=beta_slow,
             cache_type="indexer",
+            apply_hadamard=apply_hadamard,
         )
+
+    def select_indexer(
+        self,
+        layer_id: int,
+        q: torch.Tensor,
+        weights: torch.Tensor,
+        batch: Batch,
+    ) -> dsv4_kernel.DSV4IndexerSelectOutput | None:
+        metadata = batch.attn_metadata
+        if not isinstance(metadata, DSV4AttentionMetadata):
+            return None
+        indexer_metadata = metadata.indexer_metadata
+        if indexer_metadata is None or q.numel() == 0:
+            return None
+        rows = min(
+            q.shape[0],
+            weights.shape[0],
+            indexer_metadata.c4_seq_lens.shape[0],
+            indexer_metadata.page_table.shape[0],
+        )
+        if rows == 0:
+            return None
+        q = q[:rows]
+        weights = weights[:rows]
+        seq_lens = indexer_metadata.c4_seq_lens[:rows]
+        page_table = indexer_metadata.page_table[:rows]
+        out = dsv4_kernel.indexer_select_bf16_fallback(
+            q,
+            weights,
+            self.kvcache.indexer_cache(layer_id),
+            seq_lens,
+            page_table,
+            page_size=indexer_metadata.c4_page_size,
+            width=max(self.index_topk, 1),
+            ratio=4,
+        )
+        core = metadata.core_metadata
+        core.c4_sparse_raw_indices = self._merge_indexer_rows(
+            core.c4_sparse_raw_indices,
+            out.topk.raw_indices,
+        )
+        core.c4_sparse_page_indices = self._merge_indexer_rows(
+            core.c4_sparse_page_indices,
+            out.topk.page_indices,
+        )
+        core.c4_sparse_full_indices = self._merge_indexer_rows(
+            core.c4_sparse_full_indices,
+            out.topk.full_indices,
+        )
+        return out
+
+    def _merge_indexer_rows(self, current: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+        padded = _pad_last_dim(values, value=-1)
+        if current.shape == padded.shape:
+            return padded
+        rows = current.shape[0]
+        width = max(current.shape[1], padded.shape[1])
+        out = torch.full((rows, width), -1, dtype=current.dtype, device=current.device)
+        copy_rows = min(rows, padded.shape[0])
+        copy_width = min(width, padded.shape[1])
+        out[:copy_rows, :copy_width] = padded[:copy_rows, :copy_width].to(
+            device=current.device,
+            dtype=current.dtype,
+        )
+        return out
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
         self.capture_bs = sorted(bs_list)

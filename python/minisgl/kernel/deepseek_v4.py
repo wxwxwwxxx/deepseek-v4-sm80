@@ -61,6 +61,13 @@ class DSV4TopKTransformOutput:
     backend: str
 
 
+@dataclass(frozen=True)
+class DSV4IndexerSelectOutput:
+    logits: torch.Tensor
+    topk: DSV4TopKTransformOutput
+    backend: str
+
+
 DSV4_KERNEL_INVENTORY: tuple[DSV4KernelInventoryEntry, ...] = (
     DSV4KernelInventoryEntry(
         "apply_rotary_tail",
@@ -1051,6 +1058,182 @@ def _paged_mqa_row_indices(
     return metadata.indices[start:end]
 
 
+def hadamard_transform_ref(x: torch.Tensor) -> torch.Tensor:
+    if x.shape[-1] <= 0 or x.shape[-1] & (x.shape[-1] - 1):
+        raise ValueError(
+            "DSV4 Hadamard transform requires a positive power-of-two last dim, "
+            f"got {x.shape[-1]}"
+        )
+    dtype = x.dtype
+    y = x.float()
+    dim = y.shape[-1]
+    step = 1
+    while step < dim:
+        y = y.reshape(*y.shape[:-1], -1, step * 2)
+        left = y[..., :step].clone()
+        right = y[..., step : step * 2].clone()
+        y[..., :step] = left + right
+        y[..., step : step * 2] = left - right
+        y = y.reshape(*y.shape[:-2], -1)
+        step *= 2
+    return (y * (dim**-0.5)).to(dtype)
+
+
+def indexer_q_rope_hadamard_bf16_fallback(
+    q: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    rotary_dim: int,
+    base: float,
+    original_seq_len: int = 0,
+    factor: float = 1.0,
+    beta_fast: int = 32,
+    beta_slow: int = 1,
+) -> torch.Tensor:
+    if q.ndim != 3:
+        raise ValueError(f"DSV4 indexer q expects shape [tokens, heads, dim], got {q.shape}")
+    out = q.contiguous()
+    if rotary_dim > 0:
+        apply_rotary_tail(
+            out,
+            positions,
+            rotary_dim=rotary_dim,
+            base=base,
+            original_seq_len=original_seq_len,
+            factor=factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+        )
+    return hadamard_transform_ref(out)
+
+
+def indexer_kv_hadamard_fallback(kv: torch.Tensor) -> torch.Tensor:
+    if kv.numel() == 0:
+        return kv
+    kv.copy_(hadamard_transform_ref(kv).to(kv.dtype))
+    return kv
+
+
+def indexer_bf16_logits_fallback(
+    q: torch.Tensor,
+    cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    weights: torch.Tensor | None = None,
+    _backend: list[str] | None = None,
+) -> torch.Tensor:
+    if q.ndim != 3:
+        raise ValueError(f"DSV4 indexer q expects shape [rows, heads, dim], got {q.shape}")
+    if cache.ndim != 2 or cache.shape[-1] != q.shape[-1]:
+        raise ValueError(
+            "DSV4 indexer cache must be [slots, dim] with dim matching q, "
+            f"got cache={tuple(cache.shape)} q={tuple(q.shape)}"
+        )
+    if seq_lens.ndim != 1 or seq_lens.shape[0] != q.shape[0]:
+        raise ValueError("DSV4 indexer seq_lens must have shape [rows]")
+    if page_table.ndim != 2 or page_table.shape[0] != q.shape[0]:
+        raise ValueError("DSV4 indexer page_table must have shape [rows, pages]")
+    if page_size <= 0 or page_size & (page_size - 1):
+        raise ValueError(f"DSV4 indexer page_size must be a positive power of two, got {page_size}")
+    if weights is not None and weights.shape[:2] != q.shape[:2]:
+        raise ValueError(
+            "DSV4 indexer weights must have shape [rows, heads] or [rows, heads, 1], "
+            f"got weights={tuple(weights.shape)} q={tuple(q.shape)}"
+        )
+
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_BF16") and weights is not None:
+        try:
+            logits = _triton_dsv4_ops().indexer_bf16_logits(
+                q,
+                cache,
+                weights,
+                seq_lens,
+                page_table,
+                page_size=page_size,
+            )
+            if logits is not None:
+                if _backend is not None:
+                    _backend.append("triton")
+                return logits
+        except Exception:
+            pass
+
+    rows = q.shape[0]
+    max_seq_len = int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
+    logits = torch.full((rows, max(max_seq_len, 1)), float("-inf"), dtype=torch.float32, device=q.device)
+    if rows == 0 or max_seq_len <= 0:
+        return logits[:, :0]
+
+    page_bits = (page_size - 1).bit_length()
+    q_f = q.float()
+    cache_f = cache.to(device=q.device, dtype=torch.float32)
+    page_table_i = page_table.to(device=q.device, dtype=torch.int32)
+    if weights is None:
+        weights_f = torch.ones(q.shape[:2], dtype=torch.float32, device=q.device)
+    else:
+        weights_f = weights.squeeze(-1).to(device=q.device, dtype=torch.float32)
+
+    for row in range(rows):
+        length = int(seq_lens[row].item())
+        if length <= 0:
+            continue
+        length = min(length, logits.shape[1])
+        raw = torch.arange(length, dtype=torch.long, device=q.device)
+        page_idx = raw >> page_bits
+        offset = raw & (page_size - 1)
+        valid = page_idx < page_table.shape[1]
+        physical_page = torch.full_like(raw, -1)
+        if bool(torch.any(valid)):
+            physical_page[valid] = page_table_i[row, page_idx[valid]].to(torch.long)
+        valid = valid & (physical_page >= 0)
+        cache_rows = physical_page * page_size + offset
+        row_scores = torch.full((length,), float("-inf"), dtype=torch.float32, device=q.device)
+        if bool(torch.any(valid)):
+            kv = cache_f[cache_rows[valid]]
+            scores = torch.einsum("hd,td->th", q_f[row], kv)
+            scores = torch.relu(scores) * weights_f[row][None, :]
+            row_scores[valid] = scores.sum(dim=-1)
+        logits[row, :length] = row_scores
+    if _backend is not None:
+        _backend.append("torch")
+    return logits
+
+
+def indexer_select_bf16_fallback(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    width: int = 512,
+    ratio: int = 4,
+) -> DSV4IndexerSelectOutput:
+    logits_backend: list[str] = []
+    logits = indexer_bf16_logits_fallback(
+        q,
+        cache,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        weights=weights,
+        _backend=logits_backend,
+    )
+    topk = topk_transform_512_full_fallback(
+        logits,
+        seq_lens.to(device=logits.device, dtype=torch.int32),
+        page_table.to(device=logits.device, dtype=torch.int32),
+        page_size=page_size,
+        width=width,
+        ratio=ratio,
+    )
+    backend = logits_backend[0] if logits_backend else "torch"
+    return DSV4IndexerSelectOutput(logits=logits, topk=topk, backend=f"{backend}+{topk.backend}")
+
+
 def hc_split_sinkhorn_ref(
     mixes: torch.Tensor,
     hc_scale: torch.Tensor,
@@ -1720,13 +1903,16 @@ def compress_norm_rope_store_fallback(
     beta_fast: int = 32,
     beta_slow: int = 1,
     cache_type: Literal["compressed", "indexer"] = "compressed",
+    apply_hadamard: bool = False,
 ) -> None:
     if (norm_weight is None) != (rms_norm_eps is None):
         raise ValueError(
             "compress_norm_rope_store_fallback requires norm_weight and rms_norm_eps together"
         )
 
-    if positions is None or (rotary_dim <= 0 and norm_weight is None):
+    if positions is None and rotary_dim > 0:
+        raise ValueError("compress_norm_rope_store_fallback requires positions when rotary_dim > 0")
+    if rotary_dim <= 0 and norm_weight is None and not apply_hadamard:
         if cache_type == "compressed":
             store_compressed_fallback(kvcache, layer_id, kv, loc)
         else:
@@ -1736,13 +1922,17 @@ def compress_norm_rope_store_fallback(
     dim = kv.shape[-1]
     flat = kv.reshape(-1, dim)
     loc_flat = loc.to(device=flat.device, dtype=torch.long).reshape(-1)
-    positions_flat = positions.to(device=flat.device, dtype=torch.long).reshape(-1)
+    positions_flat = (
+        positions.to(device=flat.device, dtype=torch.long).reshape(-1)
+        if positions is not None
+        else None
+    )
     if loc_flat.numel() != flat.shape[0]:
         raise ValueError(
             "DSV4 compressed cache loc count must match kv rows, "
             f"got loc={loc_flat.numel()} rows={flat.shape[0]}"
         )
-    if positions_flat.numel() != flat.shape[0]:
+    if positions_flat is not None and positions_flat.numel() != flat.shape[0]:
         raise ValueError(
             "DSV4 compressed cache positions count must match kv rows, "
             f"got positions={positions_flat.numel()} rows={flat.shape[0]}"
@@ -1759,7 +1949,11 @@ def compress_norm_rope_store_fallback(
             f"DSV4 compressed cache dim mismatch: cache dim={cache.shape[-1]} kv dim={dim}"
         )
 
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
+    if (
+        dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE")
+        and not apply_hadamard
+        and positions_flat is not None
+    ):
         try:
             if _triton_dsv4_ops().compress_norm_rope_store_bf16(
                 flat,
@@ -1784,6 +1978,7 @@ def compress_norm_rope_store_fallback(
         y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + float(rms_norm_eps))
         flat.copy_((y * norm_weight.float()).to(flat.dtype))
     if rotary_dim > 0:
+        assert positions_flat is not None
         apply_rotary_tail(
             flat,
             positions_flat,
@@ -1794,6 +1989,8 @@ def compress_norm_rope_store_fallback(
             beta_fast=beta_fast,
             beta_slow=beta_slow,
         )
+    if apply_hadamard:
+        indexer_kv_hadamard_fallback(flat)
 
     valid = loc_flat >= 0
     if bool(torch.any(valid)):
@@ -1845,6 +2042,7 @@ __all__ = [
     "DSV4KernelCapability",
     "DSV4KernelInventoryEntry",
     "DSV4KernelMode",
+    "DSV4IndexerSelectOutput",
     "DSV4MoERoutePlan",
     "DSV4PagedMQAMetadata",
     "DSV4TopKTransformOutput",
@@ -1870,10 +2068,15 @@ __all__ = [
     "fused_q_indexer_rope_hadamard_fp4_quant",
     "fused_q_indexer_rope_hadamard_quant",
     "hash_topk_fallback",
+    "hadamard_transform_ref",
     "hc_head_fallback",
     "hc_post_fallback",
     "hc_pre_fallback",
     "hc_split_sinkhorn_ref",
+    "indexer_bf16_logits_fallback",
+    "indexer_kv_hadamard_fallback",
+    "indexer_q_rope_hadamard_bf16_fallback",
+    "indexer_select_bf16_fallback",
     "k_norm_rope_cache_fallback",
     "linear_bf16_fp32_fallback",
     "mega_moe_pre_dispatch_fallback",

@@ -152,18 +152,48 @@ class DSV4Compressor(BaseOP):
 class DSV4Indexer(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int):
         _ = layer_id
+        self.n_heads = config.index_n_heads
+        self.head_dim = config.index_head_dim
+        self.weight_scale = (self.head_dim**-0.5) * (self.n_heads**-0.5)
         self.wq_b = DSV4Linear(
             config.q_lora_rank,
-            config.index_n_heads * config.index_head_dim,
+            self.n_heads * self.head_dim,
             weight_dtype=dsv4_kernel.fp8_dtype(),
             scale_dtype=dsv4_kernel.e8m0_dtype(),
         )
         self.weights_proj = DSV4Linear(
             config.hidden_size,
-            config.index_n_heads,
+            self.n_heads,
             weight_dtype=torch.bfloat16,
         )
-        self.compressor = DSV4Compressor(config, ratio=4, head_dim=config.index_head_dim)
+        self.compressor = DSV4Compressor(config, ratio=4, head_dim=self.head_dim)
+
+    def prepare_bf16_query(
+        self,
+        x: torch.Tensor,
+        q_lora: torch.Tensor,
+        positions: torch.Tensor,
+        *,
+        rotary_dim: int,
+        base: float,
+        original_seq_len: int,
+        factor: float,
+        beta_fast: int,
+        beta_slow: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        q = self.wq_b.forward(q_lora).view(-1, self.n_heads, self.head_dim)
+        q = dsv4_kernel.indexer_q_rope_hadamard_bf16_fallback(
+            q,
+            positions,
+            rotary_dim=rotary_dim,
+            base=base,
+            original_seq_len=original_seq_len,
+            factor=factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+        )
+        weights = self.weights_proj.forward(x) * self.weight_scale
+        return q, weights
 
     def forward(
         self,
@@ -172,10 +202,12 @@ class DSV4Indexer(BaseOP):
         positions: torch.Tensor,
         *,
         apply_norm: bool = True,
+        touch_projections: bool = True,
     ) -> torch.Tensor:
         compressed_kv = self.compressor.forward(x, positions, apply_norm=apply_norm)
-        self.wq_b.forward(q_lora)
-        self.weights_proj.forward(x)
+        if touch_projections:
+            self.wq_b.forward(q_lora)
+            self.weights_proj.forward(x)
         return compressed_kv
 
 
@@ -336,11 +368,31 @@ class DSV4Attention(BaseOP):
         )
 
         if hasattr(self, "indexer"):
+            indexer_select_bf16 = (
+                use_dsv4_backend
+                and attn_backend is not None
+                and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_BF16")
+            )
+            indexer_q = None
+            indexer_weights = None
+            if indexer_select_bf16:
+                indexer_q, indexer_weights = self.indexer.prepare_bf16_query(
+                    x,
+                    q_lora,
+                    positions,
+                    rotary_dim=self.rope_head_dim,
+                    base=float(self.rope_base),
+                    original_seq_len=self.original_seq_len,
+                    factor=self.rope_factor,
+                    beta_fast=self.beta_fast,
+                    beta_slow=self.beta_slow,
+                )
             indexer_kv = self.indexer.forward(
                 x,
                 q_lora,
                 positions,
                 apply_norm=not compress_store_fuses_norm,
+                touch_projections=not indexer_select_bf16,
             )
             if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
                 attn_backend.store_indexer(
@@ -357,6 +409,19 @@ class DSV4Attention(BaseOP):
                     factor=self.rope_factor,
                     beta_fast=self.beta_fast,
                     beta_slow=self.beta_slow,
+                    apply_hadamard=indexer_select_bf16,
+                )
+            if (
+                indexer_select_bf16
+                and indexer_q is not None
+                and indexer_weights is not None
+                and hasattr(attn_backend, "select_indexer")
+            ):
+                attn_backend.select_indexer(
+                    self.layer_id,
+                    indexer_q,
+                    indexer_weights,
+                    batch,
                 )
         if hasattr(self, "compressor"):
             compressed_kv = self.compressor.forward(

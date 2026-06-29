@@ -203,6 +203,41 @@ def test_dsv4_ratio_dispatch_and_fallback_attention_shapes():
         assert torch.isfinite(out.float()).all()
 
 
+def test_dsv4_indexer_select_updates_c4_sparse_metadata():
+    cfg = _tiny_dsv4_config([4])
+    ctx = _install_context(cfg, page_size=4, table_bases=[0], max_len=16)
+    batch = _prepare_decode_batch([_req(0, 0, 16, cached_len=15)])
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+    assert isinstance(batch.attn_metadata, DSV4AttentionMetadata)
+
+    cache = ctx.kv_cache.indexer_cache(0)
+    cache.zero_()
+    cache[:4] = torch.tensor(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0],
+        ],
+        dtype=cache.dtype,
+    )
+    q = torch.tensor(
+        [[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]],
+        dtype=cache.dtype,
+    )
+    weights = torch.ones(1, 2, dtype=torch.float32)
+
+    out = backend.select_indexer(0, q, weights, batch)
+
+    assert out is not None
+    meta = batch.attn_metadata.core_metadata
+    assert sorted(meta.c4_sparse_raw_indices[0, :2].tolist()) == [1, 2]
+    assert sorted(meta.c4_sparse_page_indices[0, :2].tolist()) == [1, 2]
+    assert sorted(meta.c4_sparse_full_indices[0, :2].tolist()) == [7, 11]
+    assert meta.c4_sparse_raw_indices.shape[1] % 64 == 0
+
+
 def test_dsv4_metadata_repeats_page_table_for_multi_request_batch():
     cfg = _tiny_dsv4_config([4])
     _install_context(cfg, page_size=4, table_bases=[0, 64], max_len=12)

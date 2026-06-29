@@ -59,6 +59,29 @@ def _assert_full_topk_transform(
             assert full_idx == expected_page * ratio + (ratio - 1)
 
 
+def _manual_indexer_logits(
+    q: torch.Tensor,
+    cache: torch.Tensor,
+    weights: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+) -> torch.Tensor:
+    rows = q.shape[0]
+    max_seq_len = int(seq_lens.max().item()) if seq_lens.numel() else 0
+    logits = torch.full((rows, max_seq_len), float("-inf"), dtype=torch.float32, device=q.device)
+    for row in range(rows):
+        for raw_idx in range(int(seq_lens[row].item())):
+            page = int(page_table[row, raw_idx // page_size].item())
+            if page < 0:
+                continue
+            cache_row = page * page_size + raw_idx % page_size
+            scores = torch.einsum("hd,d->h", q[row].float(), cache[cache_row].float())
+            logits[row, raw_idx] = (torch.relu(scores) * weights[row].float()).sum()
+    return logits
+
+
 def _tiny_dsv4_cache_config(compress_ratios: list[int]) -> ModelConfig:
     return ModelConfig(
         num_layers=len(compress_ratios),
@@ -392,6 +415,80 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     assert wo_out.dtype is wo_o.dtype
 
 
+def test_indexer_bf16_query_logits_and_topk_are_fallback_clean():
+    q = torch.randn(3, 2, 4, dtype=torch.float32)
+    positions = torch.tensor([0, 3, 7], dtype=torch.int64)
+    expected_q = dsv4_kernel.apply_rotary_tail(
+        q.clone(),
+        positions,
+        rotary_dim=2,
+        base=10000.0,
+    )
+    expected_q = dsv4_kernel.hadamard_transform_ref(expected_q)
+    actual_q = dsv4_kernel.indexer_q_rope_hadamard_bf16_fallback(
+        q.clone(),
+        positions,
+        rotary_dim=2,
+        base=10000.0,
+    )
+    assert torch.allclose(actual_q, expected_q, atol=1e-5, rtol=1e-5)
+
+    q_logits = torch.tensor(
+        [
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+        ],
+        dtype=torch.bfloat16,
+    )
+    cache = torch.tensor(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 4.0, 0.0],
+            [0.0, 0.0, 0.0, 3.0],
+            [0.0, 0.0, 2.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=torch.bfloat16,
+    )
+    weights = torch.tensor([[1.0, 1.0], [0.5, 1.0]], dtype=torch.float32)
+    seq_lens = torch.tensor([5, 4], dtype=torch.int32)
+    page_table = torch.tensor([[0, 1], [1, 0]], dtype=torch.int32)
+    logits = dsv4_kernel.indexer_bf16_logits_fallback(
+        q_logits,
+        cache,
+        seq_lens,
+        page_table,
+        page_size=4,
+        weights=weights,
+    )
+    expected_logits = _manual_indexer_logits(
+        q_logits,
+        cache,
+        weights,
+        seq_lens,
+        page_table,
+        page_size=4,
+    )
+    assert torch.allclose(logits, expected_logits)
+
+    selected = dsv4_kernel.indexer_select_bf16_fallback(
+        q_logits,
+        weights,
+        cache,
+        seq_lens,
+        page_table,
+        page_size=4,
+        width=2,
+        ratio=4,
+    )
+    for row in range(seq_lens.numel()):
+        expected_raw = torch.topk(expected_logits[row, : seq_lens[row]], 2, sorted=False).indices
+        assert sorted(selected.topk.raw_indices[row].tolist()) == sorted(expected_raw.tolist())
+
+
 def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
     pool = create_kvcache_pool(
         _tiny_dsv4_cache_config([4, 128]),
@@ -540,6 +637,7 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         "MINISGL_DSV4_SM80_MOE_ROUTE",
         "MINISGL_DSV4_SM80_WO_A_BF16",
         "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
+        "MINISGL_DSV4_SM80_INDEXER_BF16",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -851,6 +949,32 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     assert torch.allclose(actual_attn_no_sink, expected_attn_no_sink, atol=3e-2, rtol=3e-2)
     assert torch.equal(actual_attn[0], torch.zeros_like(actual_attn[0]))
     monkeypatch.delenv("MINISGL_DSV4_SM80_PAGED_MQA_BF16", raising=False)
+
+    q_indexer = torch.randn(3, 4, 128, device=device, dtype=torch.bfloat16)
+    indexer_cache = torch.randn(192, 128, device=device, dtype=torch.bfloat16)
+    indexer_weights = torch.randn(3, 4, device=device, dtype=torch.float32)
+    indexer_seq_lens = torch.tensor([16, 64, 97], device=device, dtype=torch.int32)
+    indexer_page_table = torch.tensor([[0, 1], [0, 1], [0, 1]], device=device, dtype=torch.int32)
+    expected_indexer_logits = dsv4_kernel.indexer_bf16_logits_fallback(
+        q_indexer,
+        indexer_cache,
+        indexer_seq_lens,
+        indexer_page_table,
+        page_size=64,
+        weights=indexer_weights,
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_INDEXER_BF16", "1")
+    actual_indexer_logits = dsv4_kernel.indexer_bf16_logits_fallback(
+        q_indexer,
+        indexer_cache,
+        indexer_seq_lens,
+        indexer_page_table,
+        page_size=64,
+        weights=indexer_weights,
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_indexer_logits, expected_indexer_logits, atol=3e-2, rtol=3e-2)
+    monkeypatch.delenv("MINISGL_DSV4_SM80_INDEXER_BF16", raising=False)
 
     class FakeWkvGate:
         def forward(self, x: torch.Tensor) -> torch.Tensor:

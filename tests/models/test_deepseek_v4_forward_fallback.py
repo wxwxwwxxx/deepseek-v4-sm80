@@ -176,6 +176,44 @@ def test_deepseek_v4_ratio4_prefill_forward_fallback_reaches_logits():
     assert torch.isfinite(logits).all()
 
 
+def test_deepseek_v4_ratio4_prefill_forward_with_indexer_bf16_toggle(monkeypatch):
+    _reset_globals()
+    monkeypatch.setenv("MINISGL_DSV4_SM80_INDEXER_BF16", "1")
+    cfg = replace(
+        _tiny_dsv4_config(),
+        compress_ratios=[4],
+        compress_rope_theta=10000.0,
+        index_head_dim=4,
+    )
+    model = get_model_class(cfg.architectures[0], cfg)
+    _fill_forward_weights(model)
+
+    input_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+    ctx = _install_dsv4_context(cfg, max_len=input_ids.numel())
+    req = Req(
+        input_ids=input_ids,
+        table_idx=0,
+        cached_len=0,
+        output_len=1,
+        uid=0,
+        sampling_params=SamplingParams(max_tokens=1),
+        cache_handle=None,  # type: ignore[arg-type]
+    )
+    batch = Batch(reqs=[req], phase="prefill")
+    batch.padded_reqs = batch.reqs
+    batch.input_ids = input_ids
+    batch.positions = torch.arange(input_ids.numel(), dtype=torch.int32)
+    batch.out_loc = torch.arange(input_ids.numel(), dtype=torch.int32)
+    ctx.attn_backend.prepare_metadata(batch)
+
+    with ctx.forward_batch(batch):
+        logits = model.forward()
+
+    assert logits.shape == (1, cfg.vocab_size)
+    assert torch.isfinite(logits).all()
+    assert batch.attn_metadata.core_metadata.c4_sparse_raw_indices[3, 0].item() == 0
+
+
 def test_deepseek_v4_moe_gate_matches_sqrtsoftplus_oracle():
     _reset_globals()
     cfg = _tiny_dsv4_config()
