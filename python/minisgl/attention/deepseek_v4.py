@@ -171,29 +171,102 @@ class DSV4AttentionBackend(BaseAttnBackend):
         kv: torch.Tensor,
         batch: Batch,
         compress_ratio: Literal[4, 128],
+        *,
+        norm_weight: torch.Tensor | None = None,
+        rms_norm_eps: float | None = None,
+        rotary_dim: int = 0,
+        base: float = 10000.0,
+        original_seq_len: int = 0,
+        factor: float = 1.0,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
     ) -> None:
         metadata = batch.attn_metadata
         if not isinstance(metadata, DSV4AttentionMetadata):
             return
-        loc = (
-            metadata.core_metadata.c4_out_loc
+        compress_metadata = (
+            metadata.c4_compress_metadata
             if compress_ratio == 4
-            else metadata.core_metadata.c128_out_loc
+            else metadata.c128_compress_metadata
         )
+        if compress_metadata is None:
+            return
+        loc = compress_metadata.write_loc
         if loc is None or loc.numel() == 0 or kv.numel() == 0:
             return
         n = min(loc.numel(), kv.shape[0])
-        dsv4_kernel.compress_norm_rope_store_fallback(self.kvcache, layer_id, kv[:n], loc[:n])
+        positions = compress_metadata.positions
+        boundary = (positions + 1) % compress_ratio == 0
+        compressed_positions = positions[boundary]
+        if compressed_positions.numel() < n:
+            n = compressed_positions.numel()
+        if n == 0:
+            return
+        dsv4_kernel.compress_norm_rope_store_fallback(
+            self.kvcache,
+            layer_id,
+            kv[:n],
+            loc[:n],
+            positions=compressed_positions[:n],
+            norm_weight=norm_weight,
+            rms_norm_eps=rms_norm_eps,
+            rotary_dim=rotary_dim,
+            base=base,
+            original_seq_len=original_seq_len,
+            factor=factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+            cache_type="compressed",
+        )
 
-    def store_indexer(self, layer_id: int, kv: torch.Tensor, batch: Batch) -> None:
+    def store_indexer(
+        self,
+        layer_id: int,
+        kv: torch.Tensor,
+        batch: Batch,
+        *,
+        norm_weight: torch.Tensor | None = None,
+        rms_norm_eps: float | None = None,
+        rotary_dim: int = 0,
+        base: float = 10000.0,
+        original_seq_len: int = 0,
+        factor: float = 1.0,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
+    ) -> None:
         metadata = batch.attn_metadata
         if not isinstance(metadata, DSV4AttentionMetadata):
+            return
+        compress_metadata = metadata.c4_compress_metadata
+        if compress_metadata is None:
             return
         loc = metadata.core_metadata.c4_indexer_out_loc
         if loc is None or loc.numel() == 0 or kv.numel() == 0:
             return
         n = min(loc.numel(), kv.shape[0])
-        dsv4_kernel.store_indexer_fallback(self.kvcache, layer_id, kv[:n], loc[:n])
+        positions = compress_metadata.positions
+        boundary = (positions + 1) % compress_metadata.ratio == 0
+        compressed_positions = positions[boundary]
+        if compressed_positions.numel() < n:
+            n = compressed_positions.numel()
+        if n == 0:
+            return
+        dsv4_kernel.compress_norm_rope_store_fallback(
+            self.kvcache,
+            layer_id,
+            kv[:n],
+            loc[:n],
+            positions=compressed_positions[:n],
+            norm_weight=norm_weight,
+            rms_norm_eps=rms_norm_eps,
+            rotary_dim=rotary_dim,
+            base=base,
+            original_seq_len=original_seq_len,
+            factor=factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+            cache_type="indexer",
+        )
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
         self.capture_bs = sorted(bs_list)

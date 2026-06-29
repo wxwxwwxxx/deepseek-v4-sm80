@@ -648,6 +648,7 @@ def _compress_forward_vectorized(
     ape: torch.Tensor,
     wkv_gate,
     norm,
+    apply_norm: bool,
 ) -> torch.Tensor | None:
     usable_tokens = x.shape[0] // ratio * ratio
     if usable_tokens == 0:
@@ -666,8 +667,8 @@ def _compress_forward_vectorized(
     else:
         if kv.shape[-1] != head_dim or score.shape[-1] != head_dim:
             return None
-    pooled = (kv * score.softmax(dim=1)).sum(dim=1)
-    return norm.forward(pooled.to(x.dtype))
+    pooled = (kv * score.softmax(dim=1)).sum(dim=1).to(x.dtype)
+    return norm.forward(pooled) if apply_norm else pooled
 
 
 def apply_rotary_tail(
@@ -918,6 +919,7 @@ def compress_forward_fallback(
     ape: torch.Tensor,
     wkv_gate,
     norm,
+    apply_norm: bool = True,
 ) -> torch.Tensor:
     if x.numel() == 0:
         return x.new_empty((0, head_dim))
@@ -935,6 +937,7 @@ def compress_forward_fallback(
             ape=ape,
             wkv_gate=wkv_gate,
             norm=norm,
+            apply_norm=apply_norm,
         )
         if fast is not None:
             return fast
@@ -962,7 +965,8 @@ def compress_forward_fallback(
             )
             local_kv = torch.cat([left, right], dim=0)
         pooled = (local_kv * local_score.softmax(dim=0)).sum(dim=0, keepdim=True)
-        rows.append(norm.forward(pooled.to(x.dtype)))
+        pooled = pooled.to(x.dtype)
+        rows.append(norm.forward(pooled) if apply_norm else pooled)
         start = end
     if not rows:
         return x.new_empty((0, head_dim))
@@ -1502,13 +1506,108 @@ def store_indexer_fallback(kvcache, layer_id: int, kv: torch.Tensor, loc: torch.
     kvcache.store_indexer(layer_id, kv, loc)
 
 
+def _compressed_store_cache(kvcache, layer_id: int, cache_type: str) -> torch.Tensor:
+    if cache_type == "compressed":
+        return kvcache.component_cache(layer_id)
+    if cache_type == "indexer":
+        return kvcache.indexer_cache(layer_id)
+    raise ValueError(f"Unsupported DSV4 compressed cache_type: {cache_type}")
+
+
 def compress_norm_rope_store_fallback(
     kvcache,
     layer_id: int,
     kv: torch.Tensor,
     loc: torch.Tensor,
+    *,
+    positions: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    rms_norm_eps: float | None = None,
+    rotary_dim: int = 0,
+    base: float = 10000.0,
+    original_seq_len: int = 0,
+    factor: float = 1.0,
+    beta_fast: int = 32,
+    beta_slow: int = 1,
+    cache_type: Literal["compressed", "indexer"] = "compressed",
 ) -> None:
-    store_compressed_fallback(kvcache, layer_id, kv, loc)
+    if (norm_weight is None) != (rms_norm_eps is None):
+        raise ValueError(
+            "compress_norm_rope_store_fallback requires norm_weight and rms_norm_eps together"
+        )
+
+    if positions is None or (rotary_dim <= 0 and norm_weight is None):
+        if cache_type == "compressed":
+            store_compressed_fallback(kvcache, layer_id, kv, loc)
+        else:
+            store_indexer_fallback(kvcache, layer_id, kv, loc)
+        return
+
+    dim = kv.shape[-1]
+    flat = kv.reshape(-1, dim)
+    loc_flat = loc.to(device=flat.device, dtype=torch.long).reshape(-1)
+    positions_flat = positions.to(device=flat.device, dtype=torch.long).reshape(-1)
+    if loc_flat.numel() != flat.shape[0]:
+        raise ValueError(
+            "DSV4 compressed cache loc count must match kv rows, "
+            f"got loc={loc_flat.numel()} rows={flat.shape[0]}"
+        )
+    if positions_flat.numel() != flat.shape[0]:
+        raise ValueError(
+            "DSV4 compressed cache positions count must match kv rows, "
+            f"got positions={positions_flat.numel()} rows={flat.shape[0]}"
+        )
+    if norm_weight is not None and norm_weight.numel() != dim:
+        raise ValueError(
+            "DSV4 compressed norm weight must match kv dim, "
+            f"got weight={norm_weight.numel()} dim={dim}"
+        )
+
+    cache = _compressed_store_cache(kvcache, layer_id, cache_type)
+    if cache.shape[-1] != dim:
+        raise ValueError(
+            f"DSV4 compressed cache dim mismatch: cache dim={cache.shape[-1]} kv dim={dim}"
+        )
+
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
+        try:
+            if _triton_dsv4_ops().compress_norm_rope_store_bf16(
+                flat,
+                positions_flat,
+                norm_weight,
+                cache,
+                loc_flat,
+                rms_norm_eps=float(rms_norm_eps or 0.0),
+                rotary_dim=rotary_dim,
+                base=base,
+                original_seq_len=original_seq_len,
+                factor=factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+            ):
+                return
+        except Exception:
+            pass
+
+    if norm_weight is not None:
+        y = flat.float()
+        y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + float(rms_norm_eps))
+        flat.copy_((y * norm_weight.float()).to(flat.dtype))
+    if rotary_dim > 0:
+        apply_rotary_tail(
+            flat,
+            positions_flat,
+            rotary_dim=rotary_dim,
+            base=base,
+            original_seq_len=original_seq_len,
+            factor=factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+        )
+
+    valid = loc_flat >= 0
+    if bool(torch.any(valid)):
+        cache[loc_flat[valid].to(device=cache.device)] = flat[valid].to(cache.dtype)
 
 
 def fused_q_indexer_rope_first_quant(*args, **kwargs):

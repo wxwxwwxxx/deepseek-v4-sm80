@@ -7,12 +7,56 @@ import torch
 import torch.nn.functional as F
 
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
+from minisgl.kvcache import create_kvcache_pool
+from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
+from minisgl.models.config import ModelConfig, RotaryConfig
 import minisgl.attention.deepseek_v4 as dsv4_attention
 import minisgl.models.deepseek_v4 as dsv4_model
 
 
 def _has_sm80_cuda() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
+
+
+def _tiny_dsv4_cache_config(compress_ratios: list[int]) -> ModelConfig:
+    return ModelConfig(
+        num_layers=len(compress_ratios),
+        num_qo_heads=4,
+        num_kv_heads=1,
+        head_dim=8,
+        hidden_size=16,
+        vocab_size=32,
+        intermediate_size=0,
+        rms_norm_eps=1e-6,
+        rotary_config=RotaryConfig(8, 2, 64, 10000.0, None),
+        hidden_act="silu",
+        tie_word_embeddings=False,
+        num_experts=2,
+        num_experts_per_tok=1,
+        moe_intermediate_size=8,
+        norm_topk_prob=True,
+        model_type="deepseek_v4",
+        architectures=["DeepseekV4ForCausalLM"],
+        q_lora_rank=4,
+        o_lora_rank=4,
+        qk_nope_head_dim=6,
+        qk_rope_head_dim=2,
+        v_head_dim=8,
+        window_size=4,
+        compress_ratios=compress_ratios,
+        index_head_dim=4,
+        index_n_heads=2,
+        index_topk=2,
+        n_routed_experts=2,
+        n_shared_experts=1,
+        scoring_func="sqrtsoftplus",
+        expert_dtype="fp4",
+        routed_scaling_factor=1.5,
+        hc_mult=1,
+        hc_sinkhorn_iters=1,
+        o_groups=1,
+        n_hash_layers=0,
+    )
 
 
 def test_dsv4_kernel_inventory_covers_sglang_main_exports():
@@ -160,6 +204,94 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     assert torch.allclose(actual_kv, expected_kv, atol=1e-5, rtol=1e-5)
     assert torch.equal(actual_cache, expected_cache)
 
+    class FakeCompressedCache:
+        def __init__(self) -> None:
+            self.compressed = torch.zeros(12, 8, dtype=torch.bfloat16)
+            self.indexer = torch.zeros(12, 4, dtype=torch.bfloat16)
+
+        def component_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return self.compressed
+
+        def indexer_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return self.indexer
+
+        def store_compressed(self, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
+            assert layer_id == 0
+            self.compressed[loc.long()] = kv.reshape(-1, 8).to(self.compressed.dtype)
+
+        def store_indexer(self, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
+            assert layer_id == 0
+            self.indexer[loc.long()] = kv.reshape(-1, 4).to(self.indexer.dtype)
+
+    compressed_kv = torch.randn(4, 8, dtype=torch.float32)
+    compressed_weight = torch.linspace(0.75, 1.5, 8, dtype=torch.float32)
+    compressed_positions = torch.tensor([3, 7, 11, 15], dtype=torch.int64)
+    compressed_loc = torch.tensor([0, 5, 2, -1], dtype=torch.int32)
+    expected_compressed_kv = compressed_kv.clone()
+    compressed_norm = expected_compressed_kv.float()
+    compressed_norm = compressed_norm * torch.rsqrt(
+        compressed_norm.square().mean(-1, keepdim=True) + 1e-6
+    )
+    expected_compressed_kv.copy_(
+        (compressed_norm * compressed_weight.float()).to(expected_compressed_kv.dtype)
+    )
+    dsv4_kernel.apply_rotary_tail(
+        expected_compressed_kv,
+        compressed_positions,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    expected_compressed_cache = FakeCompressedCache()
+    valid_compressed = compressed_loc >= 0
+    expected_compressed_cache.compressed[compressed_loc[valid_compressed].long()] = (
+        expected_compressed_kv[valid_compressed].to(expected_compressed_cache.compressed.dtype)
+    )
+    actual_compressed_kv = compressed_kv.clone()
+    actual_compressed_cache = FakeCompressedCache()
+    dsv4_kernel.compress_norm_rope_store_fallback(
+        actual_compressed_cache,
+        0,
+        actual_compressed_kv,
+        compressed_loc,
+        positions=compressed_positions,
+        norm_weight=compressed_weight,
+        rms_norm_eps=1e-6,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    assert torch.allclose(actual_compressed_kv, expected_compressed_kv, atol=1e-5, rtol=1e-5)
+    assert torch.equal(actual_compressed_cache.compressed, expected_compressed_cache.compressed)
+
+    indexer_kv = torch.randn(2, 4, dtype=torch.float32)
+    indexer_positions = torch.tensor([3, 7], dtype=torch.int64)
+    indexer_loc = torch.tensor([1, 4], dtype=torch.int32)
+    expected_indexer_kv = dsv4_kernel.apply_rotary_tail(
+        indexer_kv.clone(),
+        indexer_positions,
+        rotary_dim=2,
+        base=10000.0,
+    )
+    expected_indexer_cache = FakeCompressedCache()
+    expected_indexer_cache.indexer[indexer_loc.long()] = expected_indexer_kv.to(
+        expected_indexer_cache.indexer.dtype
+    )
+    actual_indexer_kv = indexer_kv.clone()
+    actual_indexer_cache = FakeCompressedCache()
+    dsv4_kernel.compress_norm_rope_store_fallback(
+        actual_indexer_cache,
+        0,
+        actual_indexer_kv,
+        indexer_loc,
+        positions=indexer_positions,
+        rotary_dim=2,
+        base=10000.0,
+        cache_type="indexer",
+    )
+    assert torch.allclose(actual_indexer_kv, expected_indexer_kv, atol=1e-5, rtol=1e-5)
+    assert torch.equal(actual_indexer_cache.indexer, expected_indexer_cache.indexer)
+
     padded = dsv4_kernel.topk_transform_512_fallback(torch.tensor([[1, 2]], dtype=torch.int32))
     assert padded.shape == (1, 512)
     assert padded[0, :2].tolist() == [1, 2]
@@ -181,6 +313,96 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     )
     assert wo_out.shape == (2, 10)
     assert wo_out.dtype is wo_o.dtype
+
+
+def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
+    pool = create_kvcache_pool(
+        _tiny_dsv4_cache_config([4, 128]),
+        num_pages=64,
+        page_size=4,
+        dtype=torch.float16,
+        device=torch.device("cpu"),
+    )
+    assert isinstance(pool, DeepSeekV4KVCache)
+
+    c4_kv = torch.randn(2, 8, dtype=torch.float32)
+    c4_weight = torch.linspace(0.5, 1.25, 8, dtype=torch.float32)
+    c4_positions = torch.tensor([3, 7], dtype=torch.int64)
+    c4_loc = torch.tensor([0, 3], dtype=torch.int32)
+    expected_c4 = dsv4_kernel.norm_rope_inplace_fallback(
+        c4_kv.clone(),
+        c4_positions,
+        weight=c4_weight,
+        eps=1e-6,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    dsv4_kernel.compress_norm_rope_store_fallback(
+        pool,
+        0,
+        c4_kv,
+        c4_loc,
+        positions=c4_positions,
+        norm_weight=c4_weight,
+        rms_norm_eps=1e-6,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    assert torch.allclose(c4_kv, expected_c4, atol=1e-5, rtol=1e-5)
+    assert torch.equal(pool.c4_cache(0)[c4_loc.long()], expected_c4.to(pool.dtype))
+
+    c128_kv = torch.randn(2, 8, dtype=torch.float32)
+    c128_weight = torch.linspace(0.75, 1.5, 8, dtype=torch.float32)
+    c128_positions = torch.tensor([127, 255], dtype=torch.int64)
+    c128_loc = torch.tensor([0, 1], dtype=torch.int32)
+    expected_c128 = dsv4_kernel.norm_rope_inplace_fallback(
+        c128_kv.clone(),
+        c128_positions,
+        weight=c128_weight,
+        eps=1e-6,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    dsv4_kernel.compress_norm_rope_store_fallback(
+        pool,
+        1,
+        c128_kv,
+        c128_loc,
+        positions=c128_positions,
+        norm_weight=c128_weight,
+        rms_norm_eps=1e-6,
+        rotary_dim=4,
+        base=10000.0,
+    )
+    assert torch.allclose(c128_kv, expected_c128, atol=1e-5, rtol=1e-5)
+    assert torch.equal(pool.c128_cache(1)[c128_loc.long()], expected_c128.to(pool.dtype))
+
+    indexer_kv = torch.randn(2, 4, dtype=torch.float32)
+    indexer_weight = torch.linspace(0.8, 1.1, 4, dtype=torch.float32)
+    indexer_positions = torch.tensor([3, 7], dtype=torch.int64)
+    indexer_loc = torch.tensor([1, 4], dtype=torch.int32)
+    expected_indexer = dsv4_kernel.norm_rope_inplace_fallback(
+        indexer_kv.clone(),
+        indexer_positions,
+        weight=indexer_weight,
+        eps=1e-6,
+        rotary_dim=2,
+        base=10000.0,
+    )
+    dsv4_kernel.compress_norm_rope_store_fallback(
+        pool,
+        0,
+        indexer_kv,
+        indexer_loc,
+        positions=indexer_positions,
+        norm_weight=indexer_weight,
+        rms_norm_eps=1e-6,
+        rotary_dim=2,
+        base=10000.0,
+        cache_type="indexer",
+    )
+    assert torch.allclose(indexer_kv, expected_indexer, atol=1e-5, rtol=1e-5)
+    assert torch.equal(pool.indexer_cache(0)[indexer_loc.long()], expected_indexer.to(pool.dtype))
 
 
 def test_dsv4_moe_route_plan_groups_and_pads_routes():
@@ -233,6 +455,7 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         "MINISGL_DSV4_SM80_Q_NORM_ROPE",
         "MINISGL_DSV4_SM80_KV_BF16",
         "MINISGL_DSV4_SM80_STORE_CACHE",
+        "MINISGL_DSV4_SM80_COMPRESS_STORE",
         "MINISGL_DSV4_SM80_COMPRESS",
         "MINISGL_DSV4_SM80_TOPK",
         "MINISGL_DSV4_SM80_FP8_GEMM",
@@ -397,6 +620,64 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
     torch.cuda.synchronize()
     assert torch.equal(actual_cache.cache, expected_cache.cache)
     monkeypatch.delenv("MINISGL_DSV4_SM80_STORE_CACHE", raising=False)
+
+    class FakeCompressedCudaCache:
+        def __init__(self) -> None:
+            self.cache = torch.zeros(32, 16, device=device, dtype=torch.bfloat16)
+
+        def component_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return self.cache
+
+        def store_compressed(self, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
+            assert layer_id == 0
+            valid = out_loc >= 0
+            self.cache[out_loc[valid].long()] = kv.reshape(-1, 16)[valid].to(self.cache.dtype)
+
+    compressed_for_fused = torch.randn(5, 16, device=device, dtype=torch.bfloat16)
+    compressed_weight = torch.randn(16, device=device, dtype=torch.bfloat16)
+    compressed_positions = torch.tensor([3, 7, 11, 15, 19], device=device, dtype=torch.int64)
+    compressed_loc = torch.tensor([4, 8, 12, -1, 20], device=device, dtype=torch.int32)
+    expected_compressed_cache = FakeCompressedCudaCache()
+    expected_compressed_kv = compressed_for_fused.clone()
+    dsv4_kernel.compress_norm_rope_store_fallback(
+        expected_compressed_cache,
+        0,
+        expected_compressed_kv,
+        compressed_loc,
+        positions=compressed_positions,
+        norm_weight=compressed_weight,
+        rms_norm_eps=1e-6,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    actual_compressed_cache = FakeCompressedCudaCache()
+    actual_compressed_kv = compressed_for_fused.clone()
+    monkeypatch.setenv("MINISGL_DSV4_SM80_COMPRESS_STORE", "1")
+    dsv4_kernel.compress_norm_rope_store_fallback(
+        actual_compressed_cache,
+        0,
+        actual_compressed_kv,
+        compressed_loc,
+        positions=compressed_positions,
+        norm_weight=compressed_weight,
+        rms_norm_eps=1e-6,
+        rotary_dim=8,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=2.0,
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_compressed_kv, expected_compressed_kv, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(
+        actual_compressed_cache.cache,
+        expected_compressed_cache.cache,
+        atol=2e-2,
+        rtol=2e-2,
+    )
+    monkeypatch.delenv("MINISGL_DSV4_SM80_COMPRESS_STORE", raising=False)
 
     indices = torch.tensor([[1, 2, 3], [5, 8, 13]], device=device, dtype=torch.int32)
     expected_topk = dsv4_kernel.topk_transform_512_fallback(indices, width=512)

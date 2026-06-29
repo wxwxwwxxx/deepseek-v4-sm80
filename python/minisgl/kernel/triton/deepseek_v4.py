@@ -213,6 +213,83 @@ def _k_norm_rope_cache_bf16_kernel(
 
 
 @triton.jit
+def _compress_norm_rope_store_bf16_kernel(
+    kv_ptr,
+    positions_ptr,
+    norm_weight_ptr,
+    cache_ptr,
+    loc_ptr,
+    dim: tl.constexpr,
+    rotary_dim: tl.constexpr,
+    eps: tl.constexpr,
+    log_base: tl.constexpr,
+    use_scaling: tl.constexpr,
+    factor: tl.constexpr,
+    low: tl.constexpr,
+    high: tl.constexpr,
+    scale_denom: tl.constexpr,
+    has_norm: tl.constexpr,
+    apply_rope: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_HALF: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_D)
+    mask = offsets < dim
+    row_base = row * dim
+
+    values = tl.load(kv_ptr + row_base + offsets, mask=mask, other=0.0).to(tl.float32)
+    out = values
+    scale = tl.full((), 1.0, dtype=tl.float32)
+    if has_norm:
+        weights = tl.load(norm_weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        mean_square = tl.sum(values * values, axis=0) / dim
+        scale = tl.rsqrt(mean_square + eps)
+        out = values * scale * weights
+
+    if apply_rope:
+        tail = dim - rotary_dim
+        tail_offsets = offsets - tail
+        tail_mask = mask & (tail_offsets >= 0)
+        tail_indices = tl.maximum(tail_offsets, 0)
+        pair_offsets = tail_indices // 2
+        pos = tl.load(positions_ptr + row).to(tl.float32)
+        inv_freq = tl.exp(-((2.0 * pair_offsets.to(tl.float32)) / rotary_dim) * log_base)
+        if use_scaling:
+            ramp = (pair_offsets.to(tl.float32) - low) / scale_denom
+            ramp = tl.minimum(tl.maximum(ramp, 0.0), 1.0)
+            smooth = 1.0 - ramp
+            inv_freq = inv_freq / factor * (1.0 - smooth) + inv_freq * smooth
+
+        theta = pos * inv_freq
+        theta = theta - tl.floor((theta + 3.141592653589793) / 6.283185307179586) * 6.283185307179586
+        cos = tl.cos(theta)
+        sin = tl.sin(theta)
+
+        a_dim_offsets = tail + pair_offsets * 2
+        b_dim_offsets = a_dim_offsets + 1
+        a_offsets = row_base + a_dim_offsets
+        b_offsets = row_base + b_dim_offsets
+        a = tl.load(kv_ptr + a_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+        b = tl.load(kv_ptr + b_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+        if has_norm:
+            a_weight = tl.load(norm_weight_ptr + a_dim_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+            b_weight = tl.load(norm_weight_ptr + b_dim_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+            a = a * scale * a_weight
+            b = b * scale * b_weight
+        rotated_a = a * cos - b * sin
+        rotated_b = a * sin + b * cos
+        rotated = tl.where((tail_indices & 1) == 0, rotated_a, rotated_b)
+        out = tl.where(tail_mask, rotated, out)
+
+    loc = tl.load(loc_ptr + row).to(tl.int64)
+    valid_loc = loc >= 0
+    cache_base = loc * dim
+    tl.store(kv_ptr + row_base + offsets, out, mask=mask)
+    tl.store(cache_ptr + cache_base + offsets, out, mask=mask & valid_loc)
+
+
+@triton.jit
 def _store_cache_kernel(
     kv_ptr,
     loc_ptr,
@@ -853,6 +930,77 @@ def k_norm_rope_cache_bf16(
     return True
 
 
+def compress_norm_rope_store_bf16(
+    kv: torch.Tensor,
+    positions: torch.Tensor,
+    norm_weight: torch.Tensor | None,
+    cache: torch.Tensor,
+    out_loc: torch.Tensor,
+    *,
+    rms_norm_eps: float,
+    rotary_dim: int,
+    base: float,
+    original_seq_len: int,
+    factor: float,
+    beta_fast: int,
+    beta_slow: int,
+) -> bool:
+    has_norm = norm_weight is not None
+    apply_rope = rotary_dim > 0
+    if (
+        kv.ndim != 2
+        or kv.numel() == 0
+        or not kv.is_cuda
+        or not positions.is_cuda
+        or not cache.is_cuda
+        or not out_loc.is_cuda
+        or not kv.is_contiguous()
+        or not cache.is_contiguous()
+        or (has_norm and not norm_weight.is_cuda)
+    ):
+        return False
+    if positions.numel() != kv.shape[0] or out_loc.numel() != kv.shape[0]:
+        return False
+    dim = kv.shape[-1]
+    if cache.shape[-1] != dim or rotary_dim > dim:
+        return False
+    if has_norm and norm_weight.numel() != dim:
+        return False
+    if not has_norm and not apply_rope:
+        return False
+    use_scaling, low, high = _rope_scaling(
+        rotary_dim=rotary_dim,
+        base=base,
+        original_seq_len=original_seq_len,
+        beta_fast=beta_fast,
+        beta_slow=beta_slow,
+    )
+    block_d = triton.next_power_of_2(dim)
+    block_half = triton.next_power_of_2(max(rotary_dim // 2, 1))
+    norm_weight_c = norm_weight.contiguous() if norm_weight is not None else kv
+    _compress_norm_rope_store_bf16_kernel[(kv.shape[0],)](
+        kv,
+        positions.contiguous(),
+        norm_weight_c,
+        cache,
+        out_loc.contiguous(),
+        dim=dim,
+        rotary_dim=rotary_dim,
+        eps=float(rms_norm_eps),
+        log_base=math.log(base),
+        use_scaling=use_scaling and apply_rope,
+        factor=float(factor),
+        low=low,
+        high=high,
+        scale_denom=max(high - low, 1),
+        has_norm=has_norm,
+        apply_rope=apply_rope,
+        BLOCK_D=block_d,
+        BLOCK_HALF=block_half,
+    )
+    return True
+
+
 def store_cache(cache: torch.Tensor, kv: torch.Tensor, loc: torch.Tensor) -> bool:
     if kv.numel() == 0:
         return True
@@ -1300,6 +1448,7 @@ def grouped_fp4_moe(
 
 __all__ = [
     "apply_rotary_tail",
+    "compress_norm_rope_store_bf16",
     "grouped_fp4_moe",
     "k_norm_rope_cache_bf16",
     "paged_mqa_attention_bf16",

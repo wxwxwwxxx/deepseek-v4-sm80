@@ -129,7 +129,13 @@ class DSV4Compressor(BaseOP):
         )
         self.norm = DSV4RMSNorm(head_dim, config.rms_norm_eps)
 
-    def forward(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        *,
+        apply_norm: bool = True,
+    ) -> torch.Tensor:
         return dsv4_kernel.compress_forward_fallback(
             x,
             positions,
@@ -139,6 +145,7 @@ class DSV4Compressor(BaseOP):
             ape=self.ape,
             wkv_gate=self.wkv_gate,
             norm=self.norm,
+            apply_norm=apply_norm,
         )
 
 
@@ -163,8 +170,10 @@ class DSV4Indexer(BaseOP):
         x: torch.Tensor,
         q_lora: torch.Tensor,
         positions: torch.Tensor,
+        *,
+        apply_norm: bool = True,
     ) -> torch.Tensor:
-        compressed_kv = self.compressor.forward(x, positions)
+        compressed_kv = self.compressor.forward(x, positions, apply_norm=apply_norm)
         self.wq_b.forward(q_lora)
         self.weights_proj.forward(x)
         return compressed_kv
@@ -320,18 +329,57 @@ class DSV4Attention(BaseOP):
                 kv[..., : -self.rope_head_dim], block_size=64
             )
 
+        compress_store_fuses_norm = (
+            use_dsv4_backend
+            and attn_backend is not None
+            and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE")
+        )
+
         if hasattr(self, "indexer"):
-            indexer_kv = self.indexer.forward(x, q_lora, positions)
+            indexer_kv = self.indexer.forward(
+                x,
+                q_lora,
+                positions,
+                apply_norm=not compress_store_fuses_norm,
+            )
             if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
-                attn_backend.store_indexer(self.layer_id, indexer_kv, batch)
+                attn_backend.store_indexer(
+                    self.layer_id,
+                    indexer_kv,
+                    batch,
+                    norm_weight=(
+                        self.indexer.compressor.norm.weight if compress_store_fuses_norm else None
+                    ),
+                    rms_norm_eps=self.rms_norm_eps if compress_store_fuses_norm else None,
+                    rotary_dim=self.rope_head_dim,
+                    base=float(self.rope_base),
+                    original_seq_len=self.original_seq_len,
+                    factor=self.rope_factor,
+                    beta_fast=self.beta_fast,
+                    beta_slow=self.beta_slow,
+                )
         if hasattr(self, "compressor"):
-            compressed_kv = self.compressor.forward(x, positions)
+            compressed_kv = self.compressor.forward(
+                x,
+                positions,
+                apply_norm=not compress_store_fuses_norm,
+            )
             if use_dsv4_backend and hasattr(attn_backend, "store_compressed"):
                 attn_backend.store_compressed(
                     self.layer_id,
                     compressed_kv,
                     batch,
                     self.compress_ratio,
+                    norm_weight=(
+                        self.compressor.norm.weight if compress_store_fuses_norm else None
+                    ),
+                    rms_norm_eps=self.rms_norm_eps if compress_store_fuses_norm else None,
+                    rotary_dim=self.rope_head_dim,
+                    base=float(self.rope_base),
+                    original_seq_len=self.original_seq_len,
+                    factor=self.rope_factor,
+                    beta_fast=self.beta_fast,
+                    beta_slow=self.beta_slow,
                 )
 
         if use_dsv4_backend and attn_backend is not None:
