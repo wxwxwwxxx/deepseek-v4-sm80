@@ -1,0 +1,184 @@
+{
+  "config": {
+    "classification": "baseline",
+    "communication_backend": "nccl",
+    "distributed_init_method": "env://",
+    "page_size": 256,
+    "tensor_parallel_size": 8,
+    "token_id_range": 1024,
+    "use_pynccl": false
+  },
+  "git": {
+    "branch": "dsv4-sglang-based",
+    "commit": "13afdb6ef94f1215947f1f610528353c44ad8ff8",
+    "dirty": false,
+    "short_commit": "13afdb6",
+    "status_short": []
+  },
+  "load_init": {
+    "seconds_max": 69.87670695222914,
+    "seconds_per_rank": [
+      {
+        "memory": {
+          "max_memory_allocated_bytes": 76097478144,
+          "max_memory_reserved_bytes": 76135006208,
+          "memory_allocated_bytes": 76097466368,
+          "memory_reserved_bytes": 76135006208
+        },
+        "rank": 0,
+        "seconds": 69.65510118380189
+      },
+      {
+        "memory": {
+          "max_memory_allocated_bytes": 76097478144,
+          "max_memory_reserved_bytes": 76135006208,
+          "memory_allocated_bytes": 76097466368,
+          "memory_reserved_bytes": 76135006208
+        },
+        "rank": 1,
+        "seconds": 69.73571540042758
+      },
+      {
+        "memory": {
+          "max_memory_allocated_bytes": 76097478144,
+          "max_memory_reserved_bytes": 76135006208,
+          "memory_allocated_bytes": 76097466368,
+          "memory_reserved_bytes": 76135006208
+        },
+        "rank": 2,
+        "seconds": 69.70968755334616
+      },
+      {
+        "memory": {
+          "max_memory_allocated_bytes": 76097478144,
+          "max_memory_reserved_bytes": 76135006208,
+          "memory_allocated_bytes": 76097466368,
+          "memory_reserved_bytes": 76135006208
+        },
+        "rank": 3,
+        "seconds": 69.60512905754149
+      },
+      {
+        "memory": {
+          "max_memory_allocated_bytes": 76097478144,
+          "max_memory_reserved_bytes": 76135006208,
+          "memory_allocated_bytes": 76097466368,
+          "memory_reserved_bytes": 76135006208
+        },
+        "rank": 4,
+        "seconds": 69.87670695222914
+      },
+      {
+        "memory": {
+          "max_memory_allocated_bytes": 76097478144,
+          "max_memory_reserved_bytes": 76135006208,
+          "memory_allocated_bytes": 76097466368,
+          "memory_reserved_bytes": 76135006208
+        },
+        "rank": 5,
+        "seconds": 69.6994809936732
+      },
+      {
+        "memory": {
+          "max_memory_allocated_bytes": 76097478144,
+          "max_memory_reserved_bytes": 76135006208,
+          "memory_allocated_bytes": 76097466368,
+          "memory_reserved_bytes": 76135006208
+        },
+        "rank": 6,
+        "seconds": 69.79197022505105
+      },
+      {
+        "memory": {
+          "max_memory_allocated_bytes": 76097478144,
+          "max_memory_reserved_bytes": 76135006208,
+          "memory_allocated_bytes": 76097466368,
+          "memory_reserved_bytes": 76135006208
+        },
+        "rank": 7,
+        "seconds": 69.79838649556041
+      }
+    ]
+  },
+  "model_path": "/models/DeepSeek-V4-Flash",
+  "runtime_environment_rank0": {
+    "cuda": {
+      "available": true,
+      "capability": [
+        8,
+        0
+      ],
+      "capability_name": "sm80",
+      "current_device": 0,
+      "device_count": 8,
+      "device_name": "NVIDIA A100-SXM4-80GB",
+      "rank": 0,
+      "runtime": "12.8"
+    },
+    "dsv4_kernel_capabilities": {
+      "cuda_available": true,
+      "cuda_capability": [
+        8,
+        0
+      ],
+      "deep_gemm_available": false,
+      "deep_gemm_error": "RuntimeError: Check failed: (lib_handle_ != nullptr) is false: Failed to load dynamic shared library /usr/local/lib/python3.12/dist-packages/deep_gemm/_C.so dlopen hook: '/usr/local/lib/python3.12/dist-packages/deep_gemm/_C.so': cannot open shared object file: No such file or directory",
+      "deep_gemm_usable": false,
+      "flash_mla_available": true,
+      "flash_mla_error": null,
+      "flashinfer_available": true,
+      "flashinfer_error": null,
+      "is_sm80": true,
+      "marlin_available": false,
+      "marlin_error": "module not installed",
+      "sgl_kernel_available": true,
+      "sgl_kernel_dsv4_ops": {
+        "deepseek_v4_topk_transform_512": false,
+        "dsv4_fused_q_indexer_rope_hadamard_fp4_quant": false,
+        "dsv4_fused_q_indexer_rope_hadamard_quant": false
+      },
+      "sgl_kernel_error": null,
+      "sgl_kernel_sm80_common_ops": false,
+      "tilelang_available": true,
+      "tilelang_error": null,
+      "triton_available": true,
+      "triton_error": null
+    },
+    "nccl": {
+      "version": "2.27.5"
+    },
+    "packages": {
+      "deep_gemm": null,
+      "flashinfer": "0.6.12",
+      "sgl_kernel": "0.3.21",
+      "tilelang": "0.1.11+cu128.gita417b38a",
+      "torch": "2.9.1+cu128",
+      "triton": "3.5.1",
+      "tvm_ffi": "0.1.11"
+    },
+    "python": "3.12.3"
+  },
+  "scenarios": [
+    {
+      "batch_size": 4,
+      "decode_len": 128,
+      "description": "Decode-heavy batch throughput workload.",
+      "kind": "random",
+      "name": "decode_throughput_bs8",
+      "prompt_len": 4096,
+      "repeats": 1,
+      "shared_prefix_len": 0,
+      "suffix_len": 0,
+      "warmup_repeats": 0
+    }
+  ],
+  "variants": [
+    {
+      "description": "V1 exact grouped MoE bundle: v0 BF16 whitelist plus grouped MoE route.",
+      "env": {
+        "MINISGL_DSV4_SM80_V1_MOE": "1"
+      },
+      "name": "v1_moe"
+    }
+  ]
+}
