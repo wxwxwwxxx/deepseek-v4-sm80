@@ -107,6 +107,27 @@ target is TARGET 07.3 MoE exact V2. vLLM's FusedMoE runner shape should be
 adapted, while MXFP4/FP8 activation or KV/cache precision should remain a
 separate deferred precision-lane target.
 
+TARGET 07.35 update: TARGET 07.3's exact MoE V2 route-plan/workspace and
+bf16-output SwiGLU cuts were correct, but they did not improve decode
+throughput. The post-MoE re-parity milestone is recorded in
+`performance_milestones/target07_post_moe_reparity/README.md`. The current
+exact V2 4096/1024/batch4 smoke macro is about `17.8` E2E output tok/s and
+`19.9` decode tok/s under the recorded policy, with TP8 page-size-256 text smoke
+passing. The next implementation target is no longer peripheral 07.3 MoE
+cleanup. It is TARGET 07.36: adapt vLLM's standard FusedMoE runner boundary into
+mini as a mini-owned exact baseline, then decide from fresh data whether to keep
+MoE work, open attention/cache/indexer, or move to precision/backend lanes.
+
+TARGET 07.36 update: the vLLM-shaped mini-owned FusedMoE runner is implemented
+and measured in `performance_milestones/target07_vllm_fused_moe_runner/`. It
+passes correctness and TP8 text smoke, but 4096/1024/batch4 improves only about
+`+0.16%`, and DSV4-like routed-MoE microbench is neutral-to-negative. Fresh
+4096/128 Nsight still shows grouped FP4 W13/W2 as dominant, about `46.781s` plus
+`31.700s` summed GPU time. Therefore stop MoE wrapper/runner work. The next
+step is split into TARGET 07.37 backend identification first, and TARGET 07.38
+exact backend adaptation only if 07.37 proves a vLLM-style exact W4A16 backend
+is feasible and worth porting.
+
 ## Primary References
 
 Local mini-sglang:
@@ -160,35 +181,43 @@ Use separate Codex threads for these large milestones:
 | TARGET 07.25 | `prompts/TARGET_07.25_dsv4_sm80_vllm_subgraph_parity.md` | DeepSeek V4 sm80-only mini/vLLM subgraph parity map and paired microbench, used to rank the real remaining bottlenecks before more fixes. |
 | TARGET 07.3 | `prompts/TARGET_07.3_dsv4_sm80_moe_v2_exact.md` | Exact MoE V2 plan/fusion after 07.25 identifies MoE as the top remaining bottleneck. |
 | TARGET 07.35 | `prompts/TARGET_07.35_dsv4_sm80_post_moe_reparity.md` | Re-run mini/vLLM parity after MoE V2, update the bottleneck ranking, and write the next focused performance plan before doing small optimizations. |
+| TARGET 07.36 | `prompts/TARGET_07.36_dsv4_sm80_vllm_fused_moe_runner_adapt.md` | Adapt vLLM's standard FusedMoE runner shape into mini as the next exact-path baseline, then measure whether MoE runner structure still deserves more work. |
+| TARGET 07.37 | `prompts/TARGET_07.37_dsv4_sm80_moe_backend_identification.md` | Identify the actual vLLM sm80 MoE expert backend and decide exact backend adaptation versus precision lane versus another target. |
+| TARGET 07.38 | `prompts/TARGET_07.38_dsv4_sm80_moe_exact_backend_adapt.md` | Conditional implementation target for one vLLM-identified exact W4A16 MoE expert backend, only if TARGET 07.37 selects it. |
 | TARGET 07.4 | `prompts/TARGET_07.4_dsv4_sm80_precision_lanes.md` | Precision-lane experiments: fp8/fp4 activation quantization and INT8 Tensor Core opt-in after bf16-direct is strong. |
 
 Smaller work such as sqlite reporting helpers, benchmark flags, and README
 updates may live inside the relevant subtarget rather than getting their own
 thread.
 
-## Current Sequencing After TARGET 07.25
+## Current Sequencing After TARGET 07.36
 
-TARGET 07.1, TARGET 07.2, and TARGET 07.25 now have recorded milestone
-artifacts. Do not continue expanding those threads unless a baseline artifact is
-missing or a workload/config mismatch is discovered.
+TARGET 07.1, TARGET 07.2, TARGET 07.25, TARGET 07.3, TARGET 07.35, and
+TARGET 07.36 now have recorded milestone artifacts. Do not continue expanding
+those threads unless a baseline artifact is missing or a workload/config
+mismatch is discovered.
 
-The next implementation target is TARGET 07.3 MoE exact V2. TARGET 07.3 should
-focus on the dominant MoE routed-expert execution boundary identified by
-`performance_milestones/target07_subgraph_parity/README.md`:
+The next target is TARGET 07.37 MoE backend identification. It is not an
+implementation target. Its job is to identify the vLLM sm80 MoE expert backend,
+its weight layout, activation precision, support constraints, and expected
+benefit before mini ports anything.
 
-- mini best exact after TARGET 07.2: about 25.3 output tok/s on
-  4096/1024/batch4;
+Carry these reference lines into TARGET 07.37:
+
+- post-07.36 exact runner: about 17.83 output tok/s and 19.93 decode tok/s on
+  the 4096/1024/batch4 smoke macro policy;
 - vLLM fair reference: about 201.9 output tok/s on the same macro workload;
 - first hard victory line: old serving baseline 114.07 output tok/s;
-- current bottleneck order: MoE routed experts and execution boundary, sparse
-  attention/indexer/cache layout, scheduling/graph/multi-stream overlap,
-  communication/reduce boundary, precision lane, then HC/RMSNorm/final.
+- current risk order: MoE expert backend W13/W2 first, then
+  sparse attention/indexer/cache, scheduling/stream overlap,
+  communication/reduce boundary, precision lane, then HC/RMSNorm/final;
+- vLLM runner shape is no longer enough by itself; exact backend or precision
+  backend is the next question.
 
-After TARGET 07.3 lands one serious MoE cut, run TARGET 07.35 before spending a
-new thread on small optimizations. The purpose of TARGET 07.35 is to re-rank the
-gap with fresh artifacts, decide whether attention/cache, communication,
-precision, or small-kernel cleanup is now first, and write the next focused
-plan.
+TARGET 07.38 must not start until TARGET 07.37 classifies a vLLM backend as an
+exact W4A16 candidate with bf16 activations and at least `1.5x` expected routed
+MoE improvement. If 07.37 shows the vLLM win depends on activation quantization
+or MXFP8/FP8/MXFP4 semantics, move to TARGET 07.4 instead.
 
 ## Thread Stop Rules
 

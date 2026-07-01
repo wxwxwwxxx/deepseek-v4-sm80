@@ -1,0 +1,217 @@
+{
+  "activation_format": "Standard",
+  "activation_key": null,
+  "actual_deepseek_v4_selector": {
+    "gpt_oss_reference_priority_backends": [
+      "FLASHINFER_TRTLLM_MXFP4_BF16",
+      "AITER",
+      "TRITON",
+      "FLASHINFER_CUTLASS_MXFP4_BF16",
+      "MARLIN",
+      "BATCHED_MARLIN",
+      "XPU",
+      "EMULATION"
+    ],
+    "moe_method": "Mxfp4MoEMethod",
+    "priority_backends": [
+      "FLASHINFER_TRTLLM_MXFP4_MXFP8",
+      "DEEPGEMM_MXFP4",
+      "MARLIN",
+      "BATCHED_MARLIN"
+    ],
+    "quant_config_class": "DeepseekV4FP8Config",
+    "selector": "select_mxfp4_moe_backend"
+  },
+  "classification": {
+    "AITER": "defer_or_reject_for_cuda_sm80; ROCm backend",
+    "BATCHED_MARLIN": "exact_candidate_when_batched_activation_format_is_used; rejected_for_standard_TP8_selector_format",
+    "DEEPGEMM_MXFP4": "precision_lane_and_sm100_only",
+    "EMULATION": "defer_or_reject; not in DeepSeek_V4_actual_priority_and_not_a_performance_backend",
+    "FLASHINFER_CUTLASS_MXFP4_BF16": "exact_candidate_but_sm90_or_later_only",
+    "FLASHINFER_CUTLASS_MXFP4_MXFP8": "precision_lane_and_sm100_only",
+    "FLASHINFER_TRTLLM_MXFP4_BF16": "exact_candidate_but_sm100_only",
+    "FLASHINFER_TRTLLM_MXFP4_MXFP8": "precision_lane_and_sm100_only",
+    "MARLIN": "exact_candidate",
+    "TRITON": "defer_or_reject_for_sm80; gpt_oss_triton_kernel_path_requires_sm90_to_sm100_window",
+    "TRITON_UNFUSED": "defer_or_reject_for_sm80; gpt_oss_triton_kernel_path_requires_sm90_to_sm100_window",
+    "XPU": "defer_or_reject_for_cuda_sm80; XPU backend"
+  },
+  "device": {
+    "capability": {
+      "major": 8,
+      "minor": 0,
+      "raw": "DeviceCapability(major=8, minor=0)",
+      "tuple": [
+        8,
+        0
+      ]
+    },
+    "current_platform_class": "NvmlCudaPlatform",
+    "device_name": "cuda",
+    "is_cuda": true,
+    "is_rocm": false,
+    "is_xpu": false,
+    "name": "NVIDIA A100-SXM4-80GB"
+  },
+  "explicit_overrides": {
+    "aiter": {
+      "error": "Mxfp4 MoE backend 'AITER' does not support the deployment configuration since kernel does not support current device cuda.",
+      "error_type": "ValueError",
+      "name": "select_mxfp4_moe_backend(moe_backend=aiter)",
+      "status": "error"
+    },
+    "deep_gemm": {
+      "error": "Mxfp4 MoE backend 'DEEPGEMM_MXFP4' does not support the deployment configuration since kernel does not support current device cuda.",
+      "error_type": "ValueError",
+      "name": "select_mxfp4_moe_backend(moe_backend=deep_gemm)",
+      "status": "error"
+    },
+    "emulation": {
+      "activation_format": "Standard",
+      "activation_key": null,
+      "backend": "EMULATION",
+      "experts_class": "vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe.OCP_MXQuantizationEmulationTritonExperts",
+      "name": "select_mxfp4_moe_backend(moe_backend=emulation)",
+      "quant_config": {
+        "block_shape": null,
+        "is_quantized_activation": true,
+        "per_act_token_quant": false,
+        "quant_dtype": "mxfp4",
+        "use_mxfp4_w4a16": false,
+        "use_mxfp4_w4a4": true,
+        "use_mxfp4_w4a8": false,
+        "weight_quant_dtype": "mxfp4"
+      },
+      "rounded_shape": {
+        "hidden_dim": 4096,
+        "intermediate_size_per_partition": 256
+      },
+      "status": "selected",
+      "weight_key": "QuantKey(u8,scale(u8,static,GroupShape(row=1, col=32)),symmetric)"
+    },
+    "flashinfer_cutlass": {
+      "error": "Mxfp4 MoE backend 'FLASHINFER_CUTLASS_MXFP4_BF16' does not support the deployment configuration since kernel does not support current device cuda.",
+      "error_type": "ValueError",
+      "name": "select_mxfp4_moe_backend(moe_backend=flashinfer_cutlass)",
+      "status": "error"
+    },
+    "flashinfer_cutlass_afp8": {
+      "error": "Mxfp4 MoE backend 'FLASHINFER_CUTLASS_MXFP4_MXFP8' does not support the deployment configuration since kernel does not support current device cuda.",
+      "error_type": "ValueError",
+      "name": "select_mxfp4_moe_backend(moe_backend=flashinfer_cutlass_afp8)",
+      "status": "error"
+    },
+    "flashinfer_trtllm": {
+      "error": "Mxfp4 MoE backend 'FLASHINFER_TRTLLM_MXFP4_BF16' does not support the deployment configuration since kernel does not support current device cuda.",
+      "error_type": "ValueError",
+      "name": "select_mxfp4_moe_backend(moe_backend=flashinfer_trtllm)",
+      "status": "error"
+    },
+    "flashinfer_trtllm_afp8": {
+      "error": "Mxfp4 MoE backend 'FLASHINFER_TRTLLM_MXFP4_MXFP8' does not support the deployment configuration since kernel does not support current device cuda.",
+      "error_type": "ValueError",
+      "name": "select_mxfp4_moe_backend(moe_backend=flashinfer_trtllm_afp8)",
+      "status": "error"
+    },
+    "marlin": {
+      "activation_format": "Standard",
+      "activation_key": null,
+      "backend": "MARLIN",
+      "experts_class": "vllm.model_executor.layers.fused_moe.fused_marlin_moe.MarlinExperts",
+      "name": "select_mxfp4_moe_backend(moe_backend=marlin)",
+      "quant_config": {
+        "block_shape": null,
+        "is_quantized_activation": false,
+        "per_act_token_quant": false,
+        "quant_dtype": null,
+        "use_mxfp4_w4a16": true,
+        "use_mxfp4_w4a4": false,
+        "use_mxfp4_w4a8": false,
+        "weight_quant_dtype": "mxfp4"
+      },
+      "rounded_shape": {
+        "hidden_dim": 4096,
+        "intermediate_size_per_partition": 256
+      },
+      "status": "selected",
+      "weight_key": "QuantKey(u8,scale(u8,static,GroupShape(row=1, col=32)),symmetric)"
+    },
+    "triton": {
+      "error": "Mxfp4 MoE backend 'TRITON' does not support the deployment configuration since kernel does not support current device cuda.",
+      "error_type": "ValueError",
+      "name": "select_mxfp4_moe_backend(moe_backend=triton)",
+      "status": "error"
+    },
+    "triton_unfused": {
+      "error": "Mxfp4 MoE backend 'TRITON_UNFUSED' does not support the deployment configuration since kernel does not support current device cuda.",
+      "error_type": "ValueError",
+      "name": "select_mxfp4_moe_backend(moe_backend=triton_unfused)",
+      "status": "error"
+    },
+    "xpu": {
+      "error": "Mxfp4 MoE backend 'XPU' does not support the deployment configuration since kernel does not support current device cuda.",
+      "error_type": "ValueError",
+      "name": "select_mxfp4_moe_backend(moe_backend=xpu)",
+      "status": "error"
+    }
+  },
+  "rejected_for_standard_tp8": [
+    {
+      "backend": "DEEPGEMM_MXFP4",
+      "reason": "kernel does not support current device cuda"
+    },
+    {
+      "backend": "FLASHINFER_TRTLLM_MXFP4_MXFP8",
+      "reason": "kernel does not support current device cuda"
+    },
+    {
+      "backend": "FLASHINFER_TRTLLM_MXFP4_BF16",
+      "reason": "kernel does not support current device cuda"
+    },
+    {
+      "backend": "FLASHINFER_CUTLASS_MXFP4_MXFP8",
+      "reason": "kernel does not support current device cuda"
+    },
+    {
+      "backend": "FLASHINFER_CUTLASS_MXFP4_BF16",
+      "reason": "kernel does not support current device cuda"
+    },
+    {
+      "backend": "BATCHED_MARLIN",
+      "reason": "kernel does not support ('standard',) activation format"
+    },
+    {
+      "backend": "AITER",
+      "reason": "kernel does not support current device cuda"
+    },
+    {
+      "backend": "TRITON",
+      "reason": "kernel does not support current device cuda"
+    },
+    {
+      "backend": "TRITON_UNFUSED",
+      "reason": "kernel does not support current device cuda"
+    },
+    {
+      "backend": "XPU",
+      "reason": "kernel does not support current device cuda"
+    }
+  ],
+  "selected_backend": "MARLIN",
+  "selected_experts_class": "vllm.model_executor.layers.fused_moe.fused_marlin_moe.MarlinExperts",
+  "selected_quant_config": {
+    "block_shape": null,
+    "is_quantized_activation": false,
+    "per_act_token_quant": false,
+    "quant_dtype": null,
+    "use_mxfp4_w4a16": true,
+    "use_mxfp4_w4a4": false,
+    "use_mxfp4_w4a8": false,
+    "weight_quant_dtype": "mxfp4"
+  },
+  "supported_for_standard_tp8": [
+    "MARLIN",
+    "EMULATION"
+  ],
+  "weight_key": "QuantKey(u8,scale(u8,static,GroupShape(row=1, col=32)),symmetric)"
+}

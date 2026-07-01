@@ -56,9 +56,7 @@ def _cached_fp32_weight(
     toggle: str,
 ) -> torch.Tensor:
     if not (
-        dsv4_kernel.dsv4_env_flag(toggle)
-        and weight.is_cuda
-        and weight.dtype == torch.bfloat16
+        dsv4_kernel.dsv4_env_flag(toggle) and weight.is_cuda and weight.dtype == torch.bfloat16
     ):
         return weight
     meta_name = f"{cache_name}_meta"
@@ -319,9 +317,7 @@ class DSV4Indexer(BaseOP):
         self.compressor = DSV4Compressor(config, ratio=4, head_dim=self.head_dim)
 
     def _wq_b_forward(self, q_lora: torch.Tensor) -> torch.Tensor:
-        fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
-            "MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM"
-        )
+        fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM")
         return self.wq_b.forward(q_lora, fp8_gemm=fp8_gemm if fp8_gemm else None)
 
     def prepare_bf16_query(
@@ -470,16 +466,12 @@ class DSV4Attention(BaseOP):
             and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_KV_BF16")
         )
         fused_q_kv_rmsnorm = (
-            dsv4_kernel.dsv4_sm80_triton_enabled(
-                "MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM"
-            )
+            dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM")
             and not kv_norm_rope_store_enabled
         )
         fused_q_kv_norm_rope_store = (
             kv_norm_rope_store_enabled
-            and dsv4_kernel.dsv4_sm80_triton_enabled(
-                "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE"
-            )
+            and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE")
         )
         kv_from_shared_wqa_wkv = None
         kv = None
@@ -766,9 +758,7 @@ class DSV4Attention(BaseOP):
                 o_lora_rank=self.o_lora_rank,
             )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_b"):
-            wo_b_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
-                "MINISGL_DSV4_SM80_WO_B_FP8_GEMM"
-            )
+            wo_b_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_WO_B_FP8_GEMM")
             return self.wo_b.forward(
                 o,
                 fp8_gemm=wo_b_fp8_gemm if wo_b_fp8_gemm else None,
@@ -849,8 +839,11 @@ class DSV4FusedRoutedExperts(BaseOP):
             div_ceil(local_intermediate, 32),
             dtype=dsv4_kernel.e8m0_dtype(),
         )
+        self._moe_v2_workspace = dsv4_kernel.DSV4MoEWorkspace()
 
-    def _expert_forward(self, local_idx: int, x: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    def _expert_forward(
+        self, local_idx: int, x: torch.Tensor, weights: torch.Tensor
+    ) -> torch.Tensor:
         w1 = dsv4_kernel.quantized_linear_ref(
             x,
             self.w13_weight[local_idx, 0],
@@ -883,7 +876,15 @@ class DSV4FusedRoutedExperts(BaseOP):
         indices: torch.Tensor,
         *,
         reduce: bool = True,
+        moe_plan: dsv4_kernel.DSV4MoEExecutionPlan | None = None,
     ) -> torch.Tensor:
+        dsv4_kernel.require_supported_moe_expert_backend()
+        workspace = None
+        if (
+            moe_plan is not None
+            and moe_plan.route_plan.route_count <= dsv4_kernel.DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES
+        ):
+            workspace = self._moe_v2_workspace
         grouped = dsv4_kernel.moe_route_dispatch_bf16_grouped(
             hidden_states,
             weights,
@@ -893,6 +894,8 @@ class DSV4FusedRoutedExperts(BaseOP):
             self.w2_weight,
             self.w2_weight_scale_inv,
             swiglu_limit=self.swiglu_limit,
+            moe_plan=moe_plan,
+            workspace=workspace,
         )
         if grouped is not None:
             if reduce and self._tp_size > 1:
@@ -937,9 +940,7 @@ class DSV4SharedExperts(BaseOP):
         )
 
     def forward(self, hidden_states: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
-        fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
-            "MINISGL_DSV4_SM80_SHARED_FP8_GEMM"
-        )
+        fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_SHARED_FP8_GEMM")
         gate_up = self.gate_up_proj.forward(
             hidden_states,
             fp8_gemm=fp8_gemm if fp8_gemm else None,
@@ -958,6 +959,139 @@ class DSV4SharedExperts(BaseOP):
         )
 
 
+@dataclass(frozen=True)
+class DSV4FusedMoERunnerPrepareResult:
+    weights: torch.Tensor
+    indices: torch.Tensor
+    moe_plan: dsv4_kernel.DSV4MoEExecutionPlan
+
+
+class DSV4FusedMoERunner:
+    """Mini-owned exact-path runner shaped after vLLM's standard FusedMoE runner."""
+
+    def __init__(
+        self,
+        *,
+        layer_id: int,
+        gate: DSV4MoEGate,
+        experts: DSV4FusedRoutedExperts,
+        shared_experts: DSV4SharedExperts | None,
+        topk_count: int,
+        scoring_func: str,
+        routed_scaling_factor: float,
+        tp_size: int,
+    ) -> None:
+        self.layer_id = layer_id
+        self.gate = gate
+        self.experts = experts
+        self.shared_experts = shared_experts
+        self.topk_count = topk_count
+        self.scoring_func = scoring_func
+        self.routed_scaling_factor = routed_scaling_factor
+        self._tp_size = tp_size
+
+    def route(
+        self,
+        flat: torch.Tensor,
+        input_ids: torch.Tensor,
+        *,
+        hash_topk: DSV4TopK | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.gate.forward(
+            flat,
+            input_ids=input_ids,
+            topk=self.topk_count,
+            scoring_func=self.scoring_func,
+            routed_scaling_factor=self.routed_scaling_factor,
+            hash_topk=hash_topk,
+        )
+
+    def prepare(
+        self,
+        flat: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> DSV4FusedMoERunnerPrepareResult:
+        moe_plan = dsv4_kernel.build_moe_v2_execution_plan(
+            flat,
+            weights,
+            indices,
+            num_experts=self.experts.w13_weight.shape[0],
+            block_size_m=16,
+            reduce_once=True,
+        )
+        return DSV4FusedMoERunnerPrepareResult(
+            weights=weights,
+            indices=indices,
+            moe_plan=moe_plan,
+        )
+
+    def apply_experts(
+        self,
+        flat: torch.Tensor,
+        prepared: DSV4FusedMoERunnerPrepareResult,
+    ) -> torch.Tensor:
+        return self.experts.forward(
+            flat,
+            prepared.weights,
+            prepared.indices,
+            reduce=False,
+            moe_plan=prepared.moe_plan,
+        )
+
+    def finalize_routed(self, routed_output: torch.Tensor) -> torch.Tensor:
+        # The current grouped FP4 backend already applies top-k weights and
+        # sums routes to [tokens, hidden]. Keep the boundary explicit so a
+        # future exact backend can return per-route output here.
+        return routed_output.float()
+
+    def apply_shared(self, flat: torch.Tensor) -> torch.Tensor | None:
+        if self.shared_experts is None:
+            return None
+        return self.shared_experts.forward(flat, reduce=False).float()
+
+    def maybe_reduce_final(
+        self,
+        output: torch.Tensor,
+        *,
+        comm: DistributedCommunicator,
+        reduce_label: str,
+    ) -> torch.Tensor:
+        if self._tp_size > 1:
+            return comm.all_reduce(output, label=reduce_label)
+        return output
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
+        *,
+        comm: DistributedCommunicator,
+        hash_topk: DSV4TopK | None,
+    ) -> torch.Tensor:
+        flat = hidden_states.view(-1, hidden_states.shape[-1])
+        flat_input_ids = input_ids.view(-1)
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.route"):
+            weights, indices = self.route(flat, flat_input_ids, hash_topk=hash_topk)
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.prepare"):
+            prepared = self.prepare(flat, weights, indices)
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.experts"):
+            routed = self.apply_experts(flat, prepared)
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.finalize"):
+            y = self.finalize_routed(routed)
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.shared"):
+            shared = self.apply_shared(flat)
+            if shared is not None:
+                y = y + shared
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.reduce_once"):
+            y = self.maybe_reduce_final(
+                y,
+                comm=comm,
+                reduce_label=prepared.moe_plan.final_reduce_label,
+            )
+        return y.to(flat.dtype).view_as(hidden_states)
+
+
 class DSV4MoE(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int):
         tp = get_tp_info()
@@ -974,8 +1108,26 @@ class DSV4MoE(BaseOP):
         self.experts = DSV4FusedRoutedExperts(config)
         if config.n_shared_experts > 0:
             self.shared_experts = DSV4SharedExperts(config)
+        self._runner = DSV4FusedMoERunner(
+            layer_id=layer_id,
+            gate=self.gate,
+            experts=self.experts,
+            shared_experts=getattr(self, "shared_experts", None),
+            topk_count=self.topk_count,
+            scoring_func=self.scoring_func,
+            routed_scaling_factor=self.routed_scaling_factor,
+            tp_size=self._tp_size,
+        )
 
     def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE):
+            return self._runner.forward(
+                hidden_states,
+                input_ids,
+                comm=self._comm,
+                hash_topk=getattr(self, "topk", None),
+            )
+
         flat = hidden_states.view(-1, hidden_states.shape[-1])
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.gate"):
             weights, indices = self.gate.forward(
@@ -986,9 +1138,29 @@ class DSV4MoE(BaseOP):
                 routed_scaling_factor=self.routed_scaling_factor,
                 hash_topk=getattr(self, "topk", None),
             )
-        reduce_once = dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
+        moe_v2 = dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE)
+        reduce_once = moe_v2 or dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
+        moe_plan = None
+        if moe_v2:
+            moe_plan = dsv4_kernel.build_moe_v2_execution_plan(
+                flat,
+                weights,
+                indices,
+                num_experts=self.experts.w13_weight.shape[0],
+                block_size_m=16,
+                reduce_once=reduce_once,
+            )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.routed"):
-            y = self.experts.forward(flat, weights, indices, reduce=not reduce_once).float()
+            if moe_plan is None:
+                y = self.experts.forward(flat, weights, indices, reduce=not reduce_once).float()
+            else:
+                y = self.experts.forward(
+                    flat,
+                    weights,
+                    indices,
+                    reduce=not reduce_once,
+                    moe_plan=moe_plan,
+                ).float()
         if hasattr(self, "shared_experts"):
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.shared"):
                 y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()

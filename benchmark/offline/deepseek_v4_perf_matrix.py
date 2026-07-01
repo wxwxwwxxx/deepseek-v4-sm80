@@ -16,7 +16,6 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON_ROOT = ROOT / "python"
 if str(PYTHON_ROOT) not in sys.path:
@@ -27,17 +26,17 @@ os.environ.setdefault("MINISGL_DISABLE_OVERLAP_SCHEDULING", "1")
 
 DSV4_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
 DSV4_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
+DSV4_MOE_V2_TOGGLE = "MINISGL_DSV4_SM80_MOE_V2"
+DSV4_MOE_VLLM_RUNNER_TOGGLE = "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"
+DSV4_MOE_EXPERT_BACKEND_ENV = "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"
+DSV4_MOE_EXPERT_BACKEND_MARLIN = "marlin_mxfp4_w4a16"
 DSV4_HC_TOGGLE = "MINISGL_DSV4_SM80_HC"
 DSV4_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_RMSNORM"
 DSV4_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_FP8_GEMM"
 DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE = "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT"
-DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE = (
-    "MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE"
-)
+DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE"
 DSV4_FUSED_Q_KV_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM"
-DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE = (
-    "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE"
-)
+DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE = "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE"
 DSV4_Q_WQA_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_Q_WQA_FP8_GEMM"
 DSV4_Q_WQB_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
 DSV4_WO_B_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_WO_B_FP8_GEMM"
@@ -155,6 +154,14 @@ DEFAULT_VARIANTS: tuple[Variant, ...] = (
 
 
 RUNTIME_VARIANTS: tuple[Variant, ...] = (
+    Variant(
+        name="v1_moe_v2",
+        env={DSV4_V1_MOE_TOGGLE: "1", DSV4_MOE_V2_TOGGLE: "1"},
+        description=(
+            "V2 exact MoE boundary: V1 exact grouped MoE plus explicit route "
+            "execution plan and per-layer grouped-MoE workspace."
+        ),
+    ),
     Variant(
         name="v1_moe_pynccl",
         env={DSV4_V1_MOE_TOGGLE: "1"},
@@ -347,10 +354,7 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         allow_dsv4_cuda_graph=True,
     ),
     Variant(
-        name=(
-            "v1_moe_graph_hc_rmsnorm_fwqakv_qkvrope_wqb_wob_idxwqb_"
-            "gatecache_idxstorecache"
-        ),
+        name=("v1_moe_graph_hc_rmsnorm_fwqakv_qkvrope_wqb_wob_idxwqb_" "gatecache_idxstorecache"),
         env={
             DSV4_V1_MOE_TOGGLE: "1",
             DSV4_HC_TOGGLE: "1",
@@ -375,8 +379,7 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
     ),
     Variant(
         name=(
-            "v1_moe_graph_hc_rmsnorm_fwqakvcache_qkvrope_wqb_wob_idxwqb_"
-            "gatecache_idxstorecache"
+            "v1_moe_graph_hc_rmsnorm_fwqakvcache_qkvrope_wqb_wob_idxwqb_" "gatecache_idxstorecache"
         ),
         env={
             DSV4_V1_MOE_TOGGLE: "1",
@@ -424,6 +427,88 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
             "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
             "the current vLLM-aligned cached fused wq_a/wkv graph path, and "
             "greedy sampler captured in the graph."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=(
+            "v1_moe_v2_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_"
+            "gatecache_idxstorecache"
+        ),
+        env={
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        description=(
+            "Current best exact macro variant with the V2 MoE execution plan and "
+            "per-layer grouped-MoE workspace enabled."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=(
+            "v1_moe_vllm_runner_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_"
+            "idxwqb_gatecache_idxstorecache"
+        ),
+        env={
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        description=(
+            "Mini-owned vLLM-shaped exact MoE runner wrapping the current grouped "
+            "FP4 W13/SwiGLU/W2 backend, with the current exact graph macro bundle."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=(
+            "v1_moe_vllm_runner_marlin_mxfp4_w4a16_graph_hc_rmsnorm_fwqakvcache_"
+            "qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ),
+        env={
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
+            DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN,
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 07.38 Marlin MXFP4 W4A16 exact expert-backend candidate. "
+            "This variant is expected to fail explicitly until mini owns an "
+            "equivalent Marlin WNA16 custom-op surface."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
@@ -624,9 +709,7 @@ def configure_variant(dsv4_kernel, variant: Variant) -> dict[str, Any]:
 
 def active_dsv4_toggles(dsv4_kernel) -> list[str]:
     return [
-        name
-        for name in _all_dsv4_sm80_env_names(dsv4_kernel)
-        if dsv4_kernel.dsv4_env_flag(name)
+        name for name in _all_dsv4_sm80_env_names(dsv4_kernel) if dsv4_kernel.dsv4_env_flag(name)
     ]
 
 
@@ -884,12 +967,9 @@ def make_benchmark_llm_class():
         def _forward(self, forward_input):
             batch = forward_input.batch
             batch_id = id(batch)
-            range_name = (
-                f"batch_forward:{batch.phase}:bs{batch.size}:padded{batch.padded_size}"
-            )
+            range_name = f"batch_forward:{batch.phase}:bs{batch.size}:padded{batch.padded_size}"
             enqueue_range_name = (
-                f"batch_forward_enqueue:{batch.phase}:"
-                f"bs{batch.size}:padded{batch.padded_size}"
+                f"batch_forward_enqueue:{batch.phase}:" f"bs{batch.size}:padded{batch.padded_size}"
             )
             torch.cuda.synchronize(self.device)
             with torch.cuda.nvtx.range(range_name):
@@ -1107,7 +1187,11 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
     variant_graph_greedy_sample = any(
         variant.cuda_graph_capture_greedy_sample for variant in variants
     )
-    if variant_pynccl and not all(variant.use_pynccl for variant in variants) and not args.use_pynccl:
+    if (
+        variant_pynccl
+        and not all(variant.use_pynccl for variant in variants)
+        and not args.use_pynccl
+    ):
         raise SystemExit("PyNCCL variants must be run separately or with --use-pynccl.")
     if (
         variant_graph
@@ -1187,18 +1271,14 @@ def _schedule_summary(repeats: Sequence[dict[str, Any]]) -> dict[str, Any]:
             phase_batch_key = f"{phase}:bs{batch_size}"
             phase_padded_key = f"{phase}:padded{padded_size}"
             phase_batch_counts[phase_batch_key] = phase_batch_counts.get(phase_batch_key, 0) + 1
-            phase_padded_counts[phase_padded_key] = (
-                phase_padded_counts.get(phase_padded_key, 0) + 1
-            )
+            phase_padded_counts[phase_padded_key] = phase_padded_counts.get(phase_padded_key, 0) + 1
             max_batch_size = max(max_batch_size, batch_size)
             max_padded_size = max(max_padded_size, padded_size)
     return {
         "total_batches": total_batches,
         "phase_counts": dict(sorted(phase_counts.items())),
         "batch_size_counts": dict(sorted(batch_counts.items(), key=lambda item: int(item[0]))),
-        "padded_size_counts": dict(
-            sorted(padded_counts.items(), key=lambda item: int(item[0]))
-        ),
+        "padded_size_counts": dict(sorted(padded_counts.items(), key=lambda item: int(item[0]))),
         "phase_batch_size_counts": dict(sorted(phase_batch_counts.items())),
         "phase_padded_size_counts": dict(sorted(phase_padded_counts.items())),
         "max_batch_size": max_batch_size,
@@ -1251,11 +1331,7 @@ def _run_one_repeat(
     prompt_tokens = int(sum(len(prompt) for prompt in prompts))
     torch.cuda.synchronize(llm.device)
     torch.cuda.reset_peak_memory_stats(llm.device)
-    nvtx_context = (
-        torch.cuda.nvtx.range(nvtx_name)
-        if nvtx_name
-        else contextlib.nullcontext()
-    )
+    nvtx_context = torch.cuda.nvtx.range(nvtx_name) if nvtx_name else contextlib.nullcontext()
     with nvtx_context:
         tic = time.perf_counter()
         outputs = llm.generate(prompts, sampling_params)
@@ -1276,12 +1352,8 @@ def _run_one_repeat(
         "phase_totals": {
             "prefill_forward_s": _sum_phase(trace, "prefill", "forward_s"),
             "decode_forward_s": _sum_phase(trace, "decode", "forward_s"),
-            "prefill_forward_enqueue_s": _sum_phase(
-                trace, "prefill", "forward_enqueue_s"
-            ),
-            "decode_forward_enqueue_s": _sum_phase(
-                trace, "decode", "forward_enqueue_s"
-            ),
+            "prefill_forward_enqueue_s": _sum_phase(trace, "prefill", "forward_enqueue_s"),
+            "decode_forward_enqueue_s": _sum_phase(trace, "decode", "forward_enqueue_s"),
             "prefill_prepare_s": _sum_phase(trace, "prefill", "prepare_s"),
             "decode_prepare_s": _sum_phase(trace, "decode", "prepare_s"),
             "prefill_input_tokens": _sum_trace_int(trace, "prefill", "input_tokens"),
@@ -1451,7 +1523,9 @@ def _aggregate_case_report(
     base: dict[str, Any],
     rank_payloads: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
-    rank0 = next((payload for payload in rank_payloads if payload.get("rank") == 0), rank_payloads[0])
+    rank0 = next(
+        (payload for payload in rank_payloads if payload.get("rank") == 0), rank_payloads[0]
+    )
     rank_elapsed = [sum(r["elapsed_s"] for r in payload["repeats"]) for payload in rank_payloads]
     elapsed_s = float(max(rank_elapsed) if rank_elapsed else 0.0)
     repeats0 = rank0["repeats"]
@@ -1507,9 +1581,7 @@ def _aggregate_case_report(
 
     prefill_forward_s = float(phase_totals["prefill_forward_s"])
     decode_forward_s = float(phase_totals["decode_forward_s"])
-    prepare_s = float(phase_totals["prefill_prepare_s"]) + float(
-        phase_totals["decode_prepare_s"]
-    )
+    prepare_s = float(phase_totals["prefill_prepare_s"]) + float(phase_totals["decode_prepare_s"])
     scheduler_overhead_s = max(0.0, elapsed_s - prefill_forward_s - decode_forward_s - prepare_s)
 
     aggregate_counters: dict[str, int] = {}
@@ -1669,23 +1741,23 @@ def run_case(
     rank_path = output_dir / "reports" / f"{case_name}.rank{rank}.json"
     variant_env = configure_variant(dsv4_kernel, variant)
     llm.sync_all_ranks()
-
-    warmup = _run_warmups(
-        llm=llm,
-        torch=torch,
-        scenario=scenario,
-        vocab_size=llm.engine.sampler.vocab_size,
-        seed=args.seed + 100000 + case_index * 1000,
-        token_id_range=args.token_id_range,
-    )
-    llm.sync_all_ranks()
     from minisgl.distributed import reset_communication_stats, snapshot_communication_stats
 
     tracer.reset()
     reset_communication_stats()
+    warmup = None
     repeats = []
     error: dict[str, Any] | None = None
     try:
+        warmup = _run_warmups(
+            llm=llm,
+            torch=torch,
+            scenario=scenario,
+            vocab_size=llm.engine.sampler.vocab_size,
+            seed=args.seed + 100000 + case_index * 1000,
+            token_id_range=args.token_id_range,
+        )
+        llm.sync_all_ranks()
         for repeat_idx in range(scenario.repeats):
             repeat_payload = _run_one_repeat(
                 llm=llm,
@@ -1759,9 +1831,7 @@ def run_case(
             "use_pynccl": runtime_options["use_pynccl"],
             "allow_dsv4_cuda_graph": runtime_options["allow_dsv4_cuda_graph"],
             "cuda_graph_bs": runtime_options["cuda_graph_bs"],
-            "cuda_graph_capture_greedy_sample": runtime_options[
-                "cuda_graph_capture_greedy_sample"
-            ],
+            "cuda_graph_capture_greedy_sample": runtime_options["cuda_graph_capture_greedy_sample"],
             "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
             "page_size": args.page_size,
             "num_pages": args.num_pages,
@@ -1825,18 +1895,21 @@ def _init_llm(
         use_pynccl=runtime_options["use_pynccl"],
         allow_dsv4_cuda_graph=runtime_options["allow_dsv4_cuda_graph"],
         cuda_graph_bs=runtime_options["cuda_graph_bs"],
-        cuda_graph_capture_greedy_sample=runtime_options[
-            "cuda_graph_capture_greedy_sample"
-        ],
+        cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
         **kwargs,
     )
     torch.cuda.synchronize(llm.device)
     load_init_s = time.perf_counter() - tic
-    return llm, torch, dtype, {
-        "seconds": load_init_s,
-        "rank": rank,
-        "memory": _rank_memory_report(torch, llm),
-    }
+    return (
+        llm,
+        torch,
+        dtype,
+        {
+            "seconds": load_init_s,
+            "rank": rank,
+            "memory": _rank_memory_report(torch, llm),
+        },
+    )
 
 
 def run_matrix(args: argparse.Namespace) -> int:
@@ -1960,7 +2033,11 @@ def run_matrix(args: argparse.Namespace) -> int:
     if rank == 0:
         summary = [_summary_row(report) for report in reports]
         _write_json(output_dir / "summary.json", summary)
-        print(json.dumps({"summary_path": str(output_dir / "summary.json"), "cases": summary}, indent=2))
+        print(
+            json.dumps(
+                {"summary_path": str(output_dir / "summary.json"), "cases": summary}, indent=2
+            )
+        )
     return 1 if failures else 0
 
 

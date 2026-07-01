@@ -1577,12 +1577,33 @@ def rms_norm_pair_bf16(
     return q_out.reshape_as(q), kv_out.reshape_as(kv)
 
 
-def silu_and_mul_clamp(
+def _workspace_tensor(
+    workspace,
+    name: str,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+    *,
+    zero: bool = False,
+) -> torch.Tensor:
+    if workspace is not None:
+        tensor_fn = getattr(workspace, "tensor", None)
+        if tensor_fn is not None:
+            return tensor_fn(name, shape, dtype, device, zero=zero)
+    if zero:
+        return torch.zeros(shape, dtype=dtype, device=device)
+    return torch.empty(shape, dtype=dtype, device=device)
+
+
+def _silu_and_mul_clamp_out(
     gate: torch.Tensor,
     up: torch.Tensor,
     *,
     swiglu_limit: float,
     weights: torch.Tensor | None = None,
+    out_dtype: torch.dtype,
+    workspace=None,
+    workspace_name: str,
 ) -> torch.Tensor | None:
     if gate.shape != up.shape or gate.numel() == 0 or not gate.is_cuda or not up.is_cuda:
         return None
@@ -1591,7 +1612,13 @@ def silu_and_mul_clamp(
 
     gate_c = gate.contiguous()
     up_c = up.contiguous()
-    out = torch.empty(gate_c.shape, dtype=torch.float32, device=gate_c.device)
+    out = _workspace_tensor(
+        workspace,
+        workspace_name,
+        tuple(gate_c.shape),
+        out_dtype,
+        gate_c.device,
+    )
     hidden_dim = gate_c.shape[-1]
     has_weights = weights is not None
     weights_mode = 0
@@ -1621,6 +1648,43 @@ def silu_and_mul_clamp(
         BLOCK=block,
     )
     return out
+
+
+def silu_and_mul_clamp(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    *,
+    swiglu_limit: float,
+    weights: torch.Tensor | None = None,
+) -> torch.Tensor | None:
+    return _silu_and_mul_clamp_out(
+        gate,
+        up,
+        swiglu_limit=swiglu_limit,
+        weights=weights,
+        out_dtype=torch.float32,
+        workspace=None,
+        workspace_name="swiglu_fp32",
+    )
+
+
+def silu_and_mul_clamp_bf16(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    *,
+    swiglu_limit: float,
+    weights: torch.Tensor | None = None,
+    workspace=None,
+) -> torch.Tensor | None:
+    return _silu_and_mul_clamp_out(
+        gate,
+        up,
+        swiglu_limit=swiglu_limit,
+        weights=weights,
+        out_dtype=torch.bfloat16,
+        workspace=workspace,
+        workspace_name="swiglu_bf16",
+    )
 
 
 def apply_rotary_tail(
@@ -2531,6 +2595,7 @@ def _grouped_fp4_w13(
     route_count: int,
     topk: int,
     block_size_m: int,
+    workspace=None,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     if (
         a.ndim != 2
@@ -2560,8 +2625,22 @@ def _grouped_fp4_w13(
         else weight_c.new_empty((1,), dtype=torch.float32)
     )
     n = weight_c.shape[2]
-    gate = torch.zeros((route_count, n), dtype=a.dtype, device=a.device)
-    up = torch.zeros_like(gate)
+    gate = _workspace_tensor(
+        workspace,
+        "w13_gate",
+        (route_count, n),
+        a.dtype,
+        a.device,
+        zero=True,
+    )
+    up = _workspace_tensor(
+        workspace,
+        "w13_up",
+        (route_count, n),
+        a.dtype,
+        a.device,
+        zero=True,
+    )
     block_n = 64
     block_k = 64
     grid = (
@@ -2604,6 +2683,7 @@ def _grouped_fp4_linear(
     block_size_m: int,
     slot: int | None,
     a_rows_are_routes: bool,
+    workspace=None,
 ) -> torch.Tensor | None:
     if (
         a.ndim != 2
@@ -2642,7 +2722,14 @@ def _grouped_fp4_linear(
         if scale is not None
         else weight_c.new_empty((1,), dtype=torch.float32)
     )
-    out = torch.zeros((route_count, n), dtype=a.dtype, device=a.device)
+    out = _workspace_tensor(
+        workspace,
+        "w2_routed",
+        (route_count, n),
+        a.dtype,
+        a.device,
+        zero=True,
+    )
     block_n = 64
     block_k = 64
     grid = (
@@ -2680,10 +2767,17 @@ def _sum_grouped_routes(
     tokens: int,
     hidden: int,
     topk: int,
+    workspace=None,
 ) -> torch.Tensor | None:
     if routed.ndim != 2 or not routed.is_cuda or routed.shape != (tokens * topk, hidden):
         return None
-    out = torch.empty((tokens, hidden), dtype=routed.dtype, device=routed.device)
+    out = _workspace_tensor(
+        workspace,
+        "route_sum_out",
+        (tokens, hidden),
+        routed.dtype,
+        routed.device,
+    )
     block_n = 64
     _moe_route_sum_kernel[(tokens, triton.cdiv(hidden, block_n))](
         routed.contiguous(),
@@ -2711,6 +2805,7 @@ def grouped_fp4_moe_fused_compute(
     topk: int,
     block_size_m: int,
     swiglu_limit: float,
+    workspace=None,
 ) -> torch.Tensor | None:
     if (
         hidden_states.ndim != 2
@@ -2760,7 +2855,14 @@ def grouped_fp4_moe_fused_compute(
         if w2_scale is not None
         else w2_c.new_empty((1,), dtype=torch.float32)
     )
-    routed = torch.empty((route_count, hidden), dtype=hidden_states.dtype, device=hidden_states.device)
+    routed = _workspace_tensor(
+        workspace,
+        "fused_routed",
+        (route_count, hidden),
+        hidden_states.dtype,
+        hidden_states.device,
+        zero=True,
+    )
     grid = (
         triton.cdiv(sorted_route_ids.numel(), block_size_m),
         output_tiles,
@@ -2810,6 +2912,7 @@ def grouped_fp4_moe(
     topk: int,
     block_size_m: int,
     swiglu_limit: float,
+    workspace=None,
 ) -> torch.Tensor | None:
     if hidden_states.ndim != 2 or weights.numel() != route_count:
         return None
@@ -2835,6 +2938,7 @@ def grouped_fp4_moe(
         topk=topk,
         block_size_m=block_size_m,
         swiglu_limit=swiglu_limit,
+        workspace=workspace,
     )
     if fused_routed is not None:
         return _sum_grouped_routes(
@@ -2842,6 +2946,7 @@ def grouped_fp4_moe(
             tokens=hidden_states.shape[0],
             hidden=hidden_states.shape[1],
             topk=topk,
+            workspace=workspace,
         )
 
     w13 = _grouped_fp4_w13(
@@ -2854,20 +2959,29 @@ def grouped_fp4_moe(
         route_count=route_count,
         topk=topk,
         block_size_m=block_size_m,
+        workspace=workspace,
     )
     if w13 is None:
         return None
     gate, up = w13
 
-    activated = silu_and_mul_clamp(
+    hidden = silu_and_mul_clamp_bf16(
         gate,
         up,
         swiglu_limit=swiglu_limit,
         weights=weights.reshape(-1, 1),
+        workspace=workspace,
     )
-    if activated is None:
-        return None
-    hidden = activated.to(hidden_states.dtype)
+    if hidden is None:
+        activated = silu_and_mul_clamp(
+            gate,
+            up,
+            swiglu_limit=swiglu_limit,
+            weights=weights.reshape(-1, 1),
+        )
+        if activated is None:
+            return None
+        hidden = activated.to(hidden_states.dtype)
 
     routed = _grouped_fp4_linear(
         hidden,
@@ -2881,6 +2995,7 @@ def grouped_fp4_moe(
         block_size_m=block_size_m,
         slot=None,
         a_rows_are_routes=True,
+        workspace=workspace,
     )
     if routed is None:
         return None
@@ -2889,6 +3004,7 @@ def grouped_fp4_moe(
         tokens=hidden_states.shape[0],
         hidden=hidden_states.shape[1],
         topk=topk,
+        workspace=workspace,
     )
 
 
@@ -2911,6 +3027,7 @@ __all__ = [
     "rms_norm_bf16",
     "rms_norm_pair_bf16",
     "silu_and_mul_clamp",
+    "silu_and_mul_clamp_bf16",
     "store_cache",
     "topk_transform_512",
     "wo_a_grouped_projection_fp8",

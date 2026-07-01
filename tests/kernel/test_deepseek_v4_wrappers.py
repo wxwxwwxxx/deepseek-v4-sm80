@@ -247,6 +247,9 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
 
     assert dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    assert dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    assert dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    assert dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE)
     assert not any(
         dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST
@@ -254,17 +257,14 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
 
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE, "1")
     enabled = {
-        name
-        for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-        if dsv4_kernel.dsv4_env_flag(name)
+        name for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES if dsv4_kernel.dsv4_env_flag(name)
     }
     assert enabled == {
         dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE,
         *dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST,
     }
     assert not any(
-        dsv4_kernel.dsv4_env_flag(name)
-        for name in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
+        dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
     )
 
     _clear_dsv4_sm80_env(monkeypatch)
@@ -284,9 +284,7 @@ def test_dsv4_sm80_v1_moe_bundle_env_policy(monkeypatch):
 
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE, "1")
     enabled = {
-        name
-        for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-        if dsv4_kernel.dsv4_env_flag(name)
+        name for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES if dsv4_kernel.dsv4_env_flag(name)
     }
     assert enabled == {
         dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE,
@@ -294,6 +292,70 @@ def test_dsv4_sm80_v1_moe_bundle_env_policy(monkeypatch):
     }
     assert "MINISGL_DSV4_SM80_MOE_ROUTE" in enabled
     assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE not in enabled
+
+
+def test_dsv4_sm80_moe_v2_bundle_env_policy(monkeypatch):
+    _clear_dsv4_sm80_env(monkeypatch)
+
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE)
+    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_MOE_ROUTE")
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE, "1")
+    enabled = {
+        name for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES if dsv4_kernel.dsv4_env_flag(name)
+    }
+    assert enabled == {
+        dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE,
+        *dsv4_kernel.DSV4_SM80_MOE_V2_WHITELIST,
+    }
+    assert dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE not in enabled
+    assert "MINISGL_DSV4_SM80_MOE_ROUTE" in enabled
+    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE not in enabled
+
+
+def test_dsv4_sm80_moe_vllm_runner_bundle_env_policy(monkeypatch):
+    _clear_dsv4_sm80_env(monkeypatch)
+
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE)
+    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_MOE_ROUTE")
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
+    enabled = {
+        name for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES if dsv4_kernel.dsv4_env_flag(name)
+    }
+    assert enabled == {
+        dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE,
+        *dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_WHITELIST,
+    }
+    assert dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE not in enabled
+    assert "MINISGL_DSV4_SM80_MOE_ROUTE" in enabled
+    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE not in enabled
+
+
+def test_dsv4_sm80_moe_expert_backend_selector_blocks_marlin(monkeypatch):
+    _clear_dsv4_sm80_env(monkeypatch)
+
+    assert (
+        dsv4_kernel.dsv4_moe_expert_backend()
+        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4
+    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV)
+
+    monkeypatch.setenv(
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
+    )
+    assert (
+        dsv4_kernel.dsv4_moe_expert_backend()
+        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16
+    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV)
+    with pytest.raises(NotImplementedError, match="Marlin MXFP4 W4A16"):
+        dsv4_kernel.require_supported_moe_expert_backend()
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV, "not_a_backend")
+    with pytest.raises(ValueError, match="Unsupported MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"):
+        dsv4_kernel.dsv4_moe_expert_backend()
 
 
 def test_dsv4_capability_detection_keeps_sm80_gates_explicit():
@@ -656,12 +718,8 @@ def test_quantized_linear_fp8_pair_shared_activation_matches_fallback(monkeypatc
         dtype=torch.float32,
     ).to(dsv4_kernel.e8m0_dtype())
 
-    expected_a = dsv4_kernel.quantized_linear_ref(
-        x, weight_a, scale_a, weight_kind="fp8"
-    )
-    expected_b = dsv4_kernel.quantized_linear_ref(
-        x, weight_b, scale_b, weight_kind="fp8"
-    )
+    expected_a = dsv4_kernel.quantized_linear_ref(x, weight_a, scale_a, weight_kind="fp8")
+    expected_b = dsv4_kernel.quantized_linear_ref(x, weight_b, scale_b, weight_kind="fp8")
     actual_a, actual_b = dsv4_kernel.quantized_linear_fp8_pair_shared_activation_ref(
         x, weight_a, scale_a, weight_b, scale_b
     )
@@ -1014,9 +1072,7 @@ def test_dsv4_rotary_yarn_fallback_matches_configured_ramp_range():
     )
     assert high == rotary_dim // 2 - 1
 
-    inv_freq = 1.0 / (
-        base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
-    )
+    inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim))
     ramp = torch.clamp(
         (torch.arange(rotary_dim // 2, dtype=torch.float32) - low) / max(high - low, 1),
         0,
@@ -1243,6 +1299,82 @@ def test_dsv4_moe_route_plan_groups_and_pads_routes():
     assert pairs == [(2, 0), (5, 0), (1, 1), (0, 2), (4, 2)]
 
 
+def test_dsv4_moe_v2_execution_plan_and_workspace_reuse_cpu():
+    hidden = torch.zeros(3, 8, dtype=torch.bfloat16)
+    weights = torch.tensor(
+        [
+            [0.2, 0.8],
+            [1.0, 0.0],
+            [0.5, 0.5],
+        ],
+        dtype=torch.bfloat16,
+    )
+    indices = torch.tensor(
+        [
+            [2, 1],
+            [0, -1],
+            [2, 0],
+        ],
+        dtype=torch.int64,
+    )
+
+    plan = dsv4_kernel.build_moe_v2_execution_plan(
+        hidden,
+        weights,
+        indices,
+        num_experts=3,
+        block_size_m=2,
+    )
+
+    assert plan.tokens == 3
+    assert plan.hidden == 8
+    assert plan.num_experts == 3
+    assert plan.reduce_once is True
+    assert plan.route_weights.dtype is torch.float32
+    assert plan.route_weights.shape == (6,)
+    assert torch.allclose(plan.route_weights.cpu(), weights.float().reshape(-1))
+    assert plan.route_plan.sorted_route_ids.tolist() == [2, 5, 1, 6, 0, 4]
+
+    workspace = dsv4_kernel.DSV4MoEWorkspace()
+    first = workspace.tensor("tmp", (2, 4), torch.float32, torch.device("cpu"), zero=True)
+    first.fill_(3.0)
+    second = workspace.tensor("tmp", (1, 8), torch.float32, torch.device("cpu"))
+    assert second.data_ptr() == first.data_ptr()
+    assert second.shape == (1, 8)
+    larger = workspace.tensor("tmp", (4, 4), torch.float32, torch.device("cpu"))
+    assert larger.numel() == 16
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_swiglu_bf16_output_matches_fp32_then_cast():
+    from minisgl.kernel.triton import deepseek_v4 as triton_dsv4
+
+    device = torch.device("cuda")
+    torch.manual_seed(113)
+    gate = torch.randn(17, 129, device=device, dtype=torch.bfloat16)
+    up = torch.randn_like(gate)
+    weights = torch.rand(17, 1, device=device, dtype=torch.float32)
+
+    expected = triton_dsv4.silu_and_mul_clamp(
+        gate,
+        up,
+        swiglu_limit=2.5,
+        weights=weights,
+    )
+    actual = triton_dsv4.silu_and_mul_clamp_bf16(
+        gate,
+        up,
+        swiglu_limit=2.5,
+        weights=weights,
+    )
+    torch.cuda.synchronize()
+
+    assert expected is not None
+    assert actual is not None
+    assert actual.dtype is torch.bfloat16
+    assert torch.equal(actual, expected.to(torch.bfloat16))
+
+
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_moe_route_plan_triton_matches_torch_fallback(monkeypatch):
     _clear_dsv4_sm80_env(monkeypatch)
@@ -1271,7 +1403,9 @@ def test_dsv4_moe_route_plan_triton_matches_torch_fallback(monkeypatch):
     assert actual.topk == expected.topk
     assert actual.block_size_m == expected.block_size_m
     assert actual_padded == int(expected.num_tokens_post_padded.item())
-    assert actual.sorted_route_ids[:actual_padded].cpu().tolist() == expected.sorted_route_ids.tolist()
+    assert (
+        actual.sorted_route_ids[:actual_padded].cpu().tolist() == expected.sorted_route_ids.tolist()
+    )
     assert actual.expert_ids[: actual_padded // actual.block_size_m].cpu().tolist() == (
         expected.expert_ids.tolist()
     )
@@ -1705,12 +1839,9 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     )
 
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE, "1")
-    assert all(
-        dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST
-    )
+    assert all(dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST)
     assert not any(
-        dsv4_kernel.dsv4_env_flag(name)
-        for name in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
+        dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
     )
 
     actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(

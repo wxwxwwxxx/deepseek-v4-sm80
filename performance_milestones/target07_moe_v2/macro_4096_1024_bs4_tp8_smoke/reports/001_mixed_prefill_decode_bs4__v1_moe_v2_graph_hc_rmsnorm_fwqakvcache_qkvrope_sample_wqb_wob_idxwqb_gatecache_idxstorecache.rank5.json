@@ -1,0 +1,187 @@
+{
+  "communication_counters": {
+    "by_label": {
+      "dsv4.embedding_all_reduce": {
+        "bytes": 83886080,
+        "count": 1
+      },
+      "dsv4.row_parallel_projection_all_reduce": {
+        "bytes": 503316480,
+        "count": 6
+      },
+      "dsv4.v1_moe_reduce_once_all_reduce": {
+        "bytes": 1006632960,
+        "count": 6
+      }
+    },
+    "by_op": {
+      "all_reduce": {
+        "bytes": 1593835520,
+        "count": 13
+      }
+    },
+    "entries": [
+      {
+        "bytes": 83886080,
+        "count": 1,
+        "dtype": "bfloat16",
+        "input_bytes": 83886080,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 83886080,
+        "output_shape": [
+          10240,
+          4096
+        ],
+        "shape": [
+          10240,
+          4096
+        ]
+      },
+      {
+        "bytes": 503316480,
+        "count": 6,
+        "dtype": "bfloat16",
+        "input_bytes": 83886080,
+        "label": "dsv4.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 83886080,
+        "output_shape": [
+          10240,
+          4096
+        ],
+        "shape": [
+          10240,
+          4096
+        ]
+      },
+      {
+        "bytes": 1006632960,
+        "count": 6,
+        "dtype": "float32",
+        "input_bytes": 167772160,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 167772160,
+        "output_shape": [
+          10240,
+          4096
+        ],
+        "shape": [
+          10240,
+          4096
+        ]
+      }
+    ],
+    "total_bytes": 1593835520,
+    "total_count": 13
+  },
+  "error": {
+    "exception_message": "CUDA out of memory. Tried to allocate 640.00 MiB. GPU 5 has a total capacity of 79.25 GiB of which 274.94 MiB is free. Including non-PyTorch memory, this process has 78.97 GiB memory in use. Of the allocated memory 76.60 GiB is allocated by PyTorch, with 389.98 MiB allocated in private pools (e.g., CUDA Graphs), and 1020.90 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+    "exception_type": "OutOfMemoryError",
+    "traceback": "Traceback (most recent call last):\n  File \"/workspace/mini-sglang/benchmark/offline/deepseek_v4_perf_matrix.py\", line 1725, in run_case\n    repeat_payload = _run_one_repeat(\n                     ^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/benchmark/offline/deepseek_v4_perf_matrix.py\", line 1296, in _run_one_repeat\n    outputs = llm.generate(prompts, sampling_params)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/benchmark/offline/deepseek_v4_perf_matrix.py\", line 954, in generate\n    return super().generate(prompts, sampling_params)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/python/minisgl/llm/llm.py\", line 96, in generate\n    self.run_forever()\n  File \"/usr/local/lib/python3.12/dist-packages/torch/utils/_contextlib.py\", line 120, in decorate_context\n    return func(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/python/minisgl/scheduler/scheduler.py\", line 135, in run_forever\n    self.normal_loop()\n  File \"/workspace/mini-sglang/python/minisgl/scheduler/scheduler.py\", line 125, in normal_loop\n    ongoing_data = (forward_input, self._forward(forward_input))\n                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/benchmark/offline/deepseek_v4_perf_matrix.py\", line 934, in _forward\n    output = super()._forward(forward_input)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/python/minisgl/scheduler/scheduler.py\", line 240, in _forward\n    forward_output = self.engine.forward_batch(batch, sample_args)\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/python/minisgl/engine/engine.py\", line 209, in forward_batch\n    logits = self.model.forward()\n             ^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/python/minisgl/models/deepseek_v4.py\", line 1149, in forward\n    output = self.model.forward(batch.input_ids)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/python/minisgl/models/deepseek_v4.py\", line 1134, in forward\n    x = layer.forward(x, input_ids)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/python/minisgl/models/deepseek_v4.py\", line 1080, in forward\n    y, post, comb = self._hc_pre(x, attn_fn, self.hc_attn_scale, self.hc_attn_base)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/python/minisgl/models/deepseek_v4.py\", line 1056, in _hc_pre\n    return dsv4_kernel.hc_pre_fallback(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/benchmark/offline/deepseek_v4_perf_matrix.py\", line 1041, in wrapper\n    result = func(*args, **kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/mini-sglang/python/minisgl/kernel/deepseek_v4.py\", line 1689, in hc_pre_fallback\n    rsqrt = torch.rsqrt(flat_float.square().mean(-1, keepdim=True) + norm_eps)\n                        ^^^^^^^^^^^^^^^^^^^\ntorch.OutOfMemoryError: CUDA out of memory. Tried to allocate 640.00 MiB. GPU 5 has a total capacity of 79.25 GiB of which 274.94 MiB is free. Including non-PyTorch memory, this process has 78.97 GiB memory in use. Of the allocated memory 76.60 GiB is allocated by PyTorch, with 389.98 MiB allocated in private pools (e.g., CUDA Graphs), and 1020.90 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)\n"
+  },
+  "is_primary_rank": false,
+  "kernel_counters": {
+    "fallback_wrapper_calls": {
+      "apply_rotary_tail": 10,
+      "compress_forward_fallback": 6,
+      "compress_norm_rope_store_fallback": 6,
+      "dequant_fp8_weight": 32,
+      "dsv4_sparse_attention_two_source_bf16": 6,
+      "hash_topk_fallback": 3,
+      "hc_post_fallback": 12,
+      "hc_pre_fallback": 13,
+      "indexer_bf16_logits_fallback": 2,
+      "indexer_kv_hadamard_fallback": 2,
+      "indexer_q_rope_hadamard_bf16_fallback": 2,
+      "indexer_select_bf16_fallback": 2,
+      "linear_bf16_fp32_fallback": 12,
+      "moe_gate_fallback": 6,
+      "moe_route_dispatch_bf16_grouped": 6,
+      "quantized_linear_ref": 26,
+      "silu_and_mul_clamp_fallback": 6,
+      "topk_transform_512_full_fallback": 2,
+      "wo_a_grouped_projection_fallback": 6
+    },
+    "fallback_wrapper_calls_total": 160,
+    "optional_kernel_none_skips": {},
+    "optional_kernel_none_skips_total": 0,
+    "unsupported_kernel_skips": {},
+    "unsupported_kernel_skips_total": 0,
+    "wrapper_exceptions": {
+      "hc_pre_fallback": 1
+    }
+  },
+  "kv_cache_memory_bytes": 55381065728,
+  "memory_after_case": {
+    "max_memory_allocated_bytes": 82282276352,
+    "max_memory_reserved_bytes": 83342917632,
+    "memory_allocated_bytes": 80756533248,
+    "memory_reserved_bytes": 83319848960
+  },
+  "rank": 5,
+  "repeats": [],
+  "runtime_environment": {
+    "cuda": {
+      "available": true,
+      "capability": [
+        8,
+        0
+      ],
+      "capability_name": "sm80",
+      "current_device": 5,
+      "device_count": 8,
+      "device_name": "NVIDIA A100-SXM4-80GB",
+      "rank": 5,
+      "runtime": "12.8"
+    },
+    "dsv4_kernel_capabilities": {
+      "cuda_available": true,
+      "cuda_capability": [
+        8,
+        0
+      ],
+      "deep_gemm_available": false,
+      "deep_gemm_error": "RuntimeError: Check failed: (lib_handle_ != nullptr) is false: Failed to load dynamic shared library /usr/local/lib/python3.12/dist-packages/deep_gemm/_C.so libcudart.so.13: cannot open shared object file: No such file or directory",
+      "deep_gemm_usable": false,
+      "flash_mla_available": true,
+      "flash_mla_error": null,
+      "flashinfer_available": true,
+      "flashinfer_error": null,
+      "is_sm80": true,
+      "marlin_available": false,
+      "marlin_error": "module not installed",
+      "sgl_kernel_available": true,
+      "sgl_kernel_dsv4_ops": {
+        "deepseek_v4_topk_transform_512": false,
+        "dsv4_fused_q_indexer_rope_hadamard_fp4_quant": false,
+        "dsv4_fused_q_indexer_rope_hadamard_quant": false
+      },
+      "sgl_kernel_error": null,
+      "sgl_kernel_sm80_common_ops": false,
+      "tilelang_available": true,
+      "tilelang_error": null,
+      "triton_available": true,
+      "triton_error": null
+    },
+    "nccl": {
+      "version": "2.27.5"
+    },
+    "packages": {
+      "deep_gemm": null,
+      "flashinfer": "0.6.12",
+      "sgl_kernel": "0.3.21",
+      "tilelang": "0.1.11+cu128.gita417b38a",
+      "torch": "2.9.1+cu128",
+      "triton": "3.5.1",
+      "tvm_ffi": "0.1.11"
+    },
+    "python": "3.12.3"
+  },
+  "warmup": {
+    "elapsed_s": [],
+    "repeats": 0,
+    "total_elapsed_s": 0.0
+  }
+}

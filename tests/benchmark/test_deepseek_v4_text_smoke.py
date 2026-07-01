@@ -178,6 +178,98 @@ def test_configure_variant_sets_v1_moe(monkeypatch):
     ]
 
 
+def test_configure_variant_sets_moe_v2(monkeypatch):
+    smoke = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_SWIGLU",
+            "MINISGL_DSV4_SM80_MOE_ROUTE",
+            "MINISGL_DSV4_SM80_MOE_INT8",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if os.environ.get(name) in {"1", "true"}:
+                return True
+            moe_bundle = os.environ.get("MINISGL_DSV4_SM80_V1_MOE") == "1" or (
+                os.environ.get("MINISGL_DSV4_SM80_MOE_V2") == "1"
+            )
+            return (
+                name in {"MINISGL_DSV4_SM80_SWIGLU", "MINISGL_DSV4_SM80_MOE_ROUTE"} and moe_bundle
+            )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_INT8", "1")
+    result = smoke.configure_variant(FakeKernel, smoke._variant_map()["v1_moe_v2"])
+
+    assert "MINISGL_DSV4_SM80_MOE_INT8" in result["cleared_dsv4_sm80_env"]
+    assert result["raw_dsv4_sm80_env"] == {
+        "MINISGL_DSV4_SM80_MOE_V2": "1",
+        "MINISGL_DSV4_SM80_V1_MOE": "1",
+    }
+    assert result["active_dsv4_toggles"] == [
+        "MINISGL_DSV4_SM80_MOE_ROUTE",
+        "MINISGL_DSV4_SM80_MOE_V2",
+        "MINISGL_DSV4_SM80_SWIGLU",
+        "MINISGL_DSV4_SM80_V1_MOE",
+    ]
+
+
+def test_configure_variant_sets_vllm_runner(monkeypatch):
+    smoke = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+            "MINISGL_DSV4_SM80_SWIGLU",
+            "MINISGL_DSV4_SM80_MOE_ROUTE",
+            "MINISGL_DSV4_SM80_MOE_INT8",
+            "MINISGL_DSV4_SM80_KV_FP8",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if os.environ.get(name) in {"1", "true"}:
+                return True
+            moe_bundle = (
+                os.environ.get("MINISGL_DSV4_SM80_V1_MOE") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_V2") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_VLLM_RUNNER") == "1"
+            )
+            return (
+                name in {"MINISGL_DSV4_SM80_SWIGLU", "MINISGL_DSV4_SM80_MOE_ROUTE"}
+                and moe_bundle
+            )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_INT8", "1")
+    monkeypatch.setenv("MINISGL_DSV4_SM80_KV_FP8", "1")
+    result = smoke.configure_variant(
+        FakeKernel,
+        smoke._variant_map()[
+            "v1_moe_vllm_runner_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_"
+            "idxwqb_gatecache_idxstorecache"
+        ],
+    )
+
+    assert "MINISGL_DSV4_SM80_MOE_INT8" in result["cleared_dsv4_sm80_env"]
+    assert "MINISGL_DSV4_SM80_KV_FP8" in result["cleared_dsv4_sm80_env"]
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"] == "1"
+    active = set(result["active_dsv4_toggles"])
+    assert {
+        "MINISGL_DSV4_SM80_MOE_ROUTE",
+        "MINISGL_DSV4_SM80_MOE_V2",
+        "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+        "MINISGL_DSV4_SM80_SWIGLU",
+        "MINISGL_DSV4_SM80_V1_MOE",
+    } <= active
+    assert "MINISGL_DSV4_SM80_MOE_INT8" not in active
+    assert "MINISGL_DSV4_SM80_KV_FP8" not in active
+
+
 def test_tp_rank_size_defaults_to_tp8_under_torchrun_env(monkeypatch):
     smoke = _load_module()
     args = smoke.parse_args([])

@@ -1,0 +1,245 @@
+{
+  "correctness": {
+    "artifact": "summaries/text_smoke_v2_exact.json",
+    "targeted_pytest_from_07_3": "54 passed, 4 warnings",
+    "text_smoke_status": "pass"
+  },
+  "date": "2026-07-01",
+  "decision": "Do not continue 07.3 peripheral MoE cuts. Open a focused vLLM-style FusedMoE runner integration target while preserving the current exact lane; defer MXFP4/FP8 precision semantics to TARGET 07.4.",
+  "macro_4096_1024_bs4": {
+    "actual_output_tokens": 2560,
+    "bottleneck_labels": [
+      "decode dominated",
+      "attention",
+      "MoE / expert GEMM",
+      "fp4 expert handling",
+      "KV cache writes",
+      "metadata construction"
+    ],
+    "communication_total_bytes": 87258071040,
+    "communication_total_count": 704,
+    "decode_tokens_per_s": 19.90366790865436,
+    "elapsed_s": 143.8130453582853,
+    "end_to_end_output_tokens_per_s": 17.800888602436608,
+    "fallback_wrapper_calls_total": 9768,
+    "graph_runner": {
+      "capture_compressed_locs_in_graph": true,
+      "capture_greedy_sample": true,
+      "captured_bs": [
+        4,
+        2,
+        1
+      ],
+      "eager_decode_count": 0,
+      "eager_decode_count_by_batch_size": {},
+      "enabled": true,
+      "error": null,
+      "greedy_sample_replay_count": 1023,
+      "greedy_sample_replay_count_by_batch_size": {
+        "1": 256,
+        "2": 256,
+        "3": 256,
+        "4": 255
+      },
+      "replay_count": 1023,
+      "replay_count_by_batch_size": {
+        "1": 256,
+        "2": 256,
+        "3": 256,
+        "4": 255
+      },
+      "replay_count_by_padded_size": {
+        "1": 256,
+        "2": 256,
+        "4": 511
+      },
+      "replay_input_copy_bytes": 33744,
+      "requested_bs": [
+        1,
+        2,
+        4
+      ]
+    },
+    "phase_totals": {
+      "decode_forward_enqueue_s": 0.9817327447235584,
+      "decode_forward_s": 128.4185413327068,
+      "decode_prepare_s": 1.7848386820405722,
+      "decode_tokens": 2556,
+      "prefill_forward_enqueue_s": 12.798984304070473,
+      "prefill_forward_s": 13.083458598703146,
+      "prefill_input_tokens": 10240,
+      "prefill_prepare_s": 0.532662745565176
+    },
+    "prefill_tokens_per_s": 782.6676656442361,
+    "prompt_tokens": 10240,
+    "schedule_summary": {
+      "batch_size_counts": {
+        "1": 256,
+        "2": 256,
+        "3": 256,
+        "4": 256
+      },
+      "max_batch_size": 4,
+      "max_padded_size": 4,
+      "padded_size_counts": {
+        "1": 256,
+        "2": 256,
+        "4": 512
+      },
+      "phase_batch_size_counts": {
+        "decode:bs1": 256,
+        "decode:bs2": 256,
+        "decode:bs3": 256,
+        "decode:bs4": 255,
+        "prefill:bs4": 1
+      },
+      "phase_counts": {
+        "decode": 1023,
+        "prefill": 1
+      },
+      "phase_padded_size_counts": {
+        "decode:padded1": 256,
+        "decode:padded2": 256,
+        "decode:padded4": 511,
+        "prefill:padded4": 1
+      },
+      "total_batches": 1024
+    },
+    "status": "pass",
+    "target_output_tokens": 2560,
+    "ttft_s_mean": 13.561334777623415,
+    "unsupported_kernel_skips_total": 0
+  },
+  "model_path": "/models/DeepSeek-V4-Flash",
+  "moe_v2_microbench": [
+    {
+      "name": "decode_tiny",
+      "v1_grouped_full_ms": 0.2822144031524658,
+      "v2_grouped_dispatch_ms": 0.13455359935760497,
+      "v2_grouped_full_ms": 0.29757440090179443,
+      "v2_vs_v1_grouped_max_abs": 0.0
+    },
+    {
+      "name": "decode_grouped",
+      "v1_grouped_full_ms": 0.3037184000015259,
+      "v2_grouped_dispatch_ms": 0.2598912000656128,
+      "v2_grouped_full_ms": 0.32767999172210693,
+      "v2_vs_v1_grouped_max_abs": 0.0
+    },
+    {
+      "name": "prefill_grouped",
+      "v1_grouped_full_ms": 0.44113922119140625,
+      "v2_grouped_dispatch_ms": 0.4005887985229492,
+      "v2_grouped_full_ms": 0.445849609375,
+      "v2_vs_v1_grouped_max_abs": 0.0
+    }
+  ],
+  "page_size": 256,
+  "precision_policy": "Inherited TARGET 07.2/07.3 exact macro lane; 07.35 introduced no new activation quantization, INT8 MoE, vLLM runtime dependency, or MXFP4/FP8 precision-lane promotion; V2 MoE exact route/workspace enabled.",
+  "profile_equiv_4096_128_bs4": {
+    "actual_output_tokens": 320,
+    "bottleneck_labels": [
+      "decode dominated",
+      "attention",
+      "MoE / expert GEMM",
+      "fp4 expert handling",
+      "KV cache writes",
+      "metadata construction"
+    ],
+    "communication_total_bytes": 87258071040,
+    "communication_total_count": 704,
+    "decode_tokens_per_s": 19.84422388080373,
+    "elapsed_s": 29.698172368109226,
+    "end_to_end_output_tokens_per_s": 10.775073833958396,
+    "fallback_wrapper_calls_total": 9768,
+    "graph_runner": {
+      "capture_compressed_locs_in_graph": true,
+      "capture_greedy_sample": true,
+      "captured_bs": [
+        4,
+        2,
+        1
+      ],
+      "eager_decode_count": 0,
+      "eager_decode_count_by_batch_size": {},
+      "enabled": true,
+      "error": null,
+      "greedy_sample_replay_count": 127,
+      "greedy_sample_replay_count_by_batch_size": {
+        "1": 32,
+        "2": 32,
+        "3": 32,
+        "4": 31
+      },
+      "replay_count": 127,
+      "replay_count_by_batch_size": {
+        "1": 32,
+        "2": 32,
+        "3": 32,
+        "4": 31
+      },
+      "replay_count_by_padded_size": {
+        "1": 32,
+        "2": 32,
+        "4": 63
+      },
+      "replay_input_copy_bytes": 4176,
+      "requested_bs": [
+        1,
+        2,
+        4
+      ]
+    },
+    "phase_totals": {
+      "decode_forward_enqueue_s": 0.32601945847272873,
+      "decode_forward_s": 15.924029173329473,
+      "decode_prepare_s": 0.21931719966232777,
+      "decode_tokens": 316,
+      "prefill_forward_enqueue_s": 12.76159454882145,
+      "prefill_forward_s": 13.045061439275742,
+      "prefill_input_tokens": 10240,
+      "prefill_prepare_s": 0.5086258016526699
+    },
+    "prefill_tokens_per_s": 784.9713891856168,
+    "prompt_tokens": 10240,
+    "schedule_summary": {
+      "batch_size_counts": {
+        "1": 32,
+        "2": 32,
+        "3": 32,
+        "4": 32
+      },
+      "max_batch_size": 4,
+      "max_padded_size": 4,
+      "padded_size_counts": {
+        "1": 32,
+        "2": 32,
+        "4": 64
+      },
+      "phase_batch_size_counts": {
+        "decode:bs1": 32,
+        "decode:bs2": 32,
+        "decode:bs3": 32,
+        "decode:bs4": 31,
+        "prefill:bs4": 1
+      },
+      "phase_counts": {
+        "decode": 127,
+        "prefill": 1
+      },
+      "phase_padded_size_counts": {
+        "decode:padded1": 32,
+        "decode:padded2": 32,
+        "decode:padded4": 63,
+        "prefill:padded4": 1
+      },
+      "total_batches": 128
+    },
+    "status": "pass",
+    "target_output_tokens": 320,
+    "ttft_s_mean": 13.528310423716903,
+    "unsupported_kernel_skips_total": 0
+  },
+  "tp_size": 8,
+  "variant": "v1_moe_v2_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+}

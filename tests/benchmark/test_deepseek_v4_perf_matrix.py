@@ -5,7 +5,6 @@ import os
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "benchmark" / "offline" / "deepseek_v4_perf_matrix.py"
 
@@ -113,6 +112,150 @@ def test_configure_variant_sets_v1_moe_without_int8_or_linear_experiment(monkeyp
     ]
 
 
+def test_configure_variant_sets_moe_v2_without_int8_or_precision_lane(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_SWIGLU",
+            "MINISGL_DSV4_SM80_MOE_ROUTE",
+            "MINISGL_DSV4_SM80_LINEAR_BF16_FP32",
+            "MINISGL_DSV4_SM80_MOE_INT8",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if os.environ.get(name) in {"1", "true"}:
+                return True
+            moe_bundle = os.environ.get("MINISGL_DSV4_SM80_V1_MOE") == "1" or (
+                os.environ.get("MINISGL_DSV4_SM80_MOE_V2") == "1"
+            )
+            return (
+                name in {"MINISGL_DSV4_SM80_SWIGLU", "MINISGL_DSV4_SM80_MOE_ROUTE"} and moe_bundle
+            )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_INT8", "1")
+    result = bench.configure_variant(FakeKernel, bench._variant_map()["v1_moe_v2"])
+
+    assert "MINISGL_DSV4_SM80_MOE_INT8" in result["cleared_dsv4_sm80_env"]
+    assert result["raw_dsv4_sm80_env"] == {
+        "MINISGL_DSV4_SM80_MOE_V2": "1",
+        "MINISGL_DSV4_SM80_V1_MOE": "1",
+    }
+    assert result["active_dsv4_toggles"] == [
+        "MINISGL_DSV4_SM80_MOE_ROUTE",
+        "MINISGL_DSV4_SM80_MOE_V2",
+        "MINISGL_DSV4_SM80_SWIGLU",
+        "MINISGL_DSV4_SM80_V1_MOE",
+    ]
+
+
+def test_configure_variant_sets_vllm_runner_without_precision_lane(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+            "MINISGL_DSV4_SM80_SWIGLU",
+            "MINISGL_DSV4_SM80_MOE_ROUTE",
+            "MINISGL_DSV4_SM80_MOE_INT8",
+            "MINISGL_DSV4_SM80_KV_FP8",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if os.environ.get(name) in {"1", "true"}:
+                return True
+            moe_bundle = (
+                os.environ.get("MINISGL_DSV4_SM80_V1_MOE") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_V2") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_VLLM_RUNNER") == "1"
+            )
+            return (
+                name in {"MINISGL_DSV4_SM80_SWIGLU", "MINISGL_DSV4_SM80_MOE_ROUTE"} and moe_bundle
+            )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_INT8", "1")
+    monkeypatch.setenv("MINISGL_DSV4_SM80_KV_FP8", "1")
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()[
+            "v1_moe_vllm_runner_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_"
+            "idxwqb_gatecache_idxstorecache"
+        ],
+    )
+
+    assert "MINISGL_DSV4_SM80_MOE_INT8" in result["cleared_dsv4_sm80_env"]
+    assert "MINISGL_DSV4_SM80_KV_FP8" in result["cleared_dsv4_sm80_env"]
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"] == "1"
+    assert "MINISGL_DSV4_SM80_MOE_INT8" not in result["raw_dsv4_sm80_env"]
+    assert "MINISGL_DSV4_SM80_KV_FP8" not in result["raw_dsv4_sm80_env"]
+    active = set(result["active_dsv4_toggles"])
+    assert {
+        "MINISGL_DSV4_SM80_MOE_ROUTE",
+        "MINISGL_DSV4_SM80_MOE_V2",
+        "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+        "MINISGL_DSV4_SM80_SWIGLU",
+        "MINISGL_DSV4_SM80_V1_MOE",
+    } <= active
+    assert "MINISGL_DSV4_SM80_MOE_INT8" not in active
+    assert "MINISGL_DSV4_SM80_KV_FP8" not in active
+
+
+def test_configure_variant_records_marlin_candidate_backend(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_SM80_SWIGLU",
+            "MINISGL_DSV4_SM80_MOE_ROUTE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND":
+                return False
+            if os.environ.get(name) in {"1", "true"}:
+                return True
+            moe_bundle = (
+                os.environ.get("MINISGL_DSV4_SM80_V1_MOE") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_V2") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_VLLM_RUNNER") == "1"
+            )
+            return (
+                name in {"MINISGL_DSV4_SM80_SWIGLU", "MINISGL_DSV4_SM80_MOE_ROUTE"} and moe_bundle
+            )
+
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()[
+            "v1_moe_vllm_runner_marlin_mxfp4_w4a16_graph_hc_rmsnorm_fwqakvcache_"
+            "qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ],
+    )
+
+    assert (
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"] == "marlin_mxfp4_w4a16"
+    )
+    active = set(result["active_dsv4_toggles"])
+    assert "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND" not in active
+    assert {
+        "MINISGL_DSV4_SM80_MOE_ROUTE",
+        "MINISGL_DSV4_SM80_MOE_V2",
+        "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+        "MINISGL_DSV4_SM80_SWIGLU",
+        "MINISGL_DSV4_SM80_V1_MOE",
+    } <= active
+
+
 def test_shared_prefix_workload_repeats_prefix_and_disables_radix_in_scenario():
     bench = _load_module()
     scenario = bench._scenario_map()["shared_prompt_no_radix_bs8"]
@@ -120,8 +263,13 @@ def test_shared_prefix_workload_repeats_prefix_and_disables_radix_in_scenario():
     prompts, sampling_params = bench.build_workload(scenario, vocab_size=1000, seed=7)
 
     assert len(prompts) == scenario.batch_size
-    assert all(len(prompt) == scenario.shared_prefix_len + scenario.suffix_len for prompt in prompts)
-    assert all(prompt[: scenario.shared_prefix_len] == prompts[0][: scenario.shared_prefix_len] for prompt in prompts)
+    assert all(
+        len(prompt) == scenario.shared_prefix_len + scenario.suffix_len for prompt in prompts
+    )
+    assert all(
+        prompt[: scenario.shared_prefix_len] == prompts[0][: scenario.shared_prefix_len]
+        for prompt in prompts
+    )
     assert all(param.max_tokens == scenario.decode_len for param in sampling_params)
     assert scenario.kind == "shared_prefix"
 

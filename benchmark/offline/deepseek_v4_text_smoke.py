@@ -35,6 +35,8 @@ DEFAULT_EXPECTATIONS = {
 }
 DSV4_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
 DSV4_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
+DSV4_MOE_V2_TOGGLE = "MINISGL_DSV4_SM80_MOE_V2"
+DSV4_MOE_VLLM_RUNNER_TOGGLE = "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"
 DSV4_HC_TOGGLE = "MINISGL_DSV4_SM80_HC"
 DSV4_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_RMSNORM"
 DSV4_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_FP8_GEMM"
@@ -76,6 +78,14 @@ VARIANTS: tuple[Variant, ...] = (
         "v1_moe",
         {DSV4_V1_MOE_TOGGLE: "1"},
         "V1 exact grouped MoE bundle: v0 BF16 whitelist plus grouped MoE route.",
+    ),
+    Variant(
+        "v1_moe_v2",
+        {DSV4_V1_MOE_TOGGLE: "1", DSV4_MOE_V2_TOGGLE: "1"},
+        (
+            "V2 exact MoE boundary: V1 exact grouped MoE plus explicit route "
+            "execution plan and per-layer grouped-MoE workspace."
+        ),
     ),
     Variant(
         "v1_moe_pynccl",
@@ -351,6 +361,56 @@ VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        (
+            "v1_moe_v2_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_"
+            "gatecache_idxstorecache"
+        ),
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        "Current best exact smoke variant with the V2 MoE execution boundary enabled.",
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        (
+            "v1_moe_vllm_runner_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_"
+            "idxwqb_gatecache_idxstorecache"
+        ),
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "Mini-owned vLLM-shaped exact MoE runner wrapping the current grouped "
+            "FP4 W13/SwiGLU/W2 backend, with the current exact graph smoke bundle."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         "v1_moe_graph_hc_rmsnorm_qwqa_wqb_wob_idxwqb_gatecache_idxstorecache",
         {
             DSV4_V1_MOE_TOGGLE: "1",
@@ -410,7 +470,9 @@ def configure_variant(dsv4_kernel, variant: Variant) -> dict[str, Any]:
     return {
         "cleared_dsv4_sm80_env": cleared,
         "active_dsv4_toggles": [
-            name for name in _all_dsv4_sm80_env_names(dsv4_kernel) if dsv4_kernel.dsv4_env_flag(name)
+            name
+            for name in _all_dsv4_sm80_env_names(dsv4_kernel)
+            if dsv4_kernel.dsv4_env_flag(name)
         ],
         "raw_dsv4_sm80_env": {
             name: os.environ[name]

@@ -28,6 +28,23 @@ DSV4KernelMode = Literal["fallback", "bf16_direct", "fp8_act", "fp4_act"]
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 DSV4_SM80_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
 DSV4_SM80_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
+DSV4_SM80_MOE_V2_TOGGLE = "MINISGL_DSV4_SM80_MOE_V2"
+DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE = "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"
+DSV4_SM80_MOE_EXPERT_BACKEND_ENV = "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"
+DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4 = "grouped_fp4"
+DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16 = "marlin_mxfp4_w4a16"
+DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
+    DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
+    DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
+)
+DSV4_SM80_MOE_MARLIN_BLOCKER = (
+    "TARGET 07.38 feasibility audit: vLLM's exact SM80 Marlin MXFP4 W4A16 "
+    "path depends on custom CUDA ops gptq_marlin_repack and "
+    "_moe_C::moe_wna16_marlin_gemm plus Marlin scale/layout transforms. "
+    "mini-sglang does not currently build an equivalent extension surface; "
+    "falling back to grouped FP4 would make the opt-in backend silently fake."
+)
+DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES = 512
 DSV4_LINEAR_BF16_FP32_TOGGLE = "MINISGL_DSV4_SM80_LINEAR_BF16_FP32"
 DSV4_SM80_V0_BF16_WHITELIST: tuple[str, ...] = (
     "MINISGL_DSV4_SM80_SWIGLU",
@@ -44,6 +61,14 @@ DSV4_SM80_V0_BF16_WHITELIST: tuple[str, ...] = (
 DSV4_SM80_V1_MOE_WHITELIST: tuple[str, ...] = (
     *DSV4_SM80_V0_BF16_WHITELIST,
     "MINISGL_DSV4_SM80_MOE_ROUTE",
+)
+DSV4_SM80_MOE_V2_WHITELIST: tuple[str, ...] = (
+    *DSV4_SM80_V1_MOE_WHITELIST,
+    DSV4_SM80_MOE_V2_TOGGLE,
+)
+DSV4_SM80_MOE_VLLM_RUNNER_WHITELIST: tuple[str, ...] = (
+    *DSV4_SM80_MOE_V2_WHITELIST,
+    DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE,
 )
 DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     "MINISGL_DSV4_SM80_STORE_CACHE",
@@ -74,6 +99,9 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_V0_BF16_TOGGLE,
     DSV4_SM80_V1_MOE_TOGGLE,
+    DSV4_SM80_MOE_V2_TOGGLE,
+    DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE,
+    DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
     *DSV4_SM80_V0_BF16_WHITELIST,
     *DSV4_SM80_EXPERIMENTAL_TOGGLES,
 )
@@ -499,6 +527,48 @@ class DSV4MoERoutePlan:
     block_size_m: int
 
 
+@dataclass(frozen=True)
+class DSV4MoEExecutionPlan:
+    route_plan: DSV4MoERoutePlan
+    route_weights: torch.Tensor
+    tokens: int
+    hidden: int
+    num_experts: int
+    reduce_once: bool
+    final_reduce_label: str
+
+
+class DSV4MoEWorkspace:
+    """Reusable per-layer temporary buffers for the exact grouped MoE path."""
+
+    def __init__(self) -> None:
+        self._buffers: dict[str, torch.Tensor] = {}
+
+    def tensor(
+        self,
+        name: str,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        *,
+        zero: bool = False,
+    ) -> torch.Tensor:
+        numel = math.prod(shape)
+        buffer = self._buffers.get(name)
+        if (
+            buffer is None
+            or buffer.dtype != dtype
+            or buffer.device != device
+            or buffer.numel() < numel
+        ):
+            buffer = torch.empty((numel,), dtype=dtype, device=device)
+            self._buffers[name] = buffer
+        out = buffer[:numel].view(shape)
+        if zero:
+            out.zero_()
+        return out
+
+
 def _module_available(name: str) -> tuple[bool, str | None]:
     if importlib.util.find_spec(name) is None:
         return False, "module not installed"
@@ -593,7 +663,17 @@ def unsupported_kernel(name: str, detail: str) -> None:
 
 
 def dsv4_env_flag(name: str) -> bool:
+    if name == DSV4_SM80_MOE_EXPERT_BACKEND_ENV:
+        return False
     if os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES:
+        return True
+    if name in DSV4_SM80_MOE_VLLM_RUNNER_WHITELIST and (
+        os.environ.get(DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
+    ):
+        return True
+    if name in DSV4_SM80_MOE_V2_WHITELIST and (
+        os.environ.get(DSV4_SM80_MOE_V2_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
+    ):
         return True
     if name in DSV4_SM80_V1_MOE_WHITELIST and (
         os.environ.get(DSV4_SM80_V1_MOE_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
@@ -609,6 +689,34 @@ def dsv4_sm80_triton_enabled(toggle: str) -> bool:
         return False
     cap = detect_dsv4_kernel_capabilities()
     return bool(cap.is_sm80 and cap.triton_available)
+
+
+def dsv4_moe_expert_backend() -> str:
+    raw = (
+        os.environ.get(
+            DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
+            DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
+        )
+        .strip()
+        .lower()
+    )
+    if raw in {"", "default", "current", "grouped"}:
+        return DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4
+    if raw not in DSV4_SM80_MOE_EXPERT_BACKENDS:
+        valid = ", ".join(DSV4_SM80_MOE_EXPERT_BACKENDS)
+        raise ValueError(
+            f"Unsupported {DSV4_SM80_MOE_EXPERT_BACKEND_ENV}={raw!r}; " f"valid values: {valid}"
+        )
+    return raw
+
+
+def require_supported_moe_expert_backend() -> str:
+    backend = dsv4_moe_expert_backend()
+    if backend == DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16:
+        unsupported_kernel(
+            "DSV4 Marlin MXFP4 W4A16 MoE expert backend", DSV4_SM80_MOE_MARLIN_BLOCKER
+        )
+    return backend
 
 
 def dsv4_sm80_cuda_enabled(toggle: str) -> bool:
@@ -737,9 +845,7 @@ def quantized_linear_ref(
     elif weight_kind == "fp8":
         x = quantize_fp8_activation_ref(x)
         use_fp8_gemm = (
-            dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FP8_GEMM")
-            if fp8_gemm is None
-            else fp8_gemm
+            dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FP8_GEMM") if fp8_gemm is None else fp8_gemm
         )
         if use_fp8_gemm:
             y = _triton_dsv4_ops().quantized_linear_fp8(x, weight, scale)
@@ -1519,7 +1625,9 @@ def indexer_bf16_logits_fallback(
         if static_max_seq_len is not None
         else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
     )
-    logits = torch.full((rows, max(max_seq_len, 1)), float("-inf"), dtype=torch.float32, device=q.device)
+    logits = torch.full(
+        (rows, max(max_seq_len, 1)), float("-inf"), dtype=torch.float32, device=q.device
+    )
     if rows == 0 or max_seq_len <= 0:
         return logits[:, :0]
 
@@ -1896,6 +2004,44 @@ def build_moe_route_plan(
     )
 
 
+def build_moe_v2_execution_plan(
+    hidden_states: torch.Tensor,
+    weights: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    num_experts: int,
+    block_size_m: int = 16,
+    reduce_once: bool = True,
+    final_reduce_label: str = "dsv4.v1_moe_reduce_once_all_reduce",
+) -> DSV4MoEExecutionPlan:
+    if hidden_states.ndim != 2:
+        raise ValueError(
+            f"DSV4 MoE V2 execution plan expects hidden_states [tokens, hidden], got {hidden_states.shape}"
+        )
+    if weights.shape != indices.shape or indices.ndim != 2:
+        raise ValueError(
+            "DSV4 MoE V2 execution plan expects matching weights/indices [tokens, topk], "
+            f"got weights={weights.shape}, indices={indices.shape}"
+        )
+    route_plan = build_moe_route_plan(
+        indices,
+        num_experts=num_experts,
+        block_size_m=block_size_m,
+    )
+    route_weights = (
+        weights.to(device=hidden_states.device, dtype=torch.float32).reshape(-1).contiguous()
+    )
+    return DSV4MoEExecutionPlan(
+        route_plan=route_plan,
+        route_weights=route_weights,
+        tokens=int(hidden_states.shape[0]),
+        hidden=int(hidden_states.shape[1]),
+        num_experts=int(num_experts),
+        reduce_once=bool(reduce_once),
+        final_reduce_label=final_reduce_label,
+    )
+
+
 def moe_gate_fallback(
     hidden_states: torch.Tensor,
     weight: torch.Tensor,
@@ -1988,6 +2134,8 @@ def moe_route_dispatch_bf16_grouped(
     w2_scale: torch.Tensor,
     *,
     swiglu_limit: float = 0.0,
+    moe_plan: DSV4MoEExecutionPlan | None = None,
+    workspace: DSV4MoEWorkspace | None = None,
 ) -> torch.Tensor | None:
     if not dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_MOE_ROUTE"):
         return None
@@ -2003,25 +2151,42 @@ def moe_route_dispatch_bf16_grouped(
         return None
 
     try:
-        plan = build_moe_route_plan(
-            indices,
-            num_experts=w13_weight.shape[0],
-            block_size_m=16,
-        )
+        if moe_plan is None:
+            route_plan = build_moe_route_plan(
+                indices,
+                num_experts=w13_weight.shape[0],
+                block_size_m=16,
+            )
+            route_weights = weights.to(
+                device=hidden_states.device,
+                dtype=torch.float32,
+            ).contiguous()
+        else:
+            if (
+                moe_plan.tokens != hidden_states.shape[0]
+                or moe_plan.hidden != hidden_states.shape[1]
+                or moe_plan.num_experts != w13_weight.shape[0]
+                or moe_plan.route_plan.route_count != weights.numel()
+                or moe_plan.route_plan.topk != indices.shape[1]
+            ):
+                return None
+            route_plan = moe_plan.route_plan
+            route_weights = moe_plan.route_weights
         return _triton_dsv4_ops().grouped_fp4_moe(
             hidden_states.contiguous(),
-            weights.to(device=hidden_states.device, dtype=torch.float32).contiguous(),
+            route_weights,
             w13_weight.contiguous(),
             w13_scale,
             w2_weight.contiguous(),
             w2_scale,
-            plan.sorted_route_ids,
-            plan.expert_ids,
-            plan.num_tokens_post_padded,
-            route_count=plan.route_count,
-            topk=plan.topk,
-            block_size_m=plan.block_size_m,
+            route_plan.sorted_route_ids,
+            route_plan.expert_ids,
+            route_plan.num_tokens_post_padded,
+            route_count=route_plan.route_count,
+            topk=route_plan.topk,
+            block_size_m=route_plan.block_size_m,
             swiglu_limit=swiglu_limit,
+            workspace=workspace,
         )
     except Exception:
         return None
@@ -2512,16 +2677,29 @@ __all__ = [
     "DSV4_LINEAR_BF16_FP32_TOGGLE",
     "DSV4_SM80_EXPERIMENTAL_TOGGLES",
     "DSV4_SM80_KNOWN_TOGGLES",
+    "DSV4_SM80_MOE_EXPERT_BACKEND_ENV",
+    "DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4",
+    "DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16",
+    "DSV4_SM80_MOE_EXPERT_BACKENDS",
+    "DSV4_SM80_MOE_MARLIN_BLOCKER",
+    "DSV4_SM80_MOE_V2_TOGGLE",
+    "DSV4_SM80_MOE_V2_WHITELIST",
+    "DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE",
+    "DSV4_SM80_MOE_VLLM_RUNNER_WHITELIST",
+    "DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES",
     "DSV4_SM80_V0_BF16_TOGGLE",
     "DSV4_SM80_V0_BF16_WHITELIST",
     "DSV4_SM80_V1_MOE_TOGGLE",
     "DSV4_SM80_V1_MOE_WHITELIST",
+    "DSV4MoEExecutionPlan",
     "DSV4MoERoutePlan",
+    "DSV4MoEWorkspace",
     "DSV4PagedMQAMetadata",
     "DSV4TopKTransformOutput",
     "DSV4TwoSourceAttentionMetadata",
     "apply_rotary_tail",
     "build_moe_route_plan",
+    "build_moe_v2_execution_plan",
     "copy_masked_compressed_locs",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
@@ -2535,6 +2713,7 @@ __all__ = [
     "dequant_fp8_weight",
     "detect_dsv4_kernel_capabilities",
     "dsv4_env_flag",
+    "dsv4_moe_expert_backend",
     "dsv4_kernel_inventory_by_wrapper",
     "dsv4_sparse_attention_two_source_bf16",
     "dsv4_sm80_cuda_enabled",
@@ -2568,6 +2747,7 @@ __all__ = [
     "quantize_fp8_activation_ref",
     "quantized_linear_fp8_pair_shared_activation_ref",
     "quantized_linear_ref",
+    "require_supported_moe_expert_backend",
     "rms_norm_pair_fallback",
     "scale_dim",
     "sequence_mqa_attention_fallback",

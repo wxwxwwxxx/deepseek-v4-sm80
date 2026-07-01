@@ -325,6 +325,50 @@ def test_deepseek_v4_grouped_routed_experts_all_reduce_tp_sharded_output(monkeyp
     assert torch.equal(out, torch.full_like(hidden, 23.0))
 
 
+def test_deepseek_v4_moe_v2_workspace_is_decode_sized(monkeypatch):
+    _reset_globals()
+    cfg = _tiny_dsv4_config()
+    experts = DSV4FusedRoutedExperts(cfg)
+    seen_workspaces: list[object | None] = []
+
+    def fake_grouped_dispatch(hidden_states, *args, workspace=None, **kwargs):
+        del args, kwargs
+        seen_workspaces.append(workspace)
+        return torch.zeros_like(hidden_states)
+
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "moe_route_dispatch_bf16_grouped",
+        fake_grouped_dispatch,
+    )
+
+    small_hidden = torch.zeros(4, cfg.hidden_size, dtype=torch.bfloat16)
+    small_weights = torch.ones(4, 1, dtype=torch.float32)
+    small_indices = torch.zeros(4, 1, dtype=torch.long)
+    small_plan = dsv4_kernel.build_moe_v2_execution_plan(
+        small_hidden,
+        small_weights,
+        small_indices,
+        num_experts=cfg.n_routed_experts,
+    )
+    experts.forward(small_hidden, small_weights, small_indices, moe_plan=small_plan)
+
+    large_tokens = dsv4_kernel.DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES + 1
+    large_hidden = torch.zeros(large_tokens, cfg.hidden_size, dtype=torch.bfloat16)
+    large_weights = torch.ones(large_tokens, 1, dtype=torch.float32)
+    large_indices = torch.zeros(large_tokens, 1, dtype=torch.long)
+    large_plan = dsv4_kernel.build_moe_v2_execution_plan(
+        large_hidden,
+        large_weights,
+        large_indices,
+        num_experts=cfg.n_routed_experts,
+    )
+    experts.forward(large_hidden, large_weights, large_indices, moe_plan=large_plan)
+
+    assert seen_workspaces[0] is experts._moe_v2_workspace
+    assert seen_workspaces[1] is None
+
+
 def test_deepseek_v4_v1_moe_sums_routed_and_shared_before_one_all_reduce(monkeypatch):
     _reset_globals(tp_rank=0, tp_size=2)
     cfg = _tiny_dsv4_config()
@@ -372,3 +416,232 @@ def test_deepseek_v4_v1_moe_sums_routed_and_shared_before_one_all_reduce(monkeyp
     assert len(fake_comm.calls) == 1
     assert fake_comm.calls[0].dtype is torch.float32
     assert torch.equal(out, torch.full_like(hidden, 34.0))
+
+
+def test_deepseek_v4_moe_v2_builds_execution_plan_before_reduce_once(monkeypatch):
+    _reset_globals(tp_rank=0, tp_size=2)
+    cfg = _tiny_dsv4_config()
+    moe = DSV4MoE(cfg, layer_id=0)
+
+    class FakeComm:
+        def __init__(self) -> None:
+            self.calls: list[torch.Tensor] = []
+
+        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
+            del label
+            self.calls.append(x.clone())
+            return x + 30.0
+
+    fake_comm = FakeComm()
+    moe._comm = fake_comm
+    calls: list[tuple[str, bool]] = []
+    seen_plans: list[dsv4_kernel.DSV4MoEExecutionPlan] = []
+
+    def fake_gate_forward(*args, **kwargs):
+        hidden = args[0]
+        return (
+            torch.ones(hidden.shape[0], 1, dtype=torch.float32),
+            torch.zeros(hidden.shape[0], 1, dtype=torch.long),
+        )
+
+    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+        del weights, indices
+        calls.append(("routed", reduce))
+        assert moe_plan is not None
+        seen_plans.append(moe_plan)
+        return torch.full_like(hidden, 1.25)
+
+    def fake_shared_forward(hidden, *, reduce=True):
+        calls.append(("shared", reduce))
+        return torch.full_like(hidden, 2.75)
+
+    moe.gate.forward = fake_gate_forward
+    moe.experts.forward = fake_experts_forward
+    moe.shared_experts.forward = fake_shared_forward
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE, "1")
+
+    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
+    input_ids = torch.zeros(2, 1, dtype=torch.long)
+    out = moe.forward(hidden, input_ids)
+
+    assert calls == [("routed", False), ("shared", False)]
+    assert len(seen_plans) == 1
+    assert seen_plans[0].tokens == 2
+    assert seen_plans[0].hidden == cfg.hidden_size
+    assert seen_plans[0].route_plan.route_count == 2
+    assert len(fake_comm.calls) == 1
+    assert fake_comm.calls[0].dtype is torch.float32
+    assert torch.equal(out, torch.full_like(hidden, 34.0))
+
+
+def test_deepseek_v4_vllm_runner_sums_routed_and_shared_before_late_reduce(monkeypatch):
+    _reset_globals(tp_rank=0, tp_size=2)
+    cfg = _tiny_dsv4_config()
+    moe = DSV4MoE(cfg, layer_id=0)
+
+    class FakeComm:
+        def __init__(self) -> None:
+            self.calls: list[tuple[torch.Tensor, str | None]] = []
+
+        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
+            self.calls.append((x.clone(), label))
+            return x + 30.0
+
+    fake_comm = FakeComm()
+    moe._comm = fake_comm
+    calls: list[tuple[str, bool]] = []
+    seen_plans: list[dsv4_kernel.DSV4MoEExecutionPlan] = []
+
+    def fake_gate_forward(*args, **kwargs):
+        hidden = args[0]
+        return (
+            torch.ones(hidden.shape[0], 1, dtype=torch.float32),
+            torch.zeros(hidden.shape[0], 1, dtype=torch.long),
+        )
+
+    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+        del weights, indices
+        calls.append(("routed", reduce))
+        assert moe_plan is not None
+        seen_plans.append(moe_plan)
+        return torch.full_like(hidden, 1.25)
+
+    def fake_shared_forward(hidden, *, reduce=True):
+        calls.append(("shared", reduce))
+        return torch.full_like(hidden, 2.75)
+
+    moe.gate.forward = fake_gate_forward
+    moe.experts.forward = fake_experts_forward
+    moe.shared_experts.forward = fake_shared_forward
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
+
+    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
+    input_ids = torch.zeros(2, 1, dtype=torch.long)
+    out = moe.forward(hidden, input_ids)
+
+    assert calls == [("routed", False), ("shared", False)]
+    assert len(seen_plans) == 1
+    assert seen_plans[0].tokens == 2
+    assert seen_plans[0].route_plan.route_count == 2
+    assert len(fake_comm.calls) == 1
+    reduced, label = fake_comm.calls[0]
+    assert reduced.dtype is torch.float32
+    assert label == "dsv4.v1_moe_reduce_once_all_reduce"
+    assert torch.equal(out, torch.full_like(hidden, 34.0))
+
+
+def test_deepseek_v4_vllm_runner_routed_only_path(monkeypatch):
+    _reset_globals()
+    cfg = replace(_tiny_dsv4_config(), n_shared_experts=0)
+    moe = DSV4MoE(cfg, layer_id=0)
+
+    def fake_gate_forward(*args, **kwargs):
+        hidden = args[0]
+        return (
+            torch.ones(hidden.shape[0], 1, dtype=torch.float32),
+            torch.zeros(hidden.shape[0], 1, dtype=torch.long),
+        )
+
+    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+        del weights, indices
+        assert reduce is False
+        assert moe_plan is not None
+        return torch.full_like(hidden, 5.0)
+
+    moe.gate.forward = fake_gate_forward
+    moe.experts.forward = fake_experts_forward
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
+
+    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
+    input_ids = torch.zeros(2, 1, dtype=torch.long)
+    out = moe.forward(hidden, input_ids)
+
+    assert torch.equal(out, torch.full_like(hidden, 5.0))
+
+
+def test_deepseek_v4_vllm_runner_shared_only_effect(monkeypatch):
+    _reset_globals()
+    cfg = _tiny_dsv4_config()
+    moe = DSV4MoE(cfg, layer_id=0)
+
+    def fake_gate_forward(*args, **kwargs):
+        hidden = args[0]
+        return (
+            torch.ones(hidden.shape[0], 1, dtype=torch.float32),
+            torch.zeros(hidden.shape[0], 1, dtype=torch.long),
+        )
+
+    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+        del weights, indices
+        assert reduce is False
+        assert moe_plan is not None
+        return torch.zeros_like(hidden)
+
+    def fake_shared_forward(hidden, *, reduce=True):
+        assert reduce is False
+        return torch.full_like(hidden, 7.0)
+
+    moe.gate.forward = fake_gate_forward
+    moe.experts.forward = fake_experts_forward
+    moe.shared_experts.forward = fake_shared_forward
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
+
+    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
+    input_ids = torch.zeros(2, 1, dtype=torch.long)
+    out = moe.forward(hidden, input_ids)
+
+    assert torch.equal(out, torch.full_like(hidden, 7.0))
+
+
+def test_deepseek_v4_vllm_runner_hash_routing_uses_input_ids(monkeypatch):
+    _reset_globals()
+    cfg = replace(_tiny_dsv4_config(), n_hash_layers=1, n_shared_experts=0)
+    moe = DSV4MoE(cfg, layer_id=0)
+    moe.gate.weight.zero_()
+    moe.topk.tid2eid.zero_()
+    moe.topk.tid2eid[3, 0] = 1
+    moe.topk.tid2eid[4, 0] = 0
+    seen_indices: list[torch.Tensor] = []
+
+    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+        del weights
+        assert reduce is False
+        assert moe_plan is not None
+        seen_indices.append(indices.clone())
+        return torch.zeros_like(hidden)
+
+    moe.experts.forward = fake_experts_forward
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
+
+    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
+    input_ids = torch.tensor([[3], [4]], dtype=torch.long)
+    moe.forward(hidden, input_ids)
+
+    assert len(seen_indices) == 1
+    assert seen_indices[0].tolist() == [[1], [0]]
+
+
+def test_deepseek_v4_vllm_runner_correction_bias_routing(monkeypatch):
+    _reset_globals()
+    cfg = replace(_tiny_dsv4_config(), n_shared_experts=0)
+    moe = DSV4MoE(cfg, layer_id=0)
+    moe.gate.weight.zero_()
+    moe.gate.e_score_correction_bias.copy_(torch.tensor([0.0, 4.0]))
+    seen_indices: list[torch.Tensor] = []
+
+    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+        del weights
+        assert reduce is False
+        assert moe_plan is not None
+        seen_indices.append(indices.clone())
+        return torch.zeros_like(hidden)
+
+    moe.experts.forward = fake_experts_forward
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
+
+    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
+    input_ids = torch.zeros(2, 1, dtype=torch.long)
+    moe.forward(hidden, input_ids)
+
+    assert len(seen_indices) == 1
+    assert seen_indices[0].tolist() == [[1], [1]]
