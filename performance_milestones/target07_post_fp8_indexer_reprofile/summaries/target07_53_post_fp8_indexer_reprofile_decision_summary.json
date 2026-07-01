@@ -1,0 +1,244 @@
+{
+  "date": "2026-07-02",
+  "decode_envelope_bucket_ranking": [
+    {
+      "bucket": "projection_gemm",
+      "count": 100965,
+      "duration_s": 1.797271777,
+      "graph_events": 100965,
+      "graph_nodes": 795,
+      "share_of_decode_envelope_wall": 0.27485573714788186,
+      "share_of_section_wall": 0.27485573714788186
+    },
+    {
+      "bucket": "graph_runtime_copy_cat_index",
+      "count": 466128,
+      "duration_s": 1.6169825149999995,
+      "graph_events": 458724,
+      "graph_nodes": 3612,
+      "share_of_decode_envelope_wall": 0.24728420420500533,
+      "share_of_section_wall": 0.24728420420500533
+    },
+    {
+      "bucket": "elementwise_graph_nodes",
+      "count": 561461,
+      "duration_s": 1.3582532889999999,
+      "graph_events": 556768,
+      "graph_nodes": 4384,
+      "share_of_decode_envelope_wall": 0.20771689276998534,
+      "share_of_section_wall": 0.20771689276998534
+    },
+    {
+      "bucket": "nccl_communication",
+      "count": 11176,
+      "duration_s": 0.33125521199999997,
+      "graph_events": 11176,
+      "graph_nodes": 88,
+      "share_of_decode_envelope_wall": 0.05065866867965505,
+      "share_of_section_wall": 0.05065866867965505
+    },
+    {
+      "bucket": "moe_marlin",
+      "count": 43688,
+      "duration_s": 0.319279547,
+      "graph_events": 43688,
+      "graph_nodes": 344,
+      "share_of_decode_envelope_wall": 0.04882723713238769,
+      "share_of_section_wall": 0.04882723713238769
+    },
+    {
+      "bucket": "sampling_logits",
+      "count": 43815,
+      "duration_s": 0.18257766100000003,
+      "graph_events": 43815,
+      "graph_nodes": 345,
+      "share_of_decode_envelope_wall": 0.027921496483217234,
+      "share_of_section_wall": 0.027921496483217234
+    },
+    {
+      "bucket": "fp8_indexer",
+      "count": 20828,
+      "duration_s": 0.130135633,
+      "graph_events": 20828,
+      "graph_nodes": 164,
+      "share_of_decode_envelope_wall": 0.019901567361796515,
+      "share_of_section_wall": 0.019901567361796515
+    },
+    {
+      "bucket": "sparse_attention_decode",
+      "count": 21590,
+      "duration_s": 0.117957477,
+      "graph_events": 21590,
+      "graph_nodes": 170,
+      "share_of_decode_envelope_wall": 0.01803916898258806,
+      "share_of_section_wall": 0.01803916898258806
+    },
+    {
+      "bucket": "kv_compressor_cache_store",
+      "count": 8128,
+      "duration_s": 0.028085251999999998,
+      "graph_events": 8128,
+      "graph_nodes": 64,
+      "share_of_decode_envelope_wall": 0.004295061403751194,
+      "share_of_section_wall": 0.004295061403751194
+    },
+    {
+      "bucket": "unknown",
+      "count": 11301,
+      "duration_s": 0.023599579,
+      "graph_events": 11049,
+      "graph_nodes": 87,
+      "share_of_decode_envelope_wall": 0.003609070016807298,
+      "share_of_section_wall": 0.003609070016807298
+    }
+  ],
+  "do_not_continue_condition": "Stop the next graph/layout target if one focused PoC cannot remove at least 10% of graph_runtime_copy_cat_index+elementwise_graph_nodes decode-envelope kernel time or produce at least 5% 4096/128 output-throughput gain; then pivot to projection/GEMM profiling/implementation only if intrinsic GEMM remains top-two after graph/layout cleanup.",
+  "mini_fp8_indexer_long_macro_reused_from_0752": {
+    "decode_tok_s": 86.21240020897775,
+    "eager_decode_count": 0,
+    "elapsed_s": 55.59886202402413,
+    "graph_replay_count": 1023,
+    "output_tok_s": 73.67057257808854,
+    "ttft_s_mean": 6.2175095323473215
+  },
+  "mini_fp8_indexer_nsys_macro": {
+    "decode_tok_s": 80.65754744183856,
+    "eager_decode_count": 0,
+    "elapsed_s": 13.288162084296346,
+    "graph_replay_count": 127,
+    "output_tok_s": 38.53053543086069,
+    "ttft_s_mean": 6.724188031628728
+  },
+  "mini_fp8_indexer_short_macro": {
+    "communication_total_bytes": 139602984960,
+    "communication_total_count": 704,
+    "decode_tok_s": 85.75677839557339,
+    "eager_decode_count": 0,
+    "elapsed_s": 12.289803251624107,
+    "graph_replay_count": 127,
+    "output_tok_s": 41.66055302246916,
+    "ttft_s_mean": 6.106141427531838
+  },
+  "next_target_decision": "Decision: start graph/layout replay deforestation target",
+  "profile_windows": {
+    "decode_forward_envelope_wall_s": 6.538964024,
+    "decode_forward_ranges": 127,
+    "decode_forward_sum_s": 6.10260429,
+    "prefill_forward_wall_s": 5.408743509,
+    "repeat_wall_s": 13.288071946
+  },
+  "repeat_bucket_ranking": [
+    {
+      "bucket": "graph_runtime_copy_cat_index",
+      "count": 502980,
+      "duration_s": 2.1818767310000005,
+      "graph_events": 458724,
+      "graph_nodes": 3612,
+      "share_of_decode_envelope_wall": 0.3336731511278919,
+      "share_of_section_wall": 0.16419814250454845
+    },
+    {
+      "bucket": "projection_gemm",
+      "count": 101545,
+      "duration_s": 2.169954203,
+      "graph_events": 100965,
+      "graph_nodes": 795,
+      "share_of_decode_envelope_wall": 0.3318498457914134,
+      "share_of_section_wall": 0.1633009071457657
+    },
+    {
+      "bucket": "prefill_sparse_attention",
+      "count": 43,
+      "duration_s": 2.129781908,
+      "graph_events": 0,
+      "graph_nodes": 0,
+      "share_of_decode_envelope_wall": 0.3257063198670383,
+      "share_of_section_wall": 0.16027772250594344
+    },
+    {
+      "bucket": "elementwise_graph_nodes",
+      "count": 566419,
+      "duration_s": 1.812329348,
+      "graph_events": 556768,
+      "graph_nodes": 4384,
+      "share_of_decode_envelope_wall": 0.277158482803728,
+      "share_of_section_wall": 0.13638768328203932
+    },
+    {
+      "bucket": "sampling_logits",
+      "count": 44180,
+      "duration_s": 0.6326828849999999,
+      "graph_events": 43815,
+      "graph_nodes": 345,
+      "share_of_decode_envelope_wall": 0.0967558290086717,
+      "share_of_section_wall": 0.047612843125104484
+    },
+    {
+      "bucket": "moe_marlin",
+      "count": 44032,
+      "duration_s": 0.582976784,
+      "graph_events": 43688,
+      "graph_nodes": 344,
+      "share_of_decode_envelope_wall": 0.08915430362673608,
+      "share_of_section_wall": 0.04387218750538815
+    },
+    {
+      "bucket": "nccl_communication",
+      "count": 11264,
+      "duration_s": 0.489769193,
+      "graph_events": 11176,
+      "graph_nodes": 88,
+      "share_of_decode_envelope_wall": 0.07490012044758115,
+      "share_of_section_wall": 0.03685780713637927
+    },
+    {
+      "bucket": "fp8_indexer",
+      "count": 20992,
+      "duration_s": 0.253231949,
+      "graph_events": 20828,
+      "graph_nodes": 164,
+      "share_of_decode_envelope_wall": 0.03872661603131034,
+      "share_of_section_wall": 0.019057087441209132
+    },
+    {
+      "bucket": "sparse_attention_decode",
+      "count": 21590,
+      "duration_s": 0.117957477,
+      "graph_events": 21590,
+      "graph_nodes": 170,
+      "share_of_decode_envelope_wall": 0.01803916898258806,
+      "share_of_section_wall": 0.008876944486706197
+    },
+    {
+      "bucket": "kv_compressor_cache_store",
+      "count": 8212,
+      "duration_s": 0.067961369,
+      "graph_events": 8128,
+      "graph_nodes": 64,
+      "share_of_decode_envelope_wall": 0.010393292997263933,
+      "share_of_section_wall": 0.005114464256077259
+    },
+    {
+      "bucket": "unknown",
+      "count": 11527,
+      "duration_s": 0.050206237,
+      "graph_events": 11049,
+      "graph_nodes": 87,
+      "share_of_decode_envelope_wall": 0.007678010892203679,
+      "share_of_section_wall": 0.0037782935857081337
+    }
+  ],
+  "vllm_controls_reused_from_0743": {
+    "4096x1024_bs4_elapsed_s_mean": 20.273795248940587,
+    "4096x1024_bs4_output_tok_s": 202.03419979858174,
+    "4096x128_bs4_elapsed_s_mean": 6.222470929846168,
+    "4096x128_bs4_output_tok_s": 82.28242538573944
+  },
+  "vllm_profile_caveat": {
+    "repeat_nvtx_present": true,
+    "repeat_window_child_kernels_missing_in_existing_summary": true,
+    "sqlite": "performance_milestones/vllm/raw/nsys_vllm_4096x128_bs4.sqlite",
+    "total_kernel_duration_s_in_existing_profile": 0.982387,
+    "use_for": "macro/source topology and visible total-kernel sanity, not per-bucket shares"
+  }
+}

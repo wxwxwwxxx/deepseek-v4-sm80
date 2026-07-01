@@ -923,6 +923,26 @@ def test_q_kv_norm_rope_cache_accepts_strided_kv_view(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_fp8_activation_quant_triton_matches_torch_reference(monkeypatch):
+    if getattr(torch, "float8_e4m3fn", None) is None:
+        pytest.skip("torch.float8_e4m3fn is required for FP8 activation quantization")
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(754)
+
+    x = torch.randn(5, 256, device=device, dtype=torch.bfloat16)
+    x[0, ::17] *= 5
+    expected = dsv4_kernel.quantize_fp8_activation_ref(x, block_size=128)
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON", "1")
+    actual = dsv4_kernel.quantize_fp8_activation_ref(x, block_size=128)
+
+    assert dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON")
+    assert actual.dtype is torch.bfloat16
+    assert torch.allclose(actual, expected, atol=1e-2, rtol=0.0)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_quantized_linear_fp8_per_call_gemm_matches_fallback(monkeypatch):
     device = torch.device("cuda")
     _clear_dsv4_sm80_env(monkeypatch)

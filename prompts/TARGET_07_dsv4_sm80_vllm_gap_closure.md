@@ -66,7 +66,10 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.43 | `prompts/TARGET_07.43_dsv4_sm80_vllm_ablation_before_precision.md` | completed | vLLM ablations found aux stream and persistent topk are not standalone macro factors; eager-vs-graph confirms graph is mandatory but not the next mini action item. |
 | TARGET 07.50 | `prompts/TARGET_07.50_dsv4_sm80_fp8_cache_indexer_precision.md` | completed | Narrow mini-owned FP8 indexer cache/logits slice passed quality smoke but was slower than bf16; stop that slice. |
 | TARGET 07.51 | `prompts/TARGET_07.51_dsv4_sm80_vllm_fp8_backend_parity.md` | completed | Isolated vLLM's actual FP8 indexer and `fp8_ds_mla` gather/dequant backends; decision is to port/adapt vLLM's FP8 indexer backend next. |
-| TARGET 07.52 | `prompts/TARGET_07.52_dsv4_sm80_vllm_fp8_indexer_backend_port.md` | next todo | Port or closely adapt vLLM's FP8 paged indexer backend as an opt-in path; keep exact bf16 default and defer full `fp8_ds_mla` KV cache E2E. |
+| TARGET 07.52 | `prompts/TARGET_07.52_dsv4_sm80_vllm_fp8_indexer_backend_port.md` | completed | Ported a vLLM-aligned FP8 paged indexer backend as an opt-in path; microbench reached vLLM-adjacent speed and 4096/1024 improved to `73.67 output tok/s`, but the main gap remains. |
+| TARGET 07.53 | `prompts/TARGET_07.53_dsv4_sm80_post_fp8_indexer_reprofile.md` | completed | Reprofiled the FP8-indexer stack; graph/layout copy/cat/index plus elementwise graph nodes are the largest actionable cluster, with projection/GEMM as pivot. |
+| TARGET 07.54 | `prompts/TARGET_07.54_dsv4_sm80_graph_layout_replay_deforestation.md` | completed | Fused the repeated FP8 activation fake-quant chain into an opt-in Triton helper; graph/layout cluster dropped `38.59%`, 4096/1024 improved to `87.08 output tok/s`, but projection/GEMM is now tied with remaining graph/layout. |
+| TARGET 07.55 | `prompts/TARGET_07.55_dsv4_sm80_remaining_graph_layout_or_projection_pivot.md` | next todo | Run exactly one more evidence-first cut on remaining graph/layout, or pivot to projection/GEMM backend parity against vLLM if no concentrated subgraph clears the gate. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -103,7 +106,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.52 next.
+Run TARGET 07.55 next.
 
 TARGET 07.395 proved that mini's exact bf16 sparse decode boundary can match
 the comparable vLLM gather+split-K decode boundary:
@@ -162,6 +165,64 @@ fused compressor/insert kernels with SM80 software-FP8 branches.  Therefore
 TARGET 07.52 should port or closely adapt the FP8 indexer backend first, and
 must not start by porting standalone `quantize_and_insert_k_cache` or full
 `fp8_ds_mla` KV cache E2E.
+
+TARGET 07.52 succeeded as an opt-in FP8 indexer port:
+
+- mini FP8 paged indexer logits at batch16/history4096: `0.1845 ms`, within
+  `1.21x` of vLLM's isolated `0.1529 ms`;
+- large-shape FP8 select: `0.2472 ms`, vs mini bf16 select `0.3709 ms`;
+- text smoke passed with graph replay;
+- 4096/128/batch4: `41.63 output tok/s`;
+- 4096/1024/batch4: `73.67 output tok/s`.
+
+This is a real improvement, but it is not the decisive vLLM gap closer.  The
+4096/1024 run remains decode dominated: total `55.60 s`, decode forward
+`47.46 s`, prefill forward `5.47 s`.  Relative to the historical exact
+4096/1024 result `68.81`, the opt-in FP8 indexer macro gain is about `7%`.
+TARGET 07.53 must therefore refresh the Nsight/profile attribution with FP8
+indexer enabled and compare the new top buckets against vLLM before selecting
+the next implementation target.
+
+TARGET 07.53 completed that reprofile.  The opt-in FP8-indexer path was:
+
+- 4096/128/batch4: `41.66 output tok/s`;
+- 4096/1024/batch4: `73.67 output tok/s`;
+- vLLM reference remains about `82.28` on 4096/128 and `202.03` on
+  4096/1024.
+
+Fresh 4096/128/batch4 rank0 node trace with FP8 indexer enabled showed decode
+envelope top buckets:
+
+- projection/GEMM: `1.7973 s`, `27.49%`;
+- graph/runtime/copy/cat/index: `1.6170 s`, `24.73%`;
+- elementwise graph nodes: `1.3583 s`, `20.77%`;
+- FP8 indexer: `0.1301 s`, `1.99%`;
+- sparse attention decode: `0.1180 s`, `1.80%`;
+- KV/cache store: `0.0281 s`, `0.43%`.
+
+The combined graph/layout cluster was `2.9752 s`, or `45.50%` of the measured
+decode-envelope wall.  TARGET 07.54 then proved that this mismatch was real by
+fusing the repeated FP8 activation fake-quant chain into an opt-in Triton
+helper:
+
+- graph/runtime/copy/cat/index fell from `1.6170 s` to `1.1875 s`;
+- elementwise graph nodes fell from `1.3583 s` to `0.6396 s`;
+- graph/layout cluster fell from `2.9752 s` to `1.8271 s`, a `38.59%`
+  reduction;
+- 4096/128/batch4 improved from `41.66` to `43.07 output tok/s`;
+- 4096/1024/batch4 improved from `73.67` to `87.08 output tok/s`.
+
+The 07.54 result is a real step forward, but it also changed the bottleneck
+shape.  Remaining graph/layout is now effectively tied with projection/GEMM:
+
+- graph/layout cluster: `1.8271 s`;
+- projection/GEMM: `1.7968 s`.
+
+TARGET 07.55 is therefore the last graph/layout triage target before a likely
+projection/GEMM pivot.  It should attribute the remaining direct-copy,
+bf16/float8 copy, CatArray/index/gather, and pow/mean/mul nodes against vLLM
+source boundaries; implement at most one concentrated graph/layout PoC; and
+stop if the next best change is really projection/GEMM backend work.
 
 ## Precision Policy
 

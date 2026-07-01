@@ -1285,6 +1285,31 @@ def _indexer_fp8_paged_quant_store_kernel(
 
 
 @triton.jit
+def _fp8_activation_quantize_kernel(
+    x_ptr,
+    out_ptr,
+    cols: tl.constexpr,
+    block_size: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    group = tl.program_id(1)
+    offsets = tl.arange(0, BLOCK)
+    mask = offsets < block_size
+    base = row * cols + group * block_size
+
+    values = tl.load(x_ptr + base + offsets, mask=mask, other=0.0).to(tl.float32)
+    absmax = tl.max(tl.abs(values), axis=0)
+    absmax = tl.maximum(absmax, 1e-4)
+    exponent = tl.ceil(tl.log2(absmax / 448.0))
+    scale = tl.exp2(exponent)
+    scaled = tl.clamp(values / scale, -448.0, 448.0)
+    encoded = _encode_e4m3fn_sw(scaled)
+    dequant = _fp8_e4m3fn_value(encoded.to(tl.uint32)) * scale
+    tl.store(out_ptr + base + offsets, dequant, mask=mask)
+
+
+@triton.jit
 def _indexer_fp8_logits_kernel(
     q_ptr,
     cache_values_ptr,
@@ -3535,6 +3560,38 @@ def indexer_fp8_paged_quant_store(
     return True
 
 
+def fp8_activation_quantize(
+    x: torch.Tensor,
+    *,
+    block_size: int = 128,
+) -> torch.Tensor | None:
+    if (
+        x.ndim == 0
+        or x.numel() == 0
+        or x.shape[-1] % block_size != 0
+        or block_size <= 0
+        or block_size & (block_size - 1)
+        or block_size > 1024
+        or not x.is_cuda
+        or x.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+    ):
+        return None
+    x_c = x.contiguous()
+    flat = x_c.view(-1, x_c.shape[-1])
+    out = torch.empty_like(flat)
+    block = triton.next_power_of_2(block_size)
+    grid = (flat.shape[0], flat.shape[1] // block_size)
+    _fp8_activation_quantize_kernel[grid](
+        flat,
+        out,
+        cols=flat.shape[1],
+        block_size=int(block_size),
+        BLOCK=block,
+        num_warps=4,
+    )
+    return out.view_as(x_c).reshape_as(x)
+
+
 def indexer_fp8_logits(
     q_values: torch.Tensor,
     cache_values: torch.Tensor,
@@ -4501,6 +4558,7 @@ __all__ = [
     "copy_decode_metadata_for_replay",
     "paged_mqa_attention_bf16",
     "q_norm_rope",
+    "fp8_activation_quantize",
     "quantized_linear_fp4",
     "quantized_linear_fp8",
     "q_kv_norm_rope_cache_bf16",

@@ -39,6 +39,7 @@ DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
 DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
 DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
 DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
+DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
     DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
@@ -120,6 +121,7 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE,
     DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE,
     DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE,
+    DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE,
 )
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_V0_BF16_TOGGLE,
@@ -927,6 +929,14 @@ def quantize_fp8_activation_ref(x: torch.Tensor, *, block_size: int = 128) -> to
     fp8 = getattr(torch, "float8_e4m3fn", None)
     if fp8 is None or x.numel() == 0 or x.shape[-1] % block_size != 0:
         return x
+    if dsv4_sm80_triton_enabled(DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE):
+        try:
+            y = _triton_dsv4_ops().fp8_activation_quantize(x, block_size=block_size)
+            if y is not None:
+                return y
+        except Exception as exc:
+            if _cuda_graph_capture_active(x.device):
+                raise RuntimeError("DSV4 CUDA graph capture failed in Triton FP8 activation quant.") from exc
     dtype = x.dtype
     flat = x.contiguous().view(-1, x.shape[-1]).float()
     groups = flat.view(flat.shape[0], flat.shape[1] // block_size, block_size)
