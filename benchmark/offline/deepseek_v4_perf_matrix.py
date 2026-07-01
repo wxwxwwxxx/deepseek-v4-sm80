@@ -49,6 +49,8 @@ DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE"
 )
 DSV4_WO_A_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16"
+DSV4_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
+DSV4_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
 
 
 @dataclass(frozen=True)
@@ -569,6 +571,65 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
             "TARGET 07.391 mini-owned Marlin WNA16 backend. This variant is "
             "explicit opt-in and may JIT-build the vendored Marlin extension "
             "before using cached MXFP4-to-Marlin expert weights."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=(
+            "v1_moe_vllm_runner_marlin_wna16_globaltopk_graph_hc_rmsnorm_"
+            "fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ),
+        env={
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
+            DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_GLOBAL_TOPK_LENS_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 07.394 exact bf16 Marlin WNA16 path with opt-in global "
+            "topk/lens consolidation. Cache and activation precision remain bf16."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=(
+            "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_graph_hc_rmsnorm_"
+            "fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ),
+        env={
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
+            DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_GLOBAL_TOPK_LENS_TOGGLE: "1",
+            DSV4_SPARSE_SPLITK_BF16_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 07.395 exact bf16 Marlin WNA16 path with global topk/lens "
+            "and opt-in bf16 two-scope gather/mask plus split-K sparse decode."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,

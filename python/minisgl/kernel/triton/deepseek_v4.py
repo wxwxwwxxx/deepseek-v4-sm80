@@ -1449,6 +1449,210 @@ def _grouped_fp4_moe_fused_compute_kernel(
     )
 
 
+@triton.jit
+def _sparse_bf16_gather_with_mask_kernel(
+    cache_ptr,
+    indices_ptr,
+    lengths_ptr,
+    out_ptr,
+    invalid_mask_ptr,
+    cache_rows,
+    topk_in: tl.constexpr,
+    total_topk: tl.constexpr,
+    slot_offset: tl.constexpr,
+    head_dim: tl.constexpr,
+    has_lengths: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    pid = tl.program_id(0)
+    token = pid // topk_in
+    slot = pid % topk_in
+    dst_slot = slot_offset + slot
+    dst_row = token * total_topk + dst_slot
+
+    index = tl.load(indices_ptr + pid).to(tl.int64)
+    in_range = (index >= 0) & (index < cache_rows)
+    beyond_length = False
+    if has_lengths:
+        length = tl.load(lengths_ptr + token).to(tl.int64)
+        beyond_length = slot.to(tl.int64) >= length
+    invalid = (~in_range) | beyond_length
+    tl.store(invalid_mask_ptr + dst_row, invalid)
+
+    safe_index = tl.where(in_range, index, 0)
+    offsets = tl.arange(0, BLOCK_D)
+    dim_mask = offsets < head_dim
+    values = tl.load(
+        cache_ptr + safe_index * head_dim + offsets,
+        mask=dim_mask & in_range,
+        other=0.0,
+    )
+    tl.store(out_ptr + dst_row * head_dim + offsets, values, mask=dim_mask)
+
+
+@triton.jit
+def _sparse_splitk_bf16_split_kernel(
+    q_ptr,
+    kv_ptr,
+    invalid_mask_ptr,
+    acc_split_ptr,
+    max_split_ptr,
+    sum_split_ptr,
+    sm_scale_log2,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    D_V: tl.constexpr,
+    TOTAL_TOPK: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    SPLIT_T: tl.constexpr,
+) -> None:
+    token = tl.program_id(0)
+    split = tl.program_id(1)
+    head_block = tl.program_id(2)
+
+    chunk_size: tl.constexpr = (TOTAL_TOPK + SPLIT_T - 1) // SPLIT_T
+    n_start_chunk = split * chunk_size
+    n_end_chunk = tl.minimum(n_start_chunk + chunk_size, TOTAL_TOPK)
+
+    head_offsets = head_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    head_mask = head_offsets < H
+    dim_offsets = tl.arange(0, BLOCK_D)
+    dim_mask = dim_offsets < D
+
+    q = tl.load(
+        q_ptr + token * H * D + head_offsets[:, None] * D + dim_offsets[None, :],
+        mask=head_mask[:, None] & dim_mask[None, :],
+        other=0.0,
+    )
+
+    e_max = tl.zeros((BLOCK_H,), dtype=tl.float32) - 1.0e30
+    e_sum = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_H, BLOCK_DV), dtype=tl.float32)
+
+    n_iter: tl.constexpr = (chunk_size + BLOCK_N - 1) // BLOCK_N
+    for n_block in tl.static_range(0, n_iter):
+        n_start = n_start_chunk + n_block * BLOCK_N
+        n_offsets = n_start + tl.arange(0, BLOCK_N)
+        n_mask = n_offsets < n_end_chunk
+
+        invalid = tl.load(
+            invalid_mask_ptr + token * TOTAL_TOPK + n_offsets,
+            mask=n_mask,
+            other=1,
+        )
+        valid = (invalid == 0) & n_mask
+
+        kv = tl.load(
+            kv_ptr + token * TOTAL_TOPK * D + n_offsets[:, None] * D + dim_offsets[None, :],
+            mask=valid[:, None] & dim_mask[None, :],
+            other=0.0,
+        )
+        qk = tl.dot(q, tl.trans(kv), out_dtype=tl.float32)
+        qk *= sm_scale_log2
+        qk = tl.where(head_mask[:, None] & valid[None, :], qk, -1.0e30)
+
+        n_e_max = tl.maximum(tl.max(qk, axis=1), e_max)
+        re_scale = tl.exp2(e_max - n_e_max)
+        p = tl.exp2(qk - n_e_max[:, None])
+        acc *= re_scale[:, None]
+        acc += tl.dot(p.to(tl.bfloat16), kv, out_dtype=tl.float32)
+        e_sum = e_sum * re_scale + tl.sum(p, axis=1)
+        e_max = n_e_max
+
+    dv_offsets = tl.arange(0, BLOCK_DV)
+    dv_mask = dv_offsets < D_V
+    acc_base = (
+        token * SPLIT_T * H * D_V
+        + split * H * D_V
+        + head_offsets[:, None] * D_V
+        + dv_offsets[None, :]
+    )
+    tl.store(acc_split_ptr + acc_base, acc, mask=head_mask[:, None] & dv_mask[None, :])
+    stat_base = token * SPLIT_T * H + split * H + head_offsets
+    tl.store(max_split_ptr + stat_base, e_max, mask=head_mask)
+    tl.store(sum_split_ptr + stat_base, e_sum, mask=head_mask)
+
+
+@triton.jit
+def _sparse_splitk_bf16_combine_kernel(
+    acc_split_ptr,
+    max_split_ptr,
+    sum_split_ptr,
+    attn_sink_ptr,
+    out_ptr,
+    H: tl.constexpr,
+    D_V: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    SPLIT_T: tl.constexpr,
+    HAS_SINK: tl.constexpr,
+) -> None:
+    token = tl.program_id(0)
+    head_block = tl.program_id(1)
+
+    head_offsets = head_block * BLOCK_H + tl.arange(0, BLOCK_H)
+    head_mask = head_offsets < H
+
+    e_max_global = tl.zeros((BLOCK_H,), dtype=tl.float32) - 1.0e30
+    for split in tl.static_range(0, SPLIT_T):
+        m = tl.load(
+            max_split_ptr + token * SPLIT_T * H + split * H + head_offsets,
+            mask=head_mask,
+            other=-1.0e30,
+        )
+        e_max_global = tl.maximum(e_max_global, m)
+
+    sink_log2 = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    if HAS_SINK:
+        sink = tl.load(attn_sink_ptr + head_offsets, mask=head_mask, other=0.0)
+        sink_log2 = sink * 1.4426950408889634
+        e_max_global = tl.maximum(e_max_global, sink_log2)
+
+    dv_offsets = tl.arange(0, BLOCK_DV)
+    dv_mask = dv_offsets < D_V
+    acc_global = tl.zeros((BLOCK_H, BLOCK_DV), dtype=tl.float32)
+    sum_global = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    for split in tl.static_range(0, SPLIT_T):
+        m = tl.load(
+            max_split_ptr + token * SPLIT_T * H + split * H + head_offsets,
+            mask=head_mask,
+            other=-1.0e30,
+        )
+        split_sum = tl.load(
+            sum_split_ptr + token * SPLIT_T * H + split * H + head_offsets,
+            mask=head_mask,
+            other=0.0,
+        )
+        scale = tl.exp2(m - e_max_global)
+        sum_global += scale * split_sum
+
+        acc_base = (
+            token * SPLIT_T * H * D_V
+            + split * H * D_V
+            + head_offsets[:, None] * D_V
+            + dv_offsets[None, :]
+        )
+        acc = tl.load(
+            acc_split_ptr + acc_base,
+            mask=head_mask[:, None] & dv_mask[None, :],
+            other=0.0,
+        )
+        acc_global += scale[:, None] * acc
+
+    if HAS_SINK:
+        sum_global += tl.exp2(sink_log2 - e_max_global)
+    sum_safe = tl.where(sum_global > 0.0, sum_global, 1.0)
+    out = (acc_global / sum_safe[:, None]).to(tl.bfloat16)
+    tl.store(
+        out_ptr + token * H * D_V + head_offsets[:, None] * D_V + dv_offsets[None, :],
+        out,
+        mask=head_mask[:, None] & dv_mask[None, :],
+    )
+
+
 def _rope_scaling(
     *,
     rotary_dim: int,
@@ -1478,6 +1682,223 @@ def _heads_per_token(x: torch.Tensor, positions: torch.Tensor) -> int | None:
     if rows % positions.numel() != 0:
         return None
     return rows // positions.numel()
+
+
+def _gather_scope_bf16(
+    cache: torch.Tensor,
+    indices: torch.Tensor,
+    lengths: torch.Tensor | None,
+    gathered: torch.Tensor,
+    invalid_mask: torch.Tensor,
+    *,
+    slot_offset: int,
+    total_topk: int,
+    head_dim: int,
+) -> None:
+    n_tokens, topk_in = indices.shape
+    if n_tokens == 0 or topk_in == 0:
+        return
+    if lengths is None:
+        length_arg = torch.empty(0, dtype=torch.int32, device=indices.device)
+        has_lengths = False
+    else:
+        length_arg = lengths.reshape(n_tokens)
+        has_lengths = True
+    _sparse_bf16_gather_with_mask_kernel[(n_tokens * topk_in,)](
+        cache,
+        indices.reshape(-1),
+        length_arg,
+        gathered,
+        invalid_mask,
+        cache.shape[0],
+        topk_in=topk_in,
+        total_topk=total_topk,
+        slot_offset=slot_offset,
+        head_dim=head_dim,
+        has_lengths=has_lengths,
+        BLOCK_D=triton.next_power_of_2(head_dim),
+        num_warps=8,
+    )
+
+
+def sparse_attention_splitk_bf16(
+    q: torch.Tensor,
+    swa_cache: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_lengths: torch.Tensor,
+    *,
+    compressed_cache: torch.Tensor | None = None,
+    compressed_indices: torch.Tensor | None = None,
+    compressed_lengths: torch.Tensor | None = None,
+    softmax_scale: float,
+    attn_sink: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if (
+        q.ndim != 3
+        or swa_cache.ndim != 2
+        or swa_indices.ndim != 2
+        or swa_lengths.ndim != 1
+        or q.dtype is not torch.bfloat16
+        or swa_cache.dtype is not torch.bfloat16
+        or swa_indices.dtype is not torch.int32
+        or swa_lengths.dtype is not torch.int32
+        or not q.is_cuda
+        or not swa_cache.is_cuda
+        or not swa_indices.is_cuda
+        or not swa_lengths.is_cuda
+        or q.shape[-1] != 512
+        or swa_cache.shape[-1] != q.shape[-1]
+        or q.shape[0] != swa_indices.shape[0]
+        or q.shape[0] != swa_lengths.numel()
+        or q.stride(-1) != 1
+        or swa_cache.stride(-1) != 1
+        or swa_indices.stride(-1) != 1
+    ):
+        return None
+
+    q = q.contiguous()
+    swa_cache = swa_cache.contiguous()
+    swa_indices = swa_indices.contiguous()
+    swa_lengths = swa_lengths.contiguous()
+
+    has_compressed = (
+        compressed_cache is not None
+        and compressed_indices is not None
+        and compressed_lengths is not None
+        and compressed_cache.numel() > 0
+        and compressed_indices.shape[-1] > 0
+    )
+    if has_compressed:
+        assert compressed_cache is not None
+        assert compressed_indices is not None
+        assert compressed_lengths is not None
+        if (
+            compressed_cache.ndim != 2
+            or compressed_indices.ndim != 2
+            or compressed_lengths.ndim != 1
+            or compressed_cache.dtype is not torch.bfloat16
+            or compressed_indices.dtype is not torch.int32
+            or compressed_lengths.dtype is not torch.int32
+            or not compressed_cache.is_cuda
+            or not compressed_indices.is_cuda
+            or not compressed_lengths.is_cuda
+            or compressed_cache.shape[-1] != q.shape[-1]
+            or compressed_indices.shape[0] != q.shape[0]
+            or compressed_lengths.numel() != q.shape[0]
+            or compressed_cache.stride(-1) != 1
+            or compressed_indices.stride(-1) != 1
+        ):
+            return None
+        compressed_cache = compressed_cache.contiguous()
+        compressed_indices = compressed_indices.contiguous()
+        compressed_lengths = compressed_lengths.contiguous()
+        compressed_topk = compressed_indices.shape[1]
+    else:
+        compressed_topk = 0
+
+    if attn_sink is not None and (
+        not attn_sink.is_cuda
+        or attn_sink.dtype is not torch.float32
+        or attn_sink.numel() < q.shape[1]
+    ):
+        return None
+
+    n_tokens, heads, head_dim = q.shape
+    swa_topk = swa_indices.shape[1]
+    total_topk = compressed_topk + swa_topk
+    if n_tokens == 0:
+        return torch.empty_like(q)
+    if total_topk <= 0:
+        return torch.empty_like(q)
+
+    gathered = torch.empty((n_tokens, total_topk, head_dim), dtype=torch.bfloat16, device=q.device)
+    invalid_mask = torch.empty((n_tokens, total_topk), dtype=torch.bool, device=q.device)
+
+    slot_offset = 0
+    if has_compressed:
+        assert compressed_cache is not None
+        assert compressed_indices is not None
+        assert compressed_lengths is not None
+        _gather_scope_bf16(
+            compressed_cache,
+            compressed_indices,
+            compressed_lengths,
+            gathered,
+            invalid_mask,
+            slot_offset=slot_offset,
+            total_topk=total_topk,
+            head_dim=head_dim,
+        )
+        slot_offset += compressed_topk
+
+    _gather_scope_bf16(
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        gathered,
+        invalid_mask,
+        slot_offset=slot_offset,
+        total_topk=total_topk,
+        head_dim=head_dim,
+    )
+
+    block_h = 16
+    block_n = 32
+    block_d = triton.next_power_of_2(head_dim)
+    block_dv = block_d
+    split_t = max(1, min(16, triton.cdiv(total_topk, block_n)))
+
+    out = torch.empty_like(q)
+    acc_split = torch.empty(
+        (n_tokens, split_t, heads, head_dim),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    max_split = torch.empty((n_tokens, split_t, heads), dtype=torch.float32, device=q.device)
+    sum_split = torch.empty_like(max_split)
+
+    grid_split = (n_tokens, split_t, triton.cdiv(heads, block_h))
+    _sparse_splitk_bf16_split_kernel[grid_split](
+        q,
+        gathered,
+        invalid_mask,
+        acc_split,
+        max_split,
+        sum_split,
+        float(softmax_scale) * 1.4426950408889634,
+        H=heads,
+        D=head_dim,
+        D_V=head_dim,
+        TOTAL_TOPK=total_topk,
+        BLOCK_H=block_h,
+        BLOCK_N=block_n,
+        BLOCK_D=block_d,
+        BLOCK_DV=block_dv,
+        SPLIT_T=split_t,
+        num_warps=4,
+    )
+
+    sink = (
+        attn_sink[:heads].contiguous()
+        if attn_sink is not None
+        else q.new_empty((1,), dtype=torch.float32)
+    )
+    grid_combine = (n_tokens, triton.cdiv(heads, block_h))
+    _sparse_splitk_bf16_combine_kernel[grid_combine](
+        acc_split,
+        max_split,
+        sum_split,
+        sink,
+        out,
+        H=heads,
+        D_V=head_dim,
+        BLOCK_H=block_h,
+        BLOCK_DV=block_dv,
+        SPLIT_T=split_t,
+        HAS_SINK=attn_sink is not None,
+        num_warps=4,
+    )
+    return out
 
 
 def rms_norm_bf16(

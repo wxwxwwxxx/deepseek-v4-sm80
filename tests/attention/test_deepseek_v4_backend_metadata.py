@@ -420,6 +420,7 @@ def test_dsv4_indexer_select_updates_c4_sparse_metadata():
     assert sorted(meta.c4_sparse_raw_indices[0, :2].tolist()) == [1, 2]
     assert sorted(meta.c4_sparse_page_indices[0, :2].tolist()) == [1, 2]
     assert sorted(meta.c4_sparse_full_indices[0, :2].tolist()) == [7, 11]
+    assert meta.c4_sparse_topk_lengths[0].item() == 2
     assert meta.c4_sparse_raw_indices.shape[1] % 64 == 0
 
 

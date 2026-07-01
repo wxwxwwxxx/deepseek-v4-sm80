@@ -40,6 +40,20 @@ template <uint32_t kTopK> struct TopKParams {
   uint32_t page_bits;
 };
 
+template <uint32_t kTopK> struct TopKGlobalLensParams {
+  const float *__restrict__ scores;
+  const int32_t *__restrict__ seq_lens;
+  const int32_t *__restrict__ page_table;
+  int32_t *__restrict__ page_indices;
+  int32_t *__restrict__ raw_indices;
+  int32_t *__restrict__ full_indices;
+  int32_t *__restrict__ topk_lens;
+  int64_t score_stride;
+  int64_t page_table_stride;
+  uint32_t page_bits;
+  int32_t ratio;
+};
+
 __device__ __forceinline__ uint8_t convert_to_uint8(float x) {
   __half h = __float2half_rn(x);
   uint16_t bits = __half_as_ushort(h);
@@ -59,6 +73,11 @@ page_to_indices(const int32_t *__restrict__ page_table, uint32_t i,
                 uint32_t page_bits) {
   const uint32_t mask = (1u << page_bits) - 1u;
   return (page_table[i >> page_bits] << page_bits) | (i & mask);
+}
+
+__device__ __forceinline__ int32_t full_from_page_index(int32_t page_index,
+                                                        int32_t ratio) {
+  return page_index >= 0 ? page_index * ratio + (ratio - 1) : -1;
 }
 
 template <uint32_t kTopK>
@@ -261,6 +280,49 @@ topk_transform_kernel(const __grid_constant__ TopKParams<kTopK> params) {
   }
 }
 
+template <uint32_t kTopK>
+__global__ __launch_bounds__(TopKConfig<kTopK>::kBlockSize) void
+topk_transform_global_lens_kernel(
+    const __grid_constant__ TopKGlobalLensParams<kTopK> params) {
+  const uint32_t work_id = blockIdx.x;
+  const uint32_t seq_len = params.seq_lens[work_id];
+  const auto score_ptr = params.scores + work_id * params.score_stride;
+  const auto page_ptr = params.page_table + work_id * params.page_table_stride;
+  const auto indices_ptr = params.page_indices + work_id * kTopK;
+  const auto raw_indices_ptr = params.raw_indices + work_id * kTopK;
+  const auto full_indices_ptr = params.full_indices + work_id * kTopK;
+  const auto tx = threadIdx.x;
+
+  if (tx == 0) {
+    params.topk_lens[work_id] =
+        static_cast<int32_t>(seq_len < kTopK ? seq_len : kTopK);
+  }
+
+  if (seq_len <= kTopK) {
+    if (tx < seq_len) {
+      const auto page_index = page_to_indices(page_ptr, tx, params.page_bits);
+      indices_ptr[tx] = page_index;
+      raw_indices_ptr[tx] = tx;
+      full_indices_ptr[tx] = full_from_page_index(page_index, params.ratio);
+    } else if (kTopK == TopKConfig<kTopK>::kBlockSize || tx < kTopK) {
+      indices_ptr[tx] = -1;
+      raw_indices_ptr[tx] = -1;
+      full_indices_ptr[tx] = -1;
+    }
+  } else {
+    __shared__ int32_t s_topk_indices[kTopK];
+    radix_topk<kTopK>(score_ptr, s_topk_indices, seq_len);
+    if (tx < kTopK) {
+      const auto raw_index = s_topk_indices[tx];
+      const auto page_index =
+          page_to_indices(page_ptr, raw_index, params.page_bits);
+      indices_ptr[tx] = page_index;
+      raw_indices_ptr[tx] = raw_index;
+      full_indices_ptr[tx] = full_from_page_index(page_index, params.ratio);
+    }
+  }
+}
+
 template <uint32_t kTopK> struct DSV4TopKTransformKernel {
   static constexpr auto kernel = topk_transform_kernel<kTopK>;
 
@@ -313,6 +375,98 @@ template <uint32_t kTopK> struct DSV4TopKTransformKernel {
         .score_stride = S.unwrap(),
         .page_table_stride = P.unwrap(),
         .page_bits = page_bits,
+    };
+
+    constexpr auto kDynamicSMEM = TopKConfig<kTopK>::kSMEM + sizeof(int32_t);
+    static const auto attr_result = [] {
+      return ::cudaFuncSetAttribute(
+          reinterpret_cast<const void *>(kernel),
+          ::cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSMEM);
+    }();
+    if (attr_result != ::cudaSuccess) {
+      throw std::runtime_error(::cudaGetErrorString(attr_result));
+    }
+    const auto dl_device = device.unwrap();
+    auto stream = static_cast<cudaStream_t>(
+        ::TVMFFIEnvGetStream(dl_device.device_type, dl_device.device_id));
+    kernel<<<static_cast<uint32_t>(B.unwrap()), TopKConfig<kTopK>::kBlockSize,
+             kDynamicSMEM, stream>>>(params);
+    const auto launch_result = ::cudaGetLastError();
+    if (launch_result != ::cudaSuccess) {
+      throw std::runtime_error(::cudaGetErrorString(launch_result));
+    }
+  }
+};
+
+template <uint32_t kTopK> struct DSV4TopKTransformGlobalLensKernel {
+  static constexpr auto kernel = topk_transform_global_lens_kernel<kTopK>;
+
+  static void run(const tvm::ffi::TensorView scores,
+                  const tvm::ffi::TensorView seq_lens,
+                  const tvm::ffi::TensorView page_table,
+                  const tvm::ffi::TensorView page_indices,
+                  const uint32_t page_size,
+                  const tvm::ffi::TensorView raw_indices,
+                  const tvm::ffi::TensorView full_indices,
+                  const tvm::ffi::TensorView topk_lens,
+                  const int32_t ratio) {
+    using namespace host;
+    auto B = SymbolicSize{"batch"};
+    auto S = SymbolicSize{"score_stride"};
+    auto P = SymbolicSize{"page_table_stride"};
+    auto device = SymbolicDevice{};
+
+    TensorMatcher({B, -1})
+        .with_strides({S, 1})
+        .with_dtype<float>()
+        .with_device<kDLCUDA>(device)
+        .verify(scores);
+    TensorMatcher({B})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device)
+        .verify(seq_lens);
+    TensorMatcher({B, -1})
+        .with_strides({P, 1})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device)
+        .verify(page_table);
+    TensorMatcher({B, kTopK})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device)
+        .verify(page_indices);
+    TensorMatcher({B, kTopK})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device)
+        .verify(raw_indices);
+    TensorMatcher({B, kTopK})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device)
+        .verify(full_indices);
+    TensorMatcher({B})
+        .with_dtype<int32_t>()
+        .with_device<kDLCUDA>(device)
+        .verify(topk_lens);
+
+    if (!(page_size > 0 && (page_size & (page_size - 1)) == 0)) {
+      throw std::runtime_error("page_size must be a positive power of two");
+    }
+    if (ratio <= 0) {
+      throw std::runtime_error("ratio must be positive");
+    }
+    const auto page_bits = static_cast<uint32_t>(__builtin_ctz(page_size));
+
+    const auto params = TopKGlobalLensParams<kTopK>{
+        .scores = static_cast<const float *>(scores.data_ptr()),
+        .seq_lens = static_cast<const int32_t *>(seq_lens.data_ptr()),
+        .page_table = static_cast<const int32_t *>(page_table.data_ptr()),
+        .page_indices = static_cast<int32_t *>(page_indices.data_ptr()),
+        .raw_indices = static_cast<int32_t *>(raw_indices.data_ptr()),
+        .full_indices = static_cast<int32_t *>(full_indices.data_ptr()),
+        .topk_lens = static_cast<int32_t *>(topk_lens.data_ptr()),
+        .score_stride = S.unwrap(),
+        .page_table_stride = P.unwrap(),
+        .page_bits = page_bits,
+        .ratio = ratio,
     };
 
     constexpr auto kDynamicSMEM = TopKConfig<kTopK>::kSMEM + sizeof(int32_t);

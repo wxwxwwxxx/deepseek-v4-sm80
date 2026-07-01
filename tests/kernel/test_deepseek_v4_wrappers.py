@@ -1201,6 +1201,50 @@ def test_indexer_bf16_query_logits_and_topk_are_fallback_clean():
     for row in range(seq_lens.numel()):
         expected_raw = torch.topk(expected_logits[row, : seq_lens[row]], 2, sorted=False).indices
         assert sorted(selected.topk.raw_indices[row].tolist()) == sorted(expected_raw.tolist())
+    assert selected.topk.topk_lens is not None
+    assert selected.topk.topk_lens.tolist() == [2, 2]
+
+
+def test_topk_transform_full_reports_lens_in_torch_fallback():
+    scores = torch.tensor(
+        [
+            [0.0, 1.0, 2.0, 3.0],
+            [3.0, 2.0, 1.0, 0.0],
+            [4.0, 5.0, 6.0, 7.0],
+        ],
+        dtype=torch.float32,
+    )
+    seq_lens = torch.tensor([0, 2, 4], dtype=torch.int32)
+    page_table = torch.tensor(
+        [
+            [0],
+            [2],
+            [4],
+        ],
+        dtype=torch.int32,
+    )
+
+    topk = dsv4_kernel.topk_transform_512_full_fallback(
+        scores,
+        seq_lens,
+        page_table,
+        page_size=4,
+        width=3,
+        ratio=4,
+    )
+
+    assert topk.backend == "torch"
+    assert topk.topk_lens is not None
+    assert topk.topk_lens.tolist() == [0, 2, 3]
+    _assert_full_topk_transform(
+        topk,
+        scores,
+        seq_lens,
+        page_table,
+        page_size=4,
+        width=3,
+        ratio=4,
+    )
 
 
 def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
@@ -1561,6 +1605,94 @@ def test_dsv4_sparse_attention_two_source_bf16_matches_reference(monkeypatch):
     torch.cuda.synchronize()
     assert torch.allclose(actual_swa_only, expected_swa_only, atol=6e-2, rtol=6e-2)
     assert torch.equal(actual_swa_only[2], torch.zeros_like(actual_swa_only[2]))
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+@pytest.mark.parametrize(
+    "case_name,compressed_width,swa_width,compressed_lengths,swa_lengths,attn_sink",
+    [
+        ("swa_only", 0, 8, [0, 0, 0, 0], [1, 3, 0, 8], True),
+        ("c4", 16, 8, [4, 0, 16, 2], [3, 0, 5, 8], True),
+        ("c128", 6, 8, [0, 1, 4, 6], [2, 0, 8, 1], False),
+        ("empty", 4, 5, [0, 0, 0, 0], [0, 0, 0, 0], True),
+        ("short_history", 4, 8, [0, 1, 0, 2], [1, 2, 3, 4], False),
+        ("mixed_valid_lengths_split", 96, 96, [0, 7, 64, 96], [0, 9, 41, 96], True),
+    ],
+)
+def test_dsv4_sparse_attention_splitk_bf16_matches_legacy_cases(
+    monkeypatch,
+    case_name,
+    compressed_width,
+    swa_width,
+    compressed_lengths,
+    swa_lengths,
+    attn_sink,
+):
+    del case_name
+    device = torch.device("cuda")
+    torch.manual_seed(395 + compressed_width + swa_width)
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE, "1")
+
+    rows = 4
+    heads = 3
+    q = (torch.randn(rows, heads, 512, device=device, dtype=torch.bfloat16) * 0.2).contiguous()
+    swa_cache = (torch.randn(128, 512, device=device, dtype=torch.bfloat16) * 0.2).contiguous()
+    compressed_cache = (
+        torch.randn(160, 512, device=device, dtype=torch.bfloat16) * 0.2 + 0.1
+    ).contiguous()
+
+    def make_indices(width: int, stride: int, cache_rows: int) -> torch.Tensor:
+        if width <= 0:
+            return torch.empty((rows, 0), device=device, dtype=torch.int32)
+        base = torch.arange(width, device=device, dtype=torch.int32)
+        out = torch.empty((rows, width), device=device, dtype=torch.int32)
+        for row in range(rows):
+            out[row] = (base + row * stride) % cache_rows
+        if width >= 4:
+            out[0, min(width - 1, 3) :] = -1
+        return out
+
+    swa_indices = make_indices(swa_width, 11, swa_cache.shape[0])
+    compressed_indices = make_indices(compressed_width, 17, compressed_cache.shape[0])
+    swa_lengths_t = torch.tensor(swa_lengths, device=device, dtype=torch.int32)
+    compressed_lengths_t = torch.tensor(compressed_lengths, device=device, dtype=torch.int32)
+    sink = torch.randn(heads, device=device, dtype=torch.float32) if attn_sink else None
+    scale = 512**-0.5
+
+    compressed_kwargs = {}
+    if compressed_width > 0:
+        compressed_kwargs = {
+            "compressed_cache": compressed_cache,
+            "compressed_indices": compressed_indices,
+            "compressed_lengths": compressed_lengths_t,
+        }
+
+    expected = dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths_t,
+        **compressed_kwargs,
+        softmax_scale=scale,
+        attn_sink=sink,
+    )
+    actual = dsv4_kernel.dsv4_sparse_attention_two_source_splitk_bf16(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths_t,
+        **compressed_kwargs,
+        softmax_scale=scale,
+        attn_sink=sink,
+    )
+
+    assert expected is not None
+    assert actual is not None
+    torch.cuda.synchronize()
+    assert actual.dtype is q.dtype
+    assert actual.shape == expected.shape
+    assert torch.allclose(actual, expected, atol=7e-2, rtol=7e-2)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
@@ -2259,6 +2391,37 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
             expected_full_topk.raw_indices[row].cpu().tolist()
         )
     monkeypatch.delenv("MINISGL_DSV4_SM80_TOPK", raising=False)
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE, "1")
+    actual_global_topk = dsv4_kernel.topk_transform_512_full_fallback(
+        topk_scores,
+        topk_seq_lens,
+        topk_page_table,
+        page_size=64,
+        width=512,
+        ratio=4,
+    )
+    torch.cuda.synchronize()
+    assert actual_global_topk.backend == "local_cuda_global_topk_lens"
+    assert actual_global_topk.topk_lens is not None
+    assert torch.equal(
+        actual_global_topk.topk_lens.cpu(),
+        torch.tensor([16, 512, 512], dtype=torch.int32),
+    )
+    _assert_full_topk_transform(
+        actual_global_topk,
+        topk_scores,
+        topk_seq_lens,
+        topk_page_table,
+        page_size=64,
+        width=512,
+        ratio=4,
+    )
+    for row in range(topk_scores.shape[0]):
+        assert sorted(actual_global_topk.raw_indices[row].cpu().tolist()) == sorted(
+            expected_full_topk.raw_indices[row].cpu().tolist()
+        )
+    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE, raising=False)
 
     q_attn = torch.randn(4, 3, 64, device=device, dtype=torch.bfloat16)
     cache_attn = torch.randn(192, 64, device=device, dtype=torch.bfloat16)

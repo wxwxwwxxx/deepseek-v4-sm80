@@ -338,6 +338,81 @@ def test_configure_variant_records_marlin_wna16_backend(monkeypatch):
     assert "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND" not in result["active_dsv4_toggles"]
 
 
+def test_configure_variant_records_marlin_wna16_globaltopk(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS",
+            "MINISGL_DSV4_SM80_KV_FP8",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND":
+                return False
+            if name == "MINISGL_DSV4_SM80_KV_FP8":
+                return False
+            return os.environ.get(name) in {"1", "true"}
+
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()[
+            "v1_moe_vllm_runner_marlin_wna16_globaltopk_graph_hc_rmsnorm_"
+            "fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ],
+    )
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"] == "marlin_wna16"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"] == "1"
+    assert "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_KV_FP8" not in result["raw_dsv4_sm80_env"]
+
+
+def test_configure_variant_records_marlin_wna16_globaltopk_splitk(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS",
+            "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16",
+            "MINISGL_DSV4_SM80_KV_FP8",
+            "MINISGL_DSV4_SM80_INDEXER_FP8",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND":
+                return False
+            if name in {"MINISGL_DSV4_SM80_KV_FP8", "MINISGL_DSV4_SM80_INDEXER_FP8"}:
+                return False
+            return os.environ.get(name) in {"1", "true"}
+
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()[
+            "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_graph_hc_rmsnorm_"
+            "fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ],
+    )
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"] == "marlin_wna16"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"] == "1"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"] == "1"
+    assert "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_KV_FP8" not in result["raw_dsv4_sm80_env"]
+    assert "MINISGL_DSV4_SM80_INDEXER_FP8" not in result["raw_dsv4_sm80_env"]
+
+
 def test_shared_prefix_workload_repeats_prefix_and_disables_radix_in_scenario():
     bench = _load_module()
     scenario = bench._scenario_map()["shared_prompt_no_radix_bs8"]

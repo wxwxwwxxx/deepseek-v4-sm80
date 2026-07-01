@@ -332,6 +332,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
             core.c4_sparse_full_indices,
             out.topk.full_indices,
         )
+        if out.topk.topk_lens is not None:
+            core.c4_sparse_topk_lengths = self._merge_indexer_lengths(
+                core.c4_sparse_topk_lengths,
+                out.topk.topk_lens,
+            )
         return out
 
     def _merge_indexer_rows(self, current: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
@@ -347,6 +352,16 @@ class DSV4AttentionBackend(BaseAttnBackend):
             device=current.device,
             dtype=current.dtype,
         )
+        return out
+
+    def _merge_indexer_lengths(self, current: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+        lens = values.to(device=current.device, dtype=current.dtype).reshape(-1)
+        if current.shape == lens.shape:
+            return lens
+        out = torch.zeros_like(current)
+        rows = min(out.numel(), lens.numel())
+        if rows > 0:
+            out[:rows] = lens[:rows]
         return out
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
@@ -449,7 +464,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
 
         c4_topk_lengths_raw = torch.div(seq_lens, 4, rounding_mode="floor")
         c4_topk_lengths_clamp1 = c4_topk_lengths_raw.clamp_min(1)
-        c4_sparse_topk_lengths = c4_topk_lengths_clamp1.clamp(max=self.index_topk)
+        c4_sparse_topk_lengths = c4_topk_lengths_raw.clamp(min=0, max=self.index_topk)
         (
             c4_sparse_raw_indices,
             c4_sparse_page_indices,
@@ -716,7 +731,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 device=q.device,
                 dtype=torch.int32,
             )
-            compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE):
+                compressed_lengths = metadata.c4_sparse_topk_lengths[:rows].to(
+                    device=q.device,
+                    dtype=torch.int32,
+                )
+                compressed_lengths = compressed_lengths.clamp(max=compressed_indices.shape[-1])
+            else:
+                compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
         elif compress_ratio == 128:
             compressed_cache = self.kvcache.c128_cache(layer_id).to(q.dtype)
             compressed_indices = metadata.c128_page_indices[:rows].to(
@@ -724,6 +746,21 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 dtype=torch.int32,
             )
             compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+
+        if metadata.max_seqlen_q <= 1:
+            fast = dsv4_kernel.dsv4_sparse_attention_two_source_splitk_bf16(
+                q,
+                self.kvcache.swa_cache(layer_id).to(q.dtype),
+                swa_indices,
+                swa_lengths,
+                compressed_cache=compressed_cache,
+                compressed_indices=compressed_indices,
+                compressed_lengths=compressed_lengths,
+                softmax_scale=self.softmax_scale,
+                attn_sink=attn_sink,
+            )
+            if fast is not None:
+                return fast
 
         fast = dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
             q,

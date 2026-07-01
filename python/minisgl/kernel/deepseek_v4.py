@@ -35,6 +35,8 @@ DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4 = "grouped_fp4"
 DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16 = "marlin_mxfp4_w4a16"
 DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE = "vllm_marlin_bridge"
 DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
+DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
+DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
     DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
@@ -112,6 +114,8 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     "MINISGL_DSV4_SM80_SHARED_FP8_GEMM",
     "MINISGL_DSV4_SM80_GATE_FP32_WEIGHT_CACHE",
     "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE",
+    DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE,
+    DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE,
 )
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_V0_BF16_TOGGLE,
@@ -167,6 +171,7 @@ class DSV4TopKTransformOutput:
     page_indices: torch.Tensor
     full_indices: torch.Tensor
     backend: str
+    topk_lens: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -1581,6 +1586,53 @@ def dsv4_sparse_attention_two_source_bf16(
         return None
 
 
+def dsv4_sparse_attention_two_source_splitk_bf16(
+    q: torch.Tensor,
+    swa_cache: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_lengths: torch.Tensor,
+    *,
+    compressed_cache: torch.Tensor | None = None,
+    compressed_indices: torch.Tensor | None = None,
+    compressed_lengths: torch.Tensor | None = None,
+    softmax_scale: float,
+    attn_sink: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if not dsv4_env_flag(DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE):
+        return None
+    cap = detect_dsv4_kernel_capabilities()
+    if not (cap.is_sm80 and cap.triton_available):
+        unsupported_kernel(
+            "DSV4 exact bf16 sparse split-K decode",
+            "requires A100/sm80 CUDA plus Triton; falling back would hide "
+            f"the requested {DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE}=1 path.",
+        )
+    try:
+        out = _triton_dsv4_ops().sparse_attention_splitk_bf16(
+            q,
+            swa_cache,
+            swa_indices,
+            swa_lengths,
+            compressed_cache=compressed_cache,
+            compressed_indices=compressed_indices,
+            compressed_lengths=compressed_lengths,
+            softmax_scale=softmax_scale,
+            attn_sink=attn_sink,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "DSV4 exact bf16 sparse split-K decode failed while "
+            f"{DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE}=1 was requested."
+        ) from exc
+    if out is None:
+        raise RuntimeError(
+            "DSV4 exact bf16 sparse split-K decode does not support this "
+            "tensor contract; no legacy fallback is allowed when "
+            f"{DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE}=1."
+        )
+    return out
+
+
 def hadamard_transform_ref(x: torch.Tensor) -> torch.Tensor:
     if x.shape[-1] <= 0 or x.shape[-1] & (x.shape[-1] - 1):
         raise ValueError(
@@ -2284,6 +2336,10 @@ def _local_dsv4_topk_v1_module(width: int):
         cuda_files=["dsv4_topk_v1.cu"],
         cuda_wrappers=[
             ("topk_transform", f"DSV4TopKTransformKernel<{int(width)}>::run"),
+            (
+                "topk_transform_global_lens",
+                f"DSV4TopKTransformGlobalLensKernel<{int(width)}>::run",
+            ),
         ],
     )
 
@@ -2313,6 +2369,44 @@ def _run_local_cuda_topk_transform_512(
             page_indices,
             page_size,
             raw_indices,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _run_local_cuda_global_topk_lens_512(
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    page_indices: torch.Tensor,
+    page_size: int,
+    raw_indices: torch.Tensor,
+    full_indices: torch.Tensor,
+    topk_lens: torch.Tensor,
+    width: int,
+    ratio: int,
+) -> bool:
+    if not (
+        dsv4_env_flag(DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE)
+        and scores.is_cuda
+        and detect_dsv4_kernel_capabilities().is_sm80
+        and width in (512, 1024)
+        and ratio > 0
+    ):
+        return False
+    try:
+        module = _local_dsv4_topk_v1_module(int(width))
+        module.topk_transform_global_lens(
+            scores.contiguous(),
+            seq_lens.contiguous(),
+            page_table.contiguous(),
+            page_indices,
+            page_size,
+            raw_indices,
+            full_indices,
+            topk_lens,
+            ratio,
         )
         return True
     except Exception:
@@ -2367,9 +2461,13 @@ def _topk_transform_512_full_torch(
     page_indices = torch.full_like(raw_indices, -1)
     full_indices = torch.full_like(raw_indices, -1)
     if batch == 0 or max_seq_len == 0:
-        return DSV4TopKTransformOutput(raw_indices, page_indices, full_indices, "torch")
+        topk_lens = torch.zeros(batch, dtype=torch.int32, device=device)
+        return DSV4TopKTransformOutput(
+            raw_indices, page_indices, full_indices, "torch", topk_lens
+        )
 
     lens = seq_lens.to(device=device, dtype=torch.long).clamp(min=0, max=max_seq_len)
+    topk_lens = lens.clamp(max=width).to(torch.int32)
     actual_k = min(width, max_seq_len)
     if actual_k > 0:
         positions = torch.arange(max_seq_len, dtype=torch.long, device=device)
@@ -2403,7 +2501,7 @@ def _topk_transform_512_full_torch(
     page_indices = torch.where(valid, page_values.to(torch.int32), page_indices)
     full_values = page_indices.to(torch.long) * int(ratio) + (int(ratio) - 1)
     full_indices = torch.where(valid, full_values.to(torch.int32), full_indices)
-    return DSV4TopKTransformOutput(raw_indices, page_indices, full_indices, "torch")
+    return DSV4TopKTransformOutput(raw_indices, page_indices, full_indices, "torch", topk_lens)
 
 
 def topk_transform_512_full_fallback(
@@ -2427,9 +2525,38 @@ def topk_transform_512_full_fallback(
         (scores.shape[0], int(width)), dtype=torch.int32, device=scores.device
     )
     page_indices = torch.empty_like(raw_indices)
+    full_indices = torch.empty_like(raw_indices)
+    topk_lens = torch.empty((scores.shape[0],), dtype=torch.int32, device=scores.device)
     clamped_lens = seq_lens.to(device=scores.device, dtype=torch.int32).clamp(
         min=0, max=scores.shape[1]
     )
+    if _run_local_cuda_global_topk_lens_512(
+        scores.to(torch.float32),
+        clamped_lens,
+        page_table.to(device=scores.device, dtype=torch.int32),
+        page_indices,
+        int(page_size),
+        raw_indices,
+        full_indices,
+        topk_lens,
+        int(width),
+        int(ratio),
+    ):
+        return DSV4TopKTransformOutput(
+            raw_indices,
+            page_indices,
+            full_indices,
+            "local_cuda_global_topk_lens",
+            topk_lens,
+        )
+    if (
+        dsv4_env_flag(DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE)
+        and _cuda_graph_capture_active(scores.device)
+    ):
+        raise RuntimeError(
+            "DSV4 CUDA graph capture requires the global topk/lens JIT path when "
+            f"{DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE}=1."
+        )
     if _run_local_cuda_topk_transform_512(
         scores.to(torch.float32),
         clamped_lens,
@@ -2759,6 +2886,8 @@ __all__ = [
     "DSV4KernelMode",
     "DSV4IndexerSelectOutput",
     "DSV4_LINEAR_BF16_FP32_TOGGLE",
+    "DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE",
+    "DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE",
     "DSV4_SM80_EXPERIMENTAL_TOGGLES",
     "DSV4_SM80_KNOWN_TOGGLES",
     "DSV4_SM80_MOE_EXPERT_BACKEND_ENV",
@@ -2804,6 +2933,7 @@ __all__ = [
     "dsv4_moe_expert_backend",
     "dsv4_kernel_inventory_by_wrapper",
     "dsv4_sparse_attention_two_source_bf16",
+    "dsv4_sparse_attention_two_source_splitk_bf16",
     "dsv4_sm80_cuda_enabled",
     "dsv4_sm80_triton_enabled",
     "e8m0_dtype",
