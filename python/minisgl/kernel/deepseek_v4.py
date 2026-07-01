@@ -58,6 +58,18 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     "MINISGL_DSV4_SM80_INDEXER_FP8",
     "MINISGL_DSV4_SM80_INDEXER_FP4",
     "MINISGL_DSV4_SM80_HC",
+    "MINISGL_DSV4_SM80_RMSNORM",
+    "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT",
+    "MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE",
+    "MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM",
+    "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE",
+    "MINISGL_DSV4_SM80_Q_WQA_FP8_GEMM",
+    "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM",
+    "MINISGL_DSV4_SM80_WO_B_FP8_GEMM",
+    "MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM",
+    "MINISGL_DSV4_SM80_SHARED_FP8_GEMM",
+    "MINISGL_DSV4_SM80_GATE_FP32_WEIGHT_CACHE",
+    "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE",
 )
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_V0_BF16_TOGGLE,
@@ -713,6 +725,7 @@ def quantized_linear_ref(
     scale: torch.Tensor | None,
     *,
     weight_kind: WeightKind,
+    fp8_gemm: bool | None = None,
 ) -> torch.Tensor:
     if weight_kind == "fp4":
         x = quantize_fp8_activation_ref(x)
@@ -723,7 +736,12 @@ def quantized_linear_ref(
         w = dequant_fp4_weight(weight, scale, out_dtype=x.dtype)
     elif weight_kind == "fp8":
         x = quantize_fp8_activation_ref(x)
-        if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FP8_GEMM"):
+        use_fp8_gemm = (
+            dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FP8_GEMM")
+            if fp8_gemm is None
+            else fp8_gemm
+        )
+        if use_fp8_gemm:
             y = _triton_dsv4_ops().quantized_linear_fp8(x, weight, scale)
             if y is not None:
                 return y
@@ -731,6 +749,19 @@ def quantized_linear_ref(
     else:
         w = weight.to(x.dtype)
     return F.linear(x, w)
+
+
+def quantized_linear_fp8_pair_shared_activation_ref(
+    x: torch.Tensor,
+    weight_a: torch.Tensor,
+    scale_a: torch.Tensor | None,
+    weight_b: torch.Tensor,
+    scale_b: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    x_quant = quantize_fp8_activation_ref(x)
+    w_a = dequant_fp8_weight(weight_a, scale_a, out_dtype=x_quant.dtype)
+    w_b = dequant_fp8_weight(weight_b, scale_b, out_dtype=x_quant.dtype)
+    return F.linear(x_quant, w_a), F.linear(x_quant, w_b)
 
 
 def _linear_bf16_fp32_upstream(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -751,6 +782,41 @@ def linear_bf16_fp32_fallback(x: torch.Tensor, weight: torch.Tensor) -> torch.Te
     ):
         return _linear_bf16_fp32_upstream(x, weight)
     return F.linear(x.float(), weight.float())
+
+
+def rms_norm_fallback(x: torch.Tensor, weight: torch.Tensor, *, eps: float) -> torch.Tensor:
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_RMSNORM"):
+        y = _triton_dsv4_ops().rms_norm_bf16(x, weight, eps=eps)
+        if y is not None:
+            return y
+    dtype = x.dtype
+    y = x.float()
+    y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + eps)
+    return (y * weight.float()).to(dtype)
+
+
+def rms_norm_pair_fallback(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv_weight: torch.Tensor,
+    *,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM"):
+        y = _triton_dsv4_ops().rms_norm_pair_bf16(
+            q,
+            kv,
+            q_weight,
+            kv_weight,
+            eps=eps,
+        )
+        if y is not None:
+            return y
+    return (
+        rms_norm_fallback(q, q_weight, eps=eps),
+        rms_norm_fallback(kv, kv_weight, eps=eps),
+    )
 
 
 def _compress_forward_vectorized(
@@ -999,6 +1065,46 @@ def k_norm_rope_cache_fallback(
         if bool(torch.any(valid)):
             cache[loc[valid]] = flat[valid].to(cache.dtype)
     return out
+
+
+def q_kv_norm_rope_cache_fallback(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cache: torch.Tensor,
+    out_loc: torch.Tensor,
+    rotary_dim: int,
+    base: float,
+    original_seq_len: int = 0,
+    factor: float = 1.0,
+    beta_fast: int = 32,
+    beta_slow: int = 1,
+) -> bool:
+    if not dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE"):
+        return False
+    try:
+        return bool(
+            _triton_dsv4_ops().q_kv_norm_rope_cache_bf16(
+                q,
+                kv,
+                positions,
+                norm_weight,
+                cache,
+                out_loc,
+                rms_norm_eps=float(rms_norm_eps),
+                rotary_dim=rotary_dim,
+                base=base,
+                original_seq_len=original_seq_len,
+                factor=factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+            )
+        )
+    except Exception:
+        return False
 
 
 def make_name(*parts: object) -> str:
@@ -1341,6 +1447,15 @@ def indexer_kv_hadamard_fallback(kv: torch.Tensor) -> torch.Tensor:
     return kv
 
 
+def _cuda_graph_capture_active(device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    try:
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
+
+
 def indexer_bf16_logits_fallback(
     q: torch.Tensor,
     cache: torch.Tensor,
@@ -1370,6 +1485,8 @@ def indexer_bf16_logits_fallback(
             f"got weights={tuple(weights.shape)} q={tuple(q.shape)}"
         )
 
+    capture_active = _cuda_graph_capture_active(q.device)
+    static_max_seq_len = page_table.shape[1] * page_size if capture_active else None
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_BF16") and weights is not None:
         try:
             logits = _triton_dsv4_ops().indexer_bf16_logits(
@@ -1379,16 +1496,29 @@ def indexer_bf16_logits_fallback(
                 seq_lens,
                 page_table,
                 page_size=page_size,
+                max_seq_len=static_max_seq_len,
             )
             if logits is not None:
                 if _backend is not None:
                     _backend.append("triton")
                 return logits
-        except Exception:
-            pass
+            if capture_active:
+                raise RuntimeError(
+                    "DSV4 CUDA graph capture requires the Triton indexer bf16 logits path; "
+                    "the current tensor layout/dtype was unsupported."
+                )
+        except Exception as exc:
+            if capture_active:
+                raise RuntimeError(
+                    "DSV4 CUDA graph capture failed in Triton indexer bf16 logits."
+                ) from exc
 
     rows = q.shape[0]
-    max_seq_len = int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
+    max_seq_len = (
+        int(static_max_seq_len)
+        if static_max_seq_len is not None
+        else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
+    )
     logits = torch.full((rows, max(max_seq_len, 1)), float("-inf"), dtype=torch.float32, device=q.device)
     if rows == 0 or max_seq_len <= 0:
         return logits[:, :0]
@@ -1506,6 +1636,18 @@ def hc_pre_fallback(
     flat_float = flat.float()
     rsqrt = torch.rsqrt(flat_float.square().mean(-1, keepdim=True) + norm_eps)
     mixes = linear_bf16_fp32_fallback(flat, fn) * rsqrt
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_HC"):
+        fused = _triton_dsv4_ops().hc_split_pre(
+            mixes.contiguous(),
+            x,
+            scale,
+            base,
+            hc_mult=hc_mult,
+            sinkhorn_iters=sinkhorn_iters,
+            eps=eps,
+        )
+        if fused is not None:
+            return fused
     pre, post, comb = hc_split_sinkhorn_ref(mixes, scale, base, hc_mult, sinkhorn_iters, eps)
     y = torch.sum(pre.to(x.dtype).unsqueeze(-1) * x.view(shape), dim=1)
     return y, post.to(x.dtype), comb.to(x.dtype)
@@ -1517,6 +1659,10 @@ def hc_post_fallback(
     post: torch.Tensor,
     comb: torch.Tensor,
 ) -> torch.Tensor:
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_HC"):
+        fused = _triton_dsv4_ops().hc_post(x, residual, post, comb)
+        if fused is not None:
+            return fused
     return post.unsqueeze(-1) * x.unsqueeze(1) + torch.sum(
         comb.unsqueeze(-1) * residual.unsqueeze(2), dim=1
     )
@@ -2109,23 +2255,85 @@ def store_compressed_fallback(
     kv: torch.Tensor,
     loc: torch.Tensor,
 ) -> None:
+    loc_flat = loc.reshape(-1)
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
         try:
             if _triton_dsv4_ops().store_cache(kvcache.component_cache(layer_id), kv, loc):
                 return
         except Exception:
             pass
-    kvcache.store_compressed(layer_id, kv, loc)
+    if loc.is_cuda and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "DSV4 masked compressed cache store requires Triton during CUDA graph capture"
+        )
+    valid = loc_flat >= 0
+    if bool(torch.any(valid)):
+        kvcache.store_compressed(layer_id, kv.reshape(-1, kv.shape[-1])[valid], loc_flat[valid])
 
 
 def store_indexer_fallback(kvcache, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
+    loc_flat = loc.reshape(-1)
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
         try:
             if _triton_dsv4_ops().store_cache(kvcache.indexer_cache(layer_id), kv, loc):
                 return
         except Exception:
             pass
-    kvcache.store_indexer(layer_id, kv, loc)
+    if loc.is_cuda and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "DSV4 masked indexer cache store requires Triton during CUDA graph capture"
+        )
+    valid = loc_flat >= 0
+    if bool(torch.any(valid)):
+        kvcache.store_indexer(layer_id, kv.reshape(-1, kv.shape[-1])[valid], loc_flat[valid])
+
+
+def copy_masked_compressed_locs(
+    raw_out_loc: torch.Tensor,
+    positions: torch.Tensor,
+    c4_out_loc: torch.Tensor | None,
+    c128_out_loc: torch.Tensor | None,
+    rows: int,
+) -> None:
+    if (
+        c4_out_loc is not None
+        and c128_out_loc is not None
+        and dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE")
+    ):
+        try:
+            if _triton_dsv4_ops().copy_masked_compressed_locs(
+                raw_out_loc,
+                positions,
+                c4_out_loc,
+                c128_out_loc,
+                rows,
+            ):
+                return
+        except Exception:
+            pass
+    _copy_masked_compressed_locs_fallback(c4_out_loc, raw_out_loc, positions, rows, ratio=4)
+    _copy_masked_compressed_locs_fallback(c128_out_loc, raw_out_loc, positions, rows, ratio=128)
+
+
+def _copy_masked_compressed_locs_fallback(
+    dst: torch.Tensor | None,
+    raw_out_loc: torch.Tensor,
+    positions: torch.Tensor,
+    rows: int,
+    *,
+    ratio: Literal[4, 128],
+) -> None:
+    if dst is None:
+        return
+    dst[:rows].copy_(
+        torch.where(
+            (positions[:rows] + 1) % ratio == 0,
+            raw_out_loc[:rows].div(ratio, rounding_mode="floor"),
+            torch.full_like(raw_out_loc[:rows], -1),
+        )
+    )
+    if dst.shape[0] > rows:
+        dst[rows:].fill_(-1)
 
 
 def _compressed_store_cache(kvcache, layer_id: int, cache_type: str) -> torch.Tensor:
@@ -2241,6 +2449,15 @@ def compress_norm_rope_store_fallback(
     if apply_hadamard:
         indexer_kv_hadamard_fallback(flat)
 
+    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
+        try:
+            if _triton_dsv4_ops().store_cache(cache, flat, loc_flat):
+                return
+        except Exception:
+            pass
+    if loc_flat.is_cuda and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("DSV4 compressed cache fallback store is not CUDA graph safe")
+
     valid = loc_flat >= 0
     if bool(torch.any(valid)):
         cache[loc_flat[valid].to(device=cache.device)] = flat[valid].to(cache.dtype)
@@ -2305,6 +2522,7 @@ __all__ = [
     "DSV4TwoSourceAttentionMetadata",
     "apply_rotary_tail",
     "build_moe_route_plan",
+    "copy_masked_compressed_locs",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
     "compressor_plan_fallback",
@@ -2346,8 +2564,11 @@ __all__ = [
     "paged_mqa_attention_fallback",
     "plan_topk_v2_fallback",
     "q_norm_rope_fallback",
+    "q_kv_norm_rope_cache_fallback",
     "quantize_fp8_activation_ref",
+    "quantized_linear_fp8_pair_shared_activation_ref",
     "quantized_linear_ref",
+    "rms_norm_pair_fallback",
     "scale_dim",
     "sequence_mqa_attention_fallback",
     "silu_and_mul_clamp_fallback",

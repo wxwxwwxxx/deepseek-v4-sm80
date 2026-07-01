@@ -9,6 +9,7 @@ from minisgl.attention import create_attention_backend
 from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
+from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
 
@@ -207,6 +208,153 @@ def test_dsv4_ratio_dispatch_and_fallback_attention_shapes():
         )
         assert out.shape == q.shape
         assert torch.isfinite(out.float()).all()
+
+
+def test_dsv4_capture_replay_uses_fixed_masked_compressed_locs():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=1, table_bases=[0, 512, 1024], max_len=260)
+    reqs = [
+        _req(0, 0, 4, cached_len=3),
+        _req(1, 1, 5, cached_len=4),
+        _req(2, 2, 128, cached_len=127),
+    ]
+    batch = _prepare_decode_batch(reqs)
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+    meta = batch.attn_metadata.core_metadata
+
+    assert meta.c4_out_loc.tolist() == [3 // 4, (1024 + 127) // 4]
+    assert meta.c128_out_loc.tolist() == [(1024 + 127) // 128]
+
+    backend.init_capture_graph(max_seq_len=260, bs_list=[4])
+    backend.prepare_for_replay(batch)
+    assert backend.capture is not None
+    capture = backend.capture.core_metadata
+
+    assert capture.c4_out_loc.tolist() == [3 // 4, -1, (1024 + 127) // 4, -1]
+    assert capture.c128_out_loc.tolist() == [-1, -1, (1024 + 127) // 128, -1]
+    assert backend.capture.c4_compress_metadata.write_loc is capture.c4_out_loc
+    assert backend.capture.c128_compress_metadata.write_loc is capture.c128_out_loc
+
+
+def test_dsv4_capture_replay_can_bind_graph_out_loc_and_positions():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=1, table_bases=[0, 512, 1024], max_len=260)
+    reqs = [
+        _req(0, 0, 4, cached_len=3),
+        _req(1, 1, 5, cached_len=4),
+        _req(2, 2, 128, cached_len=127),
+    ]
+    batch = _prepare_decode_batch(reqs)
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+
+    backend.init_capture_graph(max_seq_len=260, bs_list=[4])
+    graph_out_loc = torch.full((4,), -123, dtype=torch.int32)
+    graph_positions = torch.full((4,), -456, dtype=torch.int32)
+    backend.bind_capture_graph_inputs(
+        input_ids=torch.empty(4, dtype=torch.int32),
+        out_loc=graph_out_loc,
+        positions=graph_positions,
+    )
+    assert backend.capture is not None
+    capture = backend.capture.core_metadata
+    assert capture.raw_out_loc is graph_out_loc
+    assert capture.positions is graph_positions
+    assert backend.capture.c4_compress_metadata.positions is graph_positions
+    assert backend.capture.c128_compress_metadata.positions is graph_positions
+
+    graph_out_loc[: batch.padded_size].copy_(batch.out_loc)
+    graph_positions[: batch.padded_size].copy_(batch.positions)
+    backend.prepare_for_replay(batch)
+
+    assert capture.raw_out_loc is graph_out_loc
+    assert capture.positions is graph_positions
+    assert capture.raw_out_loc.tolist() == batch.out_loc.tolist() + [-123]
+    assert capture.positions.tolist() == batch.positions.tolist() + [-456]
+    assert capture.c4_out_loc.tolist() == [3 // 4, -1, (1024 + 127) // 4, -1]
+    assert capture.c128_out_loc.tolist() == [-1, -1, (1024 + 127) // 128, -1]
+
+
+def test_dsv4_capture_replay_can_defer_compressed_locs_to_graph_hook(monkeypatch):
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=1, table_bases=[0, 512, 1024], max_len=260)
+    reqs = [
+        _req(0, 0, 4, cached_len=3),
+        _req(1, 1, 5, cached_len=4),
+        _req(2, 2, 128, cached_len=127),
+    ]
+    batch = _prepare_decode_batch(reqs)
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+
+    def fake_triton_enabled(toggle: str) -> bool:
+        return toggle == "MINISGL_DSV4_SM80_COMPRESS_STORE"
+
+    def fake_copy_masked_compressed_locs(
+        raw_out_loc: torch.Tensor,
+        positions: torch.Tensor,
+        c4_out_loc: torch.Tensor | None,
+        c128_out_loc: torch.Tensor | None,
+        rows: int,
+    ) -> None:
+        for dst, ratio in ((c4_out_loc, 4), (c128_out_loc, 128)):
+            assert dst is not None
+            values = torch.where(
+                (positions[:rows] + 1) % ratio == 0,
+                raw_out_loc[:rows].div(ratio, rounding_mode="floor"),
+                torch.full_like(raw_out_loc[:rows], -1),
+            )
+            dst[:rows].copy_(values)
+            dst[rows:].fill_(-1)
+
+    monkeypatch.setattr(dsv4_kernel, "dsv4_sm80_triton_enabled", fake_triton_enabled)
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "copy_masked_compressed_locs",
+        fake_copy_masked_compressed_locs,
+    )
+
+    backend.init_capture_graph(max_seq_len=260, bs_list=[4])
+    graph_out_loc = torch.full((4,), -123, dtype=torch.int32)
+    graph_positions = torch.full((4,), -456, dtype=torch.int32)
+    backend.bind_capture_graph_inputs(
+        input_ids=torch.empty(4, dtype=torch.int32),
+        out_loc=graph_out_loc,
+        positions=graph_positions,
+    )
+    assert backend.capture_compressed_locs_in_graph
+    assert backend.capture is not None
+    capture = backend.capture.core_metadata
+
+    graph_out_loc[: batch.padded_size].copy_(batch.out_loc)
+    graph_positions[: batch.padded_size].copy_(batch.positions)
+    backend.prepare_for_replay(batch)
+
+    assert capture.c4_out_loc.tolist() == [-1, -1, -1, -1]
+    assert capture.c128_out_loc.tolist() == [-1, -1, -1, -1]
+
+    capture_batch = Batch(reqs=[reqs[0]] * 4, phase="decode")
+    capture_batch.padded_reqs = capture_batch.reqs
+    backend.prepare_for_capture(capture_batch)
+    backend.stage_capture_metadata_for_graph(capture_batch)
+
+    assert capture.c4_out_loc.tolist() == [3 // 4, -1, (1024 + 127) // 4, -1]
+    assert capture.c128_out_loc.tolist() == [-1, -1, (1024 + 127) // 128, -1]
+
+
+def test_dsv4_masked_compressed_store_ignores_negative_locs():
+    cfg = _tiny_dsv4_config([4])
+    ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=16)
+    cache = ctx.kv_cache.c4_cache(0)
+    cache.zero_()
+    kv = torch.tensor([[11.0] + [0.0] * 7, [22.0] + [0.0] * 7], dtype=cache.dtype)
+    loc = torch.tensor([-1, 2], dtype=torch.int32)
+
+    dsv4_kernel.store_compressed_fallback(ctx.kv_cache, 0, kv, loc)
+
+    assert cache[2, 0].item() == pytest.approx(22.0)
+    assert cache[-1, 0].item() == pytest.approx(0.0)
 
 
 def test_dsv4_fallback_attention_reads_compressed_cache_as_separate_source():

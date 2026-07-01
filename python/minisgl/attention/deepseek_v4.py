@@ -132,6 +132,12 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self.capture: DSV4AttentionMetadata | None = None
         self.capture_bs: List[int] = []
         self.max_graph_bs = 0
+        self._capture_graph_inputs_bound = False
+        self._capture_compressed_locs_in_graph = False
+
+    @property
+    def capture_compressed_locs_in_graph(self) -> bool:
+        return self._capture_compressed_locs_in_graph
 
     def get_layer_compress_ratio(self, layer_id: int) -> DSV4CompressRatio:
         return self.kvcache.get_layer_mapping(layer_id).compress_ratio
@@ -194,12 +200,16 @@ class DSV4AttentionBackend(BaseAttnBackend):
         loc = compress_metadata.write_loc
         if loc is None or loc.numel() == 0 or kv.numel() == 0:
             return
-        n = min(loc.numel(), kv.shape[0])
         positions = compress_metadata.positions
-        boundary = (positions + 1) % compress_ratio == 0
-        compressed_positions = positions[boundary]
-        if compressed_positions.numel() < n:
-            n = compressed_positions.numel()
+        if loc.numel() == positions.numel():
+            n = min(loc.numel(), positions.numel(), kv.shape[0])
+            compressed_positions = positions[:n]
+        else:
+            n = min(loc.numel(), kv.shape[0])
+            boundary = (positions + 1) % compress_ratio == 0
+            compressed_positions = positions[boundary]
+            if compressed_positions.numel() < n:
+                n = compressed_positions.numel()
         if n == 0:
             return
         dsv4_kernel.compress_norm_rope_store_fallback(
@@ -244,12 +254,16 @@ class DSV4AttentionBackend(BaseAttnBackend):
         loc = metadata.core_metadata.c4_indexer_out_loc
         if loc is None or loc.numel() == 0 or kv.numel() == 0:
             return
-        n = min(loc.numel(), kv.shape[0])
         positions = compress_metadata.positions
-        boundary = (positions + 1) % compress_metadata.ratio == 0
-        compressed_positions = positions[boundary]
-        if compressed_positions.numel() < n:
-            n = compressed_positions.numel()
+        if loc.numel() == positions.numel():
+            n = min(loc.numel(), positions.numel(), kv.shape[0])
+            compressed_positions = positions[:n]
+        else:
+            n = min(loc.numel(), kv.shape[0])
+            boundary = (positions + 1) % compress_metadata.ratio == 0
+            compressed_positions = positions[boundary]
+            if compressed_positions.numel() < n:
+                n = compressed_positions.numel()
         if n == 0:
             return
         dsv4_kernel.compress_norm_rope_store_fallback(
@@ -338,6 +352,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
         self.capture_bs = sorted(bs_list)
         self.max_graph_bs = max(bs_list) if bs_list else 0
+        self._capture_graph_inputs_bound = False
+        self._capture_compressed_locs_in_graph = False
         if self.max_graph_bs == 0:
             return
         self.capture = self._empty_decode_metadata(self.max_graph_bs, max_seq_len)
@@ -347,10 +363,52 @@ class DSV4AttentionBackend(BaseAttnBackend):
         assert batch.size in self.capture_bs
         batch.attn_metadata = self.capture
 
+    def bind_capture_graph_inputs(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        out_loc: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        del input_ids
+        if self.capture is None:
+            return
+        core = self.capture.core_metadata
+        if out_loc.shape != core.raw_out_loc.shape or positions.shape != core.positions.shape:
+            self._capture_graph_inputs_bound = False
+            self._capture_compressed_locs_in_graph = False
+            return
+        core.raw_out_loc = out_loc
+        core.positions = positions
+        if self.capture.c4_compress_metadata is not None:
+            self.capture.c4_compress_metadata.positions = positions
+        if self.capture.c128_compress_metadata is not None:
+            self.capture.c128_compress_metadata.positions = positions
+        self._capture_graph_inputs_bound = True
+        self._capture_compressed_locs_in_graph = dsv4_kernel.dsv4_sm80_triton_enabled(
+            "MINISGL_DSV4_SM80_COMPRESS_STORE"
+        )
+
+    def stage_capture_metadata_for_graph(self, batch: Batch) -> None:
+        if not self._capture_compressed_locs_in_graph or self.capture is None:
+            return
+        if getattr(batch, "attn_metadata", None) is not self.capture:
+            return
+        core = self.capture.core_metadata
+        dsv4_kernel.copy_masked_compressed_locs(
+            core.raw_out_loc,
+            core.positions,
+            core.c4_out_loc,
+            core.c128_out_loc,
+            batch.padded_size,
+        )
+
     def prepare_for_replay(self, batch: Batch) -> None:
         assert self.capture is not None
         metadata = batch.attn_metadata
         assert isinstance(metadata, DSV4AttentionMetadata)
+        if metadata is self.capture:
+            return
         self._copy_metadata_for_replay(self.capture, metadata, batch.padded_size)
 
     def _build_metadata(self, batch: Batch) -> DSV4AttentionMetadata:
@@ -743,6 +801,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
         def empty_index(width: int) -> torch.Tensor:
             return torch.full((max_bs, width), -1, dtype=torch.int32, device=device)
 
+        c4_out_loc = torch.full((max_bs,), -1, dtype=torch.int32, device=device)
+        c128_out_loc = torch.full((max_bs,), -1, dtype=torch.int32, device=device)
         core = DSV4CoreAttentionMetadata(
             raw_out_loc=torch.zeros(max_bs, dtype=torch.int32, device=device),
             page_table=torch.zeros((max_bs, table_len), dtype=torch.int32, device=device),
@@ -758,9 +818,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 div_ceil(self.window_size, _PAGE_INDEX_ALIGNMENT) * _PAGE_INDEX_ALIGNMENT
             ),
             swa_topk_lengths=torch.ones(max_bs, dtype=torch.int32, device=device),
-            c4_out_loc=None,
-            c128_out_loc=None,
-            c4_indexer_out_loc=None,
+            c4_out_loc=c4_out_loc,
+            c128_out_loc=c128_out_loc,
+            c4_indexer_out_loc=c4_out_loc,
             c4_topk_lengths_raw=torch.zeros(max_bs, dtype=torch.int32, device=device),
             c4_topk_lengths_clamp1=torch.ones(max_bs, dtype=torch.int32, device=device),
             c4_sparse_topk_lengths=torch.ones(max_bs, dtype=torch.int32, device=device),
@@ -800,6 +860,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
             "c4_sparse_topk_lengths",
             "c128_topk_lengths_clamp1",
         ):
+            if self._capture_graph_inputs_bound and name in {"raw_out_loc", "positions"}:
+                continue
             getattr(dst_core, name)[:bs].copy_(getattr(src_core, name)[:bs])
         dst_core.cu_seqlens_q[: bs + 1].copy_(src_core.cu_seqlens_q[: bs + 1])
         self._copy_2d(dst_core.page_table, src_core.page_table, bs, fill=0)
@@ -813,11 +875,24 @@ class DSV4AttentionBackend(BaseAttnBackend):
             "c128_full_indices",
         ):
             self._copy_2d(getattr(dst_core, name), getattr(src_core, name), bs, fill=-1)
+        if not self._capture_compressed_locs_in_graph:
+            dsv4_kernel.copy_masked_compressed_locs(
+                src_core.raw_out_loc,
+                src_core.positions,
+                dst_core.c4_out_loc,
+                dst_core.c128_out_loc,
+                bs,
+            )
 
     def _copy_2d(self, dst: torch.Tensor, src: torch.Tensor, rows: int, *, fill: int) -> None:
-        dst[:rows].fill_(fill)
+        rows = min(rows, dst.shape[0], src.shape[0])
+        if rows <= 0:
+            return
         width = min(dst.shape[1], src.shape[1])
-        dst[:rows, :width].copy_(src[:rows, :width])
+        if width > 0:
+            dst[:rows, :width].copy_(src[:rows, :width])
+        if width < dst.shape[1]:
+            dst[:rows, width:].fill_(fill)
 
 
 __all__ = [

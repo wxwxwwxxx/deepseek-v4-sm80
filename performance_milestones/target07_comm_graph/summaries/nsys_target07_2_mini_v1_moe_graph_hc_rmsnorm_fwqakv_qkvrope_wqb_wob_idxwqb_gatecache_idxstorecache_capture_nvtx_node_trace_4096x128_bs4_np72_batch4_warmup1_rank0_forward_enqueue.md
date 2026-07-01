@@ -1,0 +1,215 @@
+# Nsight NVTX Range Summary: nsys_target07_2_mini_v1_moe_graph_hc_rmsnorm_fwqakv_qkvrope_wqb_wob_idxwqb_gatecache_idxstorecache_capture_nvtx_node_trace_4096x128_bs4_np72_batch4_warmup1_rank0.sqlite
+
+- Parent NVTX: repeat:decode_throughput_bs8:0
+- Parent range count: 1
+- Event summary mode: scan
+- Graph-node capture prefixes: ['dsv4.']
+- Graph-node capture map count: 12221
+
+## batch_forward:prefill:bs4:padded4
+
+- range count: 1
+- total range duration s: 20.5577
+- kernel count: 13284, duration s: 20.4965
+- graph trace count: n/a, duration s: n/a
+- CUDA graph node event count: 0, duration s: 0
+- kernel graphNodeId non-null count: 0, duration s: 0
+- runtime count: 15855, duration s: 20.2508
+- NCCL kernel count: 88, duration s: 0.152799
+- cudaGraphLaunch count: 0
+- cudaLaunchKernel count: 12339
+- memcpy count: 128, bytes: 178389340
+- top kernels:
+  - _grouped_fp4_w13_kernel: count=43, duration_s=8.90141
+  - _grouped_fp4_linear_kernel: count=43, duration_s=6.08619
+  - void <unnamed>::sparse_attention_kernel<(bool)1>(<unnamed>::SparseAttentionParams): count=41, duration_s=2.06592
+  - _indexer_bf16_logits_kernel: count=21, duration_s=0.921779
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=1739, duration_s=0.406698
+  - _hc_split_pre_kernel: count=86, duration_s=0.352764
+  - void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3): count=1821, duration_s=0.290773
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctor_add<float>, std::array<char *, (unsigned long)3>>(int, T2, T3): count=631, duration_s=0.152617
+- top non-graph-node kernels:
+  - _grouped_fp4_w13_kernel: count=43, duration_s=8.90141
+  - _grouped_fp4_linear_kernel: count=43, duration_s=6.08619
+  - void <unnamed>::sparse_attention_kernel<(bool)1>(<unnamed>::SparseAttentionParams): count=41, duration_s=2.06592
+  - _indexer_bf16_logits_kernel: count=21, duration_s=0.921779
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=1739, duration_s=0.406698
+  - _hc_split_pre_kernel: count=86, duration_s=0.352764
+  - void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3): count=1821, duration_s=0.290773
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctor_add<float>, std::array<char *, (unsigned long)3>>(int, T2, T3): count=631, duration_s=0.152617
+- top runtime:
+  - cudaStreamSynchronize_v3020: count=83, duration_s=19.7087
+  - cudaDeviceSynchronize_v3020: count=1, duration_s=0.455514
+  - cudaLaunchKernel_v7000: count=12339, duration_s=0.0735301
+  - cuLaunchKernelEx: count=945, duration_s=0.00728972
+  - cudaMemcpyAsync_v3020: count=128, duration_s=0.00144442
+  - cudaEventRecord_v3020: count=352, duration_s=0.00142778
+  - cudaEventQuery_v3020: count=477, duration_s=0.00101904
+  - cudaStreamWaitEvent_v3020: count=264, duration_s=0.000375198
+
+## batch_forward:decode:bs4:padded4
+
+- range count: 127
+- total range duration s: 18.1119
+- kernel count: 1552829, duration s: 17.8543
+- graph trace count: n/a, duration s: n/a
+- CUDA graph node event count: 0, duration s: 0
+- kernel graphNodeId non-null count: 1552067, duration s: 17.8472
+- runtime count: 4064, duration s: 17.9712
+- NCCL kernel count: 11176, duration s: 0.378775
+- cudaGraphLaunch count: 127
+- cudaLaunchKernel count: 635
+- memcpy count: 19050, bytes: 275506688
+- top kernels:
+  - _grouped_fp4_w13_kernel: count=5461, duration_s=5.26922
+  - _grouped_fp4_linear_kernel: count=5461, duration_s=3.27052
+  - void <unnamed>::sparse_attention_kernel<(bool)1>(<unnamed>::SparseAttentionParams): count=5207, duration_s=1.93317
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=204724, duration_s=1.84125
+  - _quantized_linear_fp8_kernel: count=13589, duration_s=1.17152
+  - void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3): count=193421, duration_s=0.589852
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3): count=35306, duration_s=0.404827
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3): count=92583, duration_s=0.27125
+- top graph-node kernels:
+  - _grouped_fp4_w13_kernel: count=5461, duration_s=5.26922
+  - _grouped_fp4_linear_kernel: count=5461, duration_s=3.27052
+  - void <unnamed>::sparse_attention_kernel<(bool)1>(<unnamed>::SparseAttentionParams): count=5207, duration_s=1.93317
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=204724, duration_s=1.84125
+  - _quantized_linear_fp8_kernel: count=13589, duration_s=1.17152
+  - void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3): count=193421, duration_s=0.589852
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3): count=35306, duration_s=0.404827
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3): count=92583, duration_s=0.27125
+- top non-graph-node kernels:
+  - void at::native::reduce_kernel<(int)512, (int)1, at::native::ReduceOp<float, at::native::ArgMaxOps<float>, unsigned int, long, (int)4, (int)4>>(T3): count=127, duration_s=0.00515043
+  - void at::native::index_elementwise_kernel<(int)128, (int)4, void at::native::gpu_index_kernel<void at::native::index_put_kernel_impl<at::native::OpaqueType<(int)4>>(at::TensorIterator &, c10::ArrayRef<long>, c10::ArrayRef<long>)::[lambda(char *, const char *, long) (instance 1)]>(at::TensorIteratorBase &, c10::ArrayRef<long>, c10::ArrayRef<long>, const T1 &, bool)::[lambda(int) (instance 1)]>(long, T3): count=127, duration_s=0.000642557
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 3)]::operator ()() const::[lambda(int) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=254, duration_s=0.000624823
+  - void at::native::index_elementwise_kernel<(int)128, (int)4, void at::native::gpu_index_kernel<void at::native::index_kernel_impl<at::native::OpaqueType<(int)4>>(at::TensorIteratorBase &, c10::ArrayRef<long>, c10::ArrayRef<long>)::[lambda(char *, const char *, long) (instance 1)]>(at::TensorIteratorBase &, c10::ArrayRef<long>, c10::ArrayRef<long>, const T1 &, bool)::[lambda(int) (instance 1)]>(long, T3): count=127, duration_s=0.000501337
+  - _copy_masked_compressed_locs_kernel: count=127, duration_s=0.00025206
+- top graph-node capture groups:
+  - dsv4.layer*.mlp.routed: count=87376, duration_s=9.4016, distinct_graph_nodes=688
+  - dsv4.layer*.attn.backend: count=32004, duration_s=2.0247, distinct_graph_nodes=252
+  - dsv4.layer*.attn.q_proj: count=174752, duration_s=0.955228, distinct_graph_nodes=1376
+  - dsv4.layer*.mlp.shared: count=278511, duration_s=0.883922, distinct_graph_nodes=2193
+  - dsv4.layer*.attn.indexer: count=208026, duration_s=0.825961, distinct_graph_nodes=1638
+  - dsv4.layer*.attn.wo_b: count=98298, duration_s=0.753941, distinct_graph_nodes=774
+  - dsv4.layer*.attn.q_wqb: count=92837, duration_s=0.596987, distinct_graph_nodes=731
+  - dsv4.layer*.attn.wo_a: count=43688, duration_s=0.482447, distinct_graph_nodes=344
+- top graph-node capture ranges:
+  - dsv4.layer2.mlp.routed: count=2032, duration_s=0.219571, distinct_graph_nodes=16
+  - dsv4.layer1.mlp.routed: count=2032, duration_s=0.219509, distinct_graph_nodes=16
+  - dsv4.layer0.mlp.routed: count=2032, duration_s=0.219437, distinct_graph_nodes=16
+  - dsv4.layer9.mlp.routed: count=2032, duration_s=0.219218, distinct_graph_nodes=16
+  - dsv4.layer23.mlp.routed: count=2032, duration_s=0.21918, distinct_graph_nodes=16
+  - dsv4.layer25.mlp.routed: count=2032, duration_s=0.21908, distinct_graph_nodes=16
+  - dsv4.layer31.mlp.routed: count=2032, duration_s=0.219064, distinct_graph_nodes=16
+  - dsv4.layer7.mlp.routed: count=2032, duration_s=0.219027, distinct_graph_nodes=16
+- top runtime:
+  - cudaDeviceSynchronize_v3020: count=127, duration_s=15.1688
+  - cudaGraphLaunch_v10000: count=127, duration_s=2.76635
+  - cudaMemcpyAsync_v3020: count=2667, duration_s=0.0225621
+  - cudaLaunchKernel_v7000: count=635, duration_s=0.0109499
+  - cuLaunchKernelEx: count=127, duration_s=0.00114906
+  - cudaEventRecordWithFlags_v11010: count=127, duration_s=0.00091571
+  - cudaStreamIsCapturing_v10000: count=254, duration_s=0.000444114
+
+## batch_forward_enqueue:prefill:bs4:padded4
+
+- range count: 1
+- total range duration s: 20.1021
+- kernel count: 13132, duration s: 20.036
+- graph trace count: n/a, duration s: n/a
+- CUDA graph node event count: 0, duration s: 0
+- kernel graphNodeId non-null count: 0, duration s: 0
+- runtime count: 15823, duration s: 19.7952
+- NCCL kernel count: 85, duration s: 0.149288
+- cudaGraphLaunch count: 0
+- cudaLaunchKernel count: 12339
+- memcpy count: 127, bytes: 178389324
+- top kernels:
+  - _grouped_fp4_w13_kernel: count=42, duration_s=8.69444
+  - _grouped_fp4_linear_kernel: count=42, duration_s=5.94536
+  - void <unnamed>::sparse_attention_kernel<(bool)1>(<unnamed>::SparseAttentionParams): count=40, duration_s=1.98803
+  - _indexer_bf16_logits_kernel: count=21, duration_s=0.921779
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=1714, duration_s=0.398624
+  - _hc_split_pre_kernel: count=85, duration_s=0.348662
+  - void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3): count=1812, duration_s=0.290711
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctor_add<float>, std::array<char *, (unsigned long)3>>(int, T2, T3): count=630, duration_s=0.152166
+- top non-graph-node kernels:
+  - _grouped_fp4_w13_kernel: count=42, duration_s=8.69444
+  - _grouped_fp4_linear_kernel: count=42, duration_s=5.94536
+  - void <unnamed>::sparse_attention_kernel<(bool)1>(<unnamed>::SparseAttentionParams): count=40, duration_s=1.98803
+  - _indexer_bf16_logits_kernel: count=21, duration_s=0.921779
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=1714, duration_s=0.398624
+  - _hc_split_pre_kernel: count=85, duration_s=0.348662
+  - void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3): count=1812, duration_s=0.290711
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctor_add<float>, std::array<char *, (unsigned long)3>>(int, T2, T3): count=630, duration_s=0.152166
+- top runtime:
+  - cudaStreamSynchronize_v3020: count=83, duration_s=19.7087
+  - cudaLaunchKernel_v7000: count=12339, duration_s=0.0735301
+  - cuLaunchKernelEx: count=945, duration_s=0.00728972
+  - cudaMemcpyAsync_v3020: count=128, duration_s=0.00144442
+  - cudaEventRecord_v3020: count=352, duration_s=0.00142778
+  - cudaEventQuery_v3020: count=466, duration_s=0.00100353
+  - cudaStreamWaitEvent_v3020: count=264, duration_s=0.000375198
+  - cudaEventRecordWithFlags_v11010: count=89, duration_s=0.000360737
+
+## batch_forward_enqueue:decode:bs4:padded4
+
+- range count: 127
+- total range duration s: 2.93541
+- kernel count: 248970, duration s: 2.7662
+- graph trace count: n/a, duration s: n/a
+- CUDA graph node event count: 0, duration s: 0
+- kernel graphNodeId non-null count: 248589, duration s: 2.76516
+- runtime count: 3937, duration s: 2.80237
+- NCCL kernel count: 1840, duration s: 0.0618763
+- cudaGraphLaunch count: 127
+- cudaLaunchKernel count: 635
+- memcpy count: 5201, bytes: 8612112
+- top kernels:
+  - _grouped_fp4_w13_kernel: count=828, duration_s=0.799014
+  - _grouped_fp4_linear_kernel: count=826, duration_s=0.49715
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=33141, duration_s=0.288633
+  - void <unnamed>::sparse_attention_kernel<(bool)1>(<unnamed>::SparseAttentionParams): count=668, duration_s=0.266101
+  - _quantized_linear_fp8_kernel: count=2243, duration_s=0.191025
+  - void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3): count=29855, duration_s=0.0939252
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3): count=5676, duration_s=0.0677024
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3): count=14762, duration_s=0.0442544
+- top graph-node kernels:
+  - _grouped_fp4_w13_kernel: count=828, duration_s=0.799014
+  - _grouped_fp4_linear_kernel: count=826, duration_s=0.49715
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=33141, duration_s=0.288633
+  - void <unnamed>::sparse_attention_kernel<(bool)1>(<unnamed>::SparseAttentionParams): count=668, duration_s=0.266101
+  - _quantized_linear_fp8_kernel: count=2243, duration_s=0.191025
+  - void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3): count=29855, duration_s=0.0939252
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3): count=5676, duration_s=0.0677024
+  - void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3): count=14762, duration_s=0.0442544
+- top non-graph-node kernels:
+  - void at::native::index_elementwise_kernel<(int)128, (int)4, void at::native::gpu_index_kernel<void at::native::index_kernel_impl<at::native::OpaqueType<(int)4>>(at::TensorIteratorBase &, c10::ArrayRef<long>, c10::ArrayRef<long>)::[lambda(char *, const char *, long) (instance 1)]>(at::TensorIteratorBase &, c10::ArrayRef<long>, c10::ArrayRef<long>, const T1 &, bool)::[lambda(int) (instance 1)]>(long, T3): count=127, duration_s=0.000501337
+  - void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 3)]::operator ()() const::[lambda(int) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7): count=127, duration_s=0.000294364
+  - _copy_masked_compressed_locs_kernel: count=127, duration_s=0.00025206
+- top graph-node capture groups:
+  - dsv4.layer*.mlp.routed: count=13578, duration_s=1.43064, distinct_graph_nodes=148
+  - dsv4.layer*.attn.backend: count=4862, duration_s=0.305016, distinct_graph_nodes=54
+  - dsv4.layer*.attn.q_proj: count=30427, duration_s=0.166444, distinct_graph_nodes=320
+  - dsv4.layer*.mlp.shared: count=42096, duration_s=0.133536, distinct_graph_nodes=459
+  - dsv4.layer*.attn.indexer: count=31434, duration_s=0.124786, distinct_graph_nodes=312
+  - dsv4.layer*.attn.wo_b: count=16373, duration_s=0.124706, distinct_graph_nodes=180
+  - dsv4.layer*.attn.q_wqb: count=16125, duration_s=0.103406, distinct_graph_nodes=170
+  - dsv4.layer*.attn.wo_a: count=7349, duration_s=0.0812049, distinct_graph_nodes=80
+- top graph-node capture ranges:
+  - dsv4.layer2.mlp.routed: count=2032, duration_s=0.219571, distinct_graph_nodes=16
+  - dsv4.layer1.mlp.routed: count=2032, duration_s=0.219509, distinct_graph_nodes=16
+  - dsv4.layer0.mlp.routed: count=2032, duration_s=0.219437, distinct_graph_nodes=16
+  - dsv4.layer3.mlp.routed: count=2032, duration_s=0.218733, distinct_graph_nodes=16
+  - dsv4.layer5.mlp.routed: count=2032, duration_s=0.218533, distinct_graph_nodes=16
+  - dsv4.layer4.mlp.routed: count=2032, duration_s=0.218353, distinct_graph_nodes=16
+  - dsv4.layer6.attn.backend: count=762, duration_s=0.0759339, distinct_graph_nodes=6
+  - dsv4.layer2.attn.backend: count=762, duration_s=0.0758946, distinct_graph_nodes=6
+- top runtime:
+  - cudaGraphLaunch_v10000: count=127, duration_s=2.76635
+  - cudaMemcpyAsync_v3020: count=2667, duration_s=0.0225621
+  - cudaLaunchKernel_v7000: count=635, duration_s=0.0109499
+  - cuLaunchKernelEx: count=127, duration_s=0.00114906
+  - cudaEventRecordWithFlags_v11010: count=127, duration_s=0.00091571
+  - cudaStreamIsCapturing_v10000: count=254, duration_s=0.000444114
+

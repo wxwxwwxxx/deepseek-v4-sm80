@@ -1,0 +1,206 @@
+{
+  "cuda_graph": {
+    "cuda_graph_events_count": 0,
+    "cuda_graph_events_present": false,
+    "event_names": [],
+    "kernel_graph_node_nonnull_count": 0,
+    "runtime_graph_api": [
+      {
+        "count": 200074,
+        "duration_s": 0.560791506,
+        "name": "cudaThreadExchangeStreamCaptureMode_v10010"
+      },
+      {
+        "count": 90112,
+        "duration_s": 0.074785631,
+        "name": "cudaStreamGetCaptureInfo_v2_v11030"
+      }
+    ]
+  },
+  "lite": true,
+  "nvtx_window": {
+    "kernel": {
+      "count": 26833000,
+      "duration_s": 621.207530183,
+      "present": true
+    },
+    "memcpy": {
+      "bytes": 1353668327672,
+      "count": 1267384,
+      "duration_s": 127.954012148,
+      "present": true
+    },
+    "memset": {
+      "count": 1752,
+      "duration_s": 0.003186003,
+      "present": true
+    },
+    "nccl_kernel": {
+      "count": null,
+      "duration_s": null,
+      "present": null,
+      "skipped": "lite mode"
+    },
+    "nccl_nvtx": {
+      "count": 90144,
+      "end_ns": 181489511944,
+      "present": true,
+      "start_ns": 81017751169
+    },
+    "runtime": {
+      "count": 30493265,
+      "duration_s": 523.108813541,
+      "present": true
+    },
+    "sync": {
+      "count": 971701,
+      "duration_s": 309.206448726,
+      "present": true
+    },
+    "top_kernels": [],
+    "top_nvtx": [],
+    "top_runtime": [],
+    "window_name": "repeat:decode_throughput_bs8:0",
+    "window_ns": null
+  },
+  "requested_nvtx_window": "repeat:decode_throughput_bs8:0",
+  "sqlite_path": "/tmp/nsys_mini_v1_moe_4096x128_bs4.sqlite",
+  "tables": [
+    "ANALYSIS_DETAILS",
+    "ANALYSIS_FILE",
+    "CUPTI_ACTIVITY_KIND_CUDA_EVENT",
+    "CUPTI_ACTIVITY_KIND_KERNEL",
+    "CUPTI_ACTIVITY_KIND_MEMCPY",
+    "CUPTI_ACTIVITY_KIND_MEMSET",
+    "CUPTI_ACTIVITY_KIND_RUNTIME",
+    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION",
+    "DIAGNOSTIC_EVENT",
+    "ENUM_CUDA_DEV_MEM_EVENT_OPER",
+    "ENUM_CUDA_FUNC_CACHE_CONFIG",
+    "ENUM_CUDA_KERNEL_LAUNCH_TYPE",
+    "ENUM_CUDA_MEMCPY_OPER",
+    "ENUM_CUDA_MEMPOOL_OPER",
+    "ENUM_CUDA_MEMPOOL_TYPE",
+    "ENUM_CUDA_MEM_KIND",
+    "ENUM_CUDA_SHARED_MEM_LIMIT_CONFIG",
+    "ENUM_CUDA_UNIF_MEM_ACCESS_TYPE",
+    "ENUM_CUDA_UNIF_MEM_MIGRATION",
+    "ENUM_CUPTI_STREAM_TYPE",
+    "ENUM_CUPTI_SYNC_TYPE",
+    "ENUM_D3D12_CMD_LIST_TYPE",
+    "ENUM_D3D12_HEAP_FLAGS",
+    "ENUM_D3D12_HEAP_TYPE",
+    "ENUM_D3D12_PAGE_PROPERTY",
+    "ENUM_DIAGNOSTIC_SEVERITY_LEVEL",
+    "ENUM_DIAGNOSTIC_SOURCE_TYPE",
+    "ENUM_DIAGNOSTIC_TIMESTAMP_SOURCE",
+    "ENUM_DXGI_FORMAT",
+    "ENUM_ETW_MEMORY_TRANSFER_TYPE",
+    "ENUM_GPU_CTX_SWITCH",
+    "ENUM_NET_DEVICE_ID",
+    "ENUM_NET_IB_DEVICE_TYPE",
+    "ENUM_NET_LINK_TYPE",
+    "ENUM_NET_VENDOR_ID",
+    "ENUM_NSYS_EVENT_CLASS",
+    "ENUM_NSYS_EVENT_TYPE",
+    "ENUM_NSYS_GENERIC_EVENT_FIELD_ETW_FLAGS",
+    "ENUM_NSYS_GENERIC_EVENT_FIELD_ETW_PROPERTY",
+    "ENUM_NSYS_GENERIC_EVENT_FIELD_ETW_TYPE",
+    "ENUM_NSYS_GENERIC_EVENT_FIELD_TYPE",
+    "ENUM_NSYS_GENERIC_EVENT_GROUP",
+    "ENUM_NSYS_GENERIC_EVENT_SOURCE",
+    "ENUM_NVDRIVER_EVENT_ID",
+    "ENUM_OPENACC_DEVICE",
+    "ENUM_OPENACC_EVENT_KIND",
+    "ENUM_OPENGL_DEBUG_SEVERITY",
+    "ENUM_OPENGL_DEBUG_SOURCE",
+    "ENUM_OPENGL_DEBUG_TYPE",
+    "ENUM_OPENMP_DISPATCH",
+    "ENUM_OPENMP_EVENT_KIND",
+    "ENUM_OPENMP_MUTEX",
+    "ENUM_OPENMP_SYNC_REGION",
+    "ENUM_OPENMP_TASK_FLAG",
+    "ENUM_OPENMP_TASK_STATUS",
+    "ENUM_OPENMP_THREAD",
+    "ENUM_OPENMP_WORK",
+    "ENUM_PMU_EVENT_SOURCE",
+    "ENUM_PMU_UNIT_TYPE",
+    "ENUM_SAMPLING_THREAD_STATE",
+    "ENUM_SCHEDULING_THREAD_BLOCK",
+    "ENUM_SLI_TRANSER",
+    "ENUM_STACK_UNWIND_METHOD",
+    "ENUM_VIDEO_ENGINE_CODEC",
+    "ENUM_VIDEO_ENGINE_TYPE",
+    "ENUM_VULKAN_PIPELINE_CREATION_FLAGS",
+    "ENUM_WDDM_ENGINE_TYPE",
+    "ENUM_WDDM_INTERRUPT_TYPE",
+    "ENUM_WDDM_PACKET_TYPE",
+    "ENUM_WDDM_PAGING_QUEUE_TYPE",
+    "ENUM_WDDM_VIDMM_OP_TYPE",
+    "META_DATA_CAPTURE",
+    "META_DATA_EXPORT",
+    "NVTX_EVENTS",
+    "NVTX_PAYLOAD_ENUMS",
+    "NVTX_PAYLOAD_ENUM_ENTRIES",
+    "NVTX_PAYLOAD_SCHEMAS",
+    "NVTX_PAYLOAD_SCHEMA_ENTRIES",
+    "OSRT_API",
+    "OSRT_CALLCHAINS",
+    "PROCESSES",
+    "PROFILER_OVERHEAD",
+    "ProcessStreams",
+    "StringIds",
+    "TARGET_INFO_CUDA_CONTEXT_INFO",
+    "TARGET_INFO_CUDA_STREAM",
+    "TARGET_INFO_GPU",
+    "TARGET_INFO_NIC_INFO",
+    "TARGET_INFO_SESSION_START_TIME",
+    "TARGET_INFO_SYSTEM_ENV",
+    "ThreadNames"
+  ],
+  "total": {
+    "kernel": {
+      "count": 26833000,
+      "duration_s": 621.207530183,
+      "present": true
+    },
+    "memcpy": {
+      "bytes": 1353668327672,
+      "count": 1267384,
+      "duration_s": 127.954012148,
+      "present": true
+    },
+    "memset": {
+      "count": 1752,
+      "duration_s": 0.003186003,
+      "present": true
+    },
+    "nccl_kernel": {
+      "count": null,
+      "duration_s": null,
+      "present": null,
+      "skipped": "lite mode"
+    },
+    "nccl_nvtx": {
+      "count": 90144,
+      "end_ns": 181489511944,
+      "present": true,
+      "start_ns": 81017751169
+    },
+    "runtime": {
+      "count": 30493265,
+      "duration_s": 523.108813541,
+      "present": true
+    },
+    "sync": {
+      "count": 971701,
+      "duration_s": 309.206448726,
+      "present": true
+    },
+    "top_kernels": [],
+    "top_nvtx": [],
+    "top_runtime": [],
+    "window_name": null,
+    "window_ns": null
+  }
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,14 @@ from .base import BaseLLMModel
 
 if TYPE_CHECKING:
     from .config import ModelConfig
+
+
+def _dsv4_capture_nvtx(name: str):
+    if not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_GRAPH_CAPTURE_NVTX"):
+        return nullcontext()
+    if not torch.cuda.is_available():
+        return nullcontext()
+    return torch.cuda.nvtx.range(f"dsv4.{name}")
 
 
 def _cached_hc_bf16_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
@@ -39,6 +48,114 @@ def _cached_hc_bf16_weight(owner: object, cache_name: str, weight: torch.Tensor)
     return cached
 
 
+def _cached_fp32_weight(
+    owner: object,
+    cache_name: str,
+    weight: torch.Tensor,
+    *,
+    toggle: str,
+) -> torch.Tensor:
+    if not (
+        dsv4_kernel.dsv4_env_flag(toggle)
+        and weight.is_cuda
+        and weight.dtype == torch.bfloat16
+    ):
+        return weight
+    meta_name = f"{cache_name}_meta"
+    meta = (
+        weight.data_ptr(),
+        int(getattr(weight, "_version", 0)),
+        weight.device.type,
+        weight.device.index,
+        tuple(weight.shape),
+        tuple(weight.stride()),
+    )
+    cached = getattr(owner, cache_name, None)
+    if cached is None or getattr(owner, meta_name, None) != meta:
+        cached = weight.float().contiguous()
+        setattr(owner, cache_name, cached)
+        setattr(owner, meta_name, meta)
+    return cached
+
+
+def _cached_gate_fp32_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
+    return _cached_fp32_weight(
+        owner,
+        cache_name,
+        weight,
+        toggle="MINISGL_DSV4_SM80_GATE_FP32_WEIGHT_CACHE",
+    )
+
+
+def _cached_indexer_store_norm_fp32_weight(
+    owner: object, cache_name: str, weight: torch.Tensor
+) -> torch.Tensor:
+    return _cached_fp32_weight(
+        owner,
+        cache_name,
+        weight,
+        toggle="MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE",
+    )
+
+
+def _cached_fused_wqa_wkv_fp8_weight(
+    owner: object,
+    cache_name: str,
+    weight_q: torch.Tensor,
+    scale_q: torch.Tensor | None,
+    weight_kv: torch.Tensor,
+    scale_kv: torch.Tensor | None,
+    *,
+    out_dtype: torch.dtype,
+) -> torch.Tensor | None:
+    if not (
+        dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE")
+        and weight_q.is_cuda
+        and weight_kv.is_cuda
+        and weight_q.dtype is dsv4_kernel.fp8_dtype()
+        and weight_kv.dtype is dsv4_kernel.fp8_dtype()
+        and out_dtype is torch.bfloat16
+        and weight_q.ndim == 2
+        and weight_kv.ndim == 2
+        and weight_q.shape[-1] == weight_kv.shape[-1]
+    ):
+        return None
+    if scale_q is not None and not scale_q.is_cuda:
+        return None
+    if scale_kv is not None and not scale_kv.is_cuda:
+        return None
+
+    def _tensor_meta(tensor: torch.Tensor | None):
+        if tensor is None:
+            return None
+        return (
+            tensor.data_ptr(),
+            int(getattr(tensor, "_version", 0)),
+            tensor.device.type,
+            tensor.device.index,
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            tensor.dtype,
+        )
+
+    meta_name = f"{cache_name}_meta"
+    meta = (
+        _tensor_meta(weight_q),
+        _tensor_meta(scale_q),
+        _tensor_meta(weight_kv),
+        _tensor_meta(scale_kv),
+        out_dtype,
+    )
+    cached = getattr(owner, cache_name, None)
+    if cached is None or getattr(owner, meta_name, None) != meta:
+        q = dsv4_kernel.dequant_fp8_weight(weight_q, scale_q, out_dtype=out_dtype)
+        kv = dsv4_kernel.dequant_fp8_weight(weight_kv, scale_kv, out_dtype=out_dtype)
+        cached = torch.cat((q, kv), dim=0).contiguous()
+        setattr(owner, cache_name, cached)
+        setattr(owner, meta_name, meta)
+    return cached
+
+
 @dataclass
 class DSV4FallbackAttentionMetadata(BaseAttnMetadata):
     cu_seqlens_q: torch.Tensor
@@ -53,10 +170,7 @@ class DSV4RMSNorm(BaseOP):
         self.weight = torch.empty(size, dtype=torch.bfloat16)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        y = x.float()
-        y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + self.eps)
-        return (y * self.weight.float()).to(dtype)
+        return dsv4_kernel.rms_norm_fallback(x, self.weight, eps=self.eps)
 
 
 class DSV4VocabParallelEmbedding(BaseOP):
@@ -81,13 +195,13 @@ class DSV4VocabParallelEmbedding(BaseOP):
         local_ids = local_ids.masked_fill(mask, 0)
         y = F.embedding(local_ids, self.weight)
         y = y.masked_fill(mask.unsqueeze(-1), 0)
-        return self._comm.all_reduce(y)
+        return self._comm.all_reduce(y, label="dsv4.embedding_all_reduce")
 
     def linear(self, x: torch.Tensor) -> torch.Tensor:
         logits = F.linear(x.float(), self.weight.float())
         if self.tp_size == 1:
             return logits[:, : self.num_embeddings]
-        gathered = self._comm.all_gather(logits)
+        gathered = self._comm.all_gather(logits, label="dsv4.lm_head_all_gather")
         if x.shape[0] == 1:
             return gathered.view(1, -1)[:, : self.num_embeddings]
         output = gathered.view((self.tp_size,) + tuple(logits.shape))
@@ -122,16 +236,32 @@ class DSV4Linear(BaseOP):
                 dtype=scale_dtype,
             )
 
-    def forward(self, x: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        reduce: bool = True,
+        reduce_label: str | None = None,
+        fp8_gemm: bool | None = None,
+    ) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         if self.weight.dtype is torch.int8:
             y = dsv4_kernel.quantized_linear_ref(x, self.weight, scale, weight_kind="fp4")
         elif self.weight.dtype is dsv4_kernel.fp8_dtype():
-            y = dsv4_kernel.quantized_linear_ref(x, self.weight, scale, weight_kind="fp8")
+            y = dsv4_kernel.quantized_linear_ref(
+                x,
+                self.weight,
+                scale,
+                weight_kind="fp8",
+                fp8_gemm=fp8_gemm,
+            )
         else:
             y = F.linear(x, self.weight.to(x.dtype))
         if reduce and self.row_parallel and self._tp_size > 1:
-            y = self._comm.all_reduce(y)
+            y = self._comm.all_reduce(
+                y,
+                label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
+            )
         return y
 
 
@@ -188,6 +318,12 @@ class DSV4Indexer(BaseOP):
         )
         self.compressor = DSV4Compressor(config, ratio=4, head_dim=self.head_dim)
 
+    def _wq_b_forward(self, q_lora: torch.Tensor) -> torch.Tensor:
+        fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+            "MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM"
+        )
+        return self.wq_b.forward(q_lora, fp8_gemm=fp8_gemm if fp8_gemm else None)
+
     def prepare_bf16_query(
         self,
         x: torch.Tensor,
@@ -201,7 +337,7 @@ class DSV4Indexer(BaseOP):
         beta_fast: int,
         beta_slow: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        q = self.wq_b.forward(q_lora).view(-1, self.n_heads, self.head_dim)
+        q = self._wq_b_forward(q_lora).view(-1, self.n_heads, self.head_dim)
         q = dsv4_kernel.indexer_q_rope_hadamard_bf16_fallback(
             q,
             positions,
@@ -226,7 +362,7 @@ class DSV4Indexer(BaseOP):
     ) -> torch.Tensor:
         compressed_kv = self.compressor.forward(x, positions, apply_norm=apply_norm)
         if touch_projections:
-            self.wq_b.forward(q_lora)
+            self._wq_b_forward(q_lora)
             self.weights_proj.forward(x)
         return compressed_kv
 
@@ -327,78 +463,161 @@ class DSV4Attention(BaseOP):
         attn_backend = getattr(get_global_ctx(), "attn_backend", None)
         attn_metadata = getattr(batch, "attn_metadata", None)
         use_dsv4_backend = isinstance(attn_metadata, DSV4AttentionMetadata)
-        q_lora = self.q_norm.forward(self.wq_a.forward(x))
-        q = self.wq_b.forward(q_lora).view(-1, self.num_local_heads, self.head_dim)
-        dsv4_kernel.q_norm_rope_fallback(
-            q,
-            positions,
-            rms_norm_eps=self.rms_norm_eps,
-            rotary_dim=self.rope_head_dim,
-            base=float(self.rope_base),
-            original_seq_len=self.original_seq_len,
-            factor=self.rope_factor,
-            beta_fast=self.beta_fast,
-            beta_slow=self.beta_slow,
-        )
-
-        kv = self.wkv.forward(x)
-        kv_cache_written = False
-        if (
+        kv_norm_rope_store_enabled = (
             use_dsv4_backend
             and attn_backend is not None
             and x.is_cuda
             and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_KV_BF16")
-        ):
-            dsv4_kernel.k_norm_rope_cache_fallback(
-                kv,
-                positions,
-                norm_weight=self.kv_norm.weight,
-                rms_norm_eps=self.rms_norm_eps,
-                cache=attn_backend.kvcache.swa_cache(self.layer_id),
-                out_loc=batch.out_loc,
-                rotary_dim=self.rope_head_dim,
-                base=float(self.rope_base),
-                original_seq_len=self.original_seq_len,
-                factor=self.rope_factor,
-                beta_fast=self.beta_fast,
-                beta_slow=self.beta_slow,
+        )
+        fused_q_kv_rmsnorm = (
+            dsv4_kernel.dsv4_sm80_triton_enabled(
+                "MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM"
             )
+            and not kv_norm_rope_store_enabled
+        )
+        fused_q_kv_norm_rope_store = (
+            kv_norm_rope_store_enabled
+            and dsv4_kernel.dsv4_sm80_triton_enabled(
+                "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE"
+            )
+        )
+        kv_from_shared_wqa_wkv = None
+        kv = None
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_proj"):
+            q_wqa_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+                "MINISGL_DSV4_SM80_Q_WQA_FP8_GEMM"
+            )
+            fused_wqa_wkv_shared_act = dsv4_kernel.dsv4_sm80_triton_enabled(
+                "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT"
+            )
+            if fused_wqa_wkv_shared_act:
+                cached_fused_weight = _cached_fused_wqa_wkv_fp8_weight(
+                    self,
+                    "_cached_fused_wqa_wkv_bf16_weight",
+                    self.wq_a.weight,
+                    getattr(self.wq_a, "weight_scale_inv", None),
+                    self.wkv.weight,
+                    getattr(self.wkv, "weight_scale_inv", None),
+                    out_dtype=x.dtype,
+                )
+                if cached_fused_weight is not None:
+                    x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+                    qkv = F.linear(x_quant, cached_fused_weight)
+                    q_lora_raw, kv_from_shared_wqa_wkv = qkv.split(
+                        [self.q_norm.weight.shape[0], self.head_dim],
+                        dim=-1,
+                    )
+                else:
+                    q_lora_raw, kv_from_shared_wqa_wkv = (
+                        dsv4_kernel.quantized_linear_fp8_pair_shared_activation_ref(
+                            x,
+                            self.wq_a.weight,
+                            getattr(self.wq_a, "weight_scale_inv", None),
+                            self.wkv.weight,
+                            getattr(self.wkv, "weight_scale_inv", None),
+                        )
+                    )
+            else:
+                q_lora_raw = self.wq_a.forward(
+                    x,
+                    fp8_gemm=q_wqa_fp8_gemm if q_wqa_fp8_gemm else None,
+                )
+            if not fused_q_kv_rmsnorm:
+                q_lora = self.q_norm.forward(q_lora_raw)
+        if fused_q_kv_rmsnorm:
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
+                kv = (
+                    kv_from_shared_wqa_wkv
+                    if kv_from_shared_wqa_wkv is not None
+                    else self.wkv.forward(x)
+                )
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_kv_rmsnorm"):
+                q_lora, kv = dsv4_kernel.rms_norm_pair_fallback(
+                    q_lora_raw,
+                    kv,
+                    self.q_norm.weight,
+                    self.kv_norm.weight,
+                    eps=self.rms_norm_eps,
+                )
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_wqb"):
+            q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+                "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
+            )
+            q = self.wq_b.forward(
+                q_lora,
+                fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
+            ).view(-1, self.num_local_heads, self.head_dim)
+        if fused_q_kv_norm_rope_store and kv is None:
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
+                kv = (
+                    kv_from_shared_wqa_wkv
+                    if kv_from_shared_wqa_wkv is not None
+                    else self.wkv.forward(x)
+                )
+        q_kv_norm_rope_cache_written = False
+        if fused_q_kv_norm_rope_store and kv is not None:
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_kv_norm_rope_store"):
+                q_kv_norm_rope_cache_written = dsv4_kernel.q_kv_norm_rope_cache_fallback(
+                    q,
+                    kv,
+                    positions,
+                    norm_weight=self.kv_norm.weight,
+                    rms_norm_eps=self.rms_norm_eps,
+                    cache=attn_backend.kvcache.swa_cache(self.layer_id),
+                    out_loc=batch.out_loc,
+                    rotary_dim=self.rope_head_dim,
+                    base=float(self.rope_base),
+                    original_seq_len=self.original_seq_len,
+                    factor=self.rope_factor,
+                    beta_fast=self.beta_fast,
+                    beta_slow=self.beta_slow,
+                )
+        if not q_kv_norm_rope_cache_written:
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_norm_rope"):
+                dsv4_kernel.q_norm_rope_fallback(
+                    q,
+                    positions,
+                    rms_norm_eps=self.rms_norm_eps,
+                    rotary_dim=self.rope_head_dim,
+                    base=float(self.rope_base),
+                    original_seq_len=self.original_seq_len,
+                    factor=self.rope_factor,
+                    beta_fast=self.beta_fast,
+                    beta_slow=self.beta_slow,
+                )
+
+        if kv is None:
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
+                kv = (
+                    kv_from_shared_wqa_wkv
+                    if kv_from_shared_wqa_wkv is not None
+                    else self.wkv.forward(x)
+                )
+        kv_cache_written = False
+        if kv_norm_rope_store_enabled:
+            if not q_kv_norm_rope_cache_written:
+                with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_norm_rope_store"):
+                    dsv4_kernel.k_norm_rope_cache_fallback(
+                        kv,
+                        positions,
+                        norm_weight=self.kv_norm.weight,
+                        rms_norm_eps=self.rms_norm_eps,
+                        cache=attn_backend.kvcache.swa_cache(self.layer_id),
+                        out_loc=batch.out_loc,
+                        rotary_dim=self.rope_head_dim,
+                        base=float(self.rope_base),
+                        original_seq_len=self.original_seq_len,
+                        factor=self.rope_factor,
+                        beta_fast=self.beta_fast,
+                        beta_slow=self.beta_slow,
+                    )
             kv_cache_written = True
         else:
-            kv = self.kv_norm.forward(kv)
-            dsv4_kernel.k_norm_rope_cache_fallback(
-                kv,
-                positions,
-                rotary_dim=self.rope_head_dim,
-                base=float(self.rope_base),
-                original_seq_len=self.original_seq_len,
-                factor=self.rope_factor,
-                beta_fast=self.beta_fast,
-                beta_slow=self.beta_slow,
-            )
-        if self.rope_head_dim < kv.shape[-1]:
-            kv[..., : -self.rope_head_dim] = dsv4_kernel.quantize_fp8_activation_ref(
-                kv[..., : -self.rope_head_dim], block_size=64
-            )
-
-        compress_store_fuses_norm = (
-            use_dsv4_backend
-            and attn_backend is not None
-            and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE")
-        )
-
-        if hasattr(self, "indexer"):
-            indexer_select_bf16 = (
-                use_dsv4_backend
-                and attn_backend is not None
-                and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_BF16")
-            )
-            indexer_q = None
-            indexer_weights = None
-            if indexer_select_bf16:
-                indexer_q, indexer_weights = self.indexer.prepare_bf16_query(
-                    x,
-                    q_lora,
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_norm_rope"):
+                if not fused_q_kv_rmsnorm:
+                    kv = self.kv_norm.forward(kv)
+                dsv4_kernel.k_norm_rope_cache_fallback(
+                    kv,
                     positions,
                     rotary_dim=self.rope_head_dim,
                     base=float(self.rope_base),
@@ -407,100 +626,153 @@ class DSV4Attention(BaseOP):
                     beta_fast=self.beta_fast,
                     beta_slow=self.beta_slow,
                 )
-            indexer_kv = self.indexer.forward(
-                x,
-                q_lora,
-                positions,
-                apply_norm=not compress_store_fuses_norm,
-                touch_projections=not indexer_select_bf16,
-            )
-            if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
-                attn_backend.store_indexer(
-                    self.layer_id,
-                    indexer_kv,
-                    batch,
-                    norm_weight=(
-                        self.indexer.compressor.norm.weight if compress_store_fuses_norm else None
-                    ),
-                    rms_norm_eps=self.rms_norm_eps if compress_store_fuses_norm else None,
-                    rotary_dim=self.rope_head_dim,
-                    base=float(self.rope_base),
-                    original_seq_len=self.original_seq_len,
-                    factor=self.rope_factor,
-                    beta_fast=self.beta_fast,
-                    beta_slow=self.beta_slow,
-                    apply_hadamard=indexer_select_bf16,
+        if self.rope_head_dim < kv.shape[-1]:
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_quant"):
+                kv[..., : -self.rope_head_dim] = dsv4_kernel.quantize_fp8_activation_ref(
+                    kv[..., : -self.rope_head_dim], block_size=64
                 )
+
+        compress_store_fuses_norm = (
+            use_dsv4_backend
+            and attn_backend is not None
+            and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE")
+        )
+
+        if hasattr(self, "indexer"):
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.indexer"):
+                indexer_select_bf16 = (
+                    use_dsv4_backend
+                    and attn_backend is not None
+                    and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_BF16")
+                )
+                indexer_q = None
+                indexer_weights = None
+                if indexer_select_bf16:
+                    indexer_q, indexer_weights = self.indexer.prepare_bf16_query(
+                        x,
+                        q_lora,
+                        positions,
+                        rotary_dim=self.rope_head_dim,
+                        base=float(self.rope_base),
+                        original_seq_len=self.original_seq_len,
+                        factor=self.rope_factor,
+                        beta_fast=self.beta_fast,
+                        beta_slow=self.beta_slow,
+                    )
+                indexer_kv = self.indexer.forward(
+                    x,
+                    q_lora,
+                    positions,
+                    apply_norm=not compress_store_fuses_norm,
+                    touch_projections=not indexer_select_bf16,
+                )
+            if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
+                with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.indexer_store"):
+                    indexer_store_norm_weight = None
+                    if compress_store_fuses_norm:
+                        indexer_store_norm_weight = _cached_indexer_store_norm_fp32_weight(
+                            self.indexer.compressor.norm,
+                            "_dsv4_indexer_store_norm_fp32_weight",
+                            self.indexer.compressor.norm.weight,
+                        )
+                    attn_backend.store_indexer(
+                        self.layer_id,
+                        indexer_kv,
+                        batch,
+                        norm_weight=indexer_store_norm_weight,
+                        rms_norm_eps=self.rms_norm_eps if compress_store_fuses_norm else None,
+                        rotary_dim=self.rope_head_dim,
+                        base=float(self.rope_base),
+                        original_seq_len=self.original_seq_len,
+                        factor=self.rope_factor,
+                        beta_fast=self.beta_fast,
+                        beta_slow=self.beta_slow,
+                        apply_hadamard=indexer_select_bf16,
+                    )
             if (
                 indexer_select_bf16
                 and indexer_q is not None
                 and indexer_weights is not None
                 and hasattr(attn_backend, "select_indexer")
             ):
-                attn_backend.select_indexer(
-                    self.layer_id,
-                    indexer_q,
-                    indexer_weights,
-                    batch,
-                )
+                with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.indexer_select"):
+                    attn_backend.select_indexer(
+                        self.layer_id,
+                        indexer_q,
+                        indexer_weights,
+                        batch,
+                    )
         if hasattr(self, "compressor"):
-            compressed_kv = self.compressor.forward(
-                x,
-                positions,
-                apply_norm=not compress_store_fuses_norm,
-            )
-            if use_dsv4_backend and hasattr(attn_backend, "store_compressed"):
-                attn_backend.store_compressed(
-                    self.layer_id,
-                    compressed_kv,
-                    batch,
-                    self.compress_ratio,
-                    norm_weight=(
-                        self.compressor.norm.weight if compress_store_fuses_norm else None
-                    ),
-                    rms_norm_eps=self.rms_norm_eps if compress_store_fuses_norm else None,
-                    rotary_dim=self.rope_head_dim,
-                    base=float(self.rope_base),
-                    original_seq_len=self.original_seq_len,
-                    factor=self.rope_factor,
-                    beta_fast=self.beta_fast,
-                    beta_slow=self.beta_slow,
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.compress"):
+                compressed_kv = self.compressor.forward(
+                    x,
+                    positions,
+                    apply_norm=not compress_store_fuses_norm,
                 )
+            if use_dsv4_backend and hasattr(attn_backend, "store_compressed"):
+                with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.compress_store"):
+                    attn_backend.store_compressed(
+                        self.layer_id,
+                        compressed_kv,
+                        batch,
+                        self.compress_ratio,
+                        norm_weight=(
+                            self.compressor.norm.weight if compress_store_fuses_norm else None
+                        ),
+                        rms_norm_eps=self.rms_norm_eps if compress_store_fuses_norm else None,
+                        rotary_dim=self.rope_head_dim,
+                        base=float(self.rope_base),
+                        original_seq_len=self.original_seq_len,
+                        factor=self.rope_factor,
+                        beta_fast=self.beta_fast,
+                        beta_slow=self.beta_slow,
+                    )
 
         if use_dsv4_backend and attn_backend is not None:
-            o = attn_backend.forward(
-                q,
-                kv,
-                kv,
-                self.layer_id,
-                batch,
-                compress_ratio=self.compress_ratio,
-                attn_sink=self.attn_sink,
-                swa_cache_written=kv_cache_written,
-            )
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.backend"):
+                o = attn_backend.forward(
+                    q,
+                    kv,
+                    kv,
+                    self.layer_id,
+                    batch,
+                    compress_ratio=self.compress_ratio,
+                    attn_sink=self.attn_sink,
+                    swa_cache_written=kv_cache_written,
+                )
         else:
-            o = self._fallback_attention(q, kv, batch)
-        dsv4_kernel.apply_rotary_tail(
-            o,
-            positions,
-            rotary_dim=self.rope_head_dim,
-            base=float(self.rope_base),
-            inverse=True,
-            original_seq_len=self.original_seq_len,
-            factor=self.rope_factor,
-            beta_fast=self.beta_fast,
-            beta_slow=self.beta_slow,
-        )
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.fallback_backend"):
+                o = self._fallback_attention(q, kv, batch)
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.o_rope"):
+            dsv4_kernel.apply_rotary_tail(
+                o,
+                positions,
+                rotary_dim=self.rope_head_dim,
+                base=float(self.rope_base),
+                inverse=True,
+                original_seq_len=self.original_seq_len,
+                factor=self.rope_factor,
+                beta_fast=self.beta_fast,
+                beta_slow=self.beta_slow,
+            )
         d_per_group = self.num_local_heads * self.head_dim // self.num_local_groups
         o = o.reshape(x.shape[0], self.num_local_groups, d_per_group)
-        o = dsv4_kernel.wo_a_grouped_projection_fallback(
-            o,
-            self.wo_a.weight,
-            getattr(self.wo_a, "weight_scale_inv", None),
-            num_local_groups=self.num_local_groups,
-            o_lora_rank=self.o_lora_rank,
-        )
-        return self.wo_b.forward(o)
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_a"):
+            o = dsv4_kernel.wo_a_grouped_projection_fallback(
+                o,
+                self.wo_a.weight,
+                getattr(self.wo_a, "weight_scale_inv", None),
+                num_local_groups=self.num_local_groups,
+                o_lora_rank=self.o_lora_rank,
+            )
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_b"):
+            wo_b_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+                "MINISGL_DSV4_SM80_WO_B_FP8_GEMM"
+            )
+            return self.wo_b.forward(
+                o,
+                fp8_gemm=wo_b_fp8_gemm if wo_b_fp8_gemm else None,
+            )
 
 
 class DSV4TopK(BaseOP):
@@ -531,9 +803,10 @@ class DSV4MoEGate(BaseOP):
         routed_scaling_factor: float,
         hash_topk: DSV4TopK | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        weight = _cached_gate_fp32_weight(self, "_cached_gate_weight_fp32", self.weight)
         return dsv4_kernel.moe_gate_fallback(
             hidden_states,
-            self.weight,
+            weight,
             input_ids=input_ids,
             topk=topk,
             scoring_func=scoring_func,
@@ -623,7 +896,10 @@ class DSV4FusedRoutedExperts(BaseOP):
         )
         if grouped is not None:
             if reduce and self._tp_size > 1:
-                grouped = self._comm.all_reduce(grouped.float()).to(grouped.dtype)
+                grouped = self._comm.all_reduce(
+                    grouped.float(),
+                    label="dsv4.routed_expert_all_reduce",
+                ).to(grouped.dtype)
             return grouped
 
         y = torch.zeros_like(hidden_states, dtype=torch.float32)
@@ -637,7 +913,7 @@ class DSV4FusedRoutedExperts(BaseOP):
                 weights[token_idx, top_idx, None],
             ).float()
         if reduce and self._tp_size > 1:
-            y = self._comm.all_reduce(y)
+            y = self._comm.all_reduce(y, label="dsv4.routed_expert_all_reduce")
         return y.to(hidden_states.dtype)
 
 
@@ -661,19 +937,31 @@ class DSV4SharedExperts(BaseOP):
         )
 
     def forward(self, hidden_states: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
-        gate_up = self.gate_up_proj.forward(hidden_states)
+        fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+            "MINISGL_DSV4_SM80_SHARED_FP8_GEMM"
+        )
+        gate_up = self.gate_up_proj.forward(
+            hidden_states,
+            fp8_gemm=fp8_gemm if fp8_gemm else None,
+        )
         gate, up = gate_up.chunk(2, dim=-1)
         hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
             gate,
             up,
             swiglu_limit=self.swiglu_limit,
         )
-        return self.down_proj.forward(hidden.to(up.dtype), reduce=reduce)
+        return self.down_proj.forward(
+            hidden.to(up.dtype),
+            reduce=reduce,
+            reduce_label="dsv4.shared_expert_all_reduce",
+            fp8_gemm=fp8_gemm if fp8_gemm else None,
+        )
 
 
 class DSV4MoE(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int):
         tp = get_tp_info()
+        self.layer_id = layer_id
         self._tp_size = tp.size
         self._comm = DistributedCommunicator()
         is_hash_layer = layer_id < config.n_hash_layers
@@ -689,20 +977,24 @@ class DSV4MoE(BaseOP):
 
     def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         flat = hidden_states.view(-1, hidden_states.shape[-1])
-        weights, indices = self.gate.forward(
-            flat,
-            input_ids=input_ids.view(-1),
-            topk=self.topk_count,
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
-            hash_topk=getattr(self, "topk", None),
-        )
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.gate"):
+            weights, indices = self.gate.forward(
+                flat,
+                input_ids=input_ids.view(-1),
+                topk=self.topk_count,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                hash_topk=getattr(self, "topk", None),
+            )
         reduce_once = dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
-        y = self.experts.forward(flat, weights, indices, reduce=not reduce_once).float()
+        with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.routed"):
+            y = self.experts.forward(flat, weights, indices, reduce=not reduce_once).float()
         if hasattr(self, "shared_experts"):
-            y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.shared"):
+                y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()
         if reduce_once and self._tp_size > 1:
-            y = self._comm.all_reduce(y)
+            with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.reduce_once"):
+                y = self._comm.all_reduce(y, label="dsv4.v1_moe_reduce_once_all_reduce")
         return y.to(flat.dtype).view_as(hidden_states)
 
 
@@ -760,15 +1052,25 @@ class DeepseekV4DecoderLayer(BaseOP):
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         residual = x
         attn_fn = _cached_hc_bf16_weight(self, "_hc_attn_fn_bf16", self.hc_attn_fn)
-        y, post, comb = self._hc_pre(x, attn_fn, self.hc_attn_scale, self.hc_attn_base)
-        y = self.self_attn.forward(self.input_layernorm.forward(y))
-        x = self._hc_post(y, residual, post, comb)
+        with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_pre"):
+            y, post, comb = self._hc_pre(x, attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.attn_input_norm"):
+            y = self.input_layernorm.forward(y)
+        with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.attn"):
+            y = self.self_attn.forward(y)
+        with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_post"):
+            x = self._hc_post(y, residual, post, comb)
 
         residual = x
         ffn_fn = _cached_hc_bf16_weight(self, "_hc_ffn_fn_bf16", self.hc_ffn_fn)
-        y, post, comb = self._hc_pre(x, ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
-        y = self.mlp.forward(self.post_attention_layernorm.forward(y), input_ids)
-        return self._hc_post(y, residual, post, comb)
+        with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_ffn_pre"):
+            y, post, comb = self._hc_pre(x, ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.mlp_input_norm"):
+            y = self.post_attention_layernorm.forward(y)
+        with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.mlp"):
+            y = self.mlp.forward(y, input_ids)
+        with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_ffn_post"):
+            return self._hc_post(y, residual, post, comb)
 
 
 class DeepseekV4Model(BaseOP):
@@ -800,11 +1102,16 @@ class DeepseekV4Model(BaseOP):
         )
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        x = self.embed_tokens.forward(input_ids)
-        x = x.unsqueeze(1).repeat(1, self.hc_mult, 1)
+        with _dsv4_capture_nvtx("model.embed"):
+            x = self.embed_tokens.forward(input_ids)
+        with _dsv4_capture_nvtx("model.hc_expand"):
+            x = x.unsqueeze(1).repeat(1, self.hc_mult, 1)
         for layer in self.layers.op_list:
             x = layer.forward(x, input_ids)
-        return self.norm.forward(self._hc_head(x))
+        with _dsv4_capture_nvtx("model.hc_head"):
+            x = self._hc_head(x)
+        with _dsv4_capture_nvtx("model.final_norm"):
+            return self.norm.forward(x)
 
 
 class DeepseekV4ForCausalLM(BaseLLMModel):
@@ -818,7 +1125,8 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
         output = self.model.forward(batch.input_ids)
         if batch.is_prefill:
             output = output[batch.attn_metadata.get_last_indices(batch.size)].contiguous()
-        return self.lm_head.linear(output)
+        with _dsv4_capture_nvtx("lm_head"):
+            return self.lm_head.linear(output)
 
 
 __all__ = ["DeepseekV4ForCausalLM", "DSV4FallbackAttentionMetadata", "DSV4AttentionMetadata"]

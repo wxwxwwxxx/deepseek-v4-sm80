@@ -28,7 +28,7 @@ def run(tp_size: int, tp_rank: int):
     # use default cpu group
     tp_cpu_group = torch.distributed.group.WORLD
     assert tp_cpu_group is not None, "CPU group should not be None"
-    dtype = torch.float16
+    dtypes = (torch.float16, torch.bfloat16, torch.float32)
 
     K = 512
     USE_SYMM = 0
@@ -37,10 +37,10 @@ def run(tp_size: int, tp_rank: int):
         tp_rank=tp_rank,
         tp_size=tp_size,
         tp_cpu_group=tp_cpu_group,
-        max_size_bytes=8192 * K * dtype.itemsize if USE_SYMM else 0,
+        max_size_bytes=8192 * K * max(dtype.itemsize for dtype in dtypes) if USE_SYMM else 0,
     )
 
-    def bench_performance(f, use_graph=False):
+    def bench_performance(f, dtype: torch.dtype, use_graph=False):
         import gc
 
         gc.collect()
@@ -84,16 +84,16 @@ def run(tp_size: int, tp_rank: int):
         toc.synchronize()
         elapsed_time = tic.elapsed_time(toc)
         avg_time = elapsed_time * 1000 / (M * N)
-        logger.info(f"Rank {tp_rank} all-reduce avg time: {avg_time: .4f} us")
+        logger.info(f"Rank {tp_rank} {dtype} all-reduce avg time: {avg_time: .4f} us")
         bandwidth = (8192 * K * dtype.itemsize) / (avg_time * 1e3)  # in GB/s
-        logger.info(f"Rank {tp_rank} all-reduce bandwidth: {bandwidth:.2f} GB/s")
+        logger.info(f"Rank {tp_rank} {dtype} all-reduce bandwidth: {bandwidth:.2f} GB/s")
         # print memory usage
         mem_usage = torch.cuda.memory_allocated() / (1024 * 1024)
         logger.info(f"Rank {tp_rank} memory usage: {mem_usage:.2f} MB")
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-    def test_correctness(f):
+    def test_all_reduce_correctness(f, dtype: torch.dtype):
         N = 4
         x = torch.ones(8192 * K, dtype=dtype, device=f"cuda:{tp_rank}")
         for _ in range(N):
@@ -132,28 +132,31 @@ def run(tp_size: int, tp_rank: int):
         if N % 2 != 0:
             f(x)
 
-        logger.info(f"Correctness check for rank {tp_rank} passed")
+        logger.info(f"{dtype} all-reduce correctness check for rank {tp_rank} passed")
 
-    test_correctness(lambda x: comm.all_reduce(x, "sum"))
-    bench_performance(lambda x: comm.all_reduce(x, "sum"))
-    test_correctness(lambda x: comm.all_reduce(x, "sum"))
+    def test_all_gather_correctness(dtype: torch.dtype):
+        src = torch.full((K,), tp_rank, dtype=dtype, device=f"cuda:{tp_rank}")
+        torch.cuda.synchronize()
+        dst = torch.empty((K * tp_size,), dtype=dtype, device=f"cuda:{tp_rank}")
+        comm.all_gather(dst, src)
+        torch.cuda.synchronize()
+        expected = torch.arange(tp_size, dtype=torch.float32, device=f"cuda:{tp_rank}").to(dtype)
+        expected = expected.repeat_interleave(K)
+        assert torch.allclose(dst, expected), f"Rank {tp_rank} {dtype} all-gather failed"
+        logger.info(f"{dtype} all-gather correctness check for rank {tp_rank} passed")
 
-    # test all gather
-    src = torch.full((K,), tp_rank, dtype=dtype, device=f"cuda:{tp_rank}")
-    torch.cuda.synchronize()
-    dst = torch.empty((K * tp_size,), dtype=dtype, device=f"cuda:{tp_rank}")
-    comm.all_gather(dst, src)
-    torch.cuda.synchronize()
-    expected = torch.arange(tp_size, dtype=dtype, device=f"cuda:{tp_rank}")
-    expected = expected.repeat_interleave(K)
-    assert torch.allclose(dst, expected), f"Rank {tp_rank} all-gather failed"
+    for dtype in dtypes:
+        test_all_reduce_correctness(lambda x: comm.all_reduce(x, "sum"), dtype)
+        test_all_gather_correctness(dtype)
+    bench_performance(lambda x: comm.all_reduce(x, "sum"), torch.float16)
+    test_all_reduce_correctness(lambda x: comm.all_reduce(x, "sum"), torch.float16)
     torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
     import multiprocessing as mp
 
-    tp_size = 4
+    tp_size = int(os.environ.get("MINISGL_TEST_PYNCCL_TP_SIZE", "4"))
     mp.set_start_method("spawn", force=True)
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = "12355"

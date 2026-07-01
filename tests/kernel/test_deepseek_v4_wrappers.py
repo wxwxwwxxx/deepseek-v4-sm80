@@ -371,6 +371,373 @@ def test_hc_head_maintains_bf16_linear_weight_cache(monkeypatch):
     assert model._hc_head_fn_bf16 is not old_cache
 
 
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_hc_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(31)
+
+    tokens = 5
+    hc_mult = 4
+    hidden = 64
+    mix_hc = (2 + hc_mult) * hc_mult
+    x = torch.randn(tokens, hc_mult, hidden, device=device, dtype=torch.bfloat16)
+    fn = (torch.randn(mix_hc, hc_mult * hidden, device=device) * 0.02).contiguous()
+    scale = torch.tensor([0.15, 0.1, 0.08], device=device, dtype=torch.float32)
+    base = (torch.randn(mix_hc, device=device) * 0.01).contiguous()
+
+    expected_y, expected_post, expected_comb = dsv4_kernel.hc_pre_fallback(
+        x,
+        fn,
+        scale,
+        base,
+        hc_mult=hc_mult,
+        sinkhorn_iters=3,
+        eps=1e-6,
+        norm_eps=1e-6,
+    )
+    post_input = torch.randn(tokens, hidden, device=device, dtype=torch.bfloat16)
+    expected_post_out = dsv4_kernel.hc_post_fallback(
+        post_input,
+        x,
+        expected_post,
+        expected_comb,
+    )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_HC", "1")
+    actual_y, actual_post, actual_comb = dsv4_kernel.hc_pre_fallback(
+        x,
+        fn,
+        scale,
+        base,
+        hc_mult=hc_mult,
+        sinkhorn_iters=3,
+        eps=1e-6,
+        norm_eps=1e-6,
+    )
+    actual_post_out = dsv4_kernel.hc_post_fallback(
+        post_input,
+        x,
+        actual_post,
+        actual_comb,
+    )
+
+    assert torch.allclose(actual_y, expected_y, atol=8e-3, rtol=8e-3)
+    assert torch.allclose(actual_post, expected_post, atol=8e-3, rtol=8e-3)
+    assert torch.allclose(actual_comb, expected_comb, atol=8e-3, rtol=8e-3)
+    assert torch.allclose(actual_post_out, expected_post_out, atol=8e-3, rtol=8e-3)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_rms_norm_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(37)
+
+    x = torch.randn(5, 4, 128, device=device, dtype=torch.bfloat16)
+    weight = torch.randn(128, device=device, dtype=torch.bfloat16)
+    expected = dsv4_kernel.rms_norm_fallback(x, weight, eps=1e-6)
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_RMSNORM", "1")
+    actual = dsv4_kernel.rms_norm_fallback(x, weight, eps=1e-6)
+
+    assert actual.dtype is torch.bfloat16
+    assert torch.allclose(actual, expected, atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_rms_norm_pair_sm80_triton_opt_in_matches_fallback(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(39)
+
+    q = torch.randn(5, 4, 96, device=device, dtype=torch.bfloat16)
+    kv = torch.randn(5, 4, 64, device=device, dtype=torch.bfloat16)
+    q_weight = torch.randn(96, device=device, dtype=torch.bfloat16)
+    kv_weight = torch.randn(64, device=device, dtype=torch.bfloat16)
+    expected_q = dsv4_kernel.rms_norm_fallback(q, q_weight, eps=1e-6)
+    expected_kv = dsv4_kernel.rms_norm_fallback(kv, kv_weight, eps=1e-6)
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM", "1")
+    actual_q, actual_kv = dsv4_kernel.rms_norm_pair_fallback(
+        q,
+        kv,
+        q_weight,
+        kv_weight,
+        eps=1e-6,
+    )
+
+    assert actual_q.dtype is torch.bfloat16
+    assert actual_kv.dtype is torch.bfloat16
+    assert torch.allclose(actual_q, expected_q, atol=5e-3, rtol=5e-3)
+    assert torch.allclose(actual_kv, expected_kv, atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_q_kv_norm_rope_cache_sm80_triton_opt_in_matches_fallback(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(40)
+
+    tokens = 5
+    heads = 3
+    dim = 64
+    rotary_dim = 32
+    positions = torch.arange(tokens, device=device, dtype=torch.long) + 11
+    out_loc = torch.arange(tokens, device=device, dtype=torch.long)
+    q = torch.randn(tokens, heads, dim, device=device, dtype=torch.bfloat16).contiguous()
+    kv = torch.randn(tokens, dim, device=device, dtype=torch.bfloat16).contiguous()
+    weight = torch.randn(dim, device=device, dtype=torch.bfloat16)
+    expected_q = q.clone()
+    expected_kv = kv.clone()
+    expected_cache = torch.empty(tokens, dim, device=device, dtype=torch.bfloat16)
+    actual_q = q.clone()
+    actual_kv = kv.clone()
+    actual_cache = torch.empty_like(expected_cache)
+
+    dsv4_kernel.q_norm_rope_fallback(
+        expected_q,
+        positions,
+        rms_norm_eps=1e-6,
+        rotary_dim=rotary_dim,
+        base=10000.0,
+    )
+    dsv4_kernel.k_norm_rope_cache_fallback(
+        expected_kv,
+        positions,
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=expected_cache,
+        out_loc=out_loc,
+        rotary_dim=rotary_dim,
+        base=10000.0,
+    )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE", "1")
+    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+        actual_q,
+        actual_kv,
+        positions,
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=actual_cache,
+        out_loc=out_loc,
+        rotary_dim=rotary_dim,
+        base=10000.0,
+    )
+
+    assert torch.allclose(actual_q, expected_q, atol=5e-3, rtol=5e-3)
+    assert torch.allclose(actual_kv, expected_kv, atol=5e-3, rtol=5e-3)
+    assert torch.allclose(actual_cache, expected_cache, atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_q_kv_norm_rope_cache_accepts_strided_kv_view(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(45)
+
+    tokens = 4
+    heads = 2
+    dim = 64
+    rotary_dim = 32
+    q_prefix = 96
+    positions = torch.arange(tokens, device=device, dtype=torch.long) + 23
+    out_loc = torch.arange(tokens, device=device, dtype=torch.long)
+    q = torch.randn(tokens, heads, dim, device=device, dtype=torch.bfloat16).contiguous()
+    merged = torch.randn(tokens, q_prefix + dim, device=device, dtype=torch.bfloat16)
+    kv_view = merged[:, q_prefix:]
+    assert kv_view.stride(-1) == 1
+    assert not kv_view.is_contiguous()
+    weight = torch.randn(dim, device=device, dtype=torch.bfloat16)
+
+    expected_q = q.clone()
+    expected_kv = kv_view.clone()
+    expected_cache = torch.empty(tokens, dim, device=device, dtype=torch.bfloat16)
+    actual_q = q.clone()
+    actual_cache = torch.empty_like(expected_cache)
+
+    dsv4_kernel.q_norm_rope_fallback(
+        expected_q,
+        positions,
+        rms_norm_eps=1e-6,
+        rotary_dim=rotary_dim,
+        base=10000.0,
+    )
+    dsv4_kernel.k_norm_rope_cache_fallback(
+        expected_kv,
+        positions,
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=expected_cache,
+        out_loc=out_loc,
+        rotary_dim=rotary_dim,
+        base=10000.0,
+    )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE", "1")
+    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+        actual_q,
+        kv_view,
+        positions,
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=actual_cache,
+        out_loc=out_loc,
+        rotary_dim=rotary_dim,
+        base=10000.0,
+    )
+
+    assert torch.allclose(actual_q, expected_q, atol=5e-3, rtol=5e-3)
+    assert torch.allclose(kv_view, expected_kv, atol=5e-3, rtol=5e-3)
+    assert torch.allclose(actual_cache, expected_cache, atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_quantized_linear_fp8_per_call_gemm_matches_fallback(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(41)
+
+    x = torch.randn(4, 128, device=device, dtype=torch.bfloat16)
+    weight = (
+        torch.randn(256, 128, device=device, dtype=torch.float32)
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
+    )
+    scale = torch.rand(
+        dsv4_kernel.scale_dim(weight.shape[0]),
+        dsv4_kernel.scale_dim(weight.shape[1]),
+        device=device,
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+
+    expected = dsv4_kernel.quantized_linear_ref(x, weight, scale, weight_kind="fp8")
+    actual = dsv4_kernel.quantized_linear_ref(
+        x,
+        weight,
+        scale,
+        weight_kind="fp8",
+        fp8_gemm=True,
+    )
+
+    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_FP8_GEMM")
+    assert actual.dtype is torch.bfloat16
+    assert torch.allclose(actual, expected, atol=3e-2, rtol=3e-2)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_quantized_linear_fp8_pair_shared_activation_matches_fallback(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(43)
+
+    x = torch.randn(4, 128, device=device, dtype=torch.bfloat16)
+    weight_a = (
+        torch.randn(96, 128, device=device, dtype=torch.float32)
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
+    )
+    weight_b = (
+        torch.randn(64, 128, device=device, dtype=torch.float32)
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
+    )
+    scale_a = torch.rand(
+        dsv4_kernel.scale_dim(weight_a.shape[0]),
+        dsv4_kernel.scale_dim(weight_a.shape[1]),
+        device=device,
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+    scale_b = torch.rand(
+        dsv4_kernel.scale_dim(weight_b.shape[0]),
+        dsv4_kernel.scale_dim(weight_b.shape[1]),
+        device=device,
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+
+    expected_a = dsv4_kernel.quantized_linear_ref(
+        x, weight_a, scale_a, weight_kind="fp8"
+    )
+    expected_b = dsv4_kernel.quantized_linear_ref(
+        x, weight_b, scale_b, weight_kind="fp8"
+    )
+    actual_a, actual_b = dsv4_kernel.quantized_linear_fp8_pair_shared_activation_ref(
+        x, weight_a, scale_a, weight_b, scale_b
+    )
+
+    assert torch.equal(actual_a, expected_a)
+    assert torch.equal(actual_b, expected_b)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_fused_wqa_wkv_cached_weight_matches_shared_activation(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(44)
+
+    x = torch.randn(4, 128, device=device, dtype=torch.bfloat16)
+    weight_a = (
+        torch.randn(96, 128, device=device, dtype=torch.float32)
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
+    )
+    weight_b = (
+        torch.randn(64, 128, device=device, dtype=torch.float32)
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
+    )
+    scale_a = torch.rand(
+        dsv4_kernel.scale_dim(weight_a.shape[0]),
+        dsv4_kernel.scale_dim(weight_a.shape[1]),
+        device=device,
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+    scale_b = torch.rand(
+        dsv4_kernel.scale_dim(weight_b.shape[0]),
+        dsv4_kernel.scale_dim(weight_b.shape[1]),
+        device=device,
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+
+    expected_a, expected_b = dsv4_kernel.quantized_linear_fp8_pair_shared_activation_ref(
+        x, weight_a, scale_a, weight_b, scale_b
+    )
+
+    class Owner:
+        pass
+
+    owner = Owner()
+    monkeypatch.setenv("MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE", "1")
+    cached = dsv4_model._cached_fused_wqa_wkv_fp8_weight(
+        owner,
+        "_cached_test_weight",
+        weight_a,
+        scale_a,
+        weight_b,
+        scale_b,
+        out_dtype=x.dtype,
+    )
+    assert cached is not None
+    qkv = F.linear(dsv4_kernel.quantize_fp8_activation_ref(x), cached)
+    actual_a, actual_b = qkv.split([weight_a.shape[0], weight_b.shape[0]], dim=-1)
+
+    assert torch.equal(actual_a, expected_a)
+    assert torch.equal(actual_b, expected_b)
+    assert (
+        dsv4_model._cached_fused_wqa_wkv_fp8_weight(
+            owner,
+            "_cached_test_weight",
+            weight_a,
+            scale_a,
+            weight_b,
+            scale_b,
+            out_dtype=x.dtype,
+        )
+        is cached
+    )
+
+
 def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     x = torch.randn(2, 4, dtype=torch.float32)
     weight = torch.randn(3, 4, dtype=torch.float32)

@@ -61,3 +61,17 @@ class HybridBackend(BaseAttnBackend):
 
     def prepare_for_replay(self, batch: Batch) -> None:
         self.decode_backend.prepare_for_replay(batch)
+
+    def bind_capture_graph_inputs(self, **kwargs) -> None:
+        bind = getattr(self.decode_backend, "bind_capture_graph_inputs", None)
+        if bind is not None:
+            bind(**kwargs)
+
+    def stage_capture_metadata_for_graph(self, batch: Batch) -> None:
+        stage = getattr(self.decode_backend, "stage_capture_metadata_for_graph", None)
+        if stage is not None:
+            stage(batch)
+
+    @property
+    def capture_compressed_locs_in_graph(self) -> bool:
+        return bool(getattr(self.decode_backend, "capture_compressed_locs_in_graph", False))

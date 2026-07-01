@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Any, ClassVar, List
 
 import torch
 import torch.distributed as dist
@@ -62,12 +62,104 @@ class PyNCCLDistributedImpl(DistributedImpl):
 
 class DistributedCommunicator:
     plugins: List[DistributedImpl] = [TorchDistributedImpl()]
+    _stats: ClassVar[dict[tuple[str, str, str, tuple[int, ...], tuple[int, ...]], dict[str, Any]]] = {}
 
-    def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+    def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
+        self._record("all_reduce", x, x.shape, label)
         return self.plugins[-1].all_reduce(x)
 
-    def all_gather(self, x: torch.Tensor) -> torch.Tensor:
+    def all_gather(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
+        output_shape = list(x.shape)
+        output_shape[0] *= _world_size()
+        self._record("all_gather", x, output_shape, label)
         return self.plugins[-1].all_gather(x)
+
+    @classmethod
+    def reset_stats(cls) -> None:
+        cls._stats = {}
+
+    @classmethod
+    def snapshot_stats(cls) -> dict[str, Any]:
+        entries = []
+        by_label: dict[str, dict[str, Any]] = {}
+        by_op: dict[str, dict[str, Any]] = {}
+        for record in sorted(
+            cls._stats.values(),
+            key=lambda item: (item["label"], item["op"], item["dtype"], item["shape"]),
+        ):
+            entry = dict(record)
+            entry["shape"] = list(entry["shape"])
+            entry["output_shape"] = list(entry["output_shape"])
+            entries.append(entry)
+            _accumulate_comm_summary(by_label, entry["label"], entry)
+            _accumulate_comm_summary(by_op, entry["op"], entry)
+        return {
+            "total_count": int(sum(entry["count"] for entry in entries)),
+            "total_bytes": int(sum(entry["bytes"] for entry in entries)),
+            "entries": entries,
+            "by_label": dict(sorted(by_label.items())),
+            "by_op": dict(sorted(by_op.items())),
+        }
+
+    @classmethod
+    def _record(
+        cls,
+        op: str,
+        x: torch.Tensor,
+        output_shape: torch.Size | list[int] | tuple[int, ...],
+        label: str | None,
+    ) -> None:
+        normalized_label = label or "unlabeled"
+        shape = tuple(int(dim) for dim in x.shape)
+        normalized_output_shape = tuple(int(dim) for dim in output_shape)
+        dtype = str(x.dtype).removeprefix("torch.")
+        input_bytes = int(x.numel() * x.element_size())
+        output_numel = 1
+        for dim in normalized_output_shape:
+            output_numel *= dim
+        output_bytes = int(output_numel * x.element_size())
+        bytes_value = output_bytes if op == "all_gather" else input_bytes
+        key = (normalized_label, op, dtype, shape, normalized_output_shape)
+        record = cls._stats.get(key)
+        if record is None:
+            record = {
+                "label": normalized_label,
+                "op": op,
+                "dtype": dtype,
+                "shape": shape,
+                "output_shape": normalized_output_shape,
+                "input_bytes": input_bytes,
+                "output_bytes": output_bytes,
+                "bytes": 0,
+                "count": 0,
+            }
+            cls._stats[key] = record
+        record["count"] += 1
+        record["bytes"] += bytes_value
+
+
+def _world_size() -> int:
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
+    return 1
+
+
+def _accumulate_comm_summary(
+    summaries: dict[str, dict[str, Any]],
+    key: str,
+    entry: dict[str, Any],
+) -> None:
+    summary = summaries.setdefault(key, {"count": 0, "bytes": 0})
+    summary["count"] += int(entry["count"])
+    summary["bytes"] += int(entry["bytes"])
+
+
+def reset_communication_stats() -> None:
+    DistributedCommunicator.reset_stats()
+
+
+def snapshot_communication_stats() -> dict[str, Any]:
+    return DistributedCommunicator.snapshot_stats()
 
 
 def enable_pynccl_distributed(

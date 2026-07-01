@@ -1,0 +1,46 @@
+[
+  {
+    "bottleneck_labels": [
+      "decode dominated",
+      "attention",
+      "MoE / expert GEMM",
+      "fp4 expert handling",
+      "KV cache writes",
+      "metadata construction"
+    ],
+    "classification": "baseline",
+    "communication_by_label": {
+      "dsv4.embedding_all_reduce": {
+        "bytes": 1107034112,
+        "count": 1024
+      },
+      "dsv4.lm_head_all_gather": {
+        "bytes": 2118123520,
+        "count": 1024
+      },
+      "dsv4.row_parallel_projection_all_reduce": {
+        "bytes": 47602466816,
+        "count": 44032
+      },
+      "dsv4.v1_moe_reduce_once_all_reduce": {
+        "bytes": 95204933632,
+        "count": 44032
+      }
+    },
+    "communication_total_bytes": 146032558080,
+    "communication_total_count": 90112,
+    "decode_tokens_per_s": 11.317131388823439,
+    "elapsed_s": 67.08522972650826,
+    "end_to_end_output_tokens_per_s": 7.632082383667933,
+    "fallback_wrapper_calls_total": 1429664,
+    "kv_cache_memory_bytes_per_rank_max": 46597406720,
+    "peak_gpu_memory_allocated_bytes": 71942705664,
+    "prefill_tokens_per_s": 770.4643259720444,
+    "report_path": "performance_milestones/target07_comm_graph/raw/dsv4_target07_2_mini_v1_moe_pynccl_4096x128_bs4_warmup1/reports/000_decode_throughput_bs8__v1_moe_pynccl.json",
+    "scenario": "decode_throughput_bs8",
+    "status": "pass",
+    "ttft_s_mean": 21.95267318189144,
+    "unsupported_kernel_skips_total": 0,
+    "variant": "v1_moe_pynccl"
+  }
+]

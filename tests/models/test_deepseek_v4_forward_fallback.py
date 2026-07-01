@@ -263,7 +263,8 @@ def test_deepseek_v4_routed_experts_all_reduce_tp_sharded_output(monkeypatch):
         def __init__(self) -> None:
             self.calls: list[torch.Tensor] = []
 
-        def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
+            del label
             self.calls.append(x.clone())
             return x + 10.0
 
@@ -299,7 +300,8 @@ def test_deepseek_v4_grouped_routed_experts_all_reduce_tp_sharded_output(monkeyp
         def __init__(self) -> None:
             self.calls: list[torch.Tensor] = []
 
-        def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
+            del label
             self.calls.append(x.clone())
             return x + 20.0
 
@@ -332,7 +334,8 @@ def test_deepseek_v4_v1_moe_sums_routed_and_shared_before_one_all_reduce(monkeyp
         def __init__(self) -> None:
             self.calls: list[torch.Tensor] = []
 
-        def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
+            del label
             self.calls.append(x.clone())
             return x + 30.0
 

@@ -1,0 +1,14 @@
+[
+  {
+    "actual_output_tokens": 512,
+    "elapsed_s": 6.334618851542473,
+    "elapsed_s_mean": 6.334618851542473,
+    "end_to_end_output_tokens_per_s": 80.82569954075903,
+    "end_to_end_total_tokens_per_s": 2667.248084845048,
+    "peak_gpu_memory_allocated_bytes": 0,
+    "prompt_tokens": 16384,
+    "report_path": "/tmp/dsv4_nsys_vllm_4096x128_bs4/reports/000_decode_throughput_bs8__vllm.json",
+    "scenario": "decode_throughput_bs8",
+    "status": "pass"
+  }
+]

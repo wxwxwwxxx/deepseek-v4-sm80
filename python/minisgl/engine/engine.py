@@ -81,6 +81,8 @@ class Engine:
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
+        self._copy_done_event_pool = [torch.cuda.Event() for _ in range(2)]
+        self._copy_done_event_pool_ids = {id(event) for event in self._copy_done_event_pool}
 
         post_free_memory = self._sync_get_memory()[0]
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
@@ -107,6 +109,8 @@ class Engine:
             max_seq_len=aligned_max_seq_len,
             vocab_size=config.model_config.vocab_size,
             dummy_req=self.dummy_req,
+            capture_fail_open=config.cuda_graph_capture_fail_open,
+            capture_greedy_sample=config.cuda_graph_capture_greedy_sample,
         )
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
@@ -191,20 +195,42 @@ class Engine:
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
+        next_tokens_gpu: torch.Tensor | None = None
         with self.ctx.forward_batch(batch):
-            if self.graph_runner.can_use_cuda_graph(batch):
+            if (
+                args.temperatures is None
+                and self.graph_runner.can_replay_greedy_sample(batch)
+            ):
+                next_tokens_gpu = self.graph_runner.replay_greedy_sample(batch)
+            elif self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
             else:
+                self.graph_runner.record_eager_decode(batch)
                 logits = self.model.forward()
 
         for req in batch.reqs:
             req.complete_one()
 
-        next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
+        if next_tokens_gpu is None:
+            next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
-        copy_done_event = torch.cuda.Event()
+        copy_done_event = self._acquire_copy_done_event()
         copy_done_event.record(self.stream)
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
+
+    def _acquire_copy_done_event(self) -> torch.cuda.Event:
+        if self._copy_done_event_pool:
+            event = self._copy_done_event_pool.pop()
+            self._copy_done_event_pool_ids.remove(id(event))
+            return event
+        return torch.cuda.Event()
+
+    def release_copy_done_event(self, event: torch.cuda.Event) -> None:
+        event_id = id(event)
+        if len(self._copy_done_event_pool) >= 2 or event_id in self._copy_done_event_pool_ids:
+            return
+        self._copy_done_event_pool.append(event)
+        self._copy_done_event_pool_ids.add(event_id)
 
     def shutdown(self) -> None:
         self.graph_runner.destroy_cuda_graphs()
@@ -224,8 +250,18 @@ def _adjust_config(config: EngineConfig):
         if config.attention_backend != "dsv4":
             override("attention_backend", "dsv4")
             logger.info_rank0("Using DSV4 attention backend for DeepSeek V4")
-        override("cuda_graph_bs", [])
-        override("cuda_graph_max_bs", 0)
+        if not config.allow_dsv4_cuda_graph:
+            override("cuda_graph_bs", [])
+            override("cuda_graph_max_bs", 0)
+        else:
+            if config.cuda_graph_bs is None:
+                override("cuda_graph_bs", [1, 2, 4])
+            if config.cuda_graph_max_bs is None:
+                override("cuda_graph_max_bs", max(config.cuda_graph_bs or [0]))
+            override("cuda_graph_capture_fail_open", True)
+            logger.info_rank0(
+                f"Opting in to DeepSeek V4 decode CUDA graph sizes: {config.cuda_graph_bs}"
+            )
     elif config.attention_backend == "auto":
         backend = "trtllm" if is_sm100_supported() else ("fa,fi" if is_sm90_supported() else "fi")
         override("attention_backend", backend)

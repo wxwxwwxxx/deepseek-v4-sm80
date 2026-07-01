@@ -35,6 +35,27 @@ DEFAULT_EXPECTATIONS = {
 }
 DSV4_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
 DSV4_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
+DSV4_HC_TOGGLE = "MINISGL_DSV4_SM80_HC"
+DSV4_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_RMSNORM"
+DSV4_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_FP8_GEMM"
+DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE = "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT"
+DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE = (
+    "MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE"
+)
+DSV4_FUSED_Q_KV_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM"
+DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE = (
+    "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE"
+)
+DSV4_Q_WQA_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_Q_WQA_FP8_GEMM"
+DSV4_Q_WQB_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
+DSV4_WO_B_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_WO_B_FP8_GEMM"
+DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM"
+DSV4_SHARED_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_SHARED_FP8_GEMM"
+DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_GATE_FP32_WEIGHT_CACHE"
+DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE = (
+    "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE"
+)
+DSV4_WO_A_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16"
 BASELINE_TP_SIZE = 8
 
 
@@ -43,6 +64,9 @@ class Variant:
     name: str
     env: dict[str, str]
     description: str
+    use_pynccl: bool = False
+    allow_dsv4_cuda_graph: bool = False
+    cuda_graph_capture_greedy_sample: bool = False
 
 
 VARIANTS: tuple[Variant, ...] = (
@@ -52,6 +76,317 @@ VARIANTS: tuple[Variant, ...] = (
         "v1_moe",
         {DSV4_V1_MOE_TOGGLE: "1"},
         "V1 exact grouped MoE bundle: v0 BF16 whitelist plus grouped MoE route.",
+    ),
+    Variant(
+        "v1_moe_pynccl",
+        {DSV4_V1_MOE_TOGGLE: "1"},
+        "V1 exact grouped MoE with PyNCCL tensor-parallel collectives.",
+        use_pynccl=True,
+    ),
+    Variant(
+        "v1_moe_graph",
+        {DSV4_V1_MOE_TOGGLE: "1"},
+        "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture.",
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc",
+        {DSV4_V1_MOE_TOGGLE: "1", DSV4_HC_TOGGLE: "1"},
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture "
+            "and experimental sm80 HC split/post helpers."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC helpers, and experimental sm80 RMSNorm helper."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_fp8gemm",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FP8_GEMM_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, and experimental sm80 FP8 GEMM."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_wqb_fp8gemm",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, and selective attention wq_b FP8 GEMM."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_wqb_woa",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_A_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, selective attention wq_b FP8 GEMM, "
+            "and selective attention wo_a projection."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_wqb_wob_fp8gemm",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, selective attention wq_b FP8 GEMM, "
+            "and selective attention wo_b FP8 GEMM."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_wqb_wob_idxwqb_fp8gemm",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, selective attention wq_b/wo_b "
+            "FP8 GEMM, and selective indexer wq_b FP8 GEMM."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_wqb_wob_idxwqb_shared_fp8gemm",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_SHARED_FP8_GEMM_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, selective attention wq_b/wo_b "
+            "FP8 GEMM, selective indexer wq_b FP8 GEMM, and selective shared-expert "
+            "FP8 GEMM."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_wqb_wob_idxwqb_gatecache",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, selective attention wq_b/wo_b "
+            "FP8 GEMM, selective indexer wq_b FP8 GEMM, and exact gate fp32 "
+            "weight caching."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_wqb_wob_idxwqb_gatecache_idxstorecache",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, selective attention wq_b/wo_b "
+            "FP8 GEMM, selective indexer wq_b FP8 GEMM, exact gate fp32 weight "
+            "caching, and exact indexer-store norm fp32 weight caching."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_fwqakv_wqb_wob_idxwqb_gatecache_idxstorecache",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, vLLM-aligned shared-activation "
+            "attention wq_a/wkv FP8 projection, selective attention wq_b/wo_b "
+            "FP8 GEMM, selective indexer wq_b FP8 GEMM, exact gate fp32 weight "
+            "caching, and exact indexer-store norm fp32 weight caching."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        (
+            "v1_moe_graph_hc_rmsnorm_fwqakv_qkvrope_wqb_wob_idxwqb_"
+            "gatecache_idxstorecache"
+        ),
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, vLLM-aligned shared-activation "
+            "attention wq_a/wkv FP8 projection, vLLM-aligned fused q norm/rope "
+            "plus KV norm/rope/cache-store, selective attention wq_b/wo_b FP8 "
+            "GEMM, selective indexer wq_b FP8 GEMM, exact gate fp32 weight "
+            "caching, and exact indexer-store norm fp32 weight caching."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        (
+            "v1_moe_graph_hc_rmsnorm_fwqakvcache_qkvrope_wqb_wob_idxwqb_"
+            "gatecache_idxstorecache"
+        ),
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, vLLM-aligned shared-activation "
+            "attention wq_a/wkv FP8 projection with cached fused bf16 weights, "
+            "vLLM-aligned fused q norm/rope plus KV norm/rope/cache-store, "
+            "selective attention wq_b/wo_b FP8 GEMM, selective indexer wq_b "
+            "FP8 GEMM, exact gate fp32 weight caching, and exact indexer-store "
+            "norm fp32 weight caching."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        (
+            "v1_moe_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_"
+            "gatecache_idxstorecache"
+        ),
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "the current vLLM-aligned cached fused wq_a/wkv graph path, and "
+            "greedy sampler captured in the graph."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        "v1_moe_graph_hc_rmsnorm_qwqa_wqb_wob_idxwqb_gatecache_idxstorecache",
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_Q_WQA_FP8_GEMM_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, "
+            "experimental sm80 HC/RMSNorm helpers, selective attention wq_a/wq_b/"
+            "wo_b FP8 GEMM, selective indexer wq_b FP8 GEMM, exact gate fp32 "
+            "weight caching, and exact indexer-store norm fp32 weight caching."
+        ),
+        allow_dsv4_cuda_graph=True,
+    ),
+    Variant(
+        "v1_moe_graph_sample",
+        {DSV4_V1_MOE_TOGGLE: "1"},
+        (
+            "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture "
+            "and greedy sampler captured in the graph."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        "v1_moe_graph_pynccl",
+        {DSV4_V1_MOE_TOGGLE: "1"},
+        "V1 exact grouped MoE with PyNCCL and opt-in DSV4 decode CUDA graph capture.",
+        use_pynccl=True,
+        allow_dsv4_cuda_graph=True,
     ),
 )
 
@@ -244,6 +579,35 @@ def _distributed_init_method(args: argparse.Namespace, tp_size: int) -> str | No
     return None
 
 
+def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> dict[str, Any]:
+    variant_pynccl = any(variant.use_pynccl for variant in variants)
+    variant_graph = any(variant.allow_dsv4_cuda_graph for variant in variants)
+    variant_graph_greedy_sample = any(
+        variant.cuda_graph_capture_greedy_sample for variant in variants
+    )
+    if variant_pynccl and not all(variant.use_pynccl for variant in variants) and not args.use_pynccl:
+        raise SystemExit("PyNCCL text-smoke variants must be run separately or with --use-pynccl.")
+    if (
+        variant_graph
+        and not all(variant.allow_dsv4_cuda_graph for variant in variants)
+        and not args.allow_dsv4_cuda_graph
+    ):
+        raise SystemExit(
+            "DSV4 CUDA graph text-smoke variants must be run separately or with "
+            "--allow-dsv4-cuda-graph."
+        )
+    allow_dsv4_cuda_graph = bool(args.allow_dsv4_cuda_graph or variant_graph)
+    cuda_graph_bs = args.cuda_graph_bs
+    if allow_dsv4_cuda_graph and cuda_graph_bs is None:
+        cuda_graph_bs = [1, 2, 4]
+    return {
+        "use_pynccl": bool(args.use_pynccl or variant_pynccl),
+        "allow_dsv4_cuda_graph": allow_dsv4_cuda_graph,
+        "cuda_graph_bs": cuda_graph_bs,
+        "cuda_graph_capture_greedy_sample": variant_graph_greedy_sample,
+    }
+
+
 def _gather_payloads(group, payload: dict[str, Any]) -> list[dict[str, Any]]:
     if torch.distributed.is_initialized():
         world_size = torch.distributed.get_world_size(group=group)
@@ -271,6 +635,7 @@ def run_variant(
     formatted_prompts: Sequence[str],
     rank: int,
     tp_size: int,
+    runtime_options: dict[str, Any],
 ) -> dict[str, Any] | None:
     from minisgl.core import SamplingParams
 
@@ -359,7 +724,10 @@ def run_variant(
             "tensor_parallel_size": tp_size,
             "page_size": args.page_size,
             "num_pages": args.num_pages,
-            "use_pynccl": False,
+            "use_pynccl": runtime_options["use_pynccl"],
+            "allow_dsv4_cuda_graph": runtime_options["allow_dsv4_cuda_graph"],
+            "cuda_graph_bs": runtime_options["cuda_graph_bs"],
+            "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
             "distributed_init_method": _distributed_init_method(args, tp_size),
             "temperature": args.temperature,
             "top_p": args.top_p,
@@ -394,6 +762,9 @@ def run_text_smoke(args: argparse.Namespace) -> int:
         for prompt in prompts
     ]
     variants = [_variant_map()[name] for name in (args.variants or ["fallback", "v0_bf16"])]
+    runtime_options = _runtime_options(args, variants)
+    if runtime_options["allow_dsv4_cuda_graph"]:
+        configure_variant(dsv4_kernel, variants[0])
 
     llm = None
     reports: list[dict[str, Any]] = []
@@ -411,7 +782,12 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             num_page_override=args.num_pages,
             page_size=args.page_size,
             memory_ratio=args.memory_ratio,
-            use_pynccl=False,
+            use_pynccl=runtime_options["use_pynccl"],
+            allow_dsv4_cuda_graph=runtime_options["allow_dsv4_cuda_graph"],
+            cuda_graph_bs=runtime_options["cuda_graph_bs"],
+            cuda_graph_capture_greedy_sample=runtime_options[
+                "cuda_graph_capture_greedy_sample"
+            ],
             **llm_kwargs,
         )
         for variant in variants:
@@ -424,6 +800,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 formatted_prompts=formatted_prompts,
                 rank=rank,
                 tp_size=tp_size,
+                runtime_options=runtime_options,
             )
             if rank == 0 and report is not None:
                 reports.append(report)
@@ -454,7 +831,13 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 "tensor_parallel_size": tp_size,
                 "page_size": args.page_size,
                 "num_pages": args.num_pages,
-                "use_pynccl": False,
+                "use_pynccl": runtime_options["use_pynccl"],
+                "allow_dsv4_cuda_graph": runtime_options["allow_dsv4_cuda_graph"],
+                "cuda_graph_bs": runtime_options["cuda_graph_bs"],
+                "cuda_graph_capture_greedy_sample": runtime_options[
+                    "cuda_graph_capture_greedy_sample"
+                ],
+                "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
                 "distributed_init_method": distributed_init_method,
                 "memory_ratio": args.memory_ratio,
                 "max_seq_len": args.max_seq_len,
@@ -497,6 +880,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-seq-len", type=int, default=1024)
     parser.add_argument("--max-extend-tokens", type=int, default=4096)
     parser.add_argument("--max-tokens", type=int, default=64)
+    parser.add_argument(
+        "--use-pynccl",
+        action="store_true",
+        help="Use the PyNCCL communicator for tensor-parallel collectives.",
+    )
+    parser.add_argument(
+        "--allow-dsv4-cuda-graph",
+        action="store_true",
+        help="Opt in to DeepSeek V4 decode CUDA graph capture. Defaults to sizes 1,2,4.",
+    )
+    parser.add_argument(
+        "--cuda-graph-bs",
+        nargs="*",
+        type=int,
+        default=None,
+        help="Explicit CUDA graph decode batch sizes for opt-in graph runs.",
+    )
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--thinking-mode", choices=("chat", "thinking"), default="chat")
@@ -518,6 +918,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--max-seq-len, --max-extend-tokens and --max-tokens must be positive")
     if args.memory_ratio <= 0:
         parser.error("--memory-ratio must be positive")
+    if args.cuda_graph_bs is not None:
+        if any(value <= 0 for value in args.cuda_graph_bs):
+            parser.error("--cuda-graph-bs values must be positive")
+        args.cuda_graph_bs = sorted(set(args.cuda_graph_bs))
     return args
 
 

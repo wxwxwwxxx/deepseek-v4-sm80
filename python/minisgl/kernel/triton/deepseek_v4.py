@@ -41,6 +41,64 @@ def _silu_and_mul_clamp_kernel(
 
 
 @triton.jit
+def _rms_norm_bf16_kernel(
+    x_ptr,
+    weight_ptr,
+    out_ptr,
+    rows: tl.constexpr,
+    dim: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_D)
+    mask = offsets < dim
+    values = tl.load(x_ptr + row * dim + offsets, mask=mask, other=0.0).to(tl.float32)
+    mean_square = tl.sum(values * values, axis=0) / dim
+    scale = tl.rsqrt(mean_square + eps)
+    weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    out = values * scale * weight
+    tl.store(out_ptr + row * dim + offsets, out, mask=mask)
+
+
+@triton.jit
+def _rms_norm_pair_bf16_kernel(
+    q_ptr,
+    q_weight_ptr,
+    q_out_ptr,
+    kv_ptr,
+    kv_weight_ptr,
+    kv_out_ptr,
+    q_dim: tl.constexpr,
+    kv_dim: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    task = tl.program_id(1)
+    offsets = tl.arange(0, BLOCK_D)
+
+    if task == 0:
+        dim = q_dim
+        x_ptr = q_ptr + row * q_dim
+        weight_ptr = q_weight_ptr
+        out_ptr = q_out_ptr + row * q_dim
+    else:
+        dim = kv_dim
+        x_ptr = kv_ptr + row * kv_dim
+        weight_ptr = kv_weight_ptr
+        out_ptr = kv_out_ptr + row * kv_dim
+
+    mask = offsets < dim
+    values = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    mean_square = tl.sum(values * values, axis=0) / dim
+    scale = tl.rsqrt(mean_square + eps)
+    weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    out = values * scale * weight
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+
+@triton.jit
 def _rotary_tail_kernel(
     x_ptr,
     positions_ptr,
@@ -213,6 +271,119 @@ def _k_norm_rope_cache_bf16_kernel(
 
 
 @triton.jit
+def _q_kv_norm_rope_cache_bf16_kernel(
+    q_ptr,
+    kv_ptr,
+    positions_ptr,
+    norm_weight_ptr,
+    cache_ptr,
+    loc_ptr,
+    q_rows: tl.constexpr,
+    kv_rows: tl.constexpr,
+    heads_per_token: tl.constexpr,
+    q_dim: tl.constexpr,
+    kv_dim: tl.constexpr,
+    kv_stride0: tl.constexpr,
+    rotary_dim: tl.constexpr,
+    eps: tl.constexpr,
+    log_base: tl.constexpr,
+    use_scaling: tl.constexpr,
+    factor: tl.constexpr,
+    low: tl.constexpr,
+    high: tl.constexpr,
+    scale_denom: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_HALF: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    task = tl.program_id(1)
+    offsets = tl.arange(0, BLOCK_D)
+
+    if task == 0:
+        mask = (offsets < q_dim) & (row < q_rows)
+        row_base = row * q_dim
+        values = tl.load(q_ptr + row_base + offsets, mask=mask, other=0.0).to(tl.float32)
+        mean_square = tl.sum(values * values, axis=0) / q_dim
+        scale = tl.rsqrt(mean_square + eps)
+        normed = values * scale
+
+        tail = q_dim - rotary_dim
+        tail_offsets = offsets - tail
+        tail_mask = mask & (tail_offsets >= 0)
+        tail_indices = tl.maximum(tail_offsets, 0)
+        pair_offsets = tail_indices // 2
+        token = row // heads_per_token
+        pos = tl.load(positions_ptr + token, mask=row < q_rows, other=0).to(tl.float32)
+        inv_freq = tl.exp(-((2.0 * pair_offsets.to(tl.float32)) / rotary_dim) * log_base)
+        if use_scaling:
+            ramp = (pair_offsets.to(tl.float32) - low) / scale_denom
+            ramp = tl.minimum(tl.maximum(ramp, 0.0), 1.0)
+            smooth = 1.0 - ramp
+            inv_freq = inv_freq / factor * (1.0 - smooth) + inv_freq * smooth
+        theta = pos * inv_freq
+        theta = theta - tl.floor((theta + 3.141592653589793) / 6.283185307179586) * 6.283185307179586
+        cos = tl.cos(theta)
+        sin = tl.sin(theta)
+
+        a_offsets = row_base + tail + pair_offsets * 2
+        b_offsets = a_offsets + 1
+        a = tl.load(q_ptr + a_offsets, mask=tail_mask, other=0.0).to(tl.float32) * scale
+        b = tl.load(q_ptr + b_offsets, mask=tail_mask, other=0.0).to(tl.float32) * scale
+        rotated_a = a * cos - b * sin
+        rotated_b = a * sin + b * cos
+        rotated = tl.where((tail_indices & 1) == 0, rotated_a, rotated_b)
+        out = tl.where(tail_mask, rotated, normed)
+        tl.store(q_ptr + row_base + offsets, out, mask=mask)
+    else:
+        mask = (offsets < kv_dim) & (row < kv_rows)
+        row_base = row * kv_stride0
+        values = tl.load(kv_ptr + row_base + offsets, mask=mask, other=0.0).to(tl.float32)
+        weights = tl.load(norm_weight_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        mean_square = tl.sum(values * values, axis=0) / kv_dim
+        scale = tl.rsqrt(mean_square + eps)
+        normed = values * scale * weights
+
+        loc = tl.load(loc_ptr + row, mask=row < kv_rows, other=-1).to(tl.int64)
+        cache_base = loc * kv_dim
+        valid_loc = loc >= 0
+
+        tail = kv_dim - rotary_dim
+        tail_offsets = offsets - tail
+        tail_mask = mask & (tail_offsets >= 0)
+        tail_indices = tl.maximum(tail_offsets, 0)
+        pair_offsets = tail_indices // 2
+        pos = tl.load(positions_ptr + row, mask=row < kv_rows, other=0).to(tl.float32)
+        inv_freq = tl.exp(-((2.0 * pair_offsets.to(tl.float32)) / rotary_dim) * log_base)
+        if use_scaling:
+            ramp = (pair_offsets.to(tl.float32) - low) / scale_denom
+            ramp = tl.minimum(tl.maximum(ramp, 0.0), 1.0)
+            smooth = 1.0 - ramp
+            inv_freq = inv_freq / factor * (1.0 - smooth) + inv_freq * smooth
+
+        theta = pos * inv_freq
+        theta = theta - tl.floor((theta + 3.141592653589793) / 6.283185307179586) * 6.283185307179586
+        cos = tl.cos(theta)
+        sin = tl.sin(theta)
+
+        a_dim_offsets = tail + pair_offsets * 2
+        b_dim_offsets = a_dim_offsets + 1
+        a_offsets = row_base + a_dim_offsets
+        b_offsets = row_base + b_dim_offsets
+        a = tl.load(kv_ptr + a_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+        b = tl.load(kv_ptr + b_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+        a_weight = tl.load(norm_weight_ptr + a_dim_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+        b_weight = tl.load(norm_weight_ptr + b_dim_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+        a = a * scale * a_weight
+        b = b * scale * b_weight
+        rotated_a = a * cos - b * sin
+        rotated_b = a * sin + b * cos
+        rotated = tl.where((tail_indices & 1) == 0, rotated_a, rotated_b)
+        out = tl.where(tail_mask, rotated, normed)
+        tl.store(kv_ptr + row_base + offsets, out, mask=mask)
+        tl.store(cache_ptr + cache_base + offsets, out, mask=mask & valid_loc)
+
+
+@triton.jit
 def _compress_norm_rope_store_bf16_kernel(
     kv_ptr,
     positions_ptr,
@@ -317,6 +488,28 @@ def _store_cache_kernel(
 
 
 @triton.jit
+def _copy_masked_compressed_locs_kernel(
+    raw_out_loc_ptr,
+    positions_ptr,
+    c4_out_loc_ptr,
+    c128_out_loc_ptr,
+    rows,
+    n_elements,
+    BLOCK: tl.constexpr,
+) -> None:
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n_elements
+    active = offsets < rows
+    positions = tl.load(positions_ptr + offsets, mask=active, other=0)
+    raw_out_loc = tl.load(raw_out_loc_ptr + offsets, mask=active, other=0)
+    seq_lens = positions + 1
+    c4 = tl.where(active & ((seq_lens % 4) == 0), raw_out_loc // 4, -1)
+    c128 = tl.where(active & ((seq_lens % 128) == 0), raw_out_loc // 128, -1)
+    tl.store(c4_out_loc_ptr + offsets, c4, mask=mask)
+    tl.store(c128_out_loc_ptr + offsets, c128, mask=mask)
+
+
+@triton.jit
 def _pad_indices_kernel(
     indices_ptr,
     out_ptr,
@@ -336,6 +529,147 @@ def _pad_indices_kernel(
         other=-1,
     )
     tl.store(out_ptr + offsets, values, mask=mask)
+
+
+@triton.jit
+def _hc_split_pre_kernel(
+    mixes_ptr,
+    x_ptr,
+    scale_ptr,
+    base_ptr,
+    y_ptr,
+    post_ptr,
+    comb_ptr,
+    tokens: tl.constexpr,
+    hidden: tl.constexpr,
+    hc_mult: tl.constexpr,
+    mix_hc: tl.constexpr,
+    eps: tl.constexpr,
+    sinkhorn_steps: tl.constexpr,
+    BLOCK_HC: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    token = tl.program_id(0)
+    d_block = tl.program_id(1)
+    hc_offsets = tl.arange(0, BLOCK_HC)
+    d_offsets = d_block * BLOCK_D + tl.arange(0, BLOCK_D)
+    hc_mask = hc_offsets < hc_mult
+    d_mask = d_offsets < hidden
+
+    mix_base = token * mix_hc
+    scale0 = tl.load(scale_ptr + 0).to(tl.float32)
+    scale1 = tl.load(scale_ptr + 1).to(tl.float32)
+    scale2 = tl.load(scale_ptr + 2).to(tl.float32)
+
+    pre_logits = (
+        tl.load(mixes_ptr + mix_base + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
+        * scale0
+        + tl.load(base_ptr + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
+    )
+    pre = tl.sigmoid(pre_logits) + eps
+    pre = tl.where(hc_mask, pre, 0.0)
+
+    post_start = hc_mult
+    post_logits = (
+        tl.load(mixes_ptr + mix_base + post_start + hc_offsets, mask=hc_mask, other=0.0).to(
+            tl.float32
+        )
+        * scale1
+        + tl.load(base_ptr + post_start + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
+    )
+    post = 2.0 * tl.sigmoid(post_logits)
+    post = tl.where(hc_mask, post, 0.0)
+
+    rows = tl.arange(0, BLOCK_HC)[:, None]
+    cols = tl.arange(0, BLOCK_HC)[None, :]
+    matrix_mask = (rows < hc_mult) & (cols < hc_mult)
+    comb_start = 2 * hc_mult
+    comb_offsets = comb_start + rows * hc_mult + cols
+    comb_logits = (
+        tl.load(mixes_ptr + mix_base + comb_offsets, mask=matrix_mask, other=0.0).to(tl.float32)
+        * scale2
+        + tl.load(base_ptr + comb_offsets, mask=matrix_mask, other=0.0).to(tl.float32)
+    )
+    comb_logits = tl.where(matrix_mask, comb_logits, -3.4028234663852886e38)
+    row_max = tl.max(comb_logits, axis=1)
+    exp_logits = tl.where(matrix_mask, tl.exp(comb_logits - row_max[:, None]), 0.0)
+    row_sum = tl.sum(exp_logits, axis=1)
+    comb = exp_logits / tl.maximum(row_sum[:, None], eps)
+    comb = tl.where(matrix_mask, comb + eps, 0.0)
+
+    col_sum = tl.sum(comb, axis=0)
+    comb = tl.where(matrix_mask, comb / (col_sum[None, :] + eps), 0.0)
+    for _ in range(0, sinkhorn_steps):
+        row_sum_iter = tl.sum(comb, axis=1)
+        comb = tl.where(matrix_mask, comb / (row_sum_iter[:, None] + eps), 0.0)
+        col_sum_iter = tl.sum(comb, axis=0)
+        comb = tl.where(matrix_mask, comb / (col_sum_iter[None, :] + eps), 0.0)
+
+    if d_block == 0:
+        tl.store(post_ptr + token * hc_mult + hc_offsets, post, mask=hc_mask)
+        tl.store(
+            comb_ptr + token * hc_mult * hc_mult + rows * hc_mult + cols,
+            comb,
+            mask=matrix_mask,
+        )
+
+    x_offsets = token * hc_mult * hidden + hc_offsets[:, None] * hidden + d_offsets[None, :]
+    x_values = tl.load(x_ptr + x_offsets, mask=hc_mask[:, None] & d_mask[None, :], other=0.0)
+    y = tl.sum(pre.to(tl.bfloat16)[:, None].to(tl.float32) * x_values.to(tl.float32), axis=0)
+    tl.store(y_ptr + token * hidden + d_offsets, y, mask=d_mask)
+
+
+@triton.jit
+def _hc_post_kernel(
+    x_ptr,
+    residual_ptr,
+    post_ptr,
+    comb_ptr,
+    out_ptr,
+    tokens: tl.constexpr,
+    hidden: tl.constexpr,
+    hc_mult: tl.constexpr,
+    BLOCK_HC: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    token = tl.program_id(0)
+    d_block = tl.program_id(1)
+    i_offsets = tl.arange(0, BLOCK_HC)
+    d_offsets = d_block * BLOCK_D + tl.arange(0, BLOCK_D)
+    i_mask = i_offsets < hc_mult
+    d_mask = d_offsets < hidden
+
+    x_values = tl.load(
+        x_ptr + token * hidden + d_offsets,
+        mask=d_mask,
+        other=0.0,
+    ).to(tl.float32)
+    post = tl.load(
+        post_ptr + token * hc_mult + i_offsets,
+        mask=i_mask,
+        other=0.0,
+    ).to(tl.float32)
+    out = post[:, None] * x_values[None, :]
+
+    for j in range(0, BLOCK_HC):
+        valid_j = j < hc_mult
+        residual = tl.load(
+            residual_ptr + token * hc_mult * hidden + j * hidden + d_offsets,
+            mask=valid_j & d_mask,
+            other=0.0,
+        ).to(tl.float32)
+        comb = tl.load(
+            comb_ptr + token * hc_mult * hc_mult + j * hc_mult + i_offsets,
+            mask=valid_j & i_mask,
+            other=0.0,
+        ).to(tl.float32)
+        out += comb[:, None] * residual[None, :]
+
+    tl.store(
+        out_ptr + token * hc_mult * hidden + i_offsets[:, None] * hidden + d_offsets[None, :],
+        out,
+        mask=i_mask[:, None] & d_mask[None, :],
+    )
 
 
 @triton.jit
@@ -1146,6 +1480,103 @@ def _heads_per_token(x: torch.Tensor, positions: torch.Tensor) -> int | None:
     return rows // positions.numel()
 
 
+def rms_norm_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    eps: float,
+) -> torch.Tensor | None:
+    if (
+        x.ndim == 0
+        or x.numel() == 0
+        or x.dtype is not torch.bfloat16
+        or weight.dtype is not torch.bfloat16
+        or not x.is_cuda
+        or not weight.is_cuda
+        or x.stride(-1) != 1
+        or weight.numel() != x.shape[-1]
+    ):
+        return None
+    dim = x.shape[-1]
+    if dim <= 0:
+        return None
+    block_d = triton.next_power_of_2(dim)
+    if block_d > 8192:
+        return None
+    x_c = x.contiguous()
+    rows = x_c.numel() // dim
+    out = torch.empty_like(x_c)
+    _rms_norm_bf16_kernel[(rows,)](
+        x_c,
+        weight.contiguous(),
+        out,
+        rows=rows,
+        dim=dim,
+        eps=float(eps),
+        BLOCK_D=block_d,
+        num_warps=8,
+    )
+    return out.reshape_as(x)
+
+
+def rms_norm_pair_bf16(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv_weight: torch.Tensor,
+    *,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if (
+        q.ndim == 0
+        or kv.ndim == 0
+        or q.numel() == 0
+        or kv.numel() == 0
+        or q.dtype is not torch.bfloat16
+        or kv.dtype is not torch.bfloat16
+        or q_weight.dtype is not torch.bfloat16
+        or kv_weight.dtype is not torch.bfloat16
+        or not q.is_cuda
+        or not kv.is_cuda
+        or not q_weight.is_cuda
+        or not kv_weight.is_cuda
+        or q.stride(-1) != 1
+        or kv.stride(-1) != 1
+        or q_weight.numel() != q.shape[-1]
+        or kv_weight.numel() != kv.shape[-1]
+    ):
+        return None
+    q_dim = q.shape[-1]
+    kv_dim = kv.shape[-1]
+    if q_dim <= 0 or kv_dim <= 0:
+        return None
+    block_d = triton.next_power_of_2(max(q_dim, kv_dim))
+    if block_d > 8192:
+        return None
+    q_c = q.contiguous()
+    kv_c = kv.contiguous()
+    q_rows = q_c.numel() // q_dim
+    kv_rows = kv_c.numel() // kv_dim
+    if q_rows != kv_rows:
+        return None
+    q_out = torch.empty_like(q_c)
+    kv_out = torch.empty_like(kv_c)
+    _rms_norm_pair_bf16_kernel[(q_rows, 2)](
+        q_c,
+        q_weight.contiguous(),
+        q_out,
+        kv_c,
+        kv_weight.contiguous(),
+        kv_out,
+        q_dim=q_dim,
+        kv_dim=kv_dim,
+        eps=float(eps),
+        BLOCK_D=block_d,
+        num_warps=8,
+    )
+    return q_out.reshape_as(q), kv_out.reshape_as(kv)
+
+
 def silu_and_mul_clamp(
     gate: torch.Tensor,
     up: torch.Tensor,
@@ -1362,6 +1793,93 @@ def k_norm_rope_cache_bf16(
     return True
 
 
+def q_kv_norm_rope_cache_bf16(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    positions: torch.Tensor,
+    norm_weight: torch.Tensor,
+    cache: torch.Tensor,
+    out_loc: torch.Tensor,
+    *,
+    rms_norm_eps: float,
+    rotary_dim: int,
+    base: float,
+    original_seq_len: int,
+    factor: float,
+    beta_fast: int,
+    beta_slow: int,
+) -> bool:
+    if (
+        q.ndim != 3
+        or kv.ndim != 2
+        or q.numel() == 0
+        or kv.numel() == 0
+        or rotary_dim <= 0
+        or not q.is_cuda
+        or not kv.is_cuda
+        or not positions.is_cuda
+        or not norm_weight.is_cuda
+        or not cache.is_cuda
+        or not out_loc.is_cuda
+        or not q.is_contiguous()
+        or kv.stride(-1) != 1
+        or not cache.is_contiguous()
+    ):
+        return False
+    heads = _heads_per_token(q, positions)
+    if heads is None:
+        return False
+    if positions.numel() != kv.shape[0] or out_loc.numel() != kv.shape[0]:
+        return False
+    q_dim = q.shape[-1]
+    kv_dim = kv.shape[-1]
+    q_rows = q.numel() // q_dim
+    kv_rows = kv.shape[0]
+    if (
+        q_dim <= 0
+        or kv_dim <= 0
+        or rotary_dim > q_dim
+        or rotary_dim > kv_dim
+        or cache.shape[-1] != kv_dim
+        or norm_weight.numel() != kv_dim
+    ):
+        return False
+    use_scaling, low, high = _rope_scaling(
+        rotary_dim=rotary_dim,
+        base=base,
+        original_seq_len=original_seq_len,
+        beta_fast=beta_fast,
+        beta_slow=beta_slow,
+    )
+    block_d = triton.next_power_of_2(max(q_dim, kv_dim))
+    block_half = triton.next_power_of_2(rotary_dim // 2)
+    _q_kv_norm_rope_cache_bf16_kernel[(max(q_rows, kv_rows), 2)](
+        q,
+        kv,
+        positions.contiguous(),
+        norm_weight.contiguous(),
+        cache,
+        out_loc.contiguous(),
+        q_rows=q_rows,
+        kv_rows=kv_rows,
+        heads_per_token=heads,
+        q_dim=q_dim,
+        kv_dim=kv_dim,
+        kv_stride0=kv.stride(0),
+        rotary_dim=rotary_dim,
+        eps=float(rms_norm_eps),
+        log_base=math.log(base),
+        use_scaling=use_scaling,
+        factor=float(factor),
+        low=low,
+        high=high,
+        scale_denom=max(high - low, 1),
+        BLOCK_D=block_d,
+        BLOCK_HALF=block_half,
+    )
+    return True
+
+
 def compress_norm_rope_store_bf16(
     kv: torch.Tensor,
     positions: torch.Tensor,
@@ -1454,6 +1972,41 @@ def store_cache(cache: torch.Tensor, kv: torch.Tensor, loc: torch.Tensor) -> boo
         dim=dim,
         BLOCK_M=block_m,
         BLOCK_D=block_d,
+    )
+    return True
+
+
+def copy_masked_compressed_locs(
+    raw_out_loc: torch.Tensor,
+    positions: torch.Tensor,
+    c4_out_loc: torch.Tensor | None,
+    c128_out_loc: torch.Tensor | None,
+    rows: int,
+) -> bool:
+    if (
+        c4_out_loc is None
+        or c128_out_loc is None
+        or not raw_out_loc.is_cuda
+        or not positions.is_cuda
+        or not c4_out_loc.is_cuda
+        or not c128_out_loc.is_cuda
+        or c4_out_loc.numel() != c128_out_loc.numel()
+        or rows < 0
+    ):
+        return False
+    n_elements = c4_out_loc.numel()
+    if positions.numel() < rows or raw_out_loc.numel() < rows:
+        return False
+    block = 16
+    grid = (triton.cdiv(n_elements, block),)
+    _copy_masked_compressed_locs_kernel[grid](
+        raw_out_loc,
+        positions,
+        c4_out_loc,
+        c128_out_loc,
+        rows,
+        n_elements,
+        BLOCK=block,
     )
     return True
 
@@ -1556,6 +2109,7 @@ def indexer_bf16_logits(
     page_table: torch.Tensor,
     *,
     page_size: int,
+    max_seq_len: int | None = None,
 ) -> torch.Tensor | None:
     if (
         q.ndim != 3
@@ -1588,7 +2142,10 @@ def indexer_bf16_logits(
     if q.shape[-1] > 256:
         return None
 
-    max_seq_len = int(seq_lens.clamp_min(0).max().item())
+    if max_seq_len is None:
+        max_seq_len = int(seq_lens.clamp_min(0).max().item())
+    else:
+        max_seq_len = int(max_seq_len)
     if max_seq_len <= 0:
         return torch.empty((q.shape[0], 0), dtype=torch.float32, device=q.device)
 
@@ -1619,6 +2176,125 @@ def indexer_bf16_logits(
         num_warps=4,
     )
     return logits
+
+
+def hc_split_pre(
+    mixes: torch.Tensor,
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    hc_mult: int,
+    sinkhorn_iters: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    if (
+        x.ndim != 3
+        or mixes.ndim != 2
+        or x.numel() == 0
+        or not x.is_cuda
+        or not mixes.is_cuda
+        or not scale.is_cuda
+        or not base.is_cuda
+        or not x.is_contiguous()
+        or not mixes.is_contiguous()
+        or x.shape[0] != mixes.shape[0]
+        or x.shape[1] != hc_mult
+        or hc_mult < 1
+        or hc_mult > 8
+    ):
+        return None
+    mix_hc = (2 + hc_mult) * hc_mult
+    if mixes.shape[1] != mix_hc or scale.numel() < 3 or base.numel() < mix_hc:
+        return None
+    if x.dtype is not torch.bfloat16:
+        return None
+    tokens, _, hidden = x.shape
+    y = torch.empty((tokens, hidden), dtype=x.dtype, device=x.device)
+    post = torch.empty((tokens, hc_mult), dtype=x.dtype, device=x.device)
+    comb = torch.empty((tokens, hc_mult, hc_mult), dtype=x.dtype, device=x.device)
+    block_hc = triton.next_power_of_2(hc_mult)
+    block_d = 128
+    grid = (tokens, triton.cdiv(hidden, block_d))
+    _hc_split_pre_kernel[grid](
+        mixes,
+        x,
+        scale.contiguous(),
+        base.contiguous(),
+        y,
+        post,
+        comb,
+        tokens=tokens,
+        hidden=hidden,
+        hc_mult=int(hc_mult),
+        mix_hc=int(mix_hc),
+        eps=float(eps),
+        sinkhorn_steps=max(int(sinkhorn_iters) - 1, 0),
+        BLOCK_HC=block_hc,
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return y, post, comb
+
+
+def hc_post(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+) -> torch.Tensor | None:
+    if (
+        x.ndim != 2
+        or residual.ndim != 3
+        or post.ndim != 2
+        or comb.ndim != 3
+        or x.numel() == 0
+        or not x.is_cuda
+        or not residual.is_cuda
+        or not post.is_cuda
+        or not comb.is_cuda
+        or not x.is_contiguous()
+        or not residual.is_contiguous()
+        or not post.is_contiguous()
+        or not comb.is_contiguous()
+        or residual.shape[0] != x.shape[0]
+        or post.shape[0] != x.shape[0]
+        or comb.shape[0] != x.shape[0]
+        or residual.shape[2] != x.shape[1]
+        or post.shape[1] != residual.shape[1]
+        or comb.shape[1] != residual.shape[1]
+        or comb.shape[2] != residual.shape[1]
+    ):
+        return None
+    if (
+        x.dtype is not torch.bfloat16
+        or residual.dtype is not torch.bfloat16
+        or post.dtype is not torch.bfloat16
+        or comb.dtype is not torch.bfloat16
+    ):
+        return None
+    hc_mult = residual.shape[1]
+    if hc_mult < 1 or hc_mult > 8:
+        return None
+    tokens, hidden = x.shape
+    out = torch.empty_like(residual)
+    block_hc = triton.next_power_of_2(hc_mult)
+    block_d = 128
+    grid = (tokens, triton.cdiv(hidden, block_d))
+    _hc_post_kernel[grid](
+        x,
+        residual,
+        post,
+        comb,
+        out,
+        tokens=tokens,
+        hidden=hidden,
+        hc_mult=int(hc_mult),
+        BLOCK_HC=block_hc,
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return out
 
 
 def _flatten_linear_input(x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]] | None:
@@ -2222,12 +2898,18 @@ __all__ = [
     "build_moe_route_plan",
     "grouped_fp4_moe",
     "grouped_fp4_moe_fused_compute",
+    "hc_post",
+    "hc_split_pre",
     "indexer_bf16_logits",
     "k_norm_rope_cache_bf16",
+    "copy_masked_compressed_locs",
     "paged_mqa_attention_bf16",
     "q_norm_rope",
     "quantized_linear_fp4",
     "quantized_linear_fp8",
+    "q_kv_norm_rope_cache_bf16",
+    "rms_norm_bf16",
+    "rms_norm_pair_bf16",
     "silu_and_mul_clamp",
     "store_cache",
     "topk_transform_512",

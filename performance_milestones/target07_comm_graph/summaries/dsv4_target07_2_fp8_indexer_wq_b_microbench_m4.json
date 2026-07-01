@@ -1,0 +1,63 @@
+{
+  "created_at": "2026-07-01 03:59:24",
+  "elapsed_s": 3.6837687492370605,
+  "torch": "2.9.1+cu128",
+  "cuda_device": "NVIDIA A100-SXM4-80GB",
+  "cuda_capability": [
+    8,
+    0
+  ],
+  "capabilities": {
+    "cuda_available": true,
+    "cuda_capability": [
+      8,
+      0
+    ],
+    "is_sm80": true,
+    "sgl_kernel_available": true,
+    "sgl_kernel_error": null,
+    "sgl_kernel_sm80_common_ops": false,
+    "sgl_kernel_dsv4_ops": {
+      "deepseek_v4_topk_transform_512": false,
+      "dsv4_fused_q_indexer_rope_hadamard_quant": false,
+      "dsv4_fused_q_indexer_rope_hadamard_fp4_quant": false
+    },
+    "flash_mla_available": true,
+    "flash_mla_error": null,
+    "flashinfer_available": true,
+    "flashinfer_error": null,
+    "deep_gemm_available": false,
+    "deep_gemm_error": "RuntimeError: Check failed: (lib_handle_ != nullptr) is false: Failed to load dynamic shared library /usr/local/lib/python3.12/dist-packages/deep_gemm/_C.so libcudart.so.13: cannot open shared object file: No such file or directory",
+    "deep_gemm_usable": false,
+    "tilelang_available": true,
+    "tilelang_error": null,
+    "triton_available": true,
+    "triton_error": null,
+    "marlin_available": false,
+    "marlin_error": "module not installed"
+  },
+  "m_values": [
+    4
+  ],
+  "shapes": [
+    "fp8_indexer_wq_b"
+  ],
+  "results": [
+    {
+      "label": "fp8_indexer_wq_b",
+      "kind": "fp8",
+      "m": 4,
+      "k": 1024,
+      "n": 8192,
+      "fallback_total_ms": 0.3488768100738525,
+      "act_quant_ms": 0.1913856029510498,
+      "weight_dequant_ms": 0.20244479179382324,
+      "matmul_after_dequant_ms": 0.020275199413299562,
+      "triton_total_ms": 0.3090431928634644,
+      "speedup": 1.1288933654914273,
+      "max_abs_error": 0.0,
+      "mean_abs_error": 0.0,
+      "allclose_3e_2": true
+    }
+  ]
+}

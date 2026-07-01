@@ -1,0 +1,365 @@
+{
+  "config": {
+    "allow_dsv4_cuda_graph": true,
+    "cuda_graph_bs": [
+      1,
+      2,
+      4
+    ],
+    "cuda_graph_capture_greedy_sample": false,
+    "distributed_init_method": "env://",
+    "graph_runner": {
+      "capture_greedy_sample": false,
+      "captured_bs": [
+        4,
+        2,
+        1
+      ],
+      "eager_decode_count": 0,
+      "eager_decode_count_by_batch_size": {},
+      "enabled": true,
+      "error": null,
+      "greedy_sample_replay_count": 0,
+      "greedy_sample_replay_count_by_batch_size": {},
+      "replay_count": 3,
+      "replay_count_by_batch_size": {
+        "3": 3
+      },
+      "replay_count_by_padded_size": {
+        "4": 3
+      },
+      "replay_input_copy_bytes": 144,
+      "requested_bs": [
+        1,
+        2,
+        4
+      ]
+    },
+    "max_extend_tokens": 16384,
+    "max_seq_len": 8192,
+    "max_tokens": 4,
+    "memory_ratio": 0.9,
+    "num_pages": 72,
+    "page_size": 256,
+    "tensor_parallel_size": 8,
+    "use_pynccl": false
+  },
+  "model_path": "/models/DeepSeek-V4-Flash",
+  "prompts": [
+    "请用一句中文回答：2 + 2 等于几？",
+    "Answer in one short English sentence: what color is the sky on a clear day?",
+    "用一句话介绍杭州，不要超过20个字。"
+  ],
+  "status": "warn",
+  "variants": [
+    {
+      "config": {
+        "allow_dsv4_cuda_graph": true,
+        "cuda_graph_bs": [
+          1,
+          2,
+          4
+        ],
+        "distributed_init_method": "env://",
+        "graph_runner": {
+          "capture_greedy_sample": false,
+          "captured_bs": [
+            4,
+            2,
+            1
+          ],
+          "eager_decode_count": 0,
+          "eager_decode_count_by_batch_size": {},
+          "enabled": true,
+          "error": null,
+          "greedy_sample_replay_count": 0,
+          "greedy_sample_replay_count_by_batch_size": {},
+          "replay_count": 3,
+          "replay_count_by_batch_size": {
+            "3": 3
+          },
+          "replay_count_by_padded_size": {
+            "4": 3
+          },
+          "replay_input_copy_bytes": 144,
+          "requested_bs": [
+            1,
+            2,
+            4
+          ]
+        },
+        "max_extend_tokens": 16384,
+        "max_seq_len": 8192,
+        "max_tokens": 4,
+        "num_pages": 72,
+        "page_size": 256,
+        "temperature": 0.0,
+        "tensor_parallel_size": 8,
+        "thinking_mode": "chat",
+        "top_p": 1.0,
+        "use_pynccl": false
+      },
+      "elapsed_s": 5.107153534889221,
+      "errors": [],
+      "outputs": [
+        {
+          "formatted_prompt_preview": "<｜begin▁of▁sentence｜>You are a helpful assistant. Answer briefly and clearly.<｜User｜>请用一句中文回答：2 + 2 等于几？<｜Assistant｜></think>",
+          "generated_token_count": 4,
+          "generated_token_ids": [
+            20,
+            940,
+            223,
+            20
+          ],
+          "index": 0,
+          "parsed": {
+            "content": "2 + 2",
+            "reasoning_content": "",
+            "role": "assistant",
+            "tool_calls": []
+          },
+          "prompt": "请用一句中文回答：2 + 2 等于几？",
+          "raw_text": "2 + 2",
+          "sanity": {
+            "char_count": 5,
+            "content_char_fraction": 0.6666666666666666,
+            "expected_substrings": [
+              "4",
+              "四"
+            ],
+            "issues": [
+              "missing_expected_substring"
+            ],
+            "looks_sane": false,
+            "max_repeated_char_run": 1,
+            "max_repeated_symbol_run": 1,
+            "non_whitespace_char_count": 3,
+            "printable_fraction": 1.0,
+            "prompt_overlap_fraction": 0.0
+          },
+          "text": "2 + 2"
+        },
+        {
+          "formatted_prompt_preview": "<｜begin▁of▁sentence｜>You are a helpful assistant. Answer briefly and clearly.<｜User｜>Answer in one short English sentence: what color is the sky on a clear day?<｜Assistant｜></think>",
+          "generated_token_count": 4,
+          "generated_token_ids": [
+            671,
+            12709,
+            344,
+            8295
+          ],
+          "index": 1,
+          "parsed": {
+            "content": "The sky is blue",
+            "reasoning_content": "",
+            "role": "assistant",
+            "tool_calls": []
+          },
+          "prompt": "Answer in one short English sentence: what color is the sky on a clear day?",
+          "raw_text": "The sky is blue",
+          "sanity": {
+            "char_count": 15,
+            "content_char_fraction": 1.0,
+            "expected_substrings": [
+              "blue",
+              "Blue"
+            ],
+            "issues": [],
+            "looks_sane": true,
+            "max_repeated_char_run": 1,
+            "max_repeated_symbol_run": 0,
+            "non_whitespace_char_count": 12,
+            "printable_fraction": 1.0,
+            "prompt_overlap_fraction": 0.5
+          },
+          "text": "The sky is blue"
+        },
+        {
+          "formatted_prompt_preview": "<｜begin▁of▁sentence｜>You are a helpful assistant. Answer briefly and clearly.<｜User｜>用一句话介绍杭州，不要超过20个字。<｜Assistant｜></think>",
+          "generated_token_count": 4,
+          "generated_token_ids": [
+            24463,
+            389,
+            21614,
+            883
+          ],
+          "index": 2,
+          "parsed": {
+            "content": "杭州是风景如",
+            "reasoning_content": "",
+            "role": "assistant",
+            "tool_calls": []
+          },
+          "prompt": "用一句话介绍杭州，不要超过20个字。",
+          "raw_text": "杭州是风景如",
+          "sanity": {
+            "char_count": 6,
+            "content_char_fraction": 1.0,
+            "expected_substrings": [
+              "杭州"
+            ],
+            "issues": [],
+            "looks_sane": true,
+            "max_repeated_char_run": 1,
+            "max_repeated_symbol_run": 0,
+            "non_whitespace_char_count": 6,
+            "printable_fraction": 1.0,
+            "prompt_overlap_fraction": 0.3333333333333333
+          },
+          "text": "杭州是风景如"
+        }
+      ],
+      "per_rank": [
+        {
+          "elapsed_s": 5.102066555991769,
+          "error": null,
+          "memory": {
+            "max_memory_allocated_bytes": 22601624064,
+            "max_memory_reserved_bytes": 23192403968
+          },
+          "rank": 0
+        },
+        {
+          "elapsed_s": 5.1013258472085,
+          "error": null,
+          "memory": {
+            "max_memory_allocated_bytes": 22601624064,
+            "max_memory_reserved_bytes": 23192403968
+          },
+          "rank": 1
+        },
+        {
+          "elapsed_s": 5.101718602702022,
+          "error": null,
+          "memory": {
+            "max_memory_allocated_bytes": 22601624064,
+            "max_memory_reserved_bytes": 23192403968
+          },
+          "rank": 2
+        },
+        {
+          "elapsed_s": 5.104223281145096,
+          "error": null,
+          "memory": {
+            "max_memory_allocated_bytes": 22601624064,
+            "max_memory_reserved_bytes": 23192403968
+          },
+          "rank": 3
+        },
+        {
+          "elapsed_s": 5.10158315859735,
+          "error": null,
+          "memory": {
+            "max_memory_allocated_bytes": 22601624064,
+            "max_memory_reserved_bytes": 23192403968
+          },
+          "rank": 4
+        },
+        {
+          "elapsed_s": 5.1022073198109865,
+          "error": null,
+          "memory": {
+            "max_memory_allocated_bytes": 22601624064,
+            "max_memory_reserved_bytes": 23192403968
+          },
+          "rank": 5
+        },
+        {
+          "elapsed_s": 5.101023361086845,
+          "error": null,
+          "memory": {
+            "max_memory_allocated_bytes": 22601624064,
+            "max_memory_reserved_bytes": 23192403968
+          },
+          "rank": 6
+        },
+        {
+          "elapsed_s": 5.107153534889221,
+          "error": null,
+          "memory": {
+            "max_memory_allocated_bytes": 22601624064,
+            "max_memory_reserved_bytes": 23192403968
+          },
+          "rank": 7
+        }
+      ],
+      "status": "warn",
+      "variant": {
+        "active_dsv4_toggles": [
+          "MINISGL_DSV4_SM80_COMPRESS",
+          "MINISGL_DSV4_SM80_COMPRESS_STORE",
+          "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE",
+          "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT",
+          "MINISGL_DSV4_SM80_GATE_FP32_WEIGHT_CACHE",
+          "MINISGL_DSV4_SM80_HC",
+          "MINISGL_DSV4_SM80_INDEXER_BF16",
+          "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE",
+          "MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM",
+          "MINISGL_DSV4_SM80_KV_BF16",
+          "MINISGL_DSV4_SM80_MOE_ROUTE",
+          "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
+          "MINISGL_DSV4_SM80_Q_NORM_ROPE",
+          "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM",
+          "MINISGL_DSV4_SM80_RMSNORM",
+          "MINISGL_DSV4_SM80_ROPE",
+          "MINISGL_DSV4_SM80_SPARSE_ATTN_BF16",
+          "MINISGL_DSV4_SM80_SWIGLU",
+          "MINISGL_DSV4_SM80_TOPK",
+          "MINISGL_DSV4_SM80_V1_MOE",
+          "MINISGL_DSV4_SM80_WO_B_FP8_GEMM"
+        ],
+        "cleared_dsv4_sm80_env": [
+          "MINISGL_DSV4_SM80_COMPRESS",
+          "MINISGL_DSV4_SM80_COMPRESS_STORE",
+          "MINISGL_DSV4_SM80_FP4_GEMM",
+          "MINISGL_DSV4_SM80_FP8_GEMM",
+          "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE",
+          "MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM",
+          "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT",
+          "MINISGL_DSV4_SM80_GATE_FP32_WEIGHT_CACHE",
+          "MINISGL_DSV4_SM80_HC",
+          "MINISGL_DSV4_SM80_INDEXER_BF16",
+          "MINISGL_DSV4_SM80_INDEXER_FP4",
+          "MINISGL_DSV4_SM80_INDEXER_FP8",
+          "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE",
+          "MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM",
+          "MINISGL_DSV4_SM80_KV_BF16",
+          "MINISGL_DSV4_SM80_KV_FP8",
+          "MINISGL_DSV4_SM80_LINEAR_BF16_FP32",
+          "MINISGL_DSV4_SM80_MOE_ROUTE",
+          "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
+          "MINISGL_DSV4_SM80_PAGED_MQA_FP8",
+          "MINISGL_DSV4_SM80_Q_NORM_ROPE",
+          "MINISGL_DSV4_SM80_Q_WQA_FP8_GEMM",
+          "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM",
+          "MINISGL_DSV4_SM80_RMSNORM",
+          "MINISGL_DSV4_SM80_ROPE",
+          "MINISGL_DSV4_SM80_SHARED_FP8_GEMM",
+          "MINISGL_DSV4_SM80_SPARSE_ATTN_BF16",
+          "MINISGL_DSV4_SM80_STORE_CACHE",
+          "MINISGL_DSV4_SM80_SWIGLU",
+          "MINISGL_DSV4_SM80_TOPK",
+          "MINISGL_DSV4_SM80_V0_BF16",
+          "MINISGL_DSV4_SM80_V1_MOE",
+          "MINISGL_DSV4_SM80_WO_A_BF16",
+          "MINISGL_DSV4_SM80_WO_A_FP8",
+          "MINISGL_DSV4_SM80_WO_B_FP8_GEMM"
+        ],
+        "description": "V1 exact grouped MoE with opt-in DSV4 decode CUDA graph capture, experimental sm80 HC/RMSNorm helpers, vLLM-aligned shared-activation attention wq_a/wkv FP8 projection, vLLM-aligned fused q norm/rope plus KV norm/rope/cache-store, selective attention wq_b/wo_b FP8 GEMM, selective indexer wq_b FP8 GEMM, exact gate fp32 weight caching, and exact indexer-store norm fp32 weight caching.",
+        "name": "v1_moe_graph_hc_rmsnorm_fwqakv_qkvrope_wqb_wob_idxwqb_gatecache_idxstorecache",
+        "raw_dsv4_sm80_env": {
+          "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE": "1",
+          "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT": "1",
+          "MINISGL_DSV4_SM80_GATE_FP32_WEIGHT_CACHE": "1",
+          "MINISGL_DSV4_SM80_HC": "1",
+          "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE": "1",
+          "MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM": "1",
+          "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM": "1",
+          "MINISGL_DSV4_SM80_RMSNORM": "1",
+          "MINISGL_DSV4_SM80_V1_MOE": "1",
+          "MINISGL_DSV4_SM80_WO_B_FP8_GEMM": "1"
+        }
+      }
+    }
+  ]
+}
