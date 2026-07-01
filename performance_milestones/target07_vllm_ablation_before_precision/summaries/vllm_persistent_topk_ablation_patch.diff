@@ -1,0 +1,27 @@
+diff --git a/vllm/model_executor/layers/sparse_attn_indexer.py b/vllm/model_executor/layers/sparse_attn_indexer.py
+index 316cdd3..4381521 100644
+--- a/vllm/model_executor/layers/sparse_attn_indexer.py
++++ b/vllm/model_executor/layers/sparse_attn_indexer.py
+@@ -2,6 +2,8 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Custom Sparse Attention Indexer layers."""
+ 
++import os
++
+ import torch
+ 
+ import vllm.envs as envs
+@@ -349,7 +351,12 @@ def sparse_attn_indexer(
+         num_rows = logits.shape[0]
+         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+ 
+-        if current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
++        use_persistent_topk = (
++            current_platform.is_cuda()
++            and topk_tokens in (512, 1024, 2048)
++            and os.getenv("VLLM_DSV4_ABLATE_PERSISTENT_TOPK") != "1"
++        )
++        if use_persistent_topk:
+             workspace_manager = current_workspace_manager()
+             (topk_workspace,) = workspace_manager.get_simultaneous(
+                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),

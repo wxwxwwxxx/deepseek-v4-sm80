@@ -510,6 +510,215 @@ def _copy_masked_compressed_locs_kernel(
 
 
 @triton.jit
+def _copy_1d_i32(src_ptr, dst_ptr, offsets, n):
+    mask = offsets < n
+    values = tl.load(src_ptr + offsets, mask=mask, other=0)
+    tl.store(dst_ptr + offsets, values, mask=mask)
+
+
+@triton.jit
+def _copy_2d_i32_fill(
+    src_ptr,
+    dst_ptr,
+    offsets,
+    rows: tl.constexpr,
+    dst_width: tl.constexpr,
+    src_width: tl.constexpr,
+    fill_value: tl.constexpr,
+):
+    total = rows * dst_width
+    mask = offsets < total
+    row = offsets // dst_width
+    col = offsets - row * dst_width
+    has_src = col < src_width
+    values = tl.load(
+        src_ptr + row * src_width + col,
+        mask=mask & has_src,
+        other=fill_value,
+    )
+    values = tl.where(has_src, values, fill_value)
+    tl.store(dst_ptr + row * dst_width + col, values, mask=mask)
+
+
+@triton.jit
+def _copy_decode_metadata_for_replay_kernel(
+    dst_raw_out_loc,
+    src_raw_out_loc,
+    dst_seq_lens,
+    src_seq_lens,
+    dst_req_seq_lens,
+    src_req_seq_lens,
+    dst_extend_lens,
+    src_extend_lens,
+    dst_positions,
+    src_positions,
+    dst_req_table_indices,
+    src_req_table_indices,
+    dst_swa_topk_lengths,
+    src_swa_topk_lengths,
+    dst_c4_topk_lengths_raw,
+    src_c4_topk_lengths_raw,
+    dst_c4_topk_lengths_clamp1,
+    src_c4_topk_lengths_clamp1,
+    dst_c4_sparse_topk_lengths,
+    src_c4_sparse_topk_lengths,
+    dst_c128_topk_lengths_clamp1,
+    src_c128_topk_lengths_clamp1,
+    dst_cu_seqlens_q,
+    src_cu_seqlens_q,
+    dst_page_table,
+    src_page_table,
+    dst_swa_page_indices,
+    src_swa_page_indices,
+    dst_c4_sparse_raw_indices,
+    src_c4_sparse_raw_indices,
+    dst_c4_sparse_page_indices,
+    src_c4_sparse_page_indices,
+    dst_c4_sparse_full_indices,
+    src_c4_sparse_full_indices,
+    dst_c128_raw_indices,
+    src_c128_raw_indices,
+    dst_c128_page_indices,
+    src_c128_page_indices,
+    dst_c128_full_indices,
+    src_c128_full_indices,
+    rows: tl.constexpr,
+    graph_inputs_bound: tl.constexpr,
+    dst_page_table_width: tl.constexpr,
+    src_page_table_width: tl.constexpr,
+    dst_swa_page_indices_width: tl.constexpr,
+    src_swa_page_indices_width: tl.constexpr,
+    dst_c4_sparse_raw_indices_width: tl.constexpr,
+    src_c4_sparse_raw_indices_width: tl.constexpr,
+    dst_c4_sparse_page_indices_width: tl.constexpr,
+    src_c4_sparse_page_indices_width: tl.constexpr,
+    dst_c4_sparse_full_indices_width: tl.constexpr,
+    src_c4_sparse_full_indices_width: tl.constexpr,
+    dst_c128_raw_indices_width: tl.constexpr,
+    src_c128_raw_indices_width: tl.constexpr,
+    dst_c128_page_indices_width: tl.constexpr,
+    src_c128_page_indices_width: tl.constexpr,
+    dst_c128_full_indices_width: tl.constexpr,
+    src_c128_full_indices_width: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    field = tl.program_id(1)
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+
+    if field == 0:
+        if not graph_inputs_bound:
+            _copy_1d_i32(src_raw_out_loc, dst_raw_out_loc, offsets, rows)
+    elif field == 1:
+        _copy_1d_i32(src_seq_lens, dst_seq_lens, offsets, rows)
+    elif field == 2:
+        _copy_1d_i32(src_req_seq_lens, dst_req_seq_lens, offsets, rows)
+    elif field == 3:
+        _copy_1d_i32(src_extend_lens, dst_extend_lens, offsets, rows)
+    elif field == 4:
+        if not graph_inputs_bound:
+            _copy_1d_i32(src_positions, dst_positions, offsets, rows)
+    elif field == 5:
+        _copy_1d_i32(src_req_table_indices, dst_req_table_indices, offsets, rows)
+    elif field == 6:
+        _copy_1d_i32(src_swa_topk_lengths, dst_swa_topk_lengths, offsets, rows)
+    elif field == 7:
+        _copy_1d_i32(src_c4_topk_lengths_raw, dst_c4_topk_lengths_raw, offsets, rows)
+    elif field == 8:
+        _copy_1d_i32(src_c4_topk_lengths_clamp1, dst_c4_topk_lengths_clamp1, offsets, rows)
+    elif field == 9:
+        _copy_1d_i32(src_c4_sparse_topk_lengths, dst_c4_sparse_topk_lengths, offsets, rows)
+    elif field == 10:
+        _copy_1d_i32(
+            src_c128_topk_lengths_clamp1,
+            dst_c128_topk_lengths_clamp1,
+            offsets,
+            rows,
+        )
+    elif field == 11:
+        _copy_1d_i32(src_cu_seqlens_q, dst_cu_seqlens_q, offsets, rows + 1)
+    elif field == 12:
+        _copy_2d_i32_fill(
+            src_page_table,
+            dst_page_table,
+            offsets,
+            rows,
+            dst_page_table_width,
+            src_page_table_width,
+            0,
+        )
+    elif field == 13:
+        _copy_2d_i32_fill(
+            src_swa_page_indices,
+            dst_swa_page_indices,
+            offsets,
+            rows,
+            dst_swa_page_indices_width,
+            src_swa_page_indices_width,
+            -1,
+        )
+    elif field == 14:
+        _copy_2d_i32_fill(
+            src_c4_sparse_raw_indices,
+            dst_c4_sparse_raw_indices,
+            offsets,
+            rows,
+            dst_c4_sparse_raw_indices_width,
+            src_c4_sparse_raw_indices_width,
+            -1,
+        )
+    elif field == 15:
+        _copy_2d_i32_fill(
+            src_c4_sparse_page_indices,
+            dst_c4_sparse_page_indices,
+            offsets,
+            rows,
+            dst_c4_sparse_page_indices_width,
+            src_c4_sparse_page_indices_width,
+            -1,
+        )
+    elif field == 16:
+        _copy_2d_i32_fill(
+            src_c4_sparse_full_indices,
+            dst_c4_sparse_full_indices,
+            offsets,
+            rows,
+            dst_c4_sparse_full_indices_width,
+            src_c4_sparse_full_indices_width,
+            -1,
+        )
+    elif field == 17:
+        _copy_2d_i32_fill(
+            src_c128_raw_indices,
+            dst_c128_raw_indices,
+            offsets,
+            rows,
+            dst_c128_raw_indices_width,
+            src_c128_raw_indices_width,
+            -1,
+        )
+    elif field == 18:
+        _copy_2d_i32_fill(
+            src_c128_page_indices,
+            dst_c128_page_indices,
+            offsets,
+            rows,
+            dst_c128_page_indices_width,
+            src_c128_page_indices_width,
+            -1,
+        )
+    else:
+        _copy_2d_i32_fill(
+            src_c128_full_indices,
+            dst_c128_full_indices,
+            offsets,
+            rows,
+            dst_c128_full_indices_width,
+            src_c128_full_indices_width,
+            -1,
+        )
+
+
+@triton.jit
 def _pad_indices_kernel(
     indices_ptr,
     out_ptr,
@@ -2496,6 +2705,131 @@ def copy_masked_compressed_locs(
     return True
 
 
+def copy_decode_metadata_for_replay(
+    *,
+    dst_raw_out_loc: torch.Tensor,
+    src_raw_out_loc: torch.Tensor,
+    dst_seq_lens: torch.Tensor,
+    src_seq_lens: torch.Tensor,
+    dst_req_seq_lens: torch.Tensor,
+    src_req_seq_lens: torch.Tensor,
+    dst_extend_lens: torch.Tensor,
+    src_extend_lens: torch.Tensor,
+    dst_positions: torch.Tensor,
+    src_positions: torch.Tensor,
+    dst_req_table_indices: torch.Tensor,
+    src_req_table_indices: torch.Tensor,
+    dst_swa_topk_lengths: torch.Tensor,
+    src_swa_topk_lengths: torch.Tensor,
+    dst_c4_topk_lengths_raw: torch.Tensor,
+    src_c4_topk_lengths_raw: torch.Tensor,
+    dst_c4_topk_lengths_clamp1: torch.Tensor,
+    src_c4_topk_lengths_clamp1: torch.Tensor,
+    dst_c4_sparse_topk_lengths: torch.Tensor,
+    src_c4_sparse_topk_lengths: torch.Tensor,
+    dst_c128_topk_lengths_clamp1: torch.Tensor,
+    src_c128_topk_lengths_clamp1: torch.Tensor,
+    dst_cu_seqlens_q: torch.Tensor,
+    src_cu_seqlens_q: torch.Tensor,
+    dst_page_table: torch.Tensor,
+    src_page_table: torch.Tensor,
+    dst_swa_page_indices: torch.Tensor,
+    src_swa_page_indices: torch.Tensor,
+    dst_c4_sparse_raw_indices: torch.Tensor,
+    src_c4_sparse_raw_indices: torch.Tensor,
+    dst_c4_sparse_page_indices: torch.Tensor,
+    src_c4_sparse_page_indices: torch.Tensor,
+    dst_c4_sparse_full_indices: torch.Tensor,
+    src_c4_sparse_full_indices: torch.Tensor,
+    dst_c128_raw_indices: torch.Tensor,
+    src_c128_raw_indices: torch.Tensor,
+    dst_c128_page_indices: torch.Tensor,
+    src_c128_page_indices: torch.Tensor,
+    dst_c128_full_indices: torch.Tensor,
+    src_c128_full_indices: torch.Tensor,
+    rows: int,
+    graph_inputs_bound: bool,
+) -> bool:
+    if rows <= 0:
+        return True
+    max_elements = max(
+        rows,
+        rows + 1,
+        rows * dst_page_table.shape[1],
+        rows * dst_swa_page_indices.shape[1],
+        rows * dst_c4_sparse_raw_indices.shape[1],
+        rows * dst_c4_sparse_page_indices.shape[1],
+        rows * dst_c4_sparse_full_indices.shape[1],
+        rows * dst_c128_raw_indices.shape[1],
+        rows * dst_c128_page_indices.shape[1],
+        rows * dst_c128_full_indices.shape[1],
+    )
+    block = 256
+    grid = (triton.cdiv(max_elements, block), 20)
+    _copy_decode_metadata_for_replay_kernel[grid](
+        dst_raw_out_loc,
+        src_raw_out_loc,
+        dst_seq_lens,
+        src_seq_lens,
+        dst_req_seq_lens,
+        src_req_seq_lens,
+        dst_extend_lens,
+        src_extend_lens,
+        dst_positions,
+        src_positions,
+        dst_req_table_indices,
+        src_req_table_indices,
+        dst_swa_topk_lengths,
+        src_swa_topk_lengths,
+        dst_c4_topk_lengths_raw,
+        src_c4_topk_lengths_raw,
+        dst_c4_topk_lengths_clamp1,
+        src_c4_topk_lengths_clamp1,
+        dst_c4_sparse_topk_lengths,
+        src_c4_sparse_topk_lengths,
+        dst_c128_topk_lengths_clamp1,
+        src_c128_topk_lengths_clamp1,
+        dst_cu_seqlens_q,
+        src_cu_seqlens_q,
+        dst_page_table,
+        src_page_table,
+        dst_swa_page_indices,
+        src_swa_page_indices,
+        dst_c4_sparse_raw_indices,
+        src_c4_sparse_raw_indices,
+        dst_c4_sparse_page_indices,
+        src_c4_sparse_page_indices,
+        dst_c4_sparse_full_indices,
+        src_c4_sparse_full_indices,
+        dst_c128_raw_indices,
+        src_c128_raw_indices,
+        dst_c128_page_indices,
+        src_c128_page_indices,
+        dst_c128_full_indices,
+        src_c128_full_indices,
+        rows=int(rows),
+        graph_inputs_bound=bool(graph_inputs_bound),
+        dst_page_table_width=dst_page_table.shape[1],
+        src_page_table_width=src_page_table.shape[1],
+        dst_swa_page_indices_width=dst_swa_page_indices.shape[1],
+        src_swa_page_indices_width=src_swa_page_indices.shape[1],
+        dst_c4_sparse_raw_indices_width=dst_c4_sparse_raw_indices.shape[1],
+        src_c4_sparse_raw_indices_width=src_c4_sparse_raw_indices.shape[1],
+        dst_c4_sparse_page_indices_width=dst_c4_sparse_page_indices.shape[1],
+        src_c4_sparse_page_indices_width=src_c4_sparse_page_indices.shape[1],
+        dst_c4_sparse_full_indices_width=dst_c4_sparse_full_indices.shape[1],
+        src_c4_sparse_full_indices_width=src_c4_sparse_full_indices.shape[1],
+        dst_c128_raw_indices_width=dst_c128_raw_indices.shape[1],
+        src_c128_raw_indices_width=src_c128_raw_indices.shape[1],
+        dst_c128_page_indices_width=dst_c128_page_indices.shape[1],
+        src_c128_page_indices_width=src_c128_page_indices.shape[1],
+        dst_c128_full_indices_width=dst_c128_full_indices.shape[1],
+        src_c128_full_indices_width=src_c128_full_indices.shape[1],
+        BLOCK=block,
+    )
+    return True
+
+
 def topk_transform_512(indices: torch.Tensor, *, width: int) -> torch.Tensor | None:
     if indices.numel() == 0 or not indices.is_cuda:
         return None
@@ -3440,6 +3774,7 @@ __all__ = [
     "indexer_bf16_logits",
     "k_norm_rope_cache_bf16",
     "copy_masked_compressed_locs",
+    "copy_decode_metadata_for_replay",
     "paged_mqa_attention_bf16",
     "q_norm_rope",
     "quantized_linear_fp4",

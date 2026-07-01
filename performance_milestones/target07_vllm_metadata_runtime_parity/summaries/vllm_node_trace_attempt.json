@@ -1,0 +1,39 @@
+{
+  "target": "07.42",
+  "attempt": "fresh_vllm_node_trace_4096x128_bs4",
+  "status": "workload_pass_profile_export_blocked",
+  "command_shape": {
+    "tensor_parallel_size": 8,
+    "block_size": 256,
+    "prompt_len": 4096,
+    "decode_len": 128,
+    "batch_size": 4,
+    "max_num_batched_tokens": 4096,
+    "enable_chunked_prefill": true,
+    "cudagraph_capture_sizes": [1, 2, 4],
+    "max_cudagraph_capture_size": 4,
+    "nsys_cuda_graph_trace": "node"
+  },
+  "workload_summary": {
+    "artifact": "raw/dsv4_target0742_nsys_vllm_node_4096x128_bs4/summary.json",
+    "status": "pass",
+    "actual_output_tokens": 512,
+    "elapsed_s": 6.397216243669391,
+    "end_to_end_output_tokens_per_s": 80.03481209606899,
+    "prompt_tokens": 16384
+  },
+  "profile_summary": {
+    "nsys_rep_written": false,
+    "sqlite_written": false,
+    "reason": "nsys profile waited indefinitely for re-parented vLLM worker processes after the benchmark passed; GPU compute apps were already gone, and no .nsys-rep/.sqlite had been written before the profiling process was terminated."
+  },
+  "runtime_observations_from_log": [
+    "vLLM selected quantization=deepseek_v4_fp8.",
+    "DeepSeek's fp8_ds_mla KV cache format was used.",
+    "FP8 indexer cache was used for the Lightning Indexer.",
+    "MXFP4 MoE used the MARLIN backend.",
+    "CUDA graph capture used PIECEWISE and FULL decode capture sizes [1, 2, 4].",
+    "custom all-reduce registered CUDA graph addresses during graph setup."
+  ],
+  "comparability": "Macro throughput and code-path selection are usable. Per-kernel or per-graph-node costs are not usable because the node-trace profile did not export."
+}

@@ -1,0 +1,52 @@
+{
+  "target": "07.41",
+  "status": "pass_with_subgraph_gain_no_macro_promotion",
+  "selected_cut": "graph_stable_decode_replay_metadata_copy",
+  "variant": "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_metacopy_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache",
+  "baseline_variant": "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache",
+  "precision_policy": {
+    "default_cache": "bf16_flat",
+    "expert_weights": "Marlin WNA16",
+    "packed_fp8_ds_mla_default": false,
+    "fp8_indexer_cache_default": false
+  },
+  "microbench": {
+    "artifact": "summaries/replay_metadata_copy_microbench.json",
+    "rows": 4,
+    "max_seq_len": 5120,
+    "page_size": 256,
+    "graph_inputs_bound": true,
+    "legacy_ms": 0.25360794067382814,
+    "fused_ms": 0.12718694305419923,
+    "speedup": 1.9939777982222286,
+    "reduction_pct": 49.84945032306775,
+    "legacy_launches_per_replay": 18,
+    "fused_launches_per_replay": 1
+  },
+  "correctness": {
+    "pytest": "pytest -q -o addopts='' tests/attention/test_deepseek_v4_backend_metadata.py tests/kernel/test_deepseek_v4_wrappers.py::test_dsv4_sm80_v0_bf16_bundle_env_policy tests/kernel/test_deepseek_v4_wrappers.py::test_copy_decode_metadata_for_replay_matches_legacy_copy",
+    "pytest_status": "pass",
+    "pytest_passed": 12,
+    "tp8_text_smoke_artifact": "summaries/tp8_text_smoke_metacopy.json",
+    "tp8_text_smoke_status": "pass",
+    "tp8_text_smoke_page_size": 256,
+    "tp8_text_smoke_num_pages": 128
+  },
+  "macro": {
+    "baseline_source": "TARGET 07.40 reused TARGET 07.395 exact split-K macro",
+    "4096x128_bs4_baseline_output_tok_s": 38.9378857615228,
+    "4096x128_bs4_metacopy_output_tok_s": 39.0027612016964,
+    "4096x128_bs4_delta_pct": 0.1666112290231532,
+    "4096x128_bs4_artifact": "raw/dsv4_target0741_metacopy_4096x128_bs4_np128/summary.json",
+    "4096x1024_bs4_baseline_output_tok_s": 68.80972486389888,
+    "4096x1024_bs4_metacopy_output_tok_s": 68.63141419207236,
+    "4096x1024_bs4_delta_pct": -0.25913586670156154,
+    "4096x1024_bs4_artifact": "raw/dsv4_target0741_metacopy_4096x1024_bs4_np128/summary.json"
+  },
+  "profile": {
+    "captured_new_nsys": false,
+    "reason": "Macro did not improve by about 5%, so TARGET 07.41 did not require a new Nsight/profile capture."
+  },
+  "decision": "Keep the opt-in fused replay metadata copy as a validated exact subgraph cut, but do not promote it as the new best exact macro variant. Do not continue local replay-metadata polish without a fresh profile showing this bucket is still top-two after the cut.",
+  "next_recommendation": "Run a fresh profile/parity pass before more exact bf16 work, or move to TARGET 07.50 if the next evidence points to packed FP8 KV/indexer cache/layout as the remaining macro gap."
+}

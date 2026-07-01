@@ -60,8 +60,10 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.10 | `prompts/TARGET_07.10_dsv4_sm80_foundation_history.md` | completed history | Fair rebench, communication/CUDA graph, and subgraph parity history. |
 | TARGET 07.20 | `prompts/TARGET_07.20_dsv4_sm80_moe_history.md` | completed history | MoE route from MoE V2 through mini-owned Marlin WNA16, including why MoE is no longer primary. |
 | TARGET 07.30 | `prompts/TARGET_07.30_dsv4_sm80_attention_history.md` | completed history | Attention/indexer/cache route through global topk/lens and bf16 split-K sparse decode. |
-| TARGET 07.40 | `prompts/TARGET_07.40_dsv4_sm80_post_splitk_reprofile.md` | next todo | Reprofile the post-splitK best exact stack and choose the next bottleneck. |
-| TARGET 07.41 | `prompts/TARGET_07.41_dsv4_sm80_indexer_cache_runtime_exact.md` | conditional todo | Exact bf16 indexer/cache/runtime work if 07.40 selects it. |
+| TARGET 07.40 | `prompts/TARGET_07.40_dsv4_sm80_post_splitk_reprofile.md` | completed | Reprofiled the post-splitK exact stack; decode split-K is no longer the main bottleneck. |
+| TARGET 07.41 | `prompts/TARGET_07.41_dsv4_sm80_indexer_cache_runtime_exact.md` | completed | Validated an exact replay metadata-copy cut, but macro gain was negligible; do not continue local metacopy polish. |
+| TARGET 07.42 | `prompts/TARGET_07.42_dsv4_sm80_vllm_metadata_runtime_parity.md` | completed | Evidence report found no justified exact runtime PoC; recommended precision/cache, but vLLM per-bucket timing remains incomplete. |
+| TARGET 07.43 | `prompts/TARGET_07.43_dsv4_sm80_vllm_ablation_before_precision.md` | next todo | vLLM destructive ablations for aux stream, persistent topk/indexer, and CUDA graph before opening precision/cache work. |
 | TARGET 07.50 | `prompts/TARGET_07.50_dsv4_sm80_fp8_cache_indexer_precision.md` | conditional todo | Opt-in packed FP8 KV/indexer cache lane if exact bf16 work cannot close the remaining gap. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
@@ -99,7 +101,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.40 next.
+Run TARGET 07.43 next.
 
 TARGET 07.395 proved that mini's exact bf16 sparse decode boundary can match
 the comparable vLLM gather+split-K decode boundary:
@@ -107,15 +109,25 @@ the comparable vLLM gather+split-K decode boundary:
 - mini exact sparse-only decode: about `0.2284 ms`;
 - vLLM prior gather+split-K decode probe: about `0.2258 ms`.
 
-Therefore the remaining vLLM gap should not be attributed to "mini did not call
-the vLLM sparse decode kernel".  The likely next candidates are:
+TARGET 07.40 then showed that the post-splitK top exact-path costs moved to
+runtime/copy/cat/index graph nodes, elementwise graph nodes, legacy
+prefill/extend sparse attention, indexer/cache/topk work, and projection GEMM.
+TARGET 07.41 optimized one real replay metadata-copy subgraph, but macro moved
+only from `38.9379` to `39.0028` output tok/s on 4096/128 and from `68.8097`
+to `68.6314` output tok/s on 4096/1024.
 
-1. prefill/extend legacy sparse work;
-2. indexer/cache work such as bf16 indexer logits and cache store;
-3. runtime/copy/allocation/graph-buffer overhead;
-4. packed FP8 cache/indexer precision/layout.
+TARGET 07.42 built the mini-vs-vLLM parity table and did not find a justified
+exact runtime PoC.  Its strongest evidence-backed next hypothesis is vLLM's
+packed FP8 KV/indexer cache lane, but it also identified an unproven suspicion:
+vLLM's attention custom-op plus aux-stream overlap and V1 graph/runtime
+discipline may hide part of mini's runtime/copy/elementwise bucket.
 
-TARGET 07.40 must decide whether 07.41 or 07.50 should run next.
+TARGET 07.43 should run before TARGET 07.50.  It is a short vLLM ablation pass:
+disable aux-stream overlap, persistent topk/indexer fast paths, and CUDA graph
+dispatch where cleanly possible.  If those destructive experiments show a
+stable `>=5%` vLLM macro loss from an exact-portable mechanism, adapt that
+mechanism first.  If they do not, open TARGET 07.50 for the opt-in packed
+FP8/cache/indexer precision lane.
 
 ## Precision Policy
 

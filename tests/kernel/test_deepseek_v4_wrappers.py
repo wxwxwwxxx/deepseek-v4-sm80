@@ -396,6 +396,88 @@ def test_dsv4_capability_detection_keeps_sm80_gates_explicit():
     }
 
 
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_copy_decode_metadata_for_replay_matches_legacy_copy(monkeypatch):
+    device = torch.device("cuda")
+    rows = 3
+    one_d_names = (
+        "raw_out_loc",
+        "seq_lens",
+        "req_seq_lens",
+        "extend_lens",
+        "positions",
+        "req_table_indices",
+        "swa_topk_lengths",
+        "c4_topk_lengths_raw",
+        "c4_topk_lengths_clamp1",
+        "c4_sparse_topk_lengths",
+        "c128_topk_lengths_clamp1",
+    )
+    two_d_specs = {
+        "page_table": (2, 5, 0),
+        "swa_page_indices": (4, 6, -1),
+        "c4_sparse_raw_indices": (3, 8, -1),
+        "c4_sparse_page_indices": (5, 8, -1),
+        "c4_sparse_full_indices": (4, 8, -1),
+        "c128_raw_indices": (2, 4, -1),
+        "c128_page_indices": (3, 4, -1),
+        "c128_full_indices": (1, 4, -1),
+    }
+
+    def make_args(graph_inputs_bound: bool) -> tuple[dict[str, torch.Tensor | int | bool], dict]:
+        args: dict[str, torch.Tensor | int | bool] = {}
+        expected: dict[str, torch.Tensor] = {}
+        counter = 1
+        for name in one_d_names:
+            src = torch.arange(counter, counter + rows, device=device, dtype=torch.int32)
+            dst = torch.full((rows,), -9999, device=device, dtype=torch.int32)
+            args[f"src_{name}"] = src
+            args[f"dst_{name}"] = dst
+            if graph_inputs_bound and name in {"raw_out_loc", "positions"}:
+                expected[name] = dst.clone()
+            else:
+                expected[name] = src.clone()
+            counter += 100
+        src_cu = torch.arange(7000, 7000 + rows + 1, device=device, dtype=torch.int32)
+        dst_cu = torch.full((rows + 1,), -9999, device=device, dtype=torch.int32)
+        args["src_cu_seqlens_q"] = src_cu
+        args["dst_cu_seqlens_q"] = dst_cu
+        expected["cu_seqlens_q"] = src_cu.clone()
+
+        for name, (src_width, dst_width, fill) in two_d_specs.items():
+            src = (
+                torch.arange(
+                    counter,
+                    counter + rows * src_width,
+                    device=device,
+                    dtype=torch.int32,
+                )
+                .reshape(rows, src_width)
+                .contiguous()
+            )
+            dst = torch.full((rows, dst_width), -9999, device=device, dtype=torch.int32)
+            args[f"src_{name}"] = src
+            args[f"dst_{name}"] = dst
+            exp = torch.full_like(dst, fill)
+            exp[:, : min(src_width, dst_width)] = src[:, : min(src_width, dst_width)]
+            expected[name] = exp
+            counter += 1000
+        args["rows"] = rows
+        args["graph_inputs_bound"] = graph_inputs_bound
+        return args, expected
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE, "1")
+    for graph_inputs_bound in (False, True):
+        args, expected = make_args(graph_inputs_bound)
+        assert dsv4_kernel.copy_decode_metadata_for_replay(**args)
+        torch.cuda.synchronize()
+        for name in one_d_names:
+            assert torch.equal(args[f"dst_{name}"], expected[name])
+        assert torch.equal(args["dst_cu_seqlens_q"], expected["cu_seqlens_q"])
+        for name in two_d_specs:
+            assert torch.equal(args[f"dst_{name}"], expected[name])
+
+
 def test_dsv4_unsupported_sm80_paths_fail_clearly():
     with pytest.raises(NotImplementedError) as exc:
         dsv4_kernel.fused_q_indexer_rope_hadamard_fp4_quant()

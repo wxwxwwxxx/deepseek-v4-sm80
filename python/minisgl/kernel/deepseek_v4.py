@@ -37,6 +37,7 @@ DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE = "vllm_marlin_bridge"
 DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
 DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
 DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
+DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
     DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
@@ -116,6 +117,7 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE",
     DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE,
     DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE,
+    DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE,
 )
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_V0_BF16_TOGGLE,
@@ -2691,6 +2693,173 @@ def copy_masked_compressed_locs(
     _copy_masked_compressed_locs_fallback(c128_out_loc, raw_out_loc, positions, rows, ratio=128)
 
 
+def copy_decode_metadata_for_replay(
+    *,
+    dst_raw_out_loc: torch.Tensor,
+    src_raw_out_loc: torch.Tensor,
+    dst_seq_lens: torch.Tensor,
+    src_seq_lens: torch.Tensor,
+    dst_req_seq_lens: torch.Tensor,
+    src_req_seq_lens: torch.Tensor,
+    dst_extend_lens: torch.Tensor,
+    src_extend_lens: torch.Tensor,
+    dst_positions: torch.Tensor,
+    src_positions: torch.Tensor,
+    dst_req_table_indices: torch.Tensor,
+    src_req_table_indices: torch.Tensor,
+    dst_swa_topk_lengths: torch.Tensor,
+    src_swa_topk_lengths: torch.Tensor,
+    dst_c4_topk_lengths_raw: torch.Tensor,
+    src_c4_topk_lengths_raw: torch.Tensor,
+    dst_c4_topk_lengths_clamp1: torch.Tensor,
+    src_c4_topk_lengths_clamp1: torch.Tensor,
+    dst_c4_sparse_topk_lengths: torch.Tensor,
+    src_c4_sparse_topk_lengths: torch.Tensor,
+    dst_c128_topk_lengths_clamp1: torch.Tensor,
+    src_c128_topk_lengths_clamp1: torch.Tensor,
+    dst_cu_seqlens_q: torch.Tensor,
+    src_cu_seqlens_q: torch.Tensor,
+    dst_page_table: torch.Tensor,
+    src_page_table: torch.Tensor,
+    dst_swa_page_indices: torch.Tensor,
+    src_swa_page_indices: torch.Tensor,
+    dst_c4_sparse_raw_indices: torch.Tensor,
+    src_c4_sparse_raw_indices: torch.Tensor,
+    dst_c4_sparse_page_indices: torch.Tensor,
+    src_c4_sparse_page_indices: torch.Tensor,
+    dst_c4_sparse_full_indices: torch.Tensor,
+    src_c4_sparse_full_indices: torch.Tensor,
+    dst_c128_raw_indices: torch.Tensor,
+    src_c128_raw_indices: torch.Tensor,
+    dst_c128_page_indices: torch.Tensor,
+    src_c128_page_indices: torch.Tensor,
+    dst_c128_full_indices: torch.Tensor,
+    src_c128_full_indices: torch.Tensor,
+    rows: int,
+    graph_inputs_bound: bool,
+) -> bool:
+    if not dsv4_env_flag(DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE):
+        return False
+    tensors = (
+        dst_raw_out_loc,
+        src_raw_out_loc,
+        dst_seq_lens,
+        src_seq_lens,
+        dst_req_seq_lens,
+        src_req_seq_lens,
+        dst_extend_lens,
+        src_extend_lens,
+        dst_positions,
+        src_positions,
+        dst_req_table_indices,
+        src_req_table_indices,
+        dst_swa_topk_lengths,
+        src_swa_topk_lengths,
+        dst_c4_topk_lengths_raw,
+        src_c4_topk_lengths_raw,
+        dst_c4_topk_lengths_clamp1,
+        src_c4_topk_lengths_clamp1,
+        dst_c4_sparse_topk_lengths,
+        src_c4_sparse_topk_lengths,
+        dst_c128_topk_lengths_clamp1,
+        src_c128_topk_lengths_clamp1,
+        dst_cu_seqlens_q,
+        src_cu_seqlens_q,
+        dst_page_table,
+        src_page_table,
+        dst_swa_page_indices,
+        src_swa_page_indices,
+        dst_c4_sparse_raw_indices,
+        src_c4_sparse_raw_indices,
+        dst_c4_sparse_page_indices,
+        src_c4_sparse_page_indices,
+        dst_c4_sparse_full_indices,
+        src_c4_sparse_full_indices,
+        dst_c128_raw_indices,
+        src_c128_raw_indices,
+        dst_c128_page_indices,
+        src_c128_page_indices,
+        dst_c128_full_indices,
+        src_c128_full_indices,
+    )
+    if rows <= 0:
+        return True
+    if not all(
+        t.is_cuda and t.dtype is torch.int32 and t.is_contiguous()
+        for t in tensors
+    ):
+        return False
+    if not all(t.dim() == 1 for t in tensors[:24]):
+        return False
+    if not all(t.dim() == 2 for t in tensors[24:]):
+        return False
+    if any(t.shape[0] < rows for t in tensors[:22]):
+        return False
+    if dst_cu_seqlens_q.shape[0] < rows + 1 or src_cu_seqlens_q.shape[0] < rows + 1:
+        return False
+    for dst, src in (
+        (dst_page_table, src_page_table),
+        (dst_swa_page_indices, src_swa_page_indices),
+        (dst_c4_sparse_raw_indices, src_c4_sparse_raw_indices),
+        (dst_c4_sparse_page_indices, src_c4_sparse_page_indices),
+        (dst_c4_sparse_full_indices, src_c4_sparse_full_indices),
+        (dst_c128_raw_indices, src_c128_raw_indices),
+        (dst_c128_page_indices, src_c128_page_indices),
+        (dst_c128_full_indices, src_c128_full_indices),
+    ):
+        if dst.shape[0] < rows or src.shape[0] < rows:
+            return False
+    try:
+        return bool(
+            _triton_dsv4_ops().copy_decode_metadata_for_replay(
+                dst_raw_out_loc=dst_raw_out_loc,
+                src_raw_out_loc=src_raw_out_loc,
+                dst_seq_lens=dst_seq_lens,
+                src_seq_lens=src_seq_lens,
+                dst_req_seq_lens=dst_req_seq_lens,
+                src_req_seq_lens=src_req_seq_lens,
+                dst_extend_lens=dst_extend_lens,
+                src_extend_lens=src_extend_lens,
+                dst_positions=dst_positions,
+                src_positions=src_positions,
+                dst_req_table_indices=dst_req_table_indices,
+                src_req_table_indices=src_req_table_indices,
+                dst_swa_topk_lengths=dst_swa_topk_lengths,
+                src_swa_topk_lengths=src_swa_topk_lengths,
+                dst_c4_topk_lengths_raw=dst_c4_topk_lengths_raw,
+                src_c4_topk_lengths_raw=src_c4_topk_lengths_raw,
+                dst_c4_topk_lengths_clamp1=dst_c4_topk_lengths_clamp1,
+                src_c4_topk_lengths_clamp1=src_c4_topk_lengths_clamp1,
+                dst_c4_sparse_topk_lengths=dst_c4_sparse_topk_lengths,
+                src_c4_sparse_topk_lengths=src_c4_sparse_topk_lengths,
+                dst_c128_topk_lengths_clamp1=dst_c128_topk_lengths_clamp1,
+                src_c128_topk_lengths_clamp1=src_c128_topk_lengths_clamp1,
+                dst_cu_seqlens_q=dst_cu_seqlens_q,
+                src_cu_seqlens_q=src_cu_seqlens_q,
+                dst_page_table=dst_page_table,
+                src_page_table=src_page_table,
+                dst_swa_page_indices=dst_swa_page_indices,
+                src_swa_page_indices=src_swa_page_indices,
+                dst_c4_sparse_raw_indices=dst_c4_sparse_raw_indices,
+                src_c4_sparse_raw_indices=src_c4_sparse_raw_indices,
+                dst_c4_sparse_page_indices=dst_c4_sparse_page_indices,
+                src_c4_sparse_page_indices=src_c4_sparse_page_indices,
+                dst_c4_sparse_full_indices=dst_c4_sparse_full_indices,
+                src_c4_sparse_full_indices=src_c4_sparse_full_indices,
+                dst_c128_raw_indices=dst_c128_raw_indices,
+                src_c128_raw_indices=src_c128_raw_indices,
+                dst_c128_page_indices=dst_c128_page_indices,
+                src_c128_page_indices=src_c128_page_indices,
+                dst_c128_full_indices=dst_c128_full_indices,
+                src_c128_full_indices=src_c128_full_indices,
+                rows=int(rows),
+                graph_inputs_bound=bool(graph_inputs_bound),
+            )
+        )
+    except Exception:
+        return False
+
+
 def _copy_masked_compressed_locs_fallback(
     dst: torch.Tensor | None,
     raw_out_loc: torch.Tensor,
@@ -2888,6 +3057,7 @@ __all__ = [
     "DSV4_LINEAR_BF16_FP32_TOGGLE",
     "DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE",
     "DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE",
+    "DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE",
     "DSV4_SM80_EXPERIMENTAL_TOGGLES",
     "DSV4_SM80_KNOWN_TOGGLES",
     "DSV4_SM80_MOE_EXPERT_BACKEND_ENV",
@@ -2918,6 +3088,7 @@ __all__ = [
     "build_moe_route_plan",
     "build_moe_v2_execution_plan",
     "copy_masked_compressed_locs",
+    "copy_decode_metadata_for_replay",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
     "compressor_plan_fallback",
