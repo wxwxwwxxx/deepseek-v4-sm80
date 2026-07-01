@@ -128,6 +128,39 @@ step is split into TARGET 07.37 backend identification first, and TARGET 07.38
 exact backend adaptation only if 07.37 proves a vLLM-style exact W4A16 backend
 is feasible and worth porting.
 
+TARGET 07.38 update: TARGET 07.37 selected Marlin MXFP4 W4A16 as the actual
+vLLM SM80 MoE expert backend, but direct adaptation stopped with a precise
+blocker in `performance_milestones/target07_moe_exact_backend_adapt/`: mini
+does not own the required Marlin custom-op surface (`gptq_marlin_repack` and
+`_moe_C::moe_wna16_marlin_gemm`). The default grouped FP4 backend remains
+unchanged and the Marlin opt-in guard fails explicitly instead of silently
+falling back. TARGET 07.39 is the next evidence target: use the locally
+installed vLLM compiled ops only as an experimental bridge/probe to determine
+whether a narrow mini-owned Marlin csrc port is worth opening.
+
+TARGET 07.39 update: the bridge probe in
+`performance_milestones/target07_marlin_custom_op_bridge/` can import and call
+the locally installed vLLM Marlin custom ops on A100 SM80. Synthetic DSV4-like
+T=4 and T=4096 MoE calls pass, route metadata is semantically compatible, and
+fused Marlin is about `4.55x` and `20.05x` faster than mini grouped FP4 in the
+probe. The bridge remains external/probe-only; the explicit
+`vllm_marlin_bridge` marker fails at mini runtime instead of depending on vLLM
+or silently falling back. Next step: open a narrow mini-owned Marlin WNA16 csrc
+port target, not TARGET 07.4.
+
+TARGET 07.391 update: the mini-owned csrc port in
+`performance_milestones/target07_marlin_wna16_csrc_port/` is implemented and
+model-integrated as explicit backend `marlin_wna16`. It vendors the narrow
+Marlin WNA16 source surface, builds/loads without a vLLM runtime dependency,
+transforms and caches MXFP4 expert weights, passes TP8 text smoke, and runs
+4096/128 plus 4096/1024 batch4 macro with CUDA graph replay and zero unsupported
+skips when `--num-pages 128` is pinned. The 4096/1024 result is
+`54.47 output tok/s`, a strong mini-side improvement but still below the old
+vLLM serving baseline `114.07 output tok/s`. Nsight now places sparse attention
+and indexer/cache above Marlin WNA16, so the next target should move to
+attention/indexer/cache or metadata/runtime overhead, not TARGET 07.4 precision
+lanes.
+
 ## Primary References
 
 Local mini-sglang:
@@ -184,6 +217,8 @@ Use separate Codex threads for these large milestones:
 | TARGET 07.36 | `prompts/TARGET_07.36_dsv4_sm80_vllm_fused_moe_runner_adapt.md` | Adapt vLLM's standard FusedMoE runner shape into mini as the next exact-path baseline, then measure whether MoE runner structure still deserves more work. |
 | TARGET 07.37 | `prompts/TARGET_07.37_dsv4_sm80_moe_backend_identification.md` | Identify the actual vLLM sm80 MoE expert backend and decide exact backend adaptation versus precision lane versus another target. |
 | TARGET 07.38 | `prompts/TARGET_07.38_dsv4_sm80_moe_exact_backend_adapt.md` | Conditional implementation target for one vLLM-identified exact W4A16 MoE expert backend, only if TARGET 07.37 selects it. |
+| TARGET 07.39 | `prompts/TARGET_07.39_dsv4_sm80_marlin_custom_op_bridge.md` | Completed bridge feasibility for locally installed vLLM Marlin custom ops; result is positive and recommends a mini-owned narrow csrc port target. |
+| TARGET 07.391 | `prompts/TARGET_07.391_dsv4_sm80_marlin_wna16_csrc_port.md` | Completed mini-owned Marlin WNA16 csrc port and opt-in backend; macro improves to `54.47 output tok/s` but next bottleneck shifts to attention/indexer/cache. |
 | TARGET 07.4 | `prompts/TARGET_07.4_dsv4_sm80_precision_lanes.md` | Precision-lane experiments: fp8/fp4 activation quantization and INT8 Tensor Core opt-in after bf16-direct is strong. |
 
 Smaller work such as sqlite reporting helpers, benchmark flags, and README
@@ -197,27 +232,18 @@ TARGET 07.36 now have recorded milestone artifacts. Do not continue expanding
 those threads unless a baseline artifact is missing or a workload/config
 mismatch is discovered.
 
-The next target is TARGET 07.37 MoE backend identification. It is not an
-implementation target. Its job is to identify the vLLM sm80 MoE expert backend,
-its weight layout, activation precision, support constraints, and expected
-benefit before mini ports anything.
+After TARGET 07.391, carry these reference lines into the next target:
 
-Carry these reference lines into TARGET 07.37:
-
-- post-07.36 exact runner: about 17.83 output tok/s and 19.93 decode tok/s on
-  the 4096/1024/batch4 smoke macro policy;
-- vLLM fair reference: about 201.9 output tok/s on the same macro workload;
-- first hard victory line: old serving baseline 114.07 output tok/s;
-- current risk order: MoE expert backend W13/W2 first, then
-  sparse attention/indexer/cache, scheduling/stream overlap,
-  communication/reduce boundary, precision lane, then HC/RMSNorm/final;
-- vLLM runner shape is no longer enough by itself; exact backend or precision
-  backend is the next question.
-
-TARGET 07.38 must not start until TARGET 07.37 classifies a vLLM backend as an
-exact W4A16 candidate with bf16 activations and at least `1.5x` expected routed
-MoE improvement. If 07.37 shows the vLLM win depends on activation quantization
-or MXFP8/FP8/MXFP4 semantics, move to TARGET 07.4 instead.
+- mini-owned Marlin WNA16 exact backend: `54.47 output tok/s` and
+  `61.41 decode tok/s` on 4096/1024/batch4 with TP8, page size 256,
+  `--num-pages 128`, and CUDA graph replay;
+- first hard victory line remains old serving baseline `114.07 output tok/s`;
+- current risk order: sparse attention/indexer/cache first, then metadata and
+  runtime overhead around graph replay and route handling, then communication,
+  then any remaining expert backend polish;
+- precision lanes are still not justified by the evidence because the Marlin
+  exact backend is now fast enough that attention/indexer/cache dominate the
+  short profile.
 
 ## Thread Stop Rules
 

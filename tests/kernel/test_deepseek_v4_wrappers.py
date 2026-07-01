@@ -353,6 +353,30 @@ def test_dsv4_sm80_moe_expert_backend_selector_blocks_marlin(monkeypatch):
     with pytest.raises(NotImplementedError, match="Marlin MXFP4 W4A16"):
         dsv4_kernel.require_supported_moe_expert_backend()
 
+    monkeypatch.setenv(
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE,
+    )
+    assert (
+        dsv4_kernel.dsv4_moe_expert_backend()
+        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE
+    )
+    with pytest.raises(NotImplementedError, match="vLLM Marlin bridge"):
+        dsv4_kernel.require_supported_moe_expert_backend()
+
+    monkeypatch.setenv(
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+    )
+    assert (
+        dsv4_kernel.dsv4_moe_expert_backend()
+        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
+    )
+    assert (
+        dsv4_kernel.require_supported_moe_expert_backend()
+        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
+    )
+
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV, "not_a_backend")
     with pytest.raises(ValueError, match="Unsupported MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"):
         dsv4_kernel.dsv4_moe_expert_backend()

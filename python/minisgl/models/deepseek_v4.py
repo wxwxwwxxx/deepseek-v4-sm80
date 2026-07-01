@@ -840,6 +840,7 @@ class DSV4FusedRoutedExperts(BaseOP):
             dtype=dsv4_kernel.e8m0_dtype(),
         )
         self._moe_v2_workspace = dsv4_kernel.DSV4MoEWorkspace()
+        self._marlin_wna16_weights = None
 
     def _expert_forward(
         self, local_idx: int, x: torch.Tensor, weights: torch.Tensor
@@ -878,7 +879,26 @@ class DSV4FusedRoutedExperts(BaseOP):
         reduce: bool = True,
         moe_plan: dsv4_kernel.DSV4MoEExecutionPlan | None = None,
     ) -> torch.Tensor:
-        dsv4_kernel.require_supported_moe_expert_backend()
+        backend = dsv4_kernel.require_supported_moe_expert_backend()
+        if backend == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16:
+            grouped, self._marlin_wna16_weights = dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16(
+                hidden_states,
+                weights,
+                indices,
+                self.w13_weight,
+                self.w13_weight_scale_inv,
+                self.w2_weight,
+                self.w2_weight_scale_inv,
+                swiglu_limit=self.swiglu_limit,
+                cache=self._marlin_wna16_weights,
+            )
+            if reduce and self._tp_size > 1:
+                grouped = self._comm.all_reduce(
+                    grouped.float(),
+                    label="dsv4.routed_expert_all_reduce",
+                ).to(grouped.dtype)
+            return grouped
+
         workspace = None
         if (
             moe_plan is not None

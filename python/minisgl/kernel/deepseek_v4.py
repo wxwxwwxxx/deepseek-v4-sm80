@@ -33,9 +33,13 @@ DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE = "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"
 DSV4_SM80_MOE_EXPERT_BACKEND_ENV = "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"
 DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4 = "grouped_fp4"
 DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16 = "marlin_mxfp4_w4a16"
+DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE = "vllm_marlin_bridge"
+DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
     DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
+    DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE,
+    DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
 )
 DSV4_SM80_MOE_MARLIN_BLOCKER = (
     "TARGET 07.38 feasibility audit: vLLM's exact SM80 Marlin MXFP4 W4A16 "
@@ -43,6 +47,19 @@ DSV4_SM80_MOE_MARLIN_BLOCKER = (
     "_moe_C::moe_wna16_marlin_gemm plus Marlin scale/layout transforms. "
     "mini-sglang does not currently build an equivalent extension surface; "
     "falling back to grouped FP4 would make the opt-in backend silently fake."
+)
+DSV4_SM80_MOE_VLLM_MARLIN_BRIDGE_BLOCKER = (
+    "TARGET 07.39 bridge probe can execute locally installed vLLM Marlin "
+    "compiled ops as an external experiment, but mini runtime is not wired to "
+    "depend on vLLM or cache Marlin-repacked weights. Use the 07.39 probe "
+    "artifact to justify a narrow mini-owned csrc port target instead."
+)
+DSV4_SM80_MOE_MARLIN_WNA16_BLOCKER = (
+    "TARGET 07.391 source-level probe builds and runs a mini-owned-style "
+    "Marlin WNA16 op namespace, but this runtime cannot initialize the "
+    "packaged extension loader, lazy MXFP4-to-Marlin weight cache, or routed "
+    "expert call path. Falling back to grouped FP4 would silently hide that "
+    "missing integration."
 )
 DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES = 512
 DSV4_LINEAR_BF16_FP32_TOGGLE = "MINISGL_DSV4_SM80_LINEAR_BF16_FP32"
@@ -716,7 +733,74 @@ def require_supported_moe_expert_backend() -> str:
         unsupported_kernel(
             "DSV4 Marlin MXFP4 W4A16 MoE expert backend", DSV4_SM80_MOE_MARLIN_BLOCKER
         )
+    if backend == DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE:
+        unsupported_kernel(
+            "DSV4 vLLM Marlin bridge MoE expert backend",
+            DSV4_SM80_MOE_VLLM_MARLIN_BRIDGE_BLOCKER,
+        )
     return backend
+
+
+def moe_route_dispatch_bf16_marlin_wna16(
+    hidden_states: torch.Tensor,
+    weights: torch.Tensor,
+    indices: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor,
+    *,
+    swiglu_limit: float = 0.0,
+    cache=None,
+) -> tuple[torch.Tensor, object]:
+    if hidden_states.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(f"Marlin WNA16 expects fp16/bf16 hidden states, got {hidden_states.dtype}")
+    if not hidden_states.is_cuda:
+        raise ValueError("Marlin WNA16 requires CUDA hidden states")
+    if hidden_states.ndim != 2 or weights.shape != indices.shape or indices.ndim != 2:
+        raise ValueError(
+            "Marlin WNA16 expects hidden [tokens, hidden] and matching weights/indices [tokens, topk]"
+        )
+    if w13_weight.ndim != 4 or w13_weight.shape[1] != 2 or w2_weight.ndim != 3:
+        raise ValueError("Marlin WNA16 expects mini raw w13 [E,2,N,K/2] and w2 [E,K,N/2]")
+    if w13_weight.shape[0] != w2_weight.shape[0]:
+        raise ValueError("Marlin WNA16 w13/w2 expert counts differ")
+    if hidden_states.shape[1] != w13_weight.shape[-1] * 2:
+        raise ValueError("Marlin WNA16 hidden size does not match packed W13")
+
+    from minisgl.kernel import marlin_wna16
+
+    experts = w13_weight.shape[0]
+    block_size_m = marlin_wna16.choose_block_size(
+        tokens=hidden_states.shape[0],
+        topk=indices.shape[1],
+        experts=experts,
+        input_dtype=None,
+    )
+    route_plan = build_moe_route_plan(
+        indices,
+        num_experts=experts,
+        block_size_m=block_size_m,
+    )
+    if cache is None or not cache.matches(w13_weight, w13_scale, w2_weight, w2_scale):
+        cache = marlin_wna16.prepare_moe_mxfp4_weights(
+            w13_weight,
+            w13_scale,
+            w2_weight,
+            w2_scale,
+            params_dtype=hidden_states.dtype,
+        )
+    output = marlin_wna16.run_moe(
+        hidden_states,
+        weights,
+        cache,
+        sorted_token_ids=route_plan.sorted_route_ids,
+        expert_ids=route_plan.expert_ids,
+        num_tokens_post_padded=route_plan.num_tokens_post_padded,
+        block_size_m=route_plan.block_size_m,
+        swiglu_limit=swiglu_limit,
+    )
+    return output, cache
 
 
 def dsv4_sm80_cuda_enabled(toggle: str) -> bool:
@@ -2680,8 +2764,12 @@ __all__ = [
     "DSV4_SM80_MOE_EXPERT_BACKEND_ENV",
     "DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4",
     "DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16",
+    "DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE",
+    "DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16",
     "DSV4_SM80_MOE_EXPERT_BACKENDS",
     "DSV4_SM80_MOE_MARLIN_BLOCKER",
+    "DSV4_SM80_MOE_VLLM_MARLIN_BRIDGE_BLOCKER",
+    "DSV4_SM80_MOE_MARLIN_WNA16_BLOCKER",
     "DSV4_SM80_MOE_V2_TOGGLE",
     "DSV4_SM80_MOE_V2_WHITELIST",
     "DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE",
@@ -2739,6 +2827,7 @@ __all__ = [
     "mega_moe_pre_dispatch_fallback",
     "moe_gate_fallback",
     "moe_route_dispatch_bf16_grouped",
+    "moe_route_dispatch_bf16_marlin_wna16",
     "norm_rope_inplace_fallback",
     "paged_mqa_attention_fallback",
     "plan_topk_v2_fallback",

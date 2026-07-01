@@ -14,7 +14,6 @@ from typing import Any, Sequence
 
 import torch
 
-
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON_ROOT = ROOT / "python"
 if str(PYTHON_ROOT) not in sys.path:
@@ -37,17 +36,15 @@ DSV4_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
 DSV4_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
 DSV4_MOE_V2_TOGGLE = "MINISGL_DSV4_SM80_MOE_V2"
 DSV4_MOE_VLLM_RUNNER_TOGGLE = "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"
+DSV4_MOE_EXPERT_BACKEND_ENV = "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"
+DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
 DSV4_HC_TOGGLE = "MINISGL_DSV4_SM80_HC"
 DSV4_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_RMSNORM"
 DSV4_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_FP8_GEMM"
 DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE = "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT"
-DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE = (
-    "MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE"
-)
+DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE"
 DSV4_FUSED_Q_KV_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM"
-DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE = (
-    "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE"
-)
+DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE = "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE"
 DSV4_Q_WQA_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_Q_WQA_FP8_GEMM"
 DSV4_Q_WQB_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
 DSV4_WO_B_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_WO_B_FP8_GEMM"
@@ -279,10 +276,7 @@ VARIANTS: tuple[Variant, ...] = (
         allow_dsv4_cuda_graph=True,
     ),
     Variant(
-        (
-            "v1_moe_graph_hc_rmsnorm_fwqakv_qkvrope_wqb_wob_idxwqb_"
-            "gatecache_idxstorecache"
-        ),
+        ("v1_moe_graph_hc_rmsnorm_fwqakv_qkvrope_wqb_wob_idxwqb_" "gatecache_idxstorecache"),
         {
             DSV4_V1_MOE_TOGGLE: "1",
             DSV4_HC_TOGGLE: "1",
@@ -306,10 +300,7 @@ VARIANTS: tuple[Variant, ...] = (
         allow_dsv4_cuda_graph=True,
     ),
     Variant(
-        (
-            "v1_moe_graph_hc_rmsnorm_fwqakvcache_qkvrope_wqb_wob_idxwqb_"
-            "gatecache_idxstorecache"
-        ),
+        ("v1_moe_graph_hc_rmsnorm_fwqakvcache_qkvrope_wqb_wob_idxwqb_" "gatecache_idxstorecache"),
         {
             DSV4_V1_MOE_TOGGLE: "1",
             DSV4_HC_TOGGLE: "1",
@@ -406,6 +397,35 @@ VARIANTS: tuple[Variant, ...] = (
         (
             "Mini-owned vLLM-shaped exact MoE runner wrapping the current grouped "
             "FP4 W13/SwiGLU/W2 backend, with the current exact graph smoke bundle."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        (
+            "v1_moe_vllm_runner_marlin_wna16_graph_hc_rmsnorm_fwqakvcache_"
+            "qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ),
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
+            DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "TARGET 07.391 mini-owned Marlin WNA16 backend smoke variant. "
+            "This is explicit opt-in and uses cached MXFP4-to-Marlin expert "
+            "weights after the first transformed call."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
@@ -608,9 +628,7 @@ def response_sanity(
         overlap_fraction = match.size / max(len(text_norm), 1)
         if overlap_fraction >= 0.7:
             issues.append("prompt_echo_like")
-    if expected_substrings and not any(
-        expected in text for expected in expected_substrings
-    ):
+    if expected_substrings and not any(expected in text for expected in expected_substrings):
         issues.append("missing_expected_substring")
 
     report["issues"] = issues
@@ -647,7 +665,11 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
     variant_graph_greedy_sample = any(
         variant.cuda_graph_capture_greedy_sample for variant in variants
     )
-    if variant_pynccl and not all(variant.use_pynccl for variant in variants) and not args.use_pynccl:
+    if (
+        variant_pynccl
+        and not all(variant.use_pynccl for variant in variants)
+        and not args.use_pynccl
+    ):
         raise SystemExit("PyNCCL text-smoke variants must be run separately or with --use-pynccl.")
     if (
         variant_graph
@@ -847,9 +869,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             use_pynccl=runtime_options["use_pynccl"],
             allow_dsv4_cuda_graph=runtime_options["allow_dsv4_cuda_graph"],
             cuda_graph_bs=runtime_options["cuda_graph_bs"],
-            cuda_graph_capture_greedy_sample=runtime_options[
-                "cuda_graph_capture_greedy_sample"
-            ],
+            cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
             **llm_kwargs,
         )
         for variant in variants:
@@ -909,9 +929,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
         }
         _write_json(Path(args.output), payload)
         print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
-        if overall_status == "fail" or (
-            args.fail_on_warning and overall_status == "warn"
-        ):
+        if overall_status == "fail" or (args.fail_on_warning and overall_status == "warn"):
             return 1
         return 0
     return 0

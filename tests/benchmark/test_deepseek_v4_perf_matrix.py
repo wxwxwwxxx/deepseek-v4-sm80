@@ -256,6 +256,88 @@ def test_configure_variant_records_marlin_candidate_backend(monkeypatch):
     } <= active
 
 
+def test_configure_variant_records_vllm_marlin_bridge_backend(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_SM80_SWIGLU",
+            "MINISGL_DSV4_SM80_MOE_ROUTE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND":
+                return False
+            if os.environ.get(name) in {"1", "true"}:
+                return True
+            moe_bundle = (
+                os.environ.get("MINISGL_DSV4_SM80_V1_MOE") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_V2") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_VLLM_RUNNER") == "1"
+            )
+            return (
+                name in {"MINISGL_DSV4_SM80_SWIGLU", "MINISGL_DSV4_SM80_MOE_ROUTE"} and moe_bundle
+            )
+
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()[
+            "v1_moe_vllm_runner_vllm_marlin_bridge_graph_hc_rmsnorm_fwqakvcache_"
+            "qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ],
+    )
+
+    assert (
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"] == "vllm_marlin_bridge"
+    )
+    assert "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND" not in result["active_dsv4_toggles"]
+
+
+def test_configure_variant_records_marlin_wna16_backend(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_SM80_SWIGLU",
+            "MINISGL_DSV4_SM80_MOE_ROUTE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND":
+                return False
+            if os.environ.get(name) in {"1", "true"}:
+                return True
+            moe_bundle = (
+                os.environ.get("MINISGL_DSV4_SM80_V1_MOE") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_V2") == "1"
+                or os.environ.get("MINISGL_DSV4_SM80_MOE_VLLM_RUNNER") == "1"
+            )
+            return (
+                name in {"MINISGL_DSV4_SM80_SWIGLU", "MINISGL_DSV4_SM80_MOE_ROUTE"} and moe_bundle
+            )
+
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()[
+            "v1_moe_vllm_runner_marlin_wna16_graph_hc_rmsnorm_fwqakvcache_"
+            "qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ],
+    )
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"] == "marlin_wna16"
+    assert "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND" not in result["active_dsv4_toggles"]
+
+
 def test_shared_prefix_workload_repeats_prefix_and_disables_radix_in_scenario():
     bench = _load_module()
     scenario = bench._scenario_map()["shared_prompt_no_radix_bs8"]
