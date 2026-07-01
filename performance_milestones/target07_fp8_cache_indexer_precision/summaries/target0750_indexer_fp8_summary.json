@@ -1,0 +1,70 @@
+{
+  "decision": "stop_indexer_first_slice",
+  "reason": "The opt-in FP8 indexer cache/logits lane is graph-safe and passes text smoke, but it is slower than the exact bf16 control on both microbench and 4096/128 macro. The target's >=5% macro gate was not met.",
+  "variant": "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_metacopy_idxfp8cache_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache",
+  "env_flag": "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE",
+  "microbench": {
+    "raw": "performance_milestones/target07_fp8_cache_indexer_precision/raw/mini_indexer_fp8_microbench.json",
+    "cases": [
+      {
+        "batch": 1,
+        "max_seq_len": 1024,
+        "bf16_logits_ms": 0.1270751953125,
+        "fp8_logits_ms": 0.1572543978691101,
+        "bf16_select_ms": 0.30928959846496584,
+        "fp8_select_ms": 0.3181663990020752,
+        "topk_overlap_mean": 0.986328125,
+        "logit_max_abs": 0.11372635513544083,
+        "logit_mean_abs": 0.02283550426363945
+      },
+      {
+        "batch": 4,
+        "max_seq_len": 2048,
+        "bf16_logits_ms": 0.12463359832763672,
+        "fp8_logits_ms": 0.2654752016067505,
+        "bf16_select_ms": 0.3036511898040771,
+        "fp8_select_ms": 0.3162751913070679,
+        "topk_overlap_mean": 0.98291015625,
+        "logit_max_abs": 0.10360908508300781,
+        "logit_mean_abs": 0.021778469905257225
+      },
+      {
+        "batch": 16,
+        "max_seq_len": 4096,
+        "bf16_logits_ms": 0.30763840675354004,
+        "fp8_logits_ms": 1.3072352409362793,
+        "bf16_select_ms": 0.35858879089355467,
+        "fp8_select_ms": 1.7368160247802735,
+        "topk_overlap_mean": 0.972412109375,
+        "logit_max_abs": 0.1492832899093628,
+        "logit_mean_abs": 0.02142001874744892
+      }
+    ],
+    "cache_dequant_mean_abs_range": [
+      0.01796329766511917,
+      0.0179789699614048
+    ]
+  },
+  "text_smoke": {
+    "raw": "performance_milestones/target07_fp8_cache_indexer_precision/raw/tp8_text_smoke_idxfp8cache.json",
+    "status": "pass",
+    "sane_outputs": 3,
+    "graph_replay_count": 9,
+    "eager_decode_count": 0
+  },
+  "macro_4096_128_bs4": {
+    "fp8_raw": "performance_milestones/target07_fp8_cache_indexer_precision/raw/dsv4_target0750_idxfp8cache_4096x128_bs4_np128/summary.json",
+    "exact_control_raw": "performance_milestones/target07_fp8_cache_indexer_precision/raw/dsv4_target0750_exactcontrol_4096x128_bs4_np128/summary.json",
+    "fp8_output_tok_s": 29.669080707895578,
+    "exact_control_output_tok_s": 37.923658128951324,
+    "historical_exact_output_tok_s": 38.9379,
+    "fp8_vs_exact_control_delta_pct": -21.76629909860853,
+    "fp8_decode_tok_s": 81.56165512154818,
+    "exact_control_decode_tok_s": 79.85738096181133,
+    "fp8_ttft_s_mean": 6.744557476757715,
+    "exact_control_ttft_s_mean": 4.311439701200773,
+    "fp8_eager_decode_count": 0,
+    "exact_control_eager_decode_count": 0
+  },
+  "next_step": "Do not run 4096/1024 or a fresh graph-node profile for this slice. If continuing TARGET 07.50, pivot to a minimal fp8_ds_mla cache/gather/dequant slice or replace the FP8 indexer logits kernel with a vLLM-equivalent optimized paged kernel before macro retry."
+}

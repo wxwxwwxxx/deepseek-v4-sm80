@@ -386,6 +386,45 @@ def test_configure_variant_sets_marlin_wna16_globaltopk_splitk(monkeypatch):
     assert "MINISGL_DSV4_SM80_INDEXER_FP8" not in result["raw_dsv4_sm80_env"]
 
 
+def test_configure_variant_sets_marlin_wna16_indexer_fp8_cache(monkeypatch):
+    smoke = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS",
+            "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16",
+            "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY",
+            "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE",
+            "MINISGL_DSV4_SM80_INDEXER_FP8",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND":
+                return False
+            if name == "MINISGL_DSV4_SM80_INDEXER_FP8":
+                return False
+            return os.environ.get(name) in {"1", "true"}
+
+    result = smoke.configure_variant(
+        FakeKernel,
+        smoke._variant_map()[
+            "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_metacopy_"
+            "idxfp8cache_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_"
+            "idxwqb_gatecache_idxstorecache"
+        ],
+    )
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"] == "marlin_wna16"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"] == "1"
+    assert "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_INDEXER_FP8" not in result["raw_dsv4_sm80_env"]
+
+
 def test_tp_rank_size_defaults_to_tp8_under_torchrun_env(monkeypatch):
     smoke = _load_module()
     args = smoke.parse_args([])

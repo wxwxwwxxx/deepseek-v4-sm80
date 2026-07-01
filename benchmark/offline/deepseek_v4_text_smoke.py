@@ -58,6 +58,7 @@ DSV4_WO_A_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16"
 DSV4_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
 DSV4_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
 DSV4_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
+DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 BASELINE_TP_SIZE = 8
 
 
@@ -520,6 +521,39 @@ VARIANTS: tuple[Variant, ...] = (
         (
             "TARGET 07.41 exact bf16 smoke path with split-K sparse decode "
             "and opt-in fused decode replay metadata staging."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        (
+            "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_metacopy_"
+            "idxfp8cache_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_"
+            "idxwqb_gatecache_idxstorecache"
+        ),
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
+            DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_GLOBAL_TOPK_LENS_TOGGLE: "1",
+            DSV4_SPARSE_SPLITK_BF16_TOGGLE: "1",
+            DSV4_REPLAY_METADATA_COPY_TOGGLE: "1",
+            DSV4_INDEXER_FP8_CACHE_TOGGLE: "1",
+        },
+        (
+            "TARGET 07.50 opt-in FP8 indexer cache/logits smoke path on the "
+            "07.41 split-K/metacopy stack. MLA/SWA cache precision remains bf16."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,

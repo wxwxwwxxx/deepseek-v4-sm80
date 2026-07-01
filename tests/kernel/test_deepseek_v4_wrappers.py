@@ -92,6 +92,167 @@ def _manual_indexer_logits(
     return logits
 
 
+def test_indexer_fp8_quantized_logits_and_topk_match_reference():
+    if getattr(torch, "float8_e4m3fn", None) is None:
+        pytest.skip("torch.float8_e4m3fn is required for FP8 indexer reference checks")
+
+    torch.manual_seed(7)
+    rows = 3
+    heads = 2
+    dim = 8
+    page_size = 4
+    q = torch.rand(rows, heads, dim, dtype=torch.float32).to(torch.bfloat16)
+    weights = torch.rand(rows, heads, dtype=torch.float32)
+    positions = torch.arange(rows, dtype=torch.int64)
+    query = dsv4_kernel.indexer_q_rope_fp8_fallback(
+        q,
+        weights,
+        positions,
+        rotary_dim=0,
+        base=10000.0,
+        softmax_scale=dim**-0.5,
+        head_scale=heads**-0.5,
+    )
+    assert query.q_values.dtype is torch.uint8
+    assert query.weights.dtype is torch.float32
+
+    cache = torch.rand(12, dim, dtype=torch.float32).to(torch.bfloat16)
+    cache_values, cache_scales = dsv4_kernel.quantize_indexer_fp8_cache_ref(cache)
+    cache_dequant = dsv4_kernel.dequantize_indexer_fp8_cache_ref(
+        cache_values,
+        cache_scales,
+        out_dtype=torch.float32,
+    )
+    q_dequant = query.q_values.contiguous().view(torch.float8_e4m3fn).to(torch.float32)
+    seq_lens = torch.tensor([3, 8, 10], dtype=torch.int32)
+    page_table = torch.tensor(
+        [[0, 1, 2], [0, 2, 1], [2, 1, 0]],
+        dtype=torch.int32,
+    )
+
+    expected = _manual_indexer_logits(
+        q_dequant,
+        cache_dequant,
+        query.weights,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+    )
+    actual = dsv4_kernel.indexer_fp8_logits_fallback(
+        query.q_values,
+        cache_values,
+        cache_scales,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        weights=query.weights,
+    )
+    assert torch.allclose(actual, expected, atol=1e-5, rtol=1e-5)
+
+    selected = dsv4_kernel.indexer_select_fp8_fallback(
+        query.q_values,
+        query.weights,
+        cache_values,
+        cache_scales,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        width=4,
+        ratio=4,
+    )
+    assert "fp8" in selected.backend
+    _assert_full_topk_transform(
+        selected.topk,
+        actual,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        width=4,
+        ratio=4,
+    )
+
+
+def test_indexer_fp8_paged_logits_and_topk_match_reference():
+    if getattr(torch, "float8_e4m3fn", None) is None:
+        pytest.skip("torch.float8_e4m3fn is required for FP8 indexer reference checks")
+
+    torch.manual_seed(752)
+    rows = 3
+    heads = 2
+    dim = 8
+    page_size = 4
+    q = torch.rand(rows, heads, dim, dtype=torch.float32).to(torch.bfloat16)
+    weights = torch.rand(rows, heads, dtype=torch.float32)
+    positions = torch.arange(rows, dtype=torch.int64)
+    query = dsv4_kernel.indexer_q_rope_fp8_fallback(
+        q,
+        weights,
+        positions,
+        rotary_dim=0,
+        base=10000.0,
+        softmax_scale=dim**-0.5,
+        head_scale=heads**-0.5,
+    )
+    cache = torch.rand(12, dim, dtype=torch.float32).to(torch.bfloat16)
+    packed_cache = dsv4_kernel.quantize_indexer_fp8_paged_cache_ref(
+        cache,
+        page_size=page_size,
+    )
+    cache_dequant = dsv4_kernel.dequantize_indexer_fp8_paged_cache_ref(
+        packed_cache,
+        page_size=page_size,
+        dim=dim,
+        slots=cache.shape[0],
+        out_dtype=torch.float32,
+    )
+    q_dequant = query.q_values.contiguous().view(torch.float8_e4m3fn).to(torch.float32)
+    seq_lens = torch.tensor([3, 8, 10], dtype=torch.int32)
+    page_table = torch.tensor(
+        [[0, 1, 2], [0, 2, 1], [2, 1, 0]],
+        dtype=torch.int32,
+    )
+
+    expected = _manual_indexer_logits(
+        q_dequant,
+        cache_dequant,
+        query.weights,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+    )
+    actual = dsv4_kernel.indexer_fp8_paged_logits_fallback(
+        query.q_values,
+        packed_cache,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        weights=query.weights,
+    )
+    assert torch.allclose(actual, expected, atol=1e-5, rtol=1e-5)
+
+    selected = dsv4_kernel.indexer_select_fp8_paged_fallback(
+        query.q_values,
+        query.weights,
+        packed_cache,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        width=4,
+        ratio=4,
+    )
+    assert "fp8_paged" in selected.backend
+    assert torch.allclose(selected.logits, actual, atol=1e-5, rtol=1e-5)
+    _assert_full_topk_transform(
+        selected.topk,
+        selected.logits,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        width=4,
+        ratio=4,
+    )
+
+
 def _manual_two_source_sparse_attention(
     q: torch.Tensor,
     swa_cache: torch.Tensor,

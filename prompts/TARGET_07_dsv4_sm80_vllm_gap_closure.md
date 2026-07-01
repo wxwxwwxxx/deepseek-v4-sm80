@@ -63,8 +63,10 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.40 | `prompts/TARGET_07.40_dsv4_sm80_post_splitk_reprofile.md` | completed | Reprofiled the post-splitK exact stack; decode split-K is no longer the main bottleneck. |
 | TARGET 07.41 | `prompts/TARGET_07.41_dsv4_sm80_indexer_cache_runtime_exact.md` | completed | Validated an exact replay metadata-copy cut, but macro gain was negligible; do not continue local metacopy polish. |
 | TARGET 07.42 | `prompts/TARGET_07.42_dsv4_sm80_vllm_metadata_runtime_parity.md` | completed | Evidence report found no justified exact runtime PoC; recommended precision/cache, but vLLM per-bucket timing remains incomplete. |
-| TARGET 07.43 | `prompts/TARGET_07.43_dsv4_sm80_vllm_ablation_before_precision.md` | next todo | vLLM destructive ablations for aux stream, persistent topk/indexer, and CUDA graph before opening precision/cache work. |
-| TARGET 07.50 | `prompts/TARGET_07.50_dsv4_sm80_fp8_cache_indexer_precision.md` | conditional todo | Opt-in packed FP8 KV/indexer cache lane if exact bf16 work cannot close the remaining gap. |
+| TARGET 07.43 | `prompts/TARGET_07.43_dsv4_sm80_vllm_ablation_before_precision.md` | completed | vLLM ablations found aux stream and persistent topk are not standalone macro factors; eager-vs-graph confirms graph is mandatory but not the next mini action item. |
+| TARGET 07.50 | `prompts/TARGET_07.50_dsv4_sm80_fp8_cache_indexer_precision.md` | completed | Narrow mini-owned FP8 indexer cache/logits slice passed quality smoke but was slower than bf16; stop that slice. |
+| TARGET 07.51 | `prompts/TARGET_07.51_dsv4_sm80_vllm_fp8_backend_parity.md` | completed | Isolated vLLM's actual FP8 indexer and `fp8_ds_mla` gather/dequant backends; decision is to port/adapt vLLM's FP8 indexer backend next. |
+| TARGET 07.52 | `prompts/TARGET_07.52_dsv4_sm80_vllm_fp8_indexer_backend_port.md` | next todo | Port or closely adapt vLLM's FP8 paged indexer backend as an opt-in path; keep exact bf16 default and defer full `fp8_ds_mla` KV cache E2E. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -101,7 +103,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.43 next.
+Run TARGET 07.52 next.
 
 TARGET 07.395 proved that mini's exact bf16 sparse decode boundary can match
 the comparable vLLM gather+split-K decode boundary:
@@ -122,12 +124,44 @@ packed FP8 KV/indexer cache lane, but it also identified an unproven suspicion:
 vLLM's attention custom-op plus aux-stream overlap and V1 graph/runtime
 discipline may hide part of mini's runtime/copy/elementwise bucket.
 
-TARGET 07.43 should run before TARGET 07.50.  It is a short vLLM ablation pass:
-disable aux-stream overlap, persistent topk/indexer fast paths, and CUDA graph
-dispatch where cleanly possible.  If those destructive experiments show a
-stable `>=5%` vLLM macro loss from an exact-portable mechanism, adapt that
-mechanism first.  If they do not, open TARGET 07.50 for the opt-in packed
-FP8/cache/indexer precision lane.
+TARGET 07.43 then ran the vLLM ablation pass:
+
+- aux-stream overlap off: `-0.54%` on 4096/128;
+- persistent topk/indexer fast path off: `+0.21%` on 4096/128;
+- enforce eager: `-69.82%` on 4096/128 and `-84.89%` on 4096/1024.
+
+This confirms that vLLM's graph/compile path is mandatory, but mini already has
+decode graph replay.  The remaining actionable hypothesis is not "add CUDA
+graph"; it is that vLLM's graph executes a lighter FP8 cache/indexer layout.
+TARGET 07.50 implemented the first narrow FP8 indexer cache/logits slice.  It
+passed quality smoke but failed performance:
+
+- same-run exact control 4096/128: `37.9237 output tok/s`;
+- FP8 indexer cache/logits 4096/128: `29.6691 output tok/s`;
+- FP8 logits microbench was slower than bf16 logits on all measured shapes.
+
+This did not disprove vLLM's full FP8 lane, because the 07.50 implementation
+was mini-owned and did not prove backend parity with vLLM's actual
+`fp8_paged_mqa_logits_triton` or `fp8_ds_mla` gather/dequant kernels.
+
+TARGET 07.51 then isolated vLLM's real FP8 backend pieces.  The main result:
+
+- vLLM FP8 Q path at batch16/history4096: `0.0839 ms`, vs mini FP8 Q
+  `0.2308 ms`;
+- vLLM FP8 indexer K store: `0.0964 ms`, vs mini FP8 store `0.2941 ms`;
+- vLLM FP8 paged decode logits: `0.1529 ms`, vs mini bf16 logits
+  `0.3076 ms` and mini FP8 logits `1.3072 ms`;
+- vLLM logits plus topk: `0.1804 ms`, vs mini bf16 select `0.3586 ms`;
+- quality was acceptable for an opt-in path, with top-k overlap about `0.973`
+  at the largest measured shape.
+
+The important nuance is that vLLM's model path does not use the standalone
+`quantize_and_insert_k_cache` wrapper for SM80 KV-cache store.  That standalone
+probe compiles `tl.float8e4nv` and fails on A100.  vLLM's real model path uses
+fused compressor/insert kernels with SM80 software-FP8 branches.  Therefore
+TARGET 07.52 should port or closely adapt the FP8 indexer backend first, and
+must not start by porting standalone `quantize_and_insert_k_cache` or full
+`fp8_ds_mla` KV cache E2E.
 
 ## Precision Policy
 

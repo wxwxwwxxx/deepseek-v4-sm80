@@ -134,6 +134,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self.max_graph_bs = 0
         self._capture_graph_inputs_bound = False
         self._capture_compressed_locs_in_graph = False
+        dsv4_kernel.warmup_indexer_fp8_backend(self.device)
 
     @property
     def capture_compressed_locs_in_graph(self) -> bool:
@@ -339,6 +340,78 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )
         return out
 
+    def select_indexer_fp8(
+        self,
+        layer_id: int,
+        q_values: torch.Tensor,
+        weights: torch.Tensor,
+        batch: Batch,
+    ) -> dsv4_kernel.DSV4IndexerSelectOutput | None:
+        metadata = batch.attn_metadata
+        if not isinstance(metadata, DSV4AttentionMetadata):
+            return None
+        indexer_metadata = metadata.indexer_metadata
+        if indexer_metadata is None or q_values.numel() == 0:
+            return None
+        rows = min(
+            q_values.shape[0],
+            weights.shape[0],
+            indexer_metadata.c4_seq_lens.shape[0],
+            indexer_metadata.page_table.shape[0],
+        )
+        if rows == 0:
+            return None
+        q_values = q_values[:rows]
+        weights = weights[:rows]
+        seq_lens = indexer_metadata.c4_seq_lens[:rows]
+        page_table = indexer_metadata.page_table[:rows]
+        if (
+            hasattr(self.kvcache, "has_indexer_fp8_paged_cache")
+            and self.kvcache.has_indexer_fp8_paged_cache()
+        ):
+            out = dsv4_kernel.indexer_select_fp8_paged_fallback(
+                q_values,
+                weights,
+                self.kvcache.indexer_fp8_paged_cache(layer_id),
+                seq_lens,
+                page_table,
+                page_size=indexer_metadata.c4_page_size,
+                width=max(self.index_topk, 1),
+                ratio=4,
+            )
+        else:
+            cache_values, cache_scales = self.kvcache.indexer_fp8_cache(layer_id)
+            out = dsv4_kernel.indexer_select_fp8_fallback(
+                q_values,
+                weights,
+                cache_values,
+                cache_scales,
+                seq_lens,
+                page_table,
+                page_size=indexer_metadata.c4_page_size,
+                width=max(self.index_topk, 1),
+                ratio=4,
+            )
+        core = metadata.core_metadata
+        core.c4_sparse_raw_indices = self._merge_indexer_rows(
+            core.c4_sparse_raw_indices,
+            out.topk.raw_indices,
+        )
+        core.c4_sparse_page_indices = self._merge_indexer_rows(
+            core.c4_sparse_page_indices,
+            out.topk.page_indices,
+        )
+        core.c4_sparse_full_indices = self._merge_indexer_rows(
+            core.c4_sparse_full_indices,
+            out.topk.full_indices,
+        )
+        if out.topk.topk_lens is not None:
+            core.c4_sparse_topk_lengths = self._merge_indexer_lengths(
+                core.c4_sparse_topk_lengths,
+                out.topk.topk_lens,
+            )
+        return out
+
     def _merge_indexer_rows(self, current: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
         padded = _pad_last_dim(values, value=-1)
         if current.shape == padded.shape:
@@ -473,8 +546,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
 
         c128_lengths_raw = torch.div(seq_lens, 128, rounding_mode="floor")
         c128_topk_lengths_clamp1 = c128_lengths_raw.clamp_min(1)
-        c128_raw_indices, c128_page_indices, c128_full_indices = (
-            self._make_all_compressed_indices(table_indices, c128_lengths_raw, 128)
+        c128_raw_indices, c128_page_indices, c128_full_indices = self._make_all_compressed_indices(
+            table_indices, c128_lengths_raw, 128
         )
 
         core = DSV4CoreAttentionMetadata(
@@ -556,11 +629,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
         table_indices: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        offsets = positions[:, None] - torch.arange(
-            self.window_size,
-            dtype=torch.int32,
-            device=self.device,
-        )[None, :]
+        offsets = (
+            positions[:, None]
+            - torch.arange(
+                self.window_size,
+                dtype=torch.int32,
+                device=self.device,
+            )[None, :]
+        )
         return self._gather_full_locs(table_indices, offsets)
 
     def _make_sparse_compressed_indices(
@@ -795,8 +871,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         compress_ratio: DSV4CompressRatio,
     ) -> dsv4_kernel.DSV4PagedMQAMetadata:
         context_indices = [
-            self._context_indices_for_query(metadata, row, compress_ratio)
-            for row in range(rows)
+            self._context_indices_for_query(metadata, row, compress_ratio) for row in range(rows)
         ]
         return dsv4_kernel.get_paged_mqa_logits_metadata_fallback(
             context_indices,
@@ -831,7 +906,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
     def _empty_decode_metadata(self, max_bs: int, max_seq_len: int) -> DSV4AttentionMetadata:
         device = self.device
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
-        topk_width = div_ceil(max(self.index_topk, 1), _PAGE_INDEX_ALIGNMENT) * _PAGE_INDEX_ALIGNMENT
+        topk_width = (
+            div_ceil(max(self.index_topk, 1), _PAGE_INDEX_ALIGNMENT) * _PAGE_INDEX_ALIGNMENT
+        )
         c128_width = div_ceil(max(div_ceil(max_seq_len, 128), 1), _PAGE_INDEX_ALIGNMENT)
         c128_width *= _PAGE_INDEX_ALIGNMENT
 
@@ -871,9 +948,15 @@ class DSV4AttentionBackend(BaseAttnBackend):
         )
         return DSV4AttentionMetadata(
             core_attn_metadata=core,
-            indexer_metadata=DSV4IndexerMetadata(self.page_size, core.page_table, core.c4_topk_lengths_raw),
-            c4_compress_metadata=DSV4CompressMetadata(4, core.c4_out_loc, core.seq_lens, core.positions),
-            c128_compress_metadata=DSV4CompressMetadata(128, core.c128_out_loc, core.seq_lens, core.positions),
+            indexer_metadata=DSV4IndexerMetadata(
+                self.page_size, core.page_table, core.c4_topk_lengths_raw
+            ),
+            c4_compress_metadata=DSV4CompressMetadata(
+                4, core.c4_out_loc, core.seq_lens, core.positions
+            ),
+            c128_compress_metadata=DSV4CompressMetadata(
+                128, core.c128_out_loc, core.seq_lens, core.positions
+            ),
         )
 
     def _copy_metadata_for_replay(

@@ -1,0 +1,219 @@
+{
+  "capability": [
+    8,
+    0
+  ],
+  "cases": [
+    {
+      "backends": {
+        "bf16_logits": "triton",
+        "legacy_fp8_logits": "triton_fp8",
+        "paged_fp8_logits": "triton_fp8_paged_vllm"
+      },
+      "case": {
+        "batch": 1,
+        "history": 1024
+      },
+      "mean_ms": {
+        "bf16_logits_ms": 0.16090560033917428,
+        "bf16_select_ms": 0.21544799953699112,
+        "fp8_q_quant_fold_ms": 0.08900480084121228,
+        "legacy_fp8_logits_ms": 0.21156639903783797,
+        "legacy_fp8_select_ms": 0.22011999860405923,
+        "legacy_fp8_store_ms": 0.0682463999837637,
+        "paged_fp8_logits_ms": 0.17942399978637696,
+        "paged_fp8_select_ms": 0.2478095956146717,
+        "paged_fp8_store_ms": 0.06806559972465039
+      },
+      "quality": {
+        "legacy_logits_vs_bf16": {
+          "max_abs": 0.10610952973365784,
+          "mean_abs": 0.02263106405735016
+        },
+        "legacy_topk_overlap_vs_bf16": {
+          "mean": 0.990234375,
+          "min": 0.990234375
+        },
+        "paged_cache_dequant_vs_bf16": {
+          "max_abs": 0.1875,
+          "mean_abs": 0.0179649256169796
+        },
+        "paged_logits_vs_bf16": {
+          "max_abs": 0.10610955953598022,
+          "mean_abs": 0.022631065919995308
+        },
+        "paged_topk_overlap_vs_bf16": {
+          "mean": 0.990234375,
+          "min": 0.990234375
+        }
+      },
+      "shape": {
+        "blocks_per_request": 16,
+        "cache_slots": 1024,
+        "fp8_paged_cache_bytes": 135168,
+        "head_dim": 128,
+        "indexer_page_size": 64,
+        "num_heads": 64,
+        "seq_lens": [
+          1024
+        ],
+        "topk_width": 512
+      },
+      "speedups": {
+        "paged_logits_vs_bf16": 0.8967897300848784,
+        "paged_logits_vs_legacy_fp8": 1.1791421397902728,
+        "paged_select_vs_bf16": 0.8694094310698088,
+        "paged_select_vs_legacy_fp8": 0.8882626116961667
+      }
+    },
+    {
+      "backends": {
+        "bf16_logits": "triton",
+        "legacy_fp8_logits": "triton_fp8",
+        "paged_fp8_logits": "triton_fp8_paged_vllm"
+      },
+      "case": {
+        "batch": 4,
+        "history": 2048
+      },
+      "mean_ms": {
+        "bf16_logits_ms": 0.16554559916257858,
+        "bf16_select_ms": 0.21387839913368226,
+        "fp8_q_quant_fold_ms": 0.08785919994115829,
+        "legacy_fp8_logits_ms": 0.31161120235919954,
+        "legacy_fp8_select_ms": 0.32874400168657303,
+        "legacy_fp8_store_ms": 0.06923199966549873,
+        "paged_fp8_logits_ms": 0.17911359965801238,
+        "paged_fp8_select_ms": 0.2449168011546135,
+        "paged_fp8_store_ms": 0.06681759990751743
+      },
+      "quality": {
+        "legacy_logits_vs_bf16": {
+          "max_abs": 0.11128245294094086,
+          "mean_abs": 0.021007968112826347
+        },
+        "legacy_topk_overlap_vs_bf16": {
+          "mean": 0.978515625,
+          "min": 0.9765625
+        },
+        "paged_cache_dequant_vs_bf16": {
+          "max_abs": 0.25,
+          "mean_abs": 0.017960259690880775
+        },
+        "paged_logits_vs_bf16": {
+          "max_abs": 0.1112823337316513,
+          "mean_abs": 0.021007966250181198
+        },
+        "paged_topk_overlap_vs_bf16": {
+          "mean": 0.978515625,
+          "min": 0.9765625
+        }
+      },
+      "shape": {
+        "blocks_per_request": 32,
+        "cache_slots": 8192,
+        "fp8_paged_cache_bytes": 1081344,
+        "head_dim": 128,
+        "indexer_page_size": 64,
+        "num_heads": 64,
+        "seq_lens": [
+          1024,
+          1365,
+          1706,
+          2048
+        ],
+        "topk_width": 512
+      },
+      "speedups": {
+        "paged_logits_vs_bf16": 0.9242491886638444,
+        "paged_logits_vs_legacy_fp8": 1.739740605705928,
+        "paged_select_vs_bf16": 0.8732696088034523,
+        "paged_select_vs_legacy_fp8": 1.342268068735065
+      }
+    },
+    {
+      "backends": {
+        "bf16_logits": "triton",
+        "legacy_fp8_logits": "triton_fp8",
+        "paged_fp8_logits": "triton_fp8_paged_vllm"
+      },
+      "case": {
+        "batch": 16,
+        "history": 4096
+      },
+      "mean_ms": {
+        "bf16_logits_ms": 0.3515920028090477,
+        "bf16_select_ms": 0.3708959981799126,
+        "fp8_q_quant_fold_ms": 0.08696320056915283,
+        "legacy_fp8_logits_ms": 1.3493296146392821,
+        "legacy_fp8_select_ms": 1.540683203935623,
+        "legacy_fp8_store_ms": 0.15113599970936775,
+        "paged_fp8_logits_ms": 0.18447039946913718,
+        "paged_fp8_select_ms": 0.24719199985265733,
+        "paged_fp8_store_ms": 0.12151199989020825
+      },
+      "quality": {
+        "legacy_logits_vs_bf16": {
+          "max_abs": 0.14101606607437134,
+          "mean_abs": 0.021472934633493423
+        },
+        "legacy_topk_overlap_vs_bf16": {
+          "mean": 0.974365234375,
+          "min": 0.96484375
+        },
+        "paged_cache_dequant_vs_bf16": {
+          "max_abs": 0.25,
+          "mean_abs": 0.017956607043743134
+        },
+        "paged_logits_vs_bf16": {
+          "max_abs": 0.14101606607437134,
+          "mean_abs": 0.021472934633493423
+        },
+        "paged_topk_overlap_vs_bf16": {
+          "mean": 0.974365234375,
+          "min": 0.96484375
+        }
+      },
+      "shape": {
+        "blocks_per_request": 64,
+        "cache_slots": 65536,
+        "fp8_paged_cache_bytes": 8650752,
+        "head_dim": 128,
+        "indexer_page_size": 64,
+        "num_heads": 64,
+        "seq_lens": [
+          2048,
+          2184,
+          2321,
+          2457,
+          2594,
+          2730,
+          2867,
+          3003,
+          3140,
+          3276,
+          3413,
+          3549,
+          3686,
+          3822,
+          3959,
+          4096
+        ],
+        "topk_width": 512
+      },
+      "speedups": {
+        "paged_logits_vs_bf16": 1.9059534961752538,
+        "paged_logits_vs_legacy_fp8": 7.314613176543978,
+        "paged_select_vs_bf16": 1.5004369008745873,
+        "paged_select_vs_legacy_fp8": 6.232738943226202
+      }
+    }
+  ],
+  "device": "NVIDIA A100-SXM4-80GB",
+  "indexer_page_size": 64,
+  "iters": 20,
+  "model_page_size": 256,
+  "suite": "target07_52_mini_vllm_fp8_indexer_backend_microbench",
+  "torch": "2.9.1+cu128",
+  "warmup": 5
+}

@@ -6,6 +6,38 @@ import torch
 import triton
 import triton.language as tl
 
+_E4M3FN_TO_BF16_LUTS: dict[tuple[str, int | None], torch.Tensor] = {}
+
+
+def _get_e4m3fn_to_bf16_lut(device: torch.device) -> torch.Tensor:
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device(device.type, torch.cuda.current_device())
+    key = (device.type, device.index)
+    lut = _E4M3FN_TO_BF16_LUTS.get(key)
+    if lut is not None and lut.device == device:
+        return lut
+
+    values = []
+    for byte in range(256):
+        sign = -1.0 if byte & 0x80 else 1.0
+        exp_bits = (byte >> 3) & 0x0F
+        mant = byte & 0x07
+        if exp_bits == 0:
+            value = (mant / 8.0) * 2.0**-6
+        else:
+            value = (1.0 + mant / 8.0) * 2.0 ** (exp_bits - 7)
+        values.append(sign * value)
+
+    lut = torch.tensor(values, dtype=torch.float32).to(torch.bfloat16).to(device)
+    _E4M3FN_TO_BF16_LUTS[key] = lut
+    return lut
+
+
+def warmup_indexer_fp8_lut(device: torch.device) -> bool:
+    _get_e4m3fn_to_bf16_lut(torch.device(device))
+    return True
+
 
 @triton.jit
 def _silu_and_mul_clamp_kernel(
@@ -321,7 +353,9 @@ def _q_kv_norm_rope_cache_bf16_kernel(
             smooth = 1.0 - ramp
             inv_freq = inv_freq / factor * (1.0 - smooth) + inv_freq * smooth
         theta = pos * inv_freq
-        theta = theta - tl.floor((theta + 3.141592653589793) / 6.283185307179586) * 6.283185307179586
+        theta = (
+            theta - tl.floor((theta + 3.141592653589793) / 6.283185307179586) * 6.283185307179586
+        )
         cos = tl.cos(theta)
         sin = tl.sin(theta)
 
@@ -361,7 +395,9 @@ def _q_kv_norm_rope_cache_bf16_kernel(
             inv_freq = inv_freq / factor * (1.0 - smooth) + inv_freq * smooth
 
         theta = pos * inv_freq
-        theta = theta - tl.floor((theta + 3.141592653589793) / 6.283185307179586) * 6.283185307179586
+        theta = (
+            theta - tl.floor((theta + 3.141592653589793) / 6.283185307179586) * 6.283185307179586
+        )
         cos = tl.cos(theta)
         sin = tl.sin(theta)
 
@@ -371,8 +407,12 @@ def _q_kv_norm_rope_cache_bf16_kernel(
         b_offsets = row_base + b_dim_offsets
         a = tl.load(kv_ptr + a_offsets, mask=tail_mask, other=0.0).to(tl.float32)
         b = tl.load(kv_ptr + b_offsets, mask=tail_mask, other=0.0).to(tl.float32)
-        a_weight = tl.load(norm_weight_ptr + a_dim_offsets, mask=tail_mask, other=0.0).to(tl.float32)
-        b_weight = tl.load(norm_weight_ptr + b_dim_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+        a_weight = tl.load(norm_weight_ptr + a_dim_offsets, mask=tail_mask, other=0.0).to(
+            tl.float32
+        )
+        b_weight = tl.load(norm_weight_ptr + b_dim_offsets, mask=tail_mask, other=0.0).to(
+            tl.float32
+        )
         a = a * scale * a_weight
         b = b * scale * b_weight
         rotated_a = a * cos - b * sin
@@ -433,7 +473,9 @@ def _compress_norm_rope_store_bf16_kernel(
             inv_freq = inv_freq / factor * (1.0 - smooth) + inv_freq * smooth
 
         theta = pos * inv_freq
-        theta = theta - tl.floor((theta + 3.141592653589793) / 6.283185307179586) * 6.283185307179586
+        theta = (
+            theta - tl.floor((theta + 3.141592653589793) / 6.283185307179586) * 6.283185307179586
+        )
         cos = tl.cos(theta)
         sin = tl.sin(theta)
 
@@ -444,8 +486,12 @@ def _compress_norm_rope_store_bf16_kernel(
         a = tl.load(kv_ptr + a_offsets, mask=tail_mask, other=0.0).to(tl.float32)
         b = tl.load(kv_ptr + b_offsets, mask=tail_mask, other=0.0).to(tl.float32)
         if has_norm:
-            a_weight = tl.load(norm_weight_ptr + a_dim_offsets, mask=tail_mask, other=0.0).to(tl.float32)
-            b_weight = tl.load(norm_weight_ptr + b_dim_offsets, mask=tail_mask, other=0.0).to(tl.float32)
+            a_weight = tl.load(norm_weight_ptr + a_dim_offsets, mask=tail_mask, other=0.0).to(
+                tl.float32
+            )
+            b_weight = tl.load(norm_weight_ptr + b_dim_offsets, mask=tail_mask, other=0.0).to(
+                tl.float32
+            )
             a = a * scale * a_weight
             b = b * scale * b_weight
         rotated_a = a * cos - b * sin
@@ -770,21 +816,19 @@ def _hc_split_pre_kernel(
     scale1 = tl.load(scale_ptr + 1).to(tl.float32)
     scale2 = tl.load(scale_ptr + 2).to(tl.float32)
 
-    pre_logits = (
-        tl.load(mixes_ptr + mix_base + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
-        * scale0
-        + tl.load(base_ptr + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
-    )
+    pre_logits = tl.load(mixes_ptr + mix_base + hc_offsets, mask=hc_mask, other=0.0).to(
+        tl.float32
+    ) * scale0 + tl.load(base_ptr + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
     pre = tl.sigmoid(pre_logits) + eps
     pre = tl.where(hc_mask, pre, 0.0)
 
     post_start = hc_mult
-    post_logits = (
-        tl.load(mixes_ptr + mix_base + post_start + hc_offsets, mask=hc_mask, other=0.0).to(
-            tl.float32
-        )
-        * scale1
-        + tl.load(base_ptr + post_start + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
+    post_logits = tl.load(
+        mixes_ptr + mix_base + post_start + hc_offsets, mask=hc_mask, other=0.0
+    ).to(tl.float32) * scale1 + tl.load(
+        base_ptr + post_start + hc_offsets, mask=hc_mask, other=0.0
+    ).to(
+        tl.float32
     )
     post = 2.0 * tl.sigmoid(post_logits)
     post = tl.where(hc_mask, post, 0.0)
@@ -794,11 +838,9 @@ def _hc_split_pre_kernel(
     matrix_mask = (rows < hc_mult) & (cols < hc_mult)
     comb_start = 2 * hc_mult
     comb_offsets = comb_start + rows * hc_mult + cols
-    comb_logits = (
-        tl.load(mixes_ptr + mix_base + comb_offsets, mask=matrix_mask, other=0.0).to(tl.float32)
-        * scale2
-        + tl.load(base_ptr + comb_offsets, mask=matrix_mask, other=0.0).to(tl.float32)
-    )
+    comb_logits = tl.load(mixes_ptr + mix_base + comb_offsets, mask=matrix_mask, other=0.0).to(
+        tl.float32
+    ) * scale2 + tl.load(base_ptr + comb_offsets, mask=matrix_mask, other=0.0).to(tl.float32)
     comb_logits = tl.where(matrix_mask, comb_logits, -3.4028234663852886e38)
     row_max = tl.max(comb_logits, axis=1)
     exp_logits = tl.where(matrix_mask, tl.exp(comb_logits - row_max[:, None]), 0.0)
@@ -1041,6 +1083,364 @@ def _fp8_e4m3fn_value(bits):
 
 
 @triton.jit
+def _decode_e4m3fn_to_bf16_lut(u, lut_ptr):
+    return tl.load(lut_ptr + u.to(tl.uint32))
+
+
+@triton.jit
+def _encode_e4m3fn_sw(x):
+    bits = x.to(tl.uint32, bitcast=True)
+    sign = (bits >> 31) & 1
+    abs_bits = bits & 0x7FFFFFFF
+    exp_fp32 = (abs_bits >> 23).to(tl.int32)
+    mant_fp32 = abs_bits & 0x7FFFFF
+
+    is_zero = abs_bits == 0
+    is_inf_or_nan = exp_fp32 == 0xFF
+    is_nan = is_inf_or_nan & (mant_fp32 != 0)
+
+    exp_fp8 = exp_fp32 - 120
+    mant_extracted = mant_fp32 >> 20
+    round_bit = (mant_fp32 >> 19) & 1
+    sticky = (mant_fp32 & 0x7FFFF) != 0
+    odd = (mant_extracted & 1) == 1
+    round_up = round_bit & (sticky.to(tl.uint32) | odd.to(tl.uint32))
+    mant_rounded = mant_extracted + round_up
+    carry = mant_rounded == 8
+    exp_after = exp_fp8 + carry.to(tl.int32)
+    mant_after = tl.where(carry, 0, mant_rounded)
+    packed_normal = ((exp_after.to(tl.uint32) & 0xF) << 3) | (mant_after & 0x7)
+
+    impl_mant = (tl.full((), 1, tl.uint32) << 23) | mant_fp32
+    sub_shift = (141 - exp_fp32).to(tl.uint32)
+    safe_shift = tl.minimum(sub_shift, 31)
+    sub_m_int = impl_mant >> safe_shift
+    sub_round_bit = tl.where(
+        safe_shift >= 1,
+        (impl_mant >> (safe_shift - 1)) & 1,
+        tl.zeros_like(impl_mant),
+    )
+    sticky_mask = tl.where(
+        safe_shift >= 2,
+        (tl.full((), 1, tl.uint32) << (safe_shift - 1)) - 1,
+        tl.zeros_like(impl_mant),
+    )
+    sub_sticky = (impl_mant & sticky_mask) != 0
+    sub_odd = (sub_m_int & 1) == 1
+    sub_round_up = sub_round_bit & (sub_sticky.to(tl.uint32) | sub_odd.to(tl.uint32))
+    sub_m_rounded = sub_m_int + sub_round_up
+    sub_promotes = sub_m_rounded == 8
+    sub_packed = tl.where(
+        sub_promotes,
+        tl.full((), 0x08, tl.uint32),
+        sub_m_rounded & 0x7,
+    )
+
+    over_max_finite = (exp_after >= 16) | ((exp_after == 15) & (mant_after == 7))
+    packed_normal = tl.where(over_max_finite, 0x7E, packed_normal)
+
+    is_subnormal = exp_fp8 <= 0
+    encoded = tl.where(is_subnormal, sub_packed, packed_normal)
+    encoded = tl.where(is_zero, tl.zeros_like(encoded), encoded)
+    encoded = tl.where(is_nan, tl.full((), 0x7F, tl.uint32), encoded)
+    encoded = encoded | (sign << 7)
+    return encoded.to(tl.uint8)
+
+
+@triton.jit
+def _indexer_fp8_quant_store_kernel(
+    kv_ptr,
+    loc_ptr,
+    values_ptr,
+    scales_ptr,
+    rows: tl.constexpr,
+    dim: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_D)
+    mask = offsets < dim
+    loc = tl.load(loc_ptr + row).to(tl.int64)
+    valid_loc = loc >= 0
+
+    values = tl.load(kv_ptr + row * dim + offsets, mask=mask, other=0.0).to(tl.float32)
+    values = values.to(tl.bfloat16).to(tl.float32)
+    absmax = tl.max(tl.abs(values), axis=0)
+    absmax = tl.maximum(absmax, 1e-4)
+    exponent = tl.ceil(tl.log2(absmax / 448.0))
+    inv_scale = tl.exp2(-exponent)
+    scaled = tl.clamp(values * inv_scale, -448.0, 448.0)
+    encoded = _encode_e4m3fn_sw(scaled)
+
+    tl.store(values_ptr + loc * dim + offsets, encoded, mask=mask & valid_loc)
+    scale = tl.exp2(exponent)
+    scale_ptr = (scales_ptr + loc * 4).to(tl.pointer_type(tl.float32))
+    tl.store(scale_ptr, scale, mask=valid_loc)
+
+
+@triton.jit
+def _indexer_fp8_quantize_kernel(
+    kv_ptr,
+    values_ptr,
+    scales_ptr,
+    dim: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_D)
+    mask = offsets < dim
+
+    values = tl.load(kv_ptr + row * dim + offsets, mask=mask, other=0.0).to(tl.float32)
+    values = values.to(tl.bfloat16).to(tl.float32)
+    absmax = tl.max(tl.abs(values), axis=0)
+    absmax = tl.maximum(absmax, 1e-4)
+    exponent = tl.ceil(tl.log2(absmax / 448.0))
+    inv_scale = tl.exp2(-exponent)
+    scaled = tl.clamp(values * inv_scale, -448.0, 448.0)
+    encoded = _encode_e4m3fn_sw(scaled)
+
+    tl.store(values_ptr + row * dim + offsets, encoded, mask=mask)
+    scale = tl.exp2(exponent)
+    scale_ptr = (scales_ptr + row * 4).to(tl.pointer_type(tl.float32))
+    tl.store(scale_ptr, scale)
+
+
+@triton.jit
+def _indexer_fp8_quantize_fold_kernel(
+    q_ptr,
+    weights_ptr,
+    values_ptr,
+    weights_out_ptr,
+    stride_q_t,
+    stride_q_h,
+    stride_q_d,
+    stride_w_t,
+    stride_w_h,
+    stride_wo_t,
+    stride_wo_h,
+    num_heads: tl.constexpr,
+    dim: tl.constexpr,
+    softmax_scale: tl.constexpr,
+    head_scale: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    token = row // num_heads
+    head = row - token * num_heads
+    offsets = tl.arange(0, BLOCK_D)
+    mask = offsets < dim
+
+    q = tl.load(
+        q_ptr + token * stride_q_t + head * stride_q_h + offsets * stride_q_d,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    q = q.to(tl.bfloat16).to(tl.float32)
+    absmax = tl.max(tl.abs(q), axis=0)
+    absmax = tl.maximum(absmax, 1e-4)
+    exponent = tl.ceil(tl.log2(absmax / 448.0))
+    inv_scale = tl.exp2(-exponent)
+    scaled = tl.clamp(q * inv_scale, -448.0, 448.0)
+    encoded = _encode_e4m3fn_sw(scaled)
+
+    tl.store(values_ptr + row * dim + offsets, encoded, mask=mask)
+    weight = tl.load(weights_ptr + token * stride_w_t + head * stride_w_h).to(tl.float32)
+    folded = weight * tl.exp2(exponent) * softmax_scale * head_scale
+    tl.store(weights_out_ptr + token * stride_wo_t + head * stride_wo_h, folded)
+
+
+@triton.jit
+def _indexer_fp8_paged_quant_store_kernel(
+    kv_ptr,
+    loc_ptr,
+    cache_ptr,
+    dim: tl.constexpr,
+    page_size: tl.constexpr,
+    page_bytes: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_D)
+    mask = offsets < dim
+    loc = tl.load(loc_ptr + row).to(tl.int64)
+    valid_loc = loc >= 0
+
+    values = tl.load(kv_ptr + row * dim + offsets, mask=mask, other=0.0).to(tl.float32)
+    values = values.to(tl.bfloat16).to(tl.float32)
+    absmax = tl.max(tl.abs(values), axis=0)
+    absmax = tl.maximum(absmax, 1e-4)
+    exponent = tl.ceil(tl.log2(absmax / 448.0))
+    inv_scale = tl.exp2(-exponent)
+    scaled = tl.clamp(values * inv_scale, -448.0, 448.0)
+    encoded = _encode_e4m3fn_sw(scaled)
+
+    page = loc // page_size
+    page_offset = loc - page * page_size
+    page_base = cache_ptr + page * page_bytes
+    value_ptr = page_base + page_offset * dim
+    scale_ptr = (page_base + page_size * dim + page_offset * 4).to(tl.pointer_type(tl.float32))
+
+    tl.store(value_ptr + offsets, encoded, mask=mask & valid_loc)
+    tl.store(scale_ptr, tl.exp2(exponent), mask=valid_loc)
+
+
+@triton.jit
+def _indexer_fp8_logits_kernel(
+    q_ptr,
+    cache_values_ptr,
+    cache_scales_ptr,
+    weights_ptr,
+    seq_lens_ptr,
+    page_table_ptr,
+    logits_ptr,
+    num_pages: tl.constexpr,
+    num_heads: tl.constexpr,
+    dim: tl.constexpr,
+    page_size: tl.constexpr,
+    page_bits: tl.constexpr,
+    max_seq_len: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    block = tl.program_id(1)
+    n_offsets = block * BLOCK_N + tl.arange(0, BLOCK_N)
+    d_offsets = tl.arange(0, BLOCK_D)
+    d_mask = d_offsets < dim
+
+    seq_len = tl.load(seq_lens_ptr + row).to(tl.int32)
+    valid_n = n_offsets < seq_len
+    page_idx = n_offsets >> page_bits
+    offset = n_offsets & (page_size - 1)
+    physical_page = tl.load(
+        page_table_ptr + row * num_pages + page_idx,
+        mask=valid_n & (page_idx < num_pages),
+        other=-1,
+    ).to(tl.int64)
+    valid = valid_n & (physical_page >= 0)
+    cache_rows = physical_page * page_size + offset
+
+    cache_bits = tl.load(
+        cache_values_ptr + cache_rows[:, None] * dim + d_offsets[None, :],
+        mask=valid[:, None] & d_mask[None, :],
+        other=0,
+    ).to(tl.int32)
+    cache_scale = tl.load(
+        cache_scales_ptr.to(tl.pointer_type(tl.float32)) + cache_rows,
+        mask=valid,
+        other=0.0,
+    ).to(tl.float32)
+    kv = _fp8_e4m3fn_value(cache_bits).to(tl.float32) * cache_scale[:, None]
+
+    acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    for head in range(0, num_heads):
+        q_bits = tl.load(
+            q_ptr + (row * num_heads + head) * dim + d_offsets,
+            mask=d_mask,
+            other=0,
+        ).to(tl.int32)
+        q = _fp8_e4m3fn_value(q_bits).to(tl.float32)
+        score = tl.sum(kv * q[None, :], axis=1)
+        score = tl.maximum(score, 0.0)
+        weight = tl.load(weights_ptr + row * num_heads + head).to(tl.float32)
+        acc += score * weight
+
+    out = tl.where(valid, acc, -float("inf"))
+    tl.store(logits_ptr + row * max_seq_len + n_offsets, out, mask=n_offsets < max_seq_len)
+
+
+@triton.jit
+def _indexer_fp8_paged_logits_kernel(
+    q_ptr,
+    cache_ptr,
+    e4m3fn_to_bf16_ptr,
+    weights_ptr,
+    seq_lens_ptr,
+    page_table_ptr,
+    logits_ptr,
+    stride_q_r,
+    stride_q_h,
+    stride_q_d,
+    stride_w_r,
+    stride_w_h,
+    stride_pt_r,
+    stride_pt_p,
+    stride_l_r,
+    stride_l_n,
+    num_pages: tl.constexpr,
+    num_heads: tl.constexpr,
+    dim: tl.constexpr,
+    page_size: tl.constexpr,
+    page_bytes: tl.constexpr,
+    max_seq_len: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    page_rank = tl.program_id(1)
+
+    seq_len = tl.load(seq_lens_ptr + row).to(tl.int32)
+    if page_rank * page_size >= seq_len:
+        return
+
+    physical_page = tl.load(
+        page_table_ptr + row * stride_pt_r + page_rank * stride_pt_p,
+        mask=page_rank < num_pages,
+        other=-1,
+    ).to(tl.int64)
+    if physical_page < 0:
+        return
+
+    offs_h = tl.arange(0, BLOCK_H)
+    offs_d = tl.arange(0, BLOCK_D)
+    offs_n = tl.arange(0, BLOCK_N)
+    mask_h = offs_h < num_heads
+    mask_d = offs_d < dim
+    mask_n = offs_n < page_size
+
+    q_byte = tl.load(
+        q_ptr + row * stride_q_r + offs_h[:, None] * stride_q_h + offs_d[None, :] * stride_q_d,
+        mask=mask_h[:, None] & mask_d[None, :],
+        other=0,
+    )
+    q = _decode_e4m3fn_to_bf16_lut(q_byte, e4m3fn_to_bf16_ptr)
+
+    page_base = cache_ptr + physical_page * page_bytes
+    k_byte = tl.load(
+        page_base + offs_n[:, None] * dim + offs_d[None, :],
+        mask=mask_n[:, None] & mask_d[None, :],
+        other=0,
+    )
+    k_scale = tl.load(
+        (page_base + page_size * dim + offs_n * 4).to(tl.pointer_type(tl.float32)),
+        mask=mask_n,
+        other=0.0,
+    )
+    k = (
+        _decode_e4m3fn_to_bf16_lut(k_byte, e4m3fn_to_bf16_ptr).to(tl.float32) * k_scale[:, None]
+    ).to(tl.bfloat16)
+
+    scores = tl.dot(q, tl.trans(k))
+    weights = tl.load(
+        weights_ptr + row * stride_w_r + offs_h * stride_w_h,
+        mask=mask_h,
+        other=0.0,
+    )
+    scores = tl.where(scores > 0, scores, 0.0) * weights[:, None]
+    out = tl.sum(scores, axis=0)
+
+    k_offsets = page_rank * page_size + offs_n
+    valid = mask_n & (k_offsets < seq_len)
+    out = tl.where(valid, out, -float("inf"))
+    tl.store(
+        logits_ptr + row * stride_l_r + k_offsets * stride_l_n,
+        out,
+        mask=mask_n & (k_offsets < max_seq_len),
+    )
+
+
+@triton.jit
 def _quantized_linear_fp8_kernel(
     x_ptr,
     weight_ptr,
@@ -1249,23 +1649,17 @@ def _grouped_fp4_linear_kernel(
             other=0.0,
         )
         if HAS_SLOT:
-            weight_offsets = (
-                ((expert * 2 + SLOT) * N + offs_n[None, :]) * WEIGHT_K_BYTES
-                + (offs_k[:, None] // 2)
+            weight_offsets = ((expert * 2 + SLOT) * N + offs_n[None, :]) * WEIGHT_K_BYTES + (
+                offs_k[:, None] // 2
             )
-            scale_offsets = (
-                ((expert * 2 + SLOT) * N + offs_n[None, :]) * SCALE_K
-                + (offs_k[:, None] // 32)
+            scale_offsets = ((expert * 2 + SLOT) * N + offs_n[None, :]) * SCALE_K + (
+                offs_k[:, None] // 32
             )
         else:
-            weight_offsets = (
-                (expert * N + offs_n[None, :]) * WEIGHT_K_BYTES
-                + (offs_k[:, None] // 2)
+            weight_offsets = (expert * N + offs_n[None, :]) * WEIGHT_K_BYTES + (
+                offs_k[:, None] // 2
             )
-            scale_offsets = (
-                (expert * N + offs_n[None, :]) * SCALE_K
-                + (offs_k[:, None] // 32)
-            )
+            scale_offsets = (expert * N + offs_n[None, :]) * SCALE_K + (offs_k[:, None] // 32)
         weight_mask = (offs_n[None, :] < N) & (offs_k[:, None] < K)
         packed = tl.load(weight_ptr + weight_offsets, mask=weight_mask, other=0).to(tl.int32)
         nibble = tl.where((offs_k[:, None] & 1) == 0, packed & 0x0F, (packed >> 4) & 0x0F)
@@ -1421,20 +1815,16 @@ def _grouped_fp4_w13_kernel(
             other=0.0,
         )
         weight_mask = (offs_n[None, :] < N) & (offs_k[:, None] < K)
-        gate_weight_offsets = (
-            ((expert * 2) * N + offs_n[None, :]) * WEIGHT_K_BYTES
-            + (offs_k[:, None] // 2)
+        gate_weight_offsets = ((expert * 2) * N + offs_n[None, :]) * WEIGHT_K_BYTES + (
+            offs_k[:, None] // 2
         )
-        up_weight_offsets = (
-            ((expert * 2 + 1) * N + offs_n[None, :]) * WEIGHT_K_BYTES
-            + (offs_k[:, None] // 2)
+        up_weight_offsets = ((expert * 2 + 1) * N + offs_n[None, :]) * WEIGHT_K_BYTES + (
+            offs_k[:, None] // 2
         )
         gate_packed = tl.load(weight_ptr + gate_weight_offsets, mask=weight_mask, other=0).to(
             tl.int32
         )
-        up_packed = tl.load(weight_ptr + up_weight_offsets, mask=weight_mask, other=0).to(
-            tl.int32
-        )
+        up_packed = tl.load(weight_ptr + up_weight_offsets, mask=weight_mask, other=0).to(tl.int32)
         gate_nibble = tl.where(
             (offs_k[:, None] & 1) == 0,
             gate_packed & 0x0F,
@@ -1448,13 +1838,11 @@ def _grouped_fp4_w13_kernel(
         gate_b = _fp4_e2m1_value(gate_nibble).to(tl.float32)
         up_b = _fp4_e2m1_value(up_nibble).to(tl.float32)
         if HAS_SCALE:
-            gate_scale_offsets = (
-                ((expert * 2) * N + offs_n[None, :]) * SCALE_K
-                + (offs_k[:, None] // 32)
+            gate_scale_offsets = ((expert * 2) * N + offs_n[None, :]) * SCALE_K + (
+                offs_k[:, None] // 32
             )
-            up_scale_offsets = (
-                ((expert * 2 + 1) * N + offs_n[None, :]) * SCALE_K
-                + (offs_k[:, None] // 32)
+            up_scale_offsets = ((expert * 2 + 1) * N + offs_n[None, :]) * SCALE_K + (
+                offs_k[:, None] // 32
             )
             gate_scale = tl.load(
                 scale_ptr + gate_scale_offsets,
@@ -1499,9 +1887,7 @@ def _moe_route_sum_kernel(
     acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
     for top_idx in range(0, topk):
         route = token * topk + top_idx
-        values = tl.load(routed_ptr + route * hidden + offs_n, mask=mask, other=0.0).to(
-            tl.float32
-        )
+        values = tl.load(routed_ptr + route * hidden + offs_n, mask=mask, other=0.0).to(tl.float32)
         acc += values
     tl.store(out_ptr + token * hidden + offs_n, acc, mask=mask)
 
@@ -1566,13 +1952,11 @@ def _grouped_fp4_moe_fused_compute_kernel(
                 other=0.0,
             )
             weight_mask = (offs_i[None, :] < I) & (offs_k[:, None] < H)
-            gate_weight_offsets = (
-                ((expert * 2) * I + offs_i[None, :]) * W13_K_BYTES
-                + (offs_k[:, None] // 2)
+            gate_weight_offsets = ((expert * 2) * I + offs_i[None, :]) * W13_K_BYTES + (
+                offs_k[:, None] // 2
             )
-            up_weight_offsets = (
-                ((expert * 2 + 1) * I + offs_i[None, :]) * W13_K_BYTES
-                + (offs_k[:, None] // 2)
+            up_weight_offsets = ((expert * 2 + 1) * I + offs_i[None, :]) * W13_K_BYTES + (
+                offs_k[:, None] // 2
             )
             gate_packed = tl.load(
                 w13_weight_ptr + gate_weight_offsets,
@@ -1597,13 +1981,11 @@ def _grouped_fp4_moe_fused_compute_kernel(
             gate_b = _fp4_e2m1_value(gate_nibble).to(tl.float32)
             up_b = _fp4_e2m1_value(up_nibble).to(tl.float32)
             if HAS_W13_SCALE:
-                gate_scale_offsets = (
-                    ((expert * 2) * I + offs_i[None, :]) * W13_SCALE_K
-                    + (offs_k[:, None] // 32)
+                gate_scale_offsets = ((expert * 2) * I + offs_i[None, :]) * W13_SCALE_K + (
+                    offs_k[:, None] // 32
                 )
-                up_scale_offsets = (
-                    ((expert * 2 + 1) * I + offs_i[None, :]) * W13_SCALE_K
-                    + (offs_k[:, None] // 32)
+                up_scale_offsets = ((expert * 2 + 1) * I + offs_i[None, :]) * W13_SCALE_K + (
+                    offs_k[:, None] // 32
                 )
                 gate_scale = tl.load(
                     w13_scale_ptr + gate_scale_offsets,
@@ -1629,10 +2011,7 @@ def _grouped_fp4_moe_fused_compute_kernel(
         activated *= route_weights[:, None]
 
         w2_mask = (offs_i[:, None] < I) & (offs_n[None, :] < H)
-        w2_offsets = (
-            (expert * H + offs_n[None, :]) * W2_K_BYTES
-            + (offs_i[:, None] // 2)
-        )
+        w2_offsets = (expert * H + offs_n[None, :]) * W2_K_BYTES + (offs_i[:, None] // 2)
         w2_packed = tl.load(w2_weight_ptr + w2_offsets, mask=w2_mask, other=0).to(tl.int32)
         w2_nibble = tl.where(
             (offs_i[:, None] & 1) == 0,
@@ -1641,10 +2020,7 @@ def _grouped_fp4_moe_fused_compute_kernel(
         )
         w2_b = _fp4_e2m1_value(w2_nibble).to(tl.float32)
         if HAS_W2_SCALE:
-            w2_scale_offsets = (
-                (expert * H + offs_n[None, :]) * W2_SCALE_K
-                + (offs_i[:, None] // 32)
-            )
+            w2_scale_offsets = (expert * H + offs_n[None, :]) * W2_SCALE_K + (offs_i[:, None] // 32)
             w2_scale = tl.load(w2_scale_ptr + w2_scale_offsets, mask=w2_mask, other=0.0).to(
                 tl.float32
             )
@@ -1874,8 +2250,10 @@ def _rope_scaling(
         return False, 0, 0
 
     def correction_dim(num_rotations: float) -> float:
-        return rotary_dim * math.log(original_seq_len / (num_rotations * 2 * math.pi)) / (
-            2 * math.log(base)
+        return (
+            rotary_dim
+            * math.log(original_seq_len / (num_rotations * 2 * math.pi))
+            / (2 * math.log(base))
         )
 
     low = max(math.floor(correction_dim(beta_fast)), 0)
@@ -2997,6 +3375,344 @@ def indexer_bf16_logits(
     return logits
 
 
+def indexer_fp8_quant_store(
+    kv: torch.Tensor,
+    loc: torch.Tensor,
+    values: torch.Tensor,
+    scales: torch.Tensor,
+) -> bool:
+    if (
+        kv.ndim != 2
+        or loc.ndim != 1
+        or values.ndim != 2
+        or scales.ndim != 2
+        or kv.shape[0] != loc.numel()
+        or values.shape[-1] != kv.shape[-1]
+        or scales.shape[-1] != 4
+        or kv.shape[-1] > 256
+        or not kv.is_cuda
+        or not loc.is_cuda
+        or not values.is_cuda
+        or not scales.is_cuda
+        or values.dtype is not torch.uint8
+        or scales.dtype is not torch.uint8
+        or not kv.is_contiguous()
+        or not values.is_contiguous()
+        or not scales.is_contiguous()
+    ):
+        return False
+    if kv.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+        return False
+    if loc.dtype not in (torch.int32, torch.int64):
+        return False
+
+    loc_c = loc.to(device=kv.device, dtype=torch.int64).contiguous()
+    block_d = triton.next_power_of_2(kv.shape[-1])
+    _indexer_fp8_quant_store_kernel[(kv.shape[0],)](
+        kv,
+        loc_c,
+        values,
+        scales,
+        rows=kv.shape[0],
+        dim=kv.shape[-1],
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return True
+
+
+def indexer_fp8_quantize(kv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if (
+        kv.ndim < 2
+        or kv.shape[-1] > 256
+        or not kv.is_cuda
+        or not kv.is_contiguous()
+        or kv.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+    ):
+        return None
+    flat = kv.view(-1, kv.shape[-1])
+    values = torch.empty_like(flat, dtype=torch.uint8)
+    scales = torch.empty((flat.shape[0], 4), dtype=torch.uint8, device=kv.device)
+    block_d = triton.next_power_of_2(kv.shape[-1])
+    _indexer_fp8_quantize_kernel[(flat.shape[0],)](
+        flat,
+        values,
+        scales,
+        dim=kv.shape[-1],
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return (
+        values.view(*kv.shape[:-1], kv.shape[-1]).contiguous(),
+        scales.view(*kv.shape[:-1], 4).contiguous(),
+    )
+
+
+def indexer_fp8_quantize_fold(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    *,
+    softmax_scale: float,
+    head_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if (
+        q.ndim != 3
+        or weights.ndim not in (2, 3)
+        or weights.shape[:2] != q.shape[:2]
+        or q.shape[-1] > 256
+        or not q.is_cuda
+        or not weights.is_cuda
+        or not q.is_contiguous()
+        or q.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+    ):
+        return None
+    weights_c = weights.squeeze(-1).to(device=q.device, dtype=torch.float32).contiguous()
+    q_values = torch.empty_like(q, dtype=torch.uint8)
+    weights_out = torch.empty_like(weights_c, dtype=torch.float32)
+    block_d = triton.next_power_of_2(q.shape[-1])
+    _indexer_fp8_quantize_fold_kernel[(q.shape[0] * q.shape[1],)](
+        q,
+        weights_c,
+        q_values,
+        weights_out,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        weights_c.stride(0),
+        weights_c.stride(1),
+        weights_out.stride(0),
+        weights_out.stride(1),
+        num_heads=q.shape[1],
+        dim=q.shape[-1],
+        softmax_scale=float(softmax_scale),
+        head_scale=float(head_scale),
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return q_values, weights_out
+
+
+def indexer_fp8_paged_quant_store(
+    kv: torch.Tensor,
+    loc: torch.Tensor,
+    cache: torch.Tensor,
+    *,
+    page_size: int,
+) -> bool:
+    if (
+        kv.ndim != 2
+        or loc.ndim != 1
+        or cache.ndim != 2
+        or kv.shape[0] != loc.numel()
+        or kv.shape[-1] > 256
+        or page_size <= 0
+        or cache.shape[-1] != page_size * (kv.shape[-1] + 4)
+        or not kv.is_cuda
+        or not loc.is_cuda
+        or not cache.is_cuda
+        or cache.dtype is not torch.uint8
+        or not kv.is_contiguous()
+        or not cache.is_contiguous()
+    ):
+        return False
+    if kv.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+        return False
+    if loc.dtype not in (torch.int32, torch.int64):
+        return False
+
+    loc_c = loc.to(device=kv.device, dtype=torch.int64).contiguous()
+    block_d = triton.next_power_of_2(kv.shape[-1])
+    _indexer_fp8_paged_quant_store_kernel[(kv.shape[0],)](
+        kv,
+        loc_c,
+        cache,
+        dim=kv.shape[-1],
+        page_size=int(page_size),
+        page_bytes=int(cache.shape[-1]),
+        BLOCK_D=block_d,
+        num_warps=1,
+    )
+    return True
+
+
+def indexer_fp8_logits(
+    q_values: torch.Tensor,
+    cache_values: torch.Tensor,
+    cache_scales: torch.Tensor,
+    weights: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    max_seq_len: int | None = None,
+) -> torch.Tensor | None:
+    if (
+        q_values.ndim != 3
+        or cache_values.ndim != 2
+        or cache_scales.ndim != 2
+        or weights.ndim not in (2, 3)
+        or seq_lens.ndim != 1
+        or page_table.ndim != 2
+        or q_values.numel() == 0
+        or cache_values.shape[-1] != q_values.shape[-1]
+        or cache_scales.shape[0] != cache_values.shape[0]
+        or cache_scales.shape[-1] != 4
+        or weights.shape[0] != q_values.shape[0]
+        or weights.shape[1] != q_values.shape[1]
+        or seq_lens.shape[0] != q_values.shape[0]
+        or page_table.shape[0] != q_values.shape[0]
+        or not q_values.is_cuda
+        or not cache_values.is_cuda
+        or not cache_scales.is_cuda
+        or not weights.is_cuda
+        or not seq_lens.is_cuda
+        or not page_table.is_cuda
+        or q_values.dtype is not torch.uint8
+        or cache_values.dtype is not torch.uint8
+        or cache_scales.dtype is not torch.uint8
+        or not q_values.is_contiguous()
+        or not cache_values.is_contiguous()
+        or not cache_scales.is_contiguous()
+    ):
+        return None
+    if page_size <= 0 or page_size & (page_size - 1):
+        return None
+    if q_values.shape[-1] > 256:
+        return None
+
+    if max_seq_len is None:
+        max_seq_len = int(seq_lens.clamp_min(0).max().item())
+    else:
+        max_seq_len = int(max_seq_len)
+    if max_seq_len <= 0:
+        return torch.empty((q_values.shape[0], 0), dtype=torch.float32, device=q_values.device)
+
+    q_c = q_values.contiguous()
+    cache_values_c = cache_values.contiguous()
+    cache_scales_c = cache_scales.contiguous()
+    weights_c = weights.squeeze(-1).to(device=q_values.device, dtype=torch.float32).contiguous()
+    seq_lens_c = seq_lens.to(device=q_values.device, dtype=torch.int32).contiguous()
+    page_table_c = page_table.to(device=q_values.device, dtype=torch.int32).contiguous()
+    logits = torch.empty(
+        (q_values.shape[0], max_seq_len), dtype=torch.float32, device=q_values.device
+    )
+    block_n = 16
+    block_d = triton.next_power_of_2(q_values.shape[-1])
+    grid = (q_values.shape[0], triton.cdiv(max_seq_len, block_n))
+    _indexer_fp8_logits_kernel[grid](
+        q_c,
+        cache_values_c,
+        cache_scales_c,
+        weights_c,
+        seq_lens_c,
+        page_table_c,
+        logits,
+        num_pages=page_table_c.shape[1],
+        num_heads=q_values.shape[1],
+        dim=q_values.shape[-1],
+        page_size=int(page_size),
+        page_bits=(int(page_size) - 1).bit_length(),
+        max_seq_len=max_seq_len,
+        BLOCK_N=block_n,
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return logits
+
+
+def indexer_fp8_paged_logits(
+    q_values: torch.Tensor,
+    cache: torch.Tensor,
+    weights: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    max_seq_len: int | None = None,
+) -> torch.Tensor | None:
+    if (
+        q_values.ndim != 3
+        or cache.ndim != 2
+        or weights.ndim not in (2, 3)
+        or seq_lens.ndim != 1
+        or page_table.ndim != 2
+        or q_values.numel() == 0
+        or cache.shape[-1] != page_size * (q_values.shape[-1] + 4)
+        or weights.shape[0] != q_values.shape[0]
+        or weights.shape[1] != q_values.shape[1]
+        or seq_lens.shape[0] != q_values.shape[0]
+        or page_table.shape[0] != q_values.shape[0]
+        or not q_values.is_cuda
+        or not cache.is_cuda
+        or not weights.is_cuda
+        or not seq_lens.is_cuda
+        or not page_table.is_cuda
+        or q_values.dtype is not torch.uint8
+        or cache.dtype is not torch.uint8
+        or not q_values.is_contiguous()
+        or not cache.is_contiguous()
+    ):
+        return None
+    if page_size <= 0 or page_size & (page_size - 1):
+        return None
+    if q_values.shape[-1] > 256:
+        return None
+
+    if max_seq_len is None:
+        max_seq_len = int(seq_lens.clamp_min(0).max().item())
+    else:
+        max_seq_len = int(max_seq_len)
+    if max_seq_len <= 0:
+        return torch.empty((q_values.shape[0], 0), dtype=torch.float32, device=q_values.device)
+
+    q_c = q_values.contiguous()
+    cache_c = cache.contiguous()
+    weights_c = weights.squeeze(-1).to(device=q_values.device, dtype=torch.float32).contiguous()
+    seq_lens_c = seq_lens.to(device=q_values.device, dtype=torch.int32).contiguous()
+    page_table_c = page_table.to(device=q_values.device, dtype=torch.int32).contiguous()
+    logits = torch.full(
+        (q_values.shape[0], max_seq_len),
+        float("-inf"),
+        dtype=torch.float32,
+        device=q_values.device,
+    )
+    block_h = max(16, triton.next_power_of_2(q_values.shape[1]))
+    block_d = triton.next_power_of_2(q_values.shape[-1])
+    block_n = triton.next_power_of_2(page_size)
+    e4m3fn_to_bf16 = _get_e4m3fn_to_bf16_lut(q_values.device)
+    grid = (q_values.shape[0], page_table_c.shape[1])
+    _indexer_fp8_paged_logits_kernel[grid](
+        q_c,
+        cache_c,
+        e4m3fn_to_bf16,
+        weights_c,
+        seq_lens_c,
+        page_table_c,
+        logits,
+        q_c.stride(0),
+        q_c.stride(1),
+        q_c.stride(2),
+        weights_c.stride(0),
+        weights_c.stride(1),
+        page_table_c.stride(0),
+        page_table_c.stride(1),
+        logits.stride(0),
+        logits.stride(1),
+        num_pages=page_table_c.shape[1],
+        num_heads=q_values.shape[1],
+        dim=q_values.shape[-1],
+        page_size=int(page_size),
+        page_bytes=int(cache_c.shape[-1]),
+        max_seq_len=max_seq_len,
+        BLOCK_H=block_h,
+        BLOCK_D=block_d,
+        BLOCK_N=block_n,
+        num_warps=4,
+        num_stages=4,
+    )
+    return logits
+
+
 def hc_split_pre(
     mixes: torch.Tensor,
     x: torch.Tensor,
@@ -3582,7 +4298,9 @@ def grouped_fp4_moe_fused_compute(
     ):
         return None
     if route_count == 0:
-        return torch.empty((0, hidden_states.shape[-1]), dtype=hidden_states.dtype, device=hidden_states.device)
+        return torch.empty(
+            (0, hidden_states.shape[-1]), dtype=hidden_states.dtype, device=hidden_states.device
+        )
     hidden = hidden_states.shape[-1]
     intermediate = w13_weight.shape[2]
     if w13_weight.shape[-1] * 2 < hidden or w2_weight.shape[-1] * 2 < intermediate:
@@ -3772,6 +4490,12 @@ __all__ = [
     "hc_post",
     "hc_split_pre",
     "indexer_bf16_logits",
+    "indexer_fp8_logits",
+    "indexer_fp8_paged_logits",
+    "indexer_fp8_paged_quant_store",
+    "indexer_fp8_quantize",
+    "indexer_fp8_quantize_fold",
+    "indexer_fp8_quant_store",
     "k_norm_rope_cache_bf16",
     "copy_masked_compressed_locs",
     "copy_decode_metadata_for_replay",

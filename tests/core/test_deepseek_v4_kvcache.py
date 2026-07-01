@@ -4,7 +4,7 @@ import torch
 
 from minisgl.core import Req, SamplingParams
 from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
-from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
+from minisgl.kvcache.deepseek_v4_pool import DSV4_INDEXER_FP8_CACHE_ENV, DeepSeekV4KVCache
 from minisgl.models.config import ModelConfig, RotaryConfig
 from minisgl.scheduler.cache import CacheManager
 from minisgl.scheduler.utils import PendingReq
@@ -123,16 +123,38 @@ def test_deepseek_v4_pool_factory_defaults_to_bf16_and_maps_layers():
     assert int(state_loc.item()) < state_size
 
 
-
 def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
     cfg = _tiny_dsv4_config([4, 128, 0])
 
-    assert estimate_kvcache_bytes_per_page(
-        cfg,
-        page_size=1,
-        dtype=torch.float16,
-        tp_size=1,
-    ) == 4919
+    assert (
+        estimate_kvcache_bytes_per_page(
+            cfg,
+            page_size=1,
+            dtype=torch.float16,
+            tp_size=1,
+        )
+        == 4919
+    )
+
+
+def test_deepseek_v4_indexer_fp8_side_cache_is_opt_in(monkeypatch):
+    monkeypatch.delenv(DSV4_INDEXER_FP8_CACHE_ENV, raising=False)
+    default_pool = _make_dsv4_pool([4], num_pages=4, page_size=4)
+
+    assert not default_pool.has_indexer_fp8_cache()
+    assert default_pool.indexer_cache(0).dtype is torch.bfloat16
+
+    monkeypatch.setenv(DSV4_INDEXER_FP8_CACHE_ENV, "1")
+    fp8_pool = _make_dsv4_pool([4], num_pages=4, page_size=4)
+    values, scales = fp8_pool.indexer_fp8_cache(0)
+
+    assert fp8_pool.has_indexer_fp8_cache()
+    assert values.shape == (4, 4)
+    assert scales.shape == (4, 4)
+    assert values.dtype is torch.uint8
+    assert scales.dtype is torch.uint8
+    assert fp8_pool.indexer_cache(0).dtype is torch.bfloat16
+
 
 def test_deepseek_v4_pool_can_write_and_read_all_cache_components():
     pool = _make_dsv4_pool([0, 4, 128], num_pages=8, page_size=4)

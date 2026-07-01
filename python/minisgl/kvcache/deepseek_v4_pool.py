@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from math import gcd
 from typing import Literal
@@ -9,8 +10,9 @@ from minisgl.utils import div_ceil
 
 from .base import BaseKVCachePool
 
-
 DSV4CacheLayout = Literal["bf16_flat", "flashmla_fp8_packed"]
+DSV4_INDEXER_FP8_CACHE_ENV = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def _lcm(a: int, b: int) -> int:
@@ -204,6 +206,39 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             dtype=self._dtype,
             device=device,
         )
+        self._use_indexer_fp8_cache = (
+            os.environ.get(DSV4_INDEXER_FP8_CACHE_ENV, "").strip().lower() in _TRUE_ENV_VALUES
+        )
+        self._c4_indexer_fp8_page_size = max(page_size // 4, 1)
+        self._c4_indexer_fp8_num_pages = div_ceil(self._c4_slots, self._c4_indexer_fp8_page_size)
+        if self._use_indexer_fp8_cache and self._c4_layer_count:
+            self._c4_indexer_fp8_paged_cache = torch.empty(
+                (
+                    self._c4_layer_count,
+                    self._c4_indexer_fp8_num_pages,
+                    self._c4_indexer_fp8_page_size * (self._index_head_dim + 4),
+                ),
+                dtype=torch.uint8,
+                device=device,
+            )
+            if device.type == "cuda":
+                self._c4_indexer_fp8_values = None
+                self._c4_indexer_fp8_scales = None
+            else:
+                self._c4_indexer_fp8_values = torch.empty(
+                    (self._c4_layer_count, self._c4_slots, self._index_head_dim),
+                    dtype=torch.uint8,
+                    device=device,
+                )
+                self._c4_indexer_fp8_scales = torch.empty(
+                    (self._c4_layer_count, self._c4_slots, 4),
+                    dtype=torch.uint8,
+                    device=device,
+                )
+        else:
+            self._c4_indexer_fp8_paged_cache = None
+            self._c4_indexer_fp8_values = None
+            self._c4_indexer_fp8_scales = None
 
         self._full_refcount = torch.zeros(self._num_tokens, dtype=torch.int16, device=device)
         self._c4_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
@@ -249,6 +284,14 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 )
 
     @property
+    def indexer_fp8_page_size(self) -> int:
+        return self._c4_indexer_fp8_page_size
+
+    @property
+    def indexer_fp8_num_pages(self) -> int:
+        return self._c4_indexer_fp8_num_pages
+
+    @property
     def policy(self) -> DSV4CacheLayoutPolicy:
         return self._policy
 
@@ -269,9 +312,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         return DSV4AllocationCounts(
             full_slots=int(torch.count_nonzero(self._full_refcount).item()),
             c4_slots=(
-                int(torch.count_nonzero(self._c4_refcount).item())
-                if self._c4_layer_count
-                else 0
+                int(torch.count_nonzero(self._c4_refcount).item()) if self._c4_layer_count else 0
             ),
             c128_slots=(
                 int(torch.count_nonzero(self._c128_refcount).item())
@@ -305,6 +346,35 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         mapping = self.get_layer_mapping(layer_id)
         assert mapping.indexer_layer_id is not None, f"Layer {layer_id} has no C4 indexer."
         return self._c4_indexer_buffer[mapping.indexer_layer_id]
+
+    def has_indexer_fp8_cache(self) -> bool:
+        return self._c4_indexer_fp8_paged_cache is not None
+
+    def has_indexer_fp8_paged_cache(self) -> bool:
+        return self._c4_indexer_fp8_paged_cache is not None
+
+    def indexer_fp8_paged_cache(self, layer_id: int) -> torch.Tensor:
+        mapping = self.get_layer_mapping(layer_id)
+        assert mapping.indexer_layer_id is not None, f"Layer {layer_id} has no C4 indexer."
+        if self._c4_indexer_fp8_paged_cache is None:
+            raise RuntimeError(
+                f"DSV4 paged FP8 indexer cache was requested for layer {layer_id}, "
+                f"but {DSV4_INDEXER_FP8_CACHE_ENV}=1 was not active at cache allocation."
+            )
+        return self._c4_indexer_fp8_paged_cache[mapping.indexer_layer_id]
+
+    def indexer_fp8_cache(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+        mapping = self.get_layer_mapping(layer_id)
+        assert mapping.indexer_layer_id is not None, f"Layer {layer_id} has no C4 indexer."
+        if self._c4_indexer_fp8_values is None or self._c4_indexer_fp8_scales is None:
+            raise RuntimeError(
+                f"DSV4 legacy two-tensor FP8 indexer cache was requested for layer {layer_id}, "
+                "but this allocation uses the paged vLLM-style FP8 indexer cache layout."
+            )
+        return (
+            self._c4_indexer_fp8_values[mapping.indexer_layer_id],
+            self._c4_indexer_fp8_scales[mapping.indexer_layer_id],
+        )
 
     def attention_compress_state(self, layer_id: int) -> DSV4CompressStatePool:
         pool = self._compress_state_pools[layer_id]
@@ -525,6 +595,11 @@ def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) ->
     c4_bytes = compressed_bytes(c4_layers, head_dim, 4)
     c128_bytes = compressed_bytes(c128_layers, head_dim, 128)
     indexer_bytes = compressed_bytes(c4_layers, index_head_dim, 4)
+    indexer_fp8_extra_bytes = (
+        div_ceil(c4_layers * page_size * (index_head_dim + 4), 4)
+        if os.environ.get(DSV4_INDEXER_FP8_CACHE_ENV, "").strip().lower() in _TRUE_ENV_VALUES
+        else 0
+    )
     c4_state_bytes = c4_layers * DeepSeekV4KVCache.C4_STATE_RING_SIZE * 4 * head_dim * dtype_size
     c4_indexer_state_bytes = (
         c4_layers * DeepSeekV4KVCache.C4_STATE_RING_SIZE * 4 * index_head_dim * dtype_size
@@ -537,6 +612,7 @@ def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) ->
         + c4_bytes
         + c128_bytes
         + indexer_bytes
+        + indexer_fp8_extra_bytes
         + c4_state_bytes
         + c4_indexer_state_bytes
         + c128_state_bytes
@@ -548,6 +624,7 @@ __all__ = [
     "DSV4AllocationCounts",
     "DSV4CacheLayoutPolicy",
     "DSV4CompressStatePool",
+    "DSV4_INDEXER_FP8_CACHE_ENV",
     "DSV4KVAndScore",
     "DSV4LayerCacheMapping",
     "estimate_deepseek_v4_kvcache_bytes_per_page",

@@ -347,6 +347,35 @@ class DSV4Indexer(BaseOP):
         weights = self.weights_proj.forward(x) * self.weight_scale
         return q, weights
 
+    def prepare_fp8_query(
+        self,
+        x: torch.Tensor,
+        q_lora: torch.Tensor,
+        positions: torch.Tensor,
+        *,
+        rotary_dim: int,
+        base: float,
+        original_seq_len: int,
+        factor: float,
+        beta_fast: int,
+        beta_slow: int,
+    ) -> dsv4_kernel.DSV4IndexerFP8Query:
+        q = self._wq_b_forward(q_lora).view(-1, self.n_heads, self.head_dim)
+        weights = self.weights_proj.forward(x)
+        return dsv4_kernel.indexer_q_rope_fp8_fallback(
+            q,
+            weights,
+            positions,
+            rotary_dim=rotary_dim,
+            base=base,
+            softmax_scale=self.head_dim**-0.5,
+            head_scale=self.n_heads**-0.5,
+            original_seq_len=original_seq_len,
+            factor=factor,
+            beta_fast=beta_fast,
+            beta_slow=beta_slow,
+        )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -632,13 +661,32 @@ class DSV4Attention(BaseOP):
 
         if hasattr(self, "indexer"):
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.indexer"):
-                indexer_select_bf16 = (
+                indexer_select_fp8 = (
                     use_dsv4_backend
+                    and attn_backend is not None
+                    and dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE)
+                )
+                indexer_select_bf16 = (
+                    not indexer_select_fp8
+                    and use_dsv4_backend
                     and attn_backend is not None
                     and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_BF16")
                 )
                 indexer_q = None
                 indexer_weights = None
+                indexer_fp8_query = None
+                if indexer_select_fp8:
+                    indexer_fp8_query = self.indexer.prepare_fp8_query(
+                        x,
+                        q_lora,
+                        positions,
+                        rotary_dim=self.rope_head_dim,
+                        base=float(self.rope_base),
+                        original_seq_len=self.original_seq_len,
+                        factor=self.rope_factor,
+                        beta_fast=self.beta_fast,
+                        beta_slow=self.beta_slow,
+                    )
                 if indexer_select_bf16:
                     indexer_q, indexer_weights = self.indexer.prepare_bf16_query(
                         x,
@@ -656,7 +704,7 @@ class DSV4Attention(BaseOP):
                     q_lora,
                     positions,
                     apply_norm=not compress_store_fuses_norm,
-                    touch_projections=not indexer_select_bf16,
+                    touch_projections=not (indexer_select_bf16 or indexer_select_fp8),
                 )
             if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.indexer_store"):
@@ -680,6 +728,19 @@ class DSV4Attention(BaseOP):
                         beta_fast=self.beta_fast,
                         beta_slow=self.beta_slow,
                         apply_hadamard=indexer_select_bf16,
+                    )
+            if indexer_select_fp8 and indexer_fp8_query is not None:
+                if not hasattr(attn_backend, "select_indexer_fp8"):
+                    raise RuntimeError(
+                        f"{dsv4_kernel.DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE}=1 requires "
+                        "a DSV4 attention backend with select_indexer_fp8."
+                    )
+                with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.indexer_select_fp8"):
+                    attn_backend.select_indexer_fp8(
+                        self.layer_id,
+                        indexer_fp8_query.q_values,
+                        indexer_fp8_query.weights,
+                        batch,
                     )
             if (
                 indexer_select_bf16

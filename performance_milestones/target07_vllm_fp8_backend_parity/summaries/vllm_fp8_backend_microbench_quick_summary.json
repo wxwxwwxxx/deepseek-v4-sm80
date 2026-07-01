@@ -1,0 +1,55 @@
+{
+  "decision_hint": "port/adapt indexer only if vLLM logits/select beats mini bf16 by >=20%; probe fp8_ds_mla only if gather/dequant is clearly below mini bf16 sparse boundary.",
+  "fp8_ds_mla_gather": [
+    {
+      "batch": 1,
+      "full_dequantize_and_gather_ms": 0.06838399916887283,
+      "full_dequantize_and_gather_status": "pass",
+      "history": 1024,
+      "nope_mean_abs": 0.0181217510253191,
+      "rope_max_abs": 0.0,
+      "two_scope_gather_dequant_topk_ms": 0.11346133053302765
+    },
+    {
+      "batch": 4,
+      "full_dequantize_and_gather_ms": 0.0919146661957105,
+      "full_dequantize_and_gather_status": "pass",
+      "history": 2048,
+      "nope_mean_abs": 0.0179554782807827,
+      "rope_max_abs": 0.0,
+      "two_scope_gather_dequant_topk_ms": 0.1123306651910146
+    }
+  ],
+  "indexer_comparison": [
+    {
+      "batch": 1,
+      "history": 1024,
+      "logits_mean_abs": 0.020256496965885162,
+      "mini_bf16_logits_ms": 0.1270751953125,
+      "mini_bf16_select_ms": 0.30928959846496584,
+      "mini_fp8_logits_ms": 0.1572543978691101,
+      "mini_fp8_select_ms": 0.3181663990020752,
+      "topk_overlap_mean": 0.98828125,
+      "vllm_fp8_decode_logits_ms": 0.15393066902955374,
+      "vllm_fp8_decode_logits_plus_topk_ms": 0.1812693327665329,
+      "vllm_logits_vs_mini_bf16_speedup": 0.8255352628143411,
+      "vllm_select_vs_mini_bf16_speedup": 1.706243376883378
+    },
+    {
+      "batch": 4,
+      "history": 2048,
+      "logits_mean_abs": 0.021067703142762184,
+      "mini_bf16_logits_ms": 0.12463359832763672,
+      "mini_bf16_select_ms": 0.3036511898040771,
+      "mini_fp8_logits_ms": 0.2654752016067505,
+      "mini_fp8_select_ms": 0.3162751913070679,
+      "topk_overlap_mean": 0.98095703125,
+      "vllm_fp8_decode_logits_ms": 0.14957866569360098,
+      "vllm_fp8_decode_logits_plus_topk_ms": 0.1784959981838862,
+      "vllm_logits_vs_mini_bf16_speedup": 0.83323111454235,
+      "vllm_select_vs_mini_bf16_speedup": 1.7011652524067027
+    }
+  ],
+  "mini_0750_baseline_source": "performance_milestones/target07_fp8_cache_indexer_precision/summaries/target0750_indexer_fp8_summary.json",
+  "suite": "target07_51_vllm_fp8_backend_microbench_summary"
+}

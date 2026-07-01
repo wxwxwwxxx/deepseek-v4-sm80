@@ -38,6 +38,7 @@ DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
 DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
 DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
 DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
+DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
     DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
@@ -118,6 +119,7 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE,
     DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE,
     DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE,
+    DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE,
 )
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_V0_BF16_TOGGLE,
@@ -181,6 +183,12 @@ class DSV4IndexerSelectOutput:
     logits: torch.Tensor
     topk: DSV4TopKTransformOutput
     backend: str
+
+
+@dataclass(frozen=True)
+class DSV4IndexerFP8Query:
+    q_values: torch.Tensor
+    weights: torch.Tensor
 
 
 DSV4_KERNEL_INVENTORY: tuple[DSV4KernelInventoryEntry, ...] = (
@@ -715,6 +723,16 @@ def dsv4_sm80_triton_enabled(toggle: str) -> bool:
     return bool(cap.is_sm80 and cap.triton_available)
 
 
+def warmup_indexer_fp8_backend(device: torch.device) -> None:
+    if not dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+        return
+    if torch.device(device).type != "cuda":
+        return
+    warmup = getattr(_triton_dsv4_ops(), "warmup_indexer_fp8_lut", None)
+    if callable(warmup):
+        warmup(device)
+
+
 def dsv4_moe_expert_backend() -> str:
     raw = (
         os.environ.get(
@@ -916,6 +934,203 @@ def quantize_fp8_activation_ref(x: torch.Tensor, *, block_size: int = 128) -> to
     scale = torch.pow(2.0, torch.ceil(torch.log2(scale)))
     y = (groups / scale).clamp(-448.0, 448.0).to(fp8).float() * scale
     return y.reshape_as(flat).reshape_as(x).to(dtype)
+
+
+def quantize_indexer_fp8_cache_ref(kv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    fp8 = getattr(torch, "float8_e4m3fn", None)
+    if fp8 is None:
+        raise RuntimeError("torch.float8_e4m3fn is required for FP8 indexer cache")
+    if kv.ndim < 2:
+        raise ValueError(f"DSV4 FP8 indexer quant expects [..., dim], got {kv.shape}")
+    flat = kv.contiguous().view(-1, kv.shape[-1]).to(torch.bfloat16).to(torch.float32)
+    amax = flat.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4)
+    scale = torch.pow(2.0, torch.ceil(torch.log2(amax / 448.0))).to(torch.float32)
+    values = (flat / scale).clamp(-448.0, 448.0).to(fp8).view(torch.uint8)
+    scale_bytes = scale.contiguous().view(torch.uint8).view(flat.shape[0], 4)
+    return (
+        values.view(*kv.shape[:-1], kv.shape[-1]).contiguous(),
+        scale_bytes.view(*kv.shape[:-1], 4).contiguous(),
+    )
+
+
+def dequantize_indexer_fp8_cache_ref(
+    values: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    out_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    fp8 = getattr(torch, "float8_e4m3fn", None)
+    if fp8 is None:
+        raise RuntimeError("torch.float8_e4m3fn is required for FP8 indexer cache")
+    if values.dtype is not torch.uint8 or scales.dtype is not torch.uint8:
+        raise ValueError("DSV4 FP8 indexer cache values/scales must be uint8 tensors")
+    if scales.shape[:-1] != values.shape[:-1] or scales.shape[-1] != 4:
+        raise ValueError(
+            "DSV4 FP8 indexer scales must have shape values.shape[:-1] + (4,), "
+            f"got values={tuple(values.shape)} scales={tuple(scales.shape)}"
+        )
+    scale = scales.contiguous().view(torch.float32).view(*values.shape[:-1], 1)
+    return (values.contiguous().view(fp8).to(torch.float32) * scale).to(out_dtype)
+
+
+def pack_indexer_fp8_paged_cache_ref(
+    values: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    page_size: int,
+) -> torch.Tensor:
+    if values.ndim != 2 or scales.ndim != 2:
+        raise ValueError(
+            "DSV4 paged FP8 indexer pack expects values [slots, dim] and scales [slots, 4], "
+            f"got values={tuple(values.shape)} scales={tuple(scales.shape)}"
+        )
+    if values.dtype is not torch.uint8 or scales.dtype is not torch.uint8:
+        raise ValueError("DSV4 paged FP8 indexer values/scales must be uint8 tensors")
+    if scales.shape != (values.shape[0], 4):
+        raise ValueError(
+            "DSV4 paged FP8 indexer scales must be [slots, 4], "
+            f"got values={tuple(values.shape)} scales={tuple(scales.shape)}"
+        )
+    if page_size <= 0:
+        raise ValueError(f"DSV4 paged FP8 indexer page_size must be positive, got {page_size}")
+
+    slots, dim = values.shape
+    pages = div_ceil(slots, page_size)
+    packed = torch.zeros(
+        (pages, page_size * (dim + 4)),
+        dtype=torch.uint8,
+        device=values.device,
+    )
+    page_bytes = page_size * (dim + 4)
+    data = packed.as_strided((pages, page_size, dim), (page_bytes, dim, 1))
+    scale_region = packed.as_strided(
+        (pages, page_size, 4),
+        (page_bytes, 4, 1),
+        storage_offset=page_size * dim,
+    )
+    padded_values = torch.zeros((pages * page_size, dim), dtype=torch.uint8, device=values.device)
+    padded_scales = torch.zeros((pages * page_size, 4), dtype=torch.uint8, device=values.device)
+    padded_values[:slots] = values.contiguous()
+    padded_scales[:slots] = scales.contiguous()
+    data.copy_(padded_values.view(pages, page_size, dim))
+    scale_region.copy_(padded_scales.view(pages, page_size, 4))
+    return packed
+
+
+def quantize_indexer_fp8_paged_cache_ref(
+    kv: torch.Tensor,
+    *,
+    page_size: int,
+) -> torch.Tensor:
+    values, scales = quantize_indexer_fp8_cache_ref(kv)
+    return pack_indexer_fp8_paged_cache_ref(
+        values.view(-1, values.shape[-1]),
+        scales.view(-1, 4),
+        page_size=page_size,
+    )
+
+
+def dequantize_indexer_fp8_paged_cache_ref(
+    packed_cache: torch.Tensor,
+    *,
+    page_size: int,
+    dim: int,
+    slots: int | None = None,
+    out_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    if packed_cache.ndim != 2 or packed_cache.dtype is not torch.uint8:
+        raise ValueError(
+            "DSV4 paged FP8 indexer cache must be a uint8 [pages, page_bytes] tensor, "
+            f"got {tuple(packed_cache.shape)} {packed_cache.dtype}"
+        )
+    if page_size <= 0 or dim <= 0:
+        raise ValueError(
+            f"DSV4 paged FP8 dequant expects positive page_size/dim, got {page_size}/{dim}"
+        )
+    if packed_cache.shape[-1] != page_size * (dim + 4):
+        raise ValueError(
+            "DSV4 paged FP8 indexer cache page byte mismatch: "
+            f"got {packed_cache.shape[-1]}, expected {page_size * (dim + 4)}"
+        )
+    pages = packed_cache.shape[0]
+    page_bytes = page_size * (dim + 4)
+    values = packed_cache.as_strided((pages, page_size, dim), (page_bytes, dim, 1)).reshape(
+        pages * page_size, dim
+    )
+    scales = packed_cache.as_strided(
+        (pages, page_size, 4),
+        (page_bytes, 4, 1),
+        storage_offset=page_size * dim,
+    ).reshape(pages * page_size, 4)
+    if slots is not None:
+        values = values[:slots]
+        scales = scales[:slots]
+    return dequantize_indexer_fp8_cache_ref(values, scales, out_dtype=out_dtype)
+
+
+def indexer_q_rope_fp8_fallback(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    rotary_dim: int,
+    base: float,
+    softmax_scale: float,
+    head_scale: float,
+    original_seq_len: int = 0,
+    factor: float = 1.0,
+    beta_fast: int = 32,
+    beta_slow: int = 1,
+) -> DSV4IndexerFP8Query:
+    if q.ndim != 3:
+        raise ValueError(f"DSV4 FP8 indexer q expects [tokens, heads, dim], got {q.shape}")
+    if weights.shape[:2] != q.shape[:2]:
+        raise ValueError(
+            "DSV4 FP8 indexer weights must match q [tokens, heads], "
+            f"got weights={tuple(weights.shape)} q={tuple(q.shape)}"
+        )
+    q_work = q.contiguous()
+    apply_rotary_tail(
+        q_work,
+        positions,
+        rotary_dim=rotary_dim,
+        base=base,
+        original_seq_len=original_seq_len,
+        factor=factor,
+        beta_fast=beta_fast,
+        beta_slow=beta_slow,
+    )
+    q_values = None
+    weights_out = None
+    if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+        try:
+            triton_quant = _triton_dsv4_ops().indexer_fp8_quantize_fold(
+                q_work,
+                weights,
+                softmax_scale=float(softmax_scale),
+                head_scale=float(head_scale),
+            )
+            if triton_quant is not None:
+                q_values, weights_out = triton_quant
+        except Exception as exc:
+            if _cuda_graph_capture_active(q_work.device):
+                raise RuntimeError(
+                    "DSV4 CUDA graph capture failed in FP8 indexer Q quantize."
+                ) from exc
+    if q_values is None or weights_out is None:
+        if _cuda_graph_capture_active(q_work.device):
+            raise RuntimeError(
+                "DSV4 CUDA graph capture requires the Triton FP8 indexer Q quantize path."
+            )
+        q_values, q_scale_bytes = quantize_indexer_fp8_cache_ref(q_work)
+        q_scale = q_scale_bytes.contiguous().view(torch.float32).view(*q.shape[:2])
+        weights_out = (
+            weights.squeeze(-1).to(device=q.device, dtype=torch.float32)
+            * q_scale
+            * float(softmax_scale)
+            * float(head_scale)
+        )
+    return DSV4IndexerFP8Query(q_values=q_values.contiguous(), weights=weights_out.contiguous())
 
 
 def quantized_linear_ref(
@@ -1804,6 +2019,311 @@ def indexer_bf16_logits_fallback(
     return logits
 
 
+def indexer_fp8_logits_fallback(
+    q_values: torch.Tensor,
+    cache_values: torch.Tensor,
+    cache_scales: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    weights: torch.Tensor,
+    _backend: list[str] | None = None,
+) -> torch.Tensor:
+    if q_values.ndim != 3:
+        raise ValueError(
+            f"DSV4 FP8 indexer q expects shape [rows, heads, dim], got {q_values.shape}"
+        )
+    if cache_values.ndim != 2 or cache_values.shape[-1] != q_values.shape[-1]:
+        raise ValueError(
+            "DSV4 FP8 indexer cache values must be [slots, dim] with dim matching q, "
+            f"got cache={tuple(cache_values.shape)} q={tuple(q_values.shape)}"
+        )
+    if cache_scales.shape != (cache_values.shape[0], 4):
+        raise ValueError(
+            "DSV4 FP8 indexer cache scales must be [slots, 4], " f"got {tuple(cache_scales.shape)}"
+        )
+    if q_values.dtype is not torch.uint8 or cache_values.dtype is not torch.uint8:
+        raise ValueError("DSV4 FP8 indexer q/cache values must be uint8 byte tensors")
+    if cache_scales.dtype is not torch.uint8:
+        raise ValueError("DSV4 FP8 indexer cache scales must be uint8 byte tensors")
+    if seq_lens.ndim != 1 or seq_lens.shape[0] != q_values.shape[0]:
+        raise ValueError("DSV4 FP8 indexer seq_lens must have shape [rows]")
+    if page_table.ndim != 2 or page_table.shape[0] != q_values.shape[0]:
+        raise ValueError("DSV4 FP8 indexer page_table must have shape [rows, pages]")
+    if page_size <= 0 or page_size & (page_size - 1):
+        raise ValueError(f"DSV4 indexer page_size must be a positive power of two, got {page_size}")
+    if weights.ndim not in (2, 3) or weights.shape[:2] != q_values.shape[:2]:
+        raise ValueError(
+            "DSV4 FP8 indexer weights must have shape [rows, heads] or [rows, heads, 1], "
+            f"got weights={tuple(weights.shape)} q={tuple(q_values.shape)}"
+        )
+    if weights.ndim == 3 and weights.shape[-1] != 1:
+        raise ValueError(
+            "DSV4 FP8 indexer weights with rank 3 must have a singleton last dimension, "
+            f"got {tuple(weights.shape)}"
+        )
+
+    capture_active = _cuda_graph_capture_active(q_values.device)
+    static_max_seq_len = page_table.shape[1] * page_size if capture_active else None
+    if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+        try:
+            logits = _triton_dsv4_ops().indexer_fp8_logits(
+                q_values,
+                cache_values,
+                cache_scales,
+                weights,
+                seq_lens,
+                page_table,
+                page_size=page_size,
+                max_seq_len=static_max_seq_len,
+            )
+            if logits is not None:
+                if _backend is not None:
+                    _backend.append("triton_fp8")
+                return logits
+            if capture_active:
+                raise RuntimeError(
+                    "DSV4 CUDA graph capture requires the Triton indexer FP8 logits path; "
+                    "the current tensor layout/dtype was unsupported."
+                )
+        except Exception as exc:
+            if capture_active:
+                raise RuntimeError(
+                    "DSV4 CUDA graph capture failed in Triton indexer FP8 logits."
+                ) from exc
+
+    rows = q_values.shape[0]
+    max_seq_len = (
+        int(static_max_seq_len)
+        if static_max_seq_len is not None
+        else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
+    )
+    logits = torch.full(
+        (rows, max(max_seq_len, 1)), float("-inf"), dtype=torch.float32, device=q_values.device
+    )
+    if rows == 0 or max_seq_len <= 0:
+        return logits[:, :0]
+
+    page_bits = (page_size - 1).bit_length()
+    q_f = q_values.contiguous().view(fp8_dtype()).to(torch.float32)
+    cache_f = dequantize_indexer_fp8_cache_ref(cache_values, cache_scales, out_dtype=torch.float32)
+    page_table_i = page_table.to(device=q_values.device, dtype=torch.int32)
+    weights_f = weights.squeeze(-1).to(device=q_values.device, dtype=torch.float32)
+
+    for row in range(rows):
+        length = int(seq_lens[row].item())
+        if length <= 0:
+            continue
+        length = min(length, logits.shape[1])
+        raw = torch.arange(length, dtype=torch.long, device=q_values.device)
+        page_idx = raw >> page_bits
+        offset = raw & (page_size - 1)
+        valid = page_idx < page_table.shape[1]
+        physical_page = torch.full_like(raw, -1)
+        if bool(torch.any(valid)):
+            physical_page[valid] = page_table_i[row, page_idx[valid]].to(torch.long)
+        valid = valid & (physical_page >= 0)
+        cache_rows = physical_page * page_size + offset
+        row_scores = torch.full(
+            (length,), float("-inf"), dtype=torch.float32, device=q_values.device
+        )
+        if bool(torch.any(valid)):
+            kv = cache_f[cache_rows[valid]]
+            scores = torch.einsum("hd,td->th", q_f[row], kv)
+            scores = torch.relu(scores) * weights_f[row][None, :]
+            row_scores[valid] = scores.sum(dim=-1)
+        logits[row, :length] = row_scores
+    if _backend is not None:
+        _backend.append("torch_fp8")
+    return logits
+
+
+def indexer_fp8_paged_logits_fallback(
+    q_values: torch.Tensor,
+    packed_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    weights: torch.Tensor,
+    _backend: list[str] | None = None,
+) -> torch.Tensor:
+    if q_values.ndim != 3:
+        raise ValueError(
+            f"DSV4 paged FP8 indexer q expects shape [rows, heads, dim], got {q_values.shape}"
+        )
+    if packed_cache.ndim != 2 or packed_cache.shape[-1] != page_size * (q_values.shape[-1] + 4):
+        raise ValueError(
+            "DSV4 paged FP8 indexer cache must be [pages, page_size * (dim + 4)], "
+            f"got cache={tuple(packed_cache.shape)} q={tuple(q_values.shape)} page_size={page_size}"
+        )
+    if q_values.dtype is not torch.uint8 or packed_cache.dtype is not torch.uint8:
+        raise ValueError("DSV4 paged FP8 indexer q/cache values must be uint8 byte tensors")
+    if seq_lens.ndim != 1 or seq_lens.shape[0] != q_values.shape[0]:
+        raise ValueError("DSV4 paged FP8 indexer seq_lens must have shape [rows]")
+    if page_table.ndim != 2 or page_table.shape[0] != q_values.shape[0]:
+        raise ValueError("DSV4 paged FP8 indexer page_table must have shape [rows, pages]")
+    if page_size <= 0 or page_size & (page_size - 1):
+        raise ValueError(f"DSV4 indexer page_size must be a positive power of two, got {page_size}")
+    if weights.ndim not in (2, 3) or weights.shape[:2] != q_values.shape[:2]:
+        raise ValueError(
+            "DSV4 paged FP8 indexer weights must have shape [rows, heads] or [rows, heads, 1], "
+            f"got weights={tuple(weights.shape)} q={tuple(q_values.shape)}"
+        )
+    if weights.ndim == 3 and weights.shape[-1] != 1:
+        raise ValueError(
+            "DSV4 paged FP8 indexer weights with rank 3 must have a singleton last dimension, "
+            f"got {tuple(weights.shape)}"
+        )
+
+    capture_active = _cuda_graph_capture_active(q_values.device)
+    static_max_seq_len = page_table.shape[1] * page_size if capture_active else None
+    if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+        try:
+            logits = _triton_dsv4_ops().indexer_fp8_paged_logits(
+                q_values,
+                packed_cache,
+                weights,
+                seq_lens,
+                page_table,
+                page_size=page_size,
+                max_seq_len=static_max_seq_len,
+            )
+            if logits is not None:
+                if _backend is not None:
+                    _backend.append("triton_fp8_paged_vllm")
+                return logits
+            if capture_active:
+                raise RuntimeError(
+                    "DSV4 CUDA graph capture requires the Triton paged FP8 indexer logits path; "
+                    "the current tensor layout/dtype was unsupported."
+                )
+        except Exception as exc:
+            if capture_active:
+                raise RuntimeError(
+                    "DSV4 CUDA graph capture failed in paged FP8 indexer logits."
+                ) from exc
+
+    rows = q_values.shape[0]
+    max_seq_len = (
+        int(static_max_seq_len)
+        if static_max_seq_len is not None
+        else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
+    )
+    logits = torch.full(
+        (rows, max(max_seq_len, 1)), float("-inf"), dtype=torch.float32, device=q_values.device
+    )
+    if rows == 0 or max_seq_len <= 0:
+        return logits[:, :0]
+
+    q_f = q_values.contiguous().view(fp8_dtype()).to(torch.float32)
+    cache_f = dequantize_indexer_fp8_paged_cache_ref(
+        packed_cache,
+        page_size=page_size,
+        dim=q_values.shape[-1],
+        out_dtype=torch.float32,
+    )
+    page_bits = (page_size - 1).bit_length()
+    page_table_i = page_table.to(device=q_values.device, dtype=torch.int32)
+    weights_f = weights.squeeze(-1).to(device=q_values.device, dtype=torch.float32)
+
+    for row in range(rows):
+        length = int(seq_lens[row].item())
+        if length <= 0:
+            continue
+        length = min(length, logits.shape[1])
+        raw = torch.arange(length, dtype=torch.long, device=q_values.device)
+        page_idx = raw >> page_bits
+        offset = raw & (page_size - 1)
+        valid = page_idx < page_table.shape[1]
+        physical_page = torch.full_like(raw, -1)
+        if bool(torch.any(valid)):
+            physical_page[valid] = page_table_i[row, page_idx[valid]].to(torch.long)
+        valid = valid & (physical_page >= 0)
+        cache_rows = physical_page * page_size + offset
+        row_scores = torch.full(
+            (length,), float("-inf"), dtype=torch.float32, device=q_values.device
+        )
+        if bool(torch.any(valid)):
+            kv = cache_f[cache_rows[valid]]
+            scores = torch.einsum("hd,td->th", q_f[row], kv)
+            scores = torch.relu(scores) * weights_f[row][None, :]
+            row_scores[valid] = scores.sum(dim=-1)
+        logits[row, :length] = row_scores
+    if _backend is not None:
+        _backend.append("torch_fp8_paged")
+    return logits
+
+
+def indexer_select_fp8_paged_fallback(
+    q_values: torch.Tensor,
+    weights: torch.Tensor,
+    packed_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    width: int = 512,
+    ratio: int = 4,
+) -> DSV4IndexerSelectOutput:
+    logits_backend: list[str] = []
+    logits = indexer_fp8_paged_logits_fallback(
+        q_values,
+        packed_cache,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        weights=weights,
+        _backend=logits_backend,
+    )
+    topk = topk_transform_512_full_fallback(
+        logits,
+        seq_lens.to(device=logits.device, dtype=torch.int32),
+        page_table.to(device=logits.device, dtype=torch.int32),
+        page_size=page_size,
+        width=width,
+        ratio=ratio,
+    )
+    backend = logits_backend[0] if logits_backend else "torch_fp8_paged"
+    return DSV4IndexerSelectOutput(logits=logits, topk=topk, backend=f"{backend}+{topk.backend}")
+
+
+def indexer_select_fp8_fallback(
+    q_values: torch.Tensor,
+    weights: torch.Tensor,
+    cache_values: torch.Tensor,
+    cache_scales: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    page_size: int,
+    width: int = 512,
+    ratio: int = 4,
+) -> DSV4IndexerSelectOutput:
+    logits_backend: list[str] = []
+    logits = indexer_fp8_logits_fallback(
+        q_values,
+        cache_values,
+        cache_scales,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        weights=weights,
+        _backend=logits_backend,
+    )
+    topk = topk_transform_512_full_fallback(
+        logits,
+        seq_lens.to(device=logits.device, dtype=torch.int32),
+        page_table.to(device=logits.device, dtype=torch.int32),
+        page_size=page_size,
+        width=width,
+        ratio=ratio,
+    )
+    backend = logits_backend[0] if logits_backend else "torch_fp8"
+    return DSV4IndexerSelectOutput(logits=logits, topk=topk, backend=f"{backend}+{topk.backend}")
+
+
 def indexer_select_bf16_fallback(
     q: torch.Tensor,
     weights: torch.Tensor,
@@ -2464,9 +2984,7 @@ def _topk_transform_512_full_torch(
     full_indices = torch.full_like(raw_indices, -1)
     if batch == 0 or max_seq_len == 0:
         topk_lens = torch.zeros(batch, dtype=torch.int32, device=device)
-        return DSV4TopKTransformOutput(
-            raw_indices, page_indices, full_indices, "torch", topk_lens
-        )
+        return DSV4TopKTransformOutput(raw_indices, page_indices, full_indices, "torch", topk_lens)
 
     lens = seq_lens.to(device=device, dtype=torch.long).clamp(min=0, max=max_seq_len)
     topk_lens = lens.clamp(max=width).to(torch.int32)
@@ -2551,9 +3069,8 @@ def topk_transform_512_full_fallback(
             "local_cuda_global_topk_lens",
             topk_lens,
         )
-    if (
-        dsv4_env_flag(DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE)
-        and _cuda_graph_capture_active(scores.device)
+    if dsv4_env_flag(DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE) and _cuda_graph_capture_active(
+        scores.device
     ):
         raise RuntimeError(
             "DSV4 CUDA graph capture requires the global topk/lens JIT path when "
@@ -2664,6 +3181,105 @@ def store_indexer_fallback(kvcache, layer_id: int, kv: torch.Tensor, loc: torch.
     valid = loc_flat >= 0
     if bool(torch.any(valid)):
         kvcache.store_indexer(layer_id, kv.reshape(-1, kv.shape[-1])[valid], loc_flat[valid])
+
+
+def store_indexer_fp8_cache_fallback(
+    kvcache,
+    layer_id: int,
+    kv: torch.Tensor,
+    loc: torch.Tensor,
+) -> bool:
+    if not dsv4_env_flag(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+        return False
+    if not hasattr(kvcache, "has_indexer_fp8_cache") or not kvcache.has_indexer_fp8_cache():
+        raise RuntimeError(
+            f"{DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE}=1 requires DeepSeekV4KVCache "
+            "to be allocated with an FP8 indexer side cache."
+        )
+    flat = kv.reshape(-1, kv.shape[-1]).contiguous()
+    loc_flat = loc.to(device=flat.device, dtype=torch.long).reshape(-1)
+    if loc_flat.numel() != flat.shape[0]:
+        raise ValueError(
+            "DSV4 FP8 indexer cache loc count must match kv rows, "
+            f"got loc={loc_flat.numel()} rows={flat.shape[0]}"
+        )
+    if flat.numel() == 0:
+        return True
+
+    if hasattr(kvcache, "has_indexer_fp8_paged_cache") and kvcache.has_indexer_fp8_paged_cache():
+        packed_cache = kvcache.indexer_fp8_paged_cache(layer_id)
+        page_size = int(kvcache.indexer_fp8_page_size)
+        if packed_cache.shape[-1] != page_size * (flat.shape[-1] + 4):
+            raise ValueError(
+                "DSV4 paged FP8 indexer cache dim mismatch: "
+                f"cache page bytes={packed_cache.shape[-1]} kv dim={flat.shape[-1]} "
+                f"page_size={page_size}"
+            )
+        if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+            try:
+                if _triton_dsv4_ops().indexer_fp8_paged_quant_store(
+                    flat,
+                    loc_flat,
+                    packed_cache,
+                    page_size=page_size,
+                ):
+                    return True
+            except Exception as exc:
+                if _cuda_graph_capture_active(flat.device):
+                    raise RuntimeError(
+                        "DSV4 CUDA graph capture failed in paged FP8 indexer cache store."
+                    ) from exc
+        if _cuda_graph_capture_active(flat.device):
+            raise RuntimeError(
+                "DSV4 CUDA graph capture requires the Triton paged FP8 indexer cache store path."
+            )
+
+        valid = loc_flat >= 0
+        if bool(torch.any(valid)):
+            q_values, q_scales = quantize_indexer_fp8_cache_ref(flat[valid])
+            loc_valid = loc_flat[valid].to(device=packed_cache.device, dtype=torch.long)
+            pages = loc_valid // page_size
+            offsets = loc_valid - pages * page_size
+            page_bytes = page_size * (flat.shape[-1] + 4)
+            data = packed_cache.as_strided(
+                (packed_cache.shape[0], page_size, flat.shape[-1]),
+                (page_bytes, flat.shape[-1], 1),
+            )
+            scales = packed_cache.as_strided(
+                (packed_cache.shape[0], page_size, 4),
+                (page_bytes, 4, 1),
+                storage_offset=page_size * flat.shape[-1],
+            )
+            data[pages, offsets] = q_values.to(device=packed_cache.device)
+            scales[pages, offsets] = q_scales.to(device=packed_cache.device)
+        return True
+
+    values, scales = kvcache.indexer_fp8_cache(layer_id)
+    if flat.shape[-1] != values.shape[-1]:
+        raise ValueError(
+            f"DSV4 FP8 indexer cache dim mismatch: cache dim={values.shape[-1]} kv dim={flat.shape[-1]}"
+        )
+
+    if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+        try:
+            if _triton_dsv4_ops().indexer_fp8_quant_store(flat, loc_flat, values, scales):
+                return True
+        except Exception as exc:
+            if _cuda_graph_capture_active(flat.device):
+                raise RuntimeError(
+                    "DSV4 CUDA graph capture failed in FP8 indexer cache store."
+                ) from exc
+    if _cuda_graph_capture_active(flat.device):
+        raise RuntimeError(
+            "DSV4 CUDA graph capture requires the Triton FP8 indexer cache store path."
+        )
+
+    valid = loc_flat >= 0
+    if bool(torch.any(valid)):
+        q_values, q_scales = quantize_indexer_fp8_cache_ref(flat[valid])
+        values[loc_flat[valid].to(device=values.device)] = q_values.to(device=values.device)
+        scales[loc_flat[valid].to(device=scales.device)] = q_scales.to(device=scales.device)
+    return True
 
 
 def copy_masked_compressed_locs(
@@ -2784,10 +3400,7 @@ def copy_decode_metadata_for_replay(
     )
     if rows <= 0:
         return True
-    if not all(
-        t.is_cuda and t.dtype is torch.int32 and t.is_contiguous()
-        for t in tensors
-    ):
+    if not all(t.is_cuda and t.dtype is torch.int32 and t.is_contiguous() for t in tensors):
         return False
     if not all(t.dim() == 1 for t in tensors[:24]):
         return False
@@ -2955,6 +3568,7 @@ def compress_norm_rope_store_fallback(
         dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE")
         and not apply_hadamard
         and positions_flat is not None
+        and not (cache_type == "indexer" and dsv4_env_flag(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE))
     ):
         try:
             if _triton_dsv4_ops().compress_norm_rope_store_bf16(
@@ -2993,6 +3607,10 @@ def compress_norm_rope_store_fallback(
         )
     if apply_hadamard:
         indexer_kv_hadamard_fallback(flat)
+
+    if cache_type == "indexer" and dsv4_env_flag(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+        store_indexer_fp8_cache_fallback(kvcache, layer_id, flat, loc_flat)
+        return
 
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
         try:
@@ -3053,9 +3671,11 @@ __all__ = [
     "DSV4KernelCapability",
     "DSV4KernelInventoryEntry",
     "DSV4KernelMode",
+    "DSV4IndexerFP8Query",
     "DSV4IndexerSelectOutput",
     "DSV4_LINEAR_BF16_FP32_TOGGLE",
     "DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE",
+    "DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE",
     "DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE",
     "DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE",
     "DSV4_SM80_EXPERIMENTAL_TOGGLES",
@@ -3099,6 +3719,8 @@ __all__ = [
     "triton_create_paged_compress_data",
     "dequant_fp4_weight",
     "dequant_fp8_weight",
+    "dequantize_indexer_fp8_cache_ref",
+    "dequantize_indexer_fp8_paged_cache_ref",
     "detect_dsv4_kernel_capabilities",
     "dsv4_env_flag",
     "dsv4_moe_expert_backend",
@@ -3119,9 +3741,14 @@ __all__ = [
     "hc_pre_fallback",
     "hc_split_sinkhorn_ref",
     "indexer_bf16_logits_fallback",
+    "indexer_fp8_logits_fallback",
+    "indexer_fp8_paged_logits_fallback",
     "indexer_kv_hadamard_fallback",
+    "indexer_q_rope_fp8_fallback",
     "indexer_q_rope_hadamard_bf16_fallback",
     "indexer_select_bf16_fallback",
+    "indexer_select_fp8_fallback",
+    "indexer_select_fp8_paged_fallback",
     "k_norm_rope_cache_fallback",
     "linear_bf16_fp32_fallback",
     "linear_bf16_fp32_upstream_enabled",
@@ -3134,6 +3761,9 @@ __all__ = [
     "plan_topk_v2_fallback",
     "q_norm_rope_fallback",
     "q_kv_norm_rope_cache_fallback",
+    "pack_indexer_fp8_paged_cache_ref",
+    "quantize_indexer_fp8_cache_ref",
+    "quantize_indexer_fp8_paged_cache_ref",
     "quantize_fp8_activation_ref",
     "quantized_linear_fp8_pair_shared_activation_ref",
     "quantized_linear_ref",
@@ -3145,6 +3775,7 @@ __all__ = [
     "silu_and_mul_contig_post_quant",
     "silu_and_mul_masked_post_quant",
     "store_compressed_fallback",
+    "store_indexer_fp8_cache_fallback",
     "store_indexer_fallback",
     "store_swa_fallback",
     "topk_transform_512_fallback",
