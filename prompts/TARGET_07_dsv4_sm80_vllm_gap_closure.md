@@ -161,6 +161,16 @@ and indexer/cache above Marlin WNA16, so the next target should move to
 attention/indexer/cache or metadata/runtime overhead, not TARGET 07.4 precision
 lanes.
 
+TARGET 07.392 update: the post-Marlin reprofile in
+`performance_milestones/target07_post_marlin_reprofile/` validated the
+mini-owned Marlin WNA16 line at `54.64 output tok/s` for 4096/1024/batch4 and
+fresh vLLM offline at `201.99 output tok/s`. The new top mini contributors are
+sparse attention, metadata/runtime/copy overhead, and indexer/cache. Whole
+visible MoE is only about `2.00%` wall share, and the Marlin expert kernel is
+about `1.47%`; therefore MoE is no longer the primary target. TARGET 07.393 is
+the next implementation/evidence target for attention/indexer/cache/runtime
+rework.
+
 ## Primary References
 
 Local mini-sglang:
@@ -219,6 +229,8 @@ Use separate Codex threads for these large milestones:
 | TARGET 07.38 | `prompts/TARGET_07.38_dsv4_sm80_moe_exact_backend_adapt.md` | Conditional implementation target for one vLLM-identified exact W4A16 MoE expert backend, only if TARGET 07.37 selects it. |
 | TARGET 07.39 | `prompts/TARGET_07.39_dsv4_sm80_marlin_custom_op_bridge.md` | Completed bridge feasibility for locally installed vLLM Marlin custom ops; result is positive and recommends a mini-owned narrow csrc port target. |
 | TARGET 07.391 | `prompts/TARGET_07.391_dsv4_sm80_marlin_wna16_csrc_port.md` | Completed mini-owned Marlin WNA16 csrc port and opt-in backend; macro improves to `54.47 output tok/s` but next bottleneck shifts to attention/indexer/cache. |
+| TARGET 07.392 | `prompts/TARGET_07.392_dsv4_sm80_post_marlin_reprofile.md` | Post-Marlin fair reprofile and mini-vs-vLLM bottleneck attribution; select the next implementation target before doing more optimization. |
+| TARGET 07.393 | `prompts/TARGET_07.393_dsv4_sm80_attention_indexer_cache_runtime_rework.md` | Identify vLLM attention/indexer/cache dispatch backends, compare mini/vLLM boundaries, then port/adapt/rewrite the selected high-value exact-path runtime/cache optimization. |
 | TARGET 07.4 | `prompts/TARGET_07.4_dsv4_sm80_precision_lanes.md` | Precision-lane experiments: fp8/fp4 activation quantization and INT8 Tensor Core opt-in after bf16-direct is strong. |
 
 Smaller work such as sqlite reporting helpers, benchmark flags, and README
@@ -232,18 +244,21 @@ TARGET 07.36 now have recorded milestone artifacts. Do not continue expanding
 those threads unless a baseline artifact is missing or a workload/config
 mismatch is discovered.
 
-After TARGET 07.391, carry these reference lines into the next target:
+After TARGET 07.392, run TARGET 07.393 before opening precision lanes. Carry
+these reference lines into the next target:
 
-- mini-owned Marlin WNA16 exact backend: `54.47 output tok/s` and
-  `61.41 decode tok/s` on 4096/1024/batch4 with TP8, page size 256,
+- mini-owned Marlin WNA16 exact backend: `54.64 output tok/s` and
+  `61.50 decode tok/s` on 4096/1024/batch4 with TP8, page size 256,
   `--num-pages 128`, and CUDA graph replay;
 - first hard victory line remains old serving baseline `114.07 output tok/s`;
-- current risk order: sparse attention/indexer/cache first, then metadata and
-  runtime overhead around graph replay and route handling, then communication,
-  then any remaining expert backend polish;
-- precision lanes are still not justified by the evidence because the Marlin
-  exact backend is now fast enough that attention/indexer/cache dominate the
-  short profile.
+- fresh vLLM offline 4096/1024/batch4 is `201.99 output tok/s`, but it uses
+  vLLM's FP8/cache policy and should guide target selection rather than being
+  treated as a precision-neutral subgraph oracle;
+- current risk order: sparse attention first, metadata/runtime/copy overhead
+  second, indexer/cache third, then HC/RMSNorm/logits/sampling, dense residuals,
+  communication, and MoE hardening;
+- precision lanes remain deferred unless TARGET 07.393 proves that the selected
+  attention/indexer/cache gap is fundamentally a cache precision/layout issue.
 
 ## Thread Stop Rules
 

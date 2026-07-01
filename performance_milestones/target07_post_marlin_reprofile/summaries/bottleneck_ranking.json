@@ -1,0 +1,74 @@
+[
+  {
+    "amdahl_max_e2e_gain": 0.15314400809965867,
+    "candidate": "sparse_attention",
+    "example_e2e_gain": 0.10249199518742147,
+    "example_reduction_fraction": 0.7,
+    "mini_wall_share": 0.13280562273573687,
+    "mini_window_seconds": 2.109879389,
+    "note": "Top mini kernel category; vLLM has different packed-cache/split attention boundary, so exact parity estimate is risky."
+  },
+  {
+    "amdahl_max_e2e_gain": 0.1398500581492501,
+    "candidate": "metadata_runtime_copy_visible",
+    "example_e2e_gain": 0.06535507364950877,
+    "example_reduction_fraction": 0.5,
+    "mini_wall_share": 0.12269162698146602,
+    "mini_window_seconds": 1.9491986079999999,
+    "note": "Visible copy/launch/graph/memcpy overhead only; sync wait is excluded because it mostly waits for GPU work already counted."
+  },
+  {
+    "amdahl_max_e2e_gain": 0.06493693770616571,
+    "candidate": "indexer_cache",
+    "example_e2e_gain": 0.037975751032054195,
+    "example_reduction_fraction": 0.6,
+    "mini_wall_share": 0.060977261100584476,
+    "mini_window_seconds": 0.9687441219999999,
+    "note": "Mini bf16 indexer/cache selection is second kernel category; vLLM uses FP8 indexer cache and fused q/RoPE/quant."
+  },
+  {
+    "amdahl_max_e2e_gain": 0.028462201074736182,
+    "candidate": "hc_rmsnorm_logits_sampling",
+    "example_e2e_gain": 0.014031418016887898,
+    "example_reduction_fraction": 0.5,
+    "mini_wall_share": 0.027674523229918712,
+    "mini_window_seconds": 0.439664413,
+    "note": "Not a top contributor after HC/RMSNorm/sampling graph work."
+  },
+  {
+    "amdahl_max_e2e_gain": 0.023874161656897375,
+    "candidate": "dense_linear_other",
+    "example_e2e_gain": 0.011796267825936457,
+    "example_reduction_fraction": 0.5,
+    "mini_wall_share": 0.0233174764545896,
+    "mini_window_seconds": 0.37044412699999996,
+    "note": "Residual dense projection/GEMM bucket."
+  },
+  {
+    "amdahl_max_e2e_gain": 0.02039844750743436,
+    "candidate": "moe_route_w13_swiglu_w2_sum",
+    "example_e2e_gain": 0.010096249842500127,
+    "example_reduction_fraction": 0.5,
+    "mini_wall_share": 0.01999066889729444,
+    "mini_window_seconds": 0.317591224,
+    "note": "Whole visible MoE bucket including Marlin WNA16 and activation/route pieces."
+  },
+  {
+    "amdahl_max_e2e_gain": 0.014964150817341038,
+    "candidate": "marlin_wna16_expert_gemm_only",
+    "example_e2e_gain": 0.0074265097030492555,
+    "example_reduction_fraction": 0.5,
+    "mini_wall_share": 0.014743526463758027,
+    "mini_window_seconds": 0.234230012,
+    "note": "Specific Marlin WNA16 expert kernel from top-kernel table; below 10% workload window."
+  },
+  {
+    "amdahl_max_e2e_gain": 0.010368675640810565,
+    "candidate": "nccl",
+    "example_e2e_gain": 0.005157599084409492,
+    "example_reduction_fraction": 0.5,
+    "mini_wall_share": 0.010262269497056989,
+    "mini_window_seconds": 0.163036402,
+    "note": "NCCL kernels are visible but not currently dominant in rank0 window."
+  }
+]

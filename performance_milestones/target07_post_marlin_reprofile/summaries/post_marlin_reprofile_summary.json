@@ -1,0 +1,560 @@
+{
+  "amdahl_candidates": [
+    {
+      "amdahl_max_e2e_gain": 0.15314400809965867,
+      "candidate": "sparse_attention",
+      "example_e2e_gain": 0.10249199518742147,
+      "example_reduction_fraction": 0.7,
+      "mini_wall_share": 0.13280562273573687,
+      "mini_window_seconds": 2.109879389,
+      "note": "Top mini kernel category; vLLM has different packed-cache/split attention boundary, so exact parity estimate is risky."
+    },
+    {
+      "amdahl_max_e2e_gain": 0.1398500581492501,
+      "candidate": "metadata_runtime_copy_visible",
+      "example_e2e_gain": 0.06535507364950877,
+      "example_reduction_fraction": 0.5,
+      "mini_wall_share": 0.12269162698146602,
+      "mini_window_seconds": 1.9491986079999999,
+      "note": "Visible copy/launch/graph/memcpy overhead only; sync wait is excluded because it mostly waits for GPU work already counted."
+    },
+    {
+      "amdahl_max_e2e_gain": 0.06493693770616571,
+      "candidate": "indexer_cache",
+      "example_e2e_gain": 0.037975751032054195,
+      "example_reduction_fraction": 0.6,
+      "mini_wall_share": 0.060977261100584476,
+      "mini_window_seconds": 0.9687441219999999,
+      "note": "Mini bf16 indexer/cache selection is second kernel category; vLLM uses FP8 indexer cache and fused q/RoPE/quant."
+    },
+    {
+      "amdahl_max_e2e_gain": 0.028462201074736182,
+      "candidate": "hc_rmsnorm_logits_sampling",
+      "example_e2e_gain": 0.014031418016887898,
+      "example_reduction_fraction": 0.5,
+      "mini_wall_share": 0.027674523229918712,
+      "mini_window_seconds": 0.439664413,
+      "note": "Not a top contributor after HC/RMSNorm/sampling graph work."
+    },
+    {
+      "amdahl_max_e2e_gain": 0.023874161656897375,
+      "candidate": "dense_linear_other",
+      "example_e2e_gain": 0.011796267825936457,
+      "example_reduction_fraction": 0.5,
+      "mini_wall_share": 0.0233174764545896,
+      "mini_window_seconds": 0.37044412699999996,
+      "note": "Residual dense projection/GEMM bucket."
+    },
+    {
+      "amdahl_max_e2e_gain": 0.02039844750743436,
+      "candidate": "moe_route_w13_swiglu_w2_sum",
+      "example_e2e_gain": 0.010096249842500127,
+      "example_reduction_fraction": 0.5,
+      "mini_wall_share": 0.01999066889729444,
+      "mini_window_seconds": 0.317591224,
+      "note": "Whole visible MoE bucket including Marlin WNA16 and activation/route pieces."
+    },
+    {
+      "amdahl_max_e2e_gain": 0.014964150817341038,
+      "candidate": "marlin_wna16_expert_gemm_only",
+      "example_e2e_gain": 0.0074265097030492555,
+      "example_reduction_fraction": 0.5,
+      "mini_wall_share": 0.014743526463758027,
+      "mini_window_seconds": 0.234230012,
+      "note": "Specific Marlin WNA16 expert kernel from top-kernel table; below 10% workload window."
+    },
+    {
+      "amdahl_max_e2e_gain": 0.010368675640810565,
+      "candidate": "nccl",
+      "example_e2e_gain": 0.005157599084409492,
+      "example_reduction_fraction": 0.5,
+      "mini_wall_share": 0.010262269497056989,
+      "mini_window_seconds": 0.163036402,
+      "note": "NCCL kernels are visible but not currently dominant in rank0 window."
+    }
+  ],
+  "decision": {
+    "do_not_continue_here_unless": "a fresh Nsight capture contradicts the current ranking or vLLM Nsight becomes profile-complete enough to replace the risky artifact",
+    "moe_hardening": "side quest only; Marlin WNA16 expert GEMM is below 10% workload window and whole visible MoE bucket is below the 5% Amdahl threshold for a primary target",
+    "precision_lanes": "deferred; vLLM precision/cache behavior is a known advantage but the mini profile still points first to attention/indexer/cache/runtime structure, not a precision-only gap",
+    "primary_scope": "mini sparse attention plus indexer/cache metadata and replay-time copy/runtime overhead, starting with exact bf16 cache policy and explicit vLLM boundary comparison",
+    "ranked_next_target": "TARGET_07.393 attention/indexer/cache runtime rework"
+  },
+  "fresh_macro": {
+    "mini_marlin_wna16_exact": {
+      "backend": "marlin_wna16",
+      "batch_size": 4,
+      "num_pages": 128,
+      "page_size": 256,
+      "prompt_len": 4096,
+      "runs": {
+        "4096x1024_bs4": {
+          "bottleneck_labels": [
+            "decode dominated",
+            "attention",
+            "MoE / expert GEMM",
+            "fp4 expert handling",
+            "KV cache writes",
+            "metadata construction"
+          ],
+          "classification": "baseline",
+          "communication_by_label": {
+            "dsv4.embedding_all_reduce": {
+              "bytes": 2147483648,
+              "count": 16
+            },
+            "dsv4.lm_head_all_gather": {
+              "bytes": 33095680,
+              "count": 16
+            },
+            "dsv4.row_parallel_projection_all_reduce": {
+              "bytes": 92341796864,
+              "count": 688
+            },
+            "dsv4.v1_moe_reduce_once_all_reduce": {
+              "bytes": 184683593728,
+              "count": 688
+            }
+          },
+          "communication_total_bytes": 279205969920,
+          "communication_total_count": 1408,
+          "decode_tokens_per_s": 61.49691267578015,
+          "elapsed_s": 74.97015323117375,
+          "end_to_end_output_tokens_per_s": 54.63507573967209,
+          "fallback_wrapper_calls_total": 18848,
+          "graph_runner": {
+            "capture_compressed_locs_in_graph": true,
+            "capture_greedy_sample": true,
+            "captured_bs": [
+              4,
+              2,
+              1
+            ],
+            "eager_decode_count": 0,
+            "eager_decode_count_by_batch_size": {},
+            "enabled": true,
+            "error": null,
+            "greedy_sample_replay_count": 2046,
+            "greedy_sample_replay_count_by_batch_size": {
+              "4": 2046
+            },
+            "replay_count": 2046,
+            "replay_count_by_batch_size": {
+              "4": 2046
+            },
+            "replay_count_by_padded_size": {
+              "4": 2046
+            },
+            "replay_input_copy_bytes": 98208,
+            "requested_bs": [
+              1,
+              2,
+              4
+            ]
+          },
+          "kv_cache_memory_bytes_per_rank_max": 2468610048,
+          "peak_gpu_memory_allocated_bytes": 45835535872,
+          "prefill_tokens_per_s": 2809.0373501004256,
+          "report_path": "/tmp/dsv4_target07392_marlin_4096x1024_bs4_np128/reports/000_decode_throughput_bs8__v1_moe_vllm_runner_marlin_wna16_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache.json",
+          "scenario": "decode_throughput_bs8",
+          "schedule_summary": {
+            "batch_size_counts": {
+              "4": 1024
+            },
+            "max_batch_size": 4,
+            "max_padded_size": 4,
+            "padded_size_counts": {
+              "4": 1024
+            },
+            "phase_batch_size_counts": {
+              "decode:bs4": 1023,
+              "prefill:bs4": 1
+            },
+            "phase_counts": {
+              "decode": 1023,
+              "prefill": 1
+            },
+            "phase_padded_size_counts": {
+              "decode:padded4": 1023,
+              "prefill:padded4": 1
+            },
+            "total_batches": 1024
+          },
+          "status": "pass",
+          "ttft_s_mean": 6.531303117051721,
+          "unsupported_kernel_skips_total": 0,
+          "variant": "v1_moe_vllm_runner_marlin_wna16_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        },
+        "4096x128_bs4": {
+          "bottleneck_labels": [
+            "decode dominated",
+            "attention",
+            "MoE / expert GEMM",
+            "fp4 expert handling",
+            "KV cache writes",
+            "metadata construction",
+            "metadata construction"
+          ],
+          "classification": "baseline",
+          "communication_by_label": {
+            "dsv4.embedding_all_reduce": {
+              "bytes": 2147483648,
+              "count": 16
+            },
+            "dsv4.lm_head_all_gather": {
+              "bytes": 33095680,
+              "count": 16
+            },
+            "dsv4.row_parallel_projection_all_reduce": {
+              "bytes": 92341796864,
+              "count": 688
+            },
+            "dsv4.v1_moe_reduce_once_all_reduce": {
+              "bytes": 184683593728,
+              "count": 688
+            }
+          },
+          "communication_total_bytes": 279205969920,
+          "communication_total_count": 1408,
+          "decode_tokens_per_s": 61.36176847685635,
+          "elapsed_s": 15.070656716823578,
+          "end_to_end_output_tokens_per_s": 33.97330385931009,
+          "fallback_wrapper_calls_total": 18848,
+          "graph_runner": {
+            "capture_compressed_locs_in_graph": true,
+            "capture_greedy_sample": true,
+            "captured_bs": [
+              4,
+              2,
+              1
+            ],
+            "eager_decode_count": 0,
+            "eager_decode_count_by_batch_size": {},
+            "enabled": true,
+            "error": null,
+            "greedy_sample_replay_count": 254,
+            "greedy_sample_replay_count_by_batch_size": {
+              "4": 254
+            },
+            "replay_count": 254,
+            "replay_count_by_batch_size": {
+              "4": 254
+            },
+            "replay_count_by_padded_size": {
+              "4": 254
+            },
+            "replay_input_copy_bytes": 12192,
+            "requested_bs": [
+              1,
+              2,
+              4
+            ]
+          },
+          "kv_cache_memory_bytes_per_rank_max": 2468610048,
+          "peak_gpu_memory_allocated_bytes": 45835505152,
+          "prefill_tokens_per_s": 2802.102149527455,
+          "report_path": "/tmp/dsv4_target07392_marlin_4096x128_bs4_np128/reports/000_decode_throughput_bs8__v1_moe_vllm_runner_marlin_wna16_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache.json",
+          "scenario": "decode_throughput_bs8",
+          "schedule_summary": {
+            "batch_size_counts": {
+              "4": 128
+            },
+            "max_batch_size": 4,
+            "max_padded_size": 4,
+            "padded_size_counts": {
+              "4": 128
+            },
+            "phase_batch_size_counts": {
+              "decode:bs4": 127,
+              "prefill:bs4": 1
+            },
+            "phase_counts": {
+              "decode": 127,
+              "prefill": 1
+            },
+            "phase_padded_size_counts": {
+              "decode:padded4": 127,
+              "prefill:padded4": 1
+            },
+            "total_batches": 128
+          },
+          "status": "pass",
+          "ttft_s_mean": 6.545539082959294,
+          "unsupported_kernel_skips_total": 0,
+          "variant": "v1_moe_vllm_runner_marlin_wna16_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        }
+      },
+      "tp_size": 8,
+      "variant": "v1_moe_vllm_runner_marlin_wna16_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+    },
+    "ratios": {
+      "fresh_vllm_over_mini_4096x1024_output_tok_s": 3.697111796964773,
+      "fresh_vllm_over_mini_4096x128_output_tok_s": 2.416094676983018,
+      "serving_baseline_114_07_over_mini_4096x1024_output_tok_s": 2.0878528757519503
+    },
+    "vllm_existing_artifacts": {
+      "4096x1024_bs4": {
+        "actual_output_tokens": 4096,
+        "elapsed_s": 20.289905719459057,
+        "elapsed_s_mean": 20.289905719459057,
+        "end_to_end_output_tokens_per_s": 201.8737818023337,
+        "end_to_end_total_tokens_per_s": 1009.3689090116684,
+        "peak_gpu_memory_allocated_bytes": 0,
+        "prompt_tokens": 16384,
+        "report_path": "/tmp/dsv4_target07_vllm_4096x1024_bs4_warmup1/reports/000_decode_throughput_bs8__vllm.json",
+        "scenario": "decode_throughput_bs8",
+        "status": "pass"
+      },
+      "4096x128_bs4": {
+        "actual_output_tokens": 512,
+        "elapsed_s": 6.328411862254143,
+        "elapsed_s_mean": 6.328411862254143,
+        "end_to_end_output_tokens_per_s": 80.90497444608933,
+        "end_to_end_total_tokens_per_s": 2669.864156720948,
+        "peak_gpu_memory_allocated_bytes": 0,
+        "prompt_tokens": 16384,
+        "report_path": "/tmp/dsv4_target07_nsys_vllm_4096x128_bs4_warmup1/reports/000_decode_throughput_bs8__vllm.json",
+        "scenario": "decode_throughput_bs8",
+        "status": "pass"
+      },
+      "risk": "Existing artifacts agree with fresh macro throughput, but old Nsight kernel attribution remains incomplete under vLLM graph/multiprocess capture."
+    },
+    "vllm_fresh": {
+      "batch_size": 4,
+      "block_size": 256,
+      "cudagraph_capture_sizes": [
+        1,
+        2,
+        4
+      ],
+      "effective_precision": "deepseek_v4_fp8 with fp8_ds_mla KV cache, FP8 indexer cache, MXFP4/Marlin MoE on sm80",
+      "enable_chunked_prefill": true,
+      "prompt_len": 4096,
+      "runs": {
+        "4096x1024_bs4": {
+          "actual_output_tokens": 4096,
+          "elapsed_s": 20.278032515197992,
+          "elapsed_s_mean": 20.278032515197992,
+          "end_to_end_output_tokens_per_s": 201.99198304520556,
+          "end_to_end_total_tokens_per_s": 1009.9599152260279,
+          "peak_gpu_memory_allocated_bytes": 0,
+          "prompt_tokens": 16384,
+          "report_path": "/tmp/dsv4_target07392_vllm_4096x1024_bs4/reports/000_decode_throughput_bs8__vllm.json",
+          "scenario": "decode_throughput_bs8",
+          "status": "pass"
+        },
+        "4096x128_bs4": {
+          "actual_output_tokens": 512,
+          "elapsed_s": 6.237610165029764,
+          "elapsed_s_mean": 6.237610165029764,
+          "end_to_end_output_tokens_per_s": 82.08271861400573,
+          "end_to_end_total_tokens_per_s": 2708.729714262189,
+          "peak_gpu_memory_allocated_bytes": 0,
+          "prompt_tokens": 16384,
+          "report_path": "/tmp/dsv4_target07392_vllm_4096x128_bs4/reports/000_decode_throughput_bs8__vllm.json",
+          "scenario": "decode_throughput_bs8",
+          "status": "pass"
+        }
+      },
+      "tp_size": 8
+    }
+  },
+  "nsight": {
+    "mini_kernel_categories": {
+      "dense_linear_other": {
+        "count": 580,
+        "duration_s": 0.37044412699999996
+      },
+      "hc_rmsnorm_logits_sampling": {
+        "count": 303,
+        "duration_s": 0.439664413
+      },
+      "indexer_cache": {
+        "count": 126,
+        "duration_s": 0.9687441219999999
+      },
+      "moe_route_w13_swiglu_w2_sum": {
+        "count": 2055,
+        "duration_s": 0.317591224
+      },
+      "nccl": {
+        "count": 88,
+        "duration_s": 0.163036402
+      },
+      "other": {
+        "count": 10541,
+        "duration_s": 0.6185521870000004
+      },
+      "runtime_memcpy_allocation_kernels": {
+        "count": 44396,
+        "duration_s": 0.890159279
+      },
+      "sparse_attention": {
+        "count": 43,
+        "duration_s": 2.109879389
+      }
+    },
+    "mini_runtime_categories": {
+      "allocation_runtime": {
+        "count": 24,
+        "duration_s": 0.013770332
+      },
+      "cuda_graph_runtime": {
+        "count": 499,
+        "duration_s": 0.37341026800000005
+      },
+      "launch_runtime": {
+        "count": 58132,
+        "duration_s": 0.395268514
+      },
+      "memcpy_runtime": {
+        "count": 37839,
+        "duration_s": 0.290360547
+      },
+      "module_runtime": {
+        "count": 16,
+        "duration_s": 0.215857762
+      },
+      "other": {
+        "count": 1327,
+        "duration_s": 0.001558951
+      },
+      "sync_runtime": {
+        "count": 4059,
+        "duration_s": 13.077310460000001
+      }
+    },
+    "mini_sqlite": "performance_milestones/target07_post_marlin_reprofile/raw/nsys_marlin_wna16_4096x128_bs4_np128_rank0.sqlite",
+    "mini_top_kernels": [
+      {
+        "count": 41,
+        "duration_s": 2.066866106,
+        "name": "void <unnamed>::sparse_attention_kernel<(bool)1>(<unnamed>::SparseAttentionParams)"
+      },
+      {
+        "count": 21,
+        "duration_s": 0.921976029,
+        "name": "_indexer_bf16_logits_kernel"
+      },
+      {
+        "count": 1481,
+        "duration_s": 0.400697062,
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+      },
+      {
+        "count": 86,
+        "duration_s": 0.355534512,
+        "name": "_hc_split_pre_kernel"
+      },
+      {
+        "count": 1649,
+        "duration_s": 0.289506941,
+        "name": "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+      },
+      {
+        "count": 86,
+        "duration_s": 0.234230012,
+        "name": "void marlin_moe_wna16::Marlin<(long)1125899906909960, (long)562949953487106, (long)1125899906909960, (long)2814749767106568, (int)128, (int)4, (int)8, (int)4, (bool)0, (int)4, (int)2, (bool)0>(const int4 *, const int4 *, int4 *, int4 *, const int4 *, const float *, const int4 *, const float *, const int4 *, const int *, const int *, const int *, const int *, const float *, int, bool, int, int, int, int, int *, bool, bool, bool)"
+      },
+      {
+        "count": 631,
+        "duration_s": 0.152617077,
+        "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctor_add<float>, std::array<char *, (unsigned long)3>>(int, T2, T3)"
+      },
+      {
+        "count": 212,
+        "duration_s": 0.111347455,
+        "name": "ampere_bf16_s16816gemm_bf16_128x256_ldg8_f2f_stages_64x3_tn"
+      },
+      {
+        "count": 108,
+        "duration_s": 0.106583454,
+        "name": "void at::native::vectorized_elementwise_kernel<(int)4, void at::native::<unnamed>::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase &, T2)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+      },
+      {
+        "count": 43,
+        "duration_s": 0.099074057,
+        "name": "ncclDevKernel_AllReduce_Sum_f32_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)"
+      },
+      {
+        "count": 87,
+        "duration_s": 0.09739236,
+        "name": "ampere_sgemm_32x128_tn"
+      },
+      {
+        "count": 43,
+        "duration_s": 0.084056179,
+        "name": "ampere_sgemm_128x64_tn"
+      }
+    ],
+    "mini_window": "repeat:smoke_debug:0",
+    "mini_window_seconds": 15.886973349,
+    "vllm_profile_risk": "Selected NVTX repeat range contains no child-process kernels in this artifact; use vLLM macro/code-path evidence rather than per-subgraph kernel shares.",
+    "vllm_sqlite": "performance_milestones/target07_post_marlin_reprofile/raw/nsys_vllm_4096x128_bs4.sqlite",
+    "vllm_total_kernel_summary": [
+      {
+        "count": 37744,
+        "duration_s": 0.239039344,
+        "name": "void at::native::index_elementwise_kernel<(int)128, (int)4, void at::native::gpu_index_kernel<void at::native::index_kernel_impl<at::native::OpaqueType<(int)2>>(at::TensorIteratorBase &, c10::ArrayRef<long>, c10::ArrayRef<long>)::[lambda(char *, const char *, long) (instance 1)]>(at::TensorIteratorBase &, c10::ArrayRef<long>, c10::ArrayRef<long>, const T1 &, bool)::[lambda(int) (instance 1)]>(long, T3)"
+      },
+      {
+        "count": 20480,
+        "duration_s": 0.229925208,
+        "name": "void marlin::gptq_marlin_repack_kernel<(int)256, (int)4, (bool)0, (bool)0>(const unsigned int *, const unsigned int *, unsigned int *, int, int)"
+      },
+      {
+        "count": 20736,
+        "duration_s": 0.141372944,
+        "name": "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 3)]::operator ()() const::[lambda(int) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+      },
+      {
+        "count": 19260,
+        "duration_s": 0.106503805,
+        "name": "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+      },
+      {
+        "count": 1376,
+        "duration_s": 0.084883125,
+        "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::FillFunctor<unsigned char>, std::array<char *, (unsigned long)1>>(int, T2, T3)"
+      },
+      {
+        "count": 18740,
+        "duration_s": 0.051031685,
+        "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(c10::BFloat16) (instance 5)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+      },
+      {
+        "count": 16,
+        "duration_s": 0.024889744,
+        "name": "ncclDevKernel_AllReduce_Sum_f32_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)"
+      },
+      {
+        "count": 160,
+        "duration_s": 0.018171194,
+        "name": "void at::native::<unnamed>::CatArrayBatchedCopy_vectorized<at::native::<unnamed>::OpaqueType<(unsigned int)4>, unsigned int, (int)1, (int)128, (int)1, (int)16, (int)4>(char *, at::native::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::native::<unnamed>::TensorSizeStride<T2, (unsigned int)4>, int, T2)"
+      },
+      {
+        "count": 32,
+        "duration_s": 0.01611964,
+        "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::cos_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+      },
+      {
+        "count": 32,
+        "duration_s": 0.016091707,
+        "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::sin_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+      },
+      {
+        "count": 32,
+        "duration_s": 0.010571729,
+        "name": "void at::native::<unnamed>::CatArrayBatchedCopy_vectorized<at::native::<unnamed>::OpaqueType<(unsigned int)4>, unsigned int, (int)2, (int)128, (int)1, (int)16, (int)4>(char *, at::native::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::native::<unnamed>::TensorSizeStride<T2, (unsigned int)4>, int, T2)"
+      },
+      {
+        "count": 192,
+        "duration_s": 0.009729147,
+        "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::AUnaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)2>>(int, T2, T3)"
+      }
+    ],
+    "vllm_window": "repeat:decode_throughput_bs8:0"
+  },
+  "status": "evidence_report_only_no_implementation",
+  "target": "TARGET_07.392_dsv4_sm80_post_marlin_reprofile"
+}

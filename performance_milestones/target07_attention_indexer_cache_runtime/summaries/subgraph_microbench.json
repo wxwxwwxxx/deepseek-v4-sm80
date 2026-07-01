@@ -1,0 +1,112 @@
+{
+  "suite": "target07_393_attention_indexer_cache_runtime_microbench_summary",
+  "status": "evidence_report_only_no_runtime_implementation",
+  "hardware": {
+    "device": "NVIDIA A100-SXM4-80GB",
+    "capability": [8, 0],
+    "mini_torch": "2.9.1+cu128",
+    "vllm_torch": "2.11.0+cu128"
+  },
+  "parameters": {
+    "tokens": 4,
+    "history": 4096,
+    "page_size": 256,
+    "local_heads": 8,
+    "head_dim": 512,
+    "indexer_heads": 64,
+    "indexer_head_dim": 128,
+    "index_topk": 512,
+    "swa_window": 128,
+    "vllm_fp8_ds_mla_block_size": 64,
+    "vllm_fp8_ds_mla_head_bytes": 584
+  },
+  "raw_artifacts": {
+    "mini": "performance_milestones/target07_attention_indexer_cache_runtime/raw/mini_attention_indexer_cache_microbench_t4_h4096.json",
+    "vllm": "performance_milestones/target07_attention_indexer_cache_runtime/raw/vllm_attention_indexer_cache_microbench_t4_h4096.json",
+    "prior_mini_vllm_subgraph": "performance_milestones/target07_subgraph_parity/summaries/",
+    "post_marlin_profile": "performance_milestones/target07_post_marlin_reprofile/summaries/post_marlin_reprofile_summary.json"
+  },
+  "current_microbench_mean_ms": {
+    "mini_attention_front_swa_store": 0.25313280075788497,
+    "mini_compressed_indexer_cache_store": 0.9761791944503784,
+    "mini_graph_replay_metadata_copy": 0.12595199793577194,
+    "mini_indexer_select_bf16": 0.3393536001443863,
+    "mini_sparse_attention_two_source": 0.5777407884597778,
+    "mini_combined_indexer_sparse_decode": 1.3113343954086303,
+    "vllm_attention_front_projection": 0.18042880147695542,
+    "vllm_global_topk_indices_lens": 0.0566271997988224,
+    "vllm_indexer_q_rope_quant": 0.08714239895343781,
+    "vllm_gather_dequant_two_scopes": 0.11294720023870468,
+    "vllm_sparse_attention_splitk_core": 0.13199360072612762,
+    "vllm_combined_gather_sparse_decode": 0.22579199820756912
+  },
+  "current_blockers": [
+    {
+      "name": "vllm_fp8_swa_quant_insert_proxy",
+      "reason": "The standalone Triton quantize_and_insert_k_cache proxy compiles tl.float8e4nv and fails on sm80. vLLM engine uses fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert / compressor custom ops instead, so this proxy is not the real engine path."
+    },
+    {
+      "name": "vllm_sparse_attn_indexer_full_logits_topk",
+      "reason": "Full SparseAttnIndexer decode requires vLLM attention metadata, kv-cache manager, FP8 indexer cache pages, and custom-op registration state."
+    },
+    {
+      "name": "vllm_deepseek_v4_attention_custom_op_full",
+      "reason": "torch.ops.vllm.deepseek_v4_attention mutates engine-owned output/cache buffers and depends on active forward context."
+    },
+    {
+      "name": "vllm_cudagraph_dispatcher_runtime",
+      "reason": "CUDA graph replay requires GPUModelRunner, CudagraphDispatcher descriptors, persistent input buffers, and attention backend builders."
+    }
+  ],
+  "derived_observations": [
+    {
+      "observation": "mini sparse attention direct bf16 cache is 0.5777 ms while vLLM fp8-cache gather/dequant plus split-K decode is 0.2258 ms for T=4/history=4096.",
+      "ratio": 2.558730821765824,
+      "caveat": "Layouts differ: mini reads bf16 flat cache directly; vLLM reads packed fp8_ds_mla cache then materializes bf16 gathered KV."
+    },
+    {
+      "observation": "vLLM split-K core alone is 0.1320 ms; using it alone as the comparison would overstate the gap because gather/dequant adds 0.1129 ms.",
+      "ratio_mini_sparse_over_vllm_core_only": 4.377036363441209
+    },
+    {
+      "observation": "mini indexer_select_bf16 is 0.3394 ms; vLLM fused indexer Q RoPE/quant is 0.0871 ms but is not the full vLLM SparseAttnIndexer logits/topk boundary.",
+      "caveat": "Full vLLM indexer logits/topk is engine-bound and precision-changing through FP8 indexer cache."
+    },
+    {
+      "observation": "mini compressed/indexer cache store probe is 0.9762 ms, consistent with the post-Marlin Nsight indexer/cache bucket of about 0.969 s over the 4096/128 rank0 window.",
+      "caveat": "The directly comparable vLLM cache insert is a C++/custom-op engine path over packed fp8 cache, not a standalone exact bf16 path."
+    },
+    {
+      "observation": "vLLM compute_global_topk_indices_and_lens is 0.0566 ms for T=4/topk512 and represents a concrete metadata-consolidation design mini can adapt without adopting FP8 cache precision."
+    }
+  ],
+  "prior_microbench_context": {
+    "target07_subgraph_parity": {
+      "mini_sparse_attention_two_source_t4_ms": 0.5879807949066163,
+      "mini_sparse_attention_two_source_t4096_ms": 30.178304036458332,
+      "mini_indexer_select_t4_ms": 0.32993280291557314,
+      "mini_indexer_select_t4096_ms": 44.50372187296549,
+      "vllm_sparse_attention_core_t4_ms": 0.13107200115919113,
+      "vllm_sparse_attention_core_t4096_ms": 4.946602662404378,
+      "vllm_indexer_q_rope_quant_t4_ms": 0.08611839935183525,
+      "vllm_indexer_q_rope_quant_t4096_ms": 0.4065279960632324,
+      "boundary_warning": "Prior vLLM sparse numbers are core-only and exclude gather/dequant."
+    }
+  },
+  "macro_context": {
+    "mini_marlin_wna16_exact_4096x128_output_tok_s": 33.97330385931009,
+    "mini_marlin_wna16_exact_4096x1024_output_tok_s": 54.63507573967209,
+    "mini_marlin_wna16_exact_decode_tok_s_4096x1024": 61.49691267578015,
+    "vllm_deepseek_v4_fp8_4096x128_output_tok_s": 82.08271861400573,
+    "vllm_deepseek_v4_fp8_4096x1024_output_tok_s": 201.99198304520556,
+    "mini_rank0_4096x128_sparse_attention_wall_share": 0.13280562273573687,
+    "mini_rank0_4096x128_metadata_runtime_copy_wall_share": 0.12269162698146602,
+    "mini_rank0_4096x128_indexer_cache_wall_share": 0.060977261100584476
+  },
+  "interpretation": {
+    "primary_route": "adapt_vllm_design",
+    "why_not_direct_port": "The vLLM advantage is bound to fp8_ds_mla KV cache and FP8 indexer cache layout plus engine custom ops; direct port would change mini's exact bf16 cache policy.",
+    "why_not_local_polish_first": "The paired evidence shows boundary/layout/metadata differences, not just a single slow local kernel.",
+    "recommended_next_work": "Write a narrow exact-path target to adapt vLLM's decode boundary ideas: global-topk/lens consolidation, bf16 two-scope gather/mask or split-K sparse decode, and graph-stable metadata buffers. Keep FP8 cache/indexer as a separate opt-in precision/cache lane."
+  }
+}
