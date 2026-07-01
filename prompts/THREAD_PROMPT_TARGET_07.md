@@ -1,36 +1,78 @@
-# New Thread Prompt for TARGET 07
+# New Thread Prompt for TARGET 07 Current Cycle
 
 你好，请继续推进 `/workspace/mini-sglang` 中 DeepSeek V4 Flash 在 A100/sm80
-上的性能追赶工作。我们的总目标是 `prompts/target.md`，当前大目标是
+上的性能追赶工作。总目标见 `prompts/target.md`，当前大目标是
 `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md`：在 TP8、page/block size
-256、4096 input / 1024 output / batch4 下超过旧 vLLM-based 框架的
-`114.07 output tok/s` 基线，同时默认路径保持 exact。
+256、4096 input / 1024 output / batch4 下超过旧 vLLM-based serving baseline
+`114.07 output tok/s`，默认路径保持 exact。
 
-请先从 `prompts/TARGET_07.1_dsv4_sm80_fair_rebench_vllm_diff.md` 开始，不要一上来直接实现 MoE V2 或 CUDA graph。第一步目标是做公平复测和 vLLM 执行路径对标：
+当前状态：
 
-- mini 当前主要证据在 `performance_milestones/v1_moe/README.md`；
-- vLLM 环境和脚本在 `performance_milestones/vllm/README.md`；
-- vLLM 源码在 `/workspace/vllm-dsv4-docker`；
-- vLLM 虚拟环境在 `/workspace/venvs/vllm-dsv4`，不要用于 mini-sglang；
-- 模型路径是 `/models/DeepSeek-V4-Flash`；
-- mini benchmark 是 `benchmark/offline/deepseek_v4_perf_matrix.py`；
-- vLLM benchmark shim 是 `performance_milestones/vllm/scripts/run_vllm_deepseek_v4_matrix.py`。
+- TARGET 07.1 已完成公平 mini/vLLM 复测，artifact 在
+  `performance_milestones/target07_vllm_gap/`。
+- TARGET 07.2 已完成通信/graph 轨迹记录，artifact 在
+  `performance_milestones/target07_comm_graph/`。best exact 4096/1024/bs4
+  约为 `25.3 output tok/s`。
+- TARGET 07.25 已完成 mini/vLLM 子图 parity，artifact 在
+  `performance_milestones/target07_subgraph_parity/`。瓶颈排序是：
+  MoE routed/execution boundary、attention/indexer/cache、
+  scheduling/stream overlap、communication、precision、HC/final。
 
-重要背景：
+现在请进入：
 
-- mini V1 MoE 已经显著改善 V0，但 4096/1024/batch4 仍只有约 `10.51 output tok/s`；
-- 用户提供的旧 vLLM serving 基线是 `114.07 output tok/s`、TTFT `123.21ms`、TPOT `15.68ms`；
-- 现有 4096/128/batch4 nsys 不是完全公平：vLLM 用了 warmup=1、chunked prefill=4096、CUDA graph sizes 1/2/4，而 mini 用了 warmup=0，且 DSV4 CUDA graph 被禁用；
-- 已知 mini profile 中最大问题是 NCCL all-reduce、grouped FP4 MoE、PyTorch 小 kernel 爆炸，以及没有 DSV4 CUDA graph replay。
-- 精度路线图是：第一阶段优先 bf16 Tensor Core，不做 activation quantization；模型中原有 fp32 计算不要静默降精度，TF32 只能作为显式实验；第二阶段才评估 fp8/fp4 activation quantization，并可优先参考 vLLM；第三阶段再做 INT8 Tensor Core opt-in。
+- `prompts/TARGET_07.3_dsv4_sm80_moe_v2_exact.md`
 
-请在新 thread 中：
+请先阅读：
 
-1. 先阅读 `TARGET_07` 和 `TARGET_07.1`，再检查现有脚本和 artifact。
-2. 生成或修正公平复测脚本/命令，输出到 `performance_milestones/target07_vllm_gap/`。
-3. 对照 vLLM 的 `FusedMoE`、CUDA graph dispatcher、custom all-reduce、communication custom ops、DeepSeek V4 attention 路径，写出 mini/vLLM execution diff。
-4. 对每个 vLLM 设计点明确结论：`port`、`adapt`、`reject` 或 `defer`。
-5. 完成后给出下一步应该进入 `TARGET_07.2` 还是先补测的判断。
+- `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md`
+- `prompts/TARGET_07.3_dsv4_sm80_moe_v2_exact.md`
+- `performance_milestones/target07_subgraph_parity/README.md`
+- `performance_milestones/target07_comm_graph/README.md`
+- `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md`
 
-请注意：我们希望尽量学习和复用 vLLM 中已经证明有效的设计，避免重复造一个更慢的轮子；但不要把 vLLM 作为 mini 的 runtime dependency，也不要默认移植 vLLM sm80 reference sparse prefill 那条已经触发过 OOM 的路径。
-同时，第一阶段不要求和 vLLM 的精度实现完全对齐；优先把 mini 的 bf16-direct exact 路径做好。
+重要约束：
+
+- 本阶段只做 exact MoE V2，不做 activation quantization、不做 INT8、不把
+  vLLM 作为 runtime dependency。
+- 默认精度路线是 bf16-direct。模型中原有 fp32 计算不要静默降精度；TF32
+  只能作为单独显式实验。
+- vLLM 的 FusedMoE runner、route metadata、workspace/finalize、shared expert
+  scheduling 可以作为优先参考；vLLM MXFP4/FP8 精度语义先 defer 到
+  `prompts/TARGET_07.4_dsv4_sm80_precision_lanes.md`。
+- vLLM `DeepseekV4MegaMoEExperts` 在 sm80 上不是路线，不要移植。
+
+工作重点：
+
+1. 建立 mini-side MoE execution plan：route metadata、token/expert layout、
+   workspace ownership、finalize/reduce policy。
+2. 对照 vLLM `FusedMoE` 的 prepare/fused-experts/finalize 边界，选择可以
+   adapt 到 mini exact lane 的部分。
+3. 优先减少 MoE routed experts 的 W13/W2 时间、workspace/materialization、
+   route/finalize 小 kernel，以及 reduce boundary 的不确定性。
+4. shared expert overlap 只有在 profile 证明它仍然重要时再做。
+5. 每个 serious cut 后跑 correctness/text smoke、4096/1024 macro，以及
+   4096/128 short profile 或等价 profile。
+
+Stop rules：
+
+- 如果 4096/1024/batch4 exact output throughput 超过 `114.07 tok/s` 且 TP8
+  page-size-256 text smoke 通过，停止性能扩张并记录胜利线。
+- 如果 MoE routed W13/W2 不再是 top-two bottleneck，停止 07.3，进入
+  `prompts/TARGET_07.35_dsv4_sm80_post_moe_reparity.md`。
+- 如果一次 serious MoE cut 让 macro 提升至少 `1.3x`，或让 MoE W13/W2
+  summed kernel time 降低至少 `2x`，停止继续钻 MoE，先做 07.35 re-parity。
+- 如果连续两次 MoE cut 都低于 `5%` macro gain 且低于 `10%` routed-MoE
+  subgraph gain，停止本 thread 并记录原因。
+- 如果下一步明显属于 attention/cache、communication、precision 或普通 graph
+  cleanup，不要在 07.3 里继续做，转 07.35 重新排序。
+
+最终请更新：
+
+- `performance_milestones/target07_moe_v2/` 或本 target 选择的 milestone
+  目录；
+- `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md`；
+- 必要时更新 `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md`。
+
+完成 07.3 后，默认下一步是
+`prompts/TARGET_07.35_dsv4_sm80_post_moe_reparity.md`，除非已经超过
+`114.07 tok/s` 胜利线。

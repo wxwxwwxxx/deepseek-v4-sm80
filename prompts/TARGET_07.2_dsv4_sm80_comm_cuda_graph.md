@@ -10,6 +10,20 @@ This target is complete when the 4096/128/batch4 short profile shows a large
 drop in kernel/runtime event count and clear evidence of CUDA graph replay or a
 documented reason why graph capture is still blocked.
 
+Handoff update: if graph replay, communication labeling, and PyNCCL correctness
+are in place but the remaining gap to vLLM is still large, do not keep spending
+this target on tiny graph-surface cleanups. Move to
+`prompts/TARGET_07.25_dsv4_sm80_vllm_subgraph_parity.md` and rank the remaining
+mini-vs-vLLM gap by subgraph before more implementation work.
+
+Completion update: this target now has a recorded trajectory under
+`performance_milestones/target07_comm_graph/README.md`. The best exact graph
+path reached about 25.3 output tok/s on 4096/1024/batch4, but late graph-surface
+experiments produced tiny gains. Treat communication labeling, PyNCCL
+correctness coverage, and guarded DSV4 decode graph replay as sufficient for
+this stage. Further work should be driven by TARGET 07.25/07.3 evidence rather
+than continued local graph cleanup.
+
 ## Primary References
 
 - Master target: `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md`
@@ -106,7 +120,23 @@ vLLM references:
 - The best exact variant has a new 4096/128 nsys report and a 4096/1024 macro
   result.
 - The target updates TARGET 07 with the next bottleneck after communication and
-  graph work.
+  graph work, or explicitly hands off to TARGET 07.25 when subgraph-level
+  comparison is needed.
+
+## Stop Conditions
+
+Stop TARGET 07.2 when DSV4 decode graph replay and communication counters exist,
+even if more tiny graph-surface improvements are possible.
+
+Hard stop and hand off to TARGET 07.25 or later targets when any of these is
+true:
+
+- two consecutive graph/communication changes each improve 4096/1024 output
+  throughput by less than 5%;
+- the profile shows MoE or attention/cache/indexer dominates the remaining
+  runtime more than graph replay or communication plumbing;
+- a proposed change is mainly an attention, MoE, or precision-lane optimization;
+- correctness is stable and the best exact macro result is recorded.
 
 ## Non-Goals
 

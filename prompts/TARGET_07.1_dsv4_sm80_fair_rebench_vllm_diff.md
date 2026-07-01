@@ -60,6 +60,17 @@ Existing short nsys comparison is not fully fair yet:
 - mini used warmup=0 and DSV4 CUDA graph was disabled by
   `python/minisgl/engine/engine.py`.
 
+## Handoff Update
+
+This target now has recorded milestone artifacts under
+`performance_milestones/target07_vllm_gap/`. Later TARGET 07 work should treat
+07.1 as a completed baseline/diff stage unless a command, workload, page size,
+warmup, TP size, or vLLM configuration mismatch is discovered.
+
+Do not reopen this target to keep collecting additional profiles. If a later
+target changes mini's execution path, record the new profile in that later
+target or in TARGET 07.35 instead.
+
 ## Plan
 
 1. Create `performance_milestones/target07_vllm_gap/`.
@@ -118,6 +129,12 @@ Existing short nsys comparison is not fully fair yet:
   both frameworks.
 - The execution-path diff identifies the first optimization target for
   TARGET 07.2.
+
+## Stop Conditions
+
+Stop this target once the fair macro comparison, short profile summary, and
+execution-path diff exist. Further profiling belongs to the next target unless
+it is required to fix an identified fairness mismatch.
 
 ## Non-Goals
 

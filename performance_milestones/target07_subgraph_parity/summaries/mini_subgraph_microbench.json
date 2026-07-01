@@ -1,0 +1,535 @@
+{
+  "elapsed_s": 7.830615520477295,
+  "env": {
+    "capability": [
+      8,
+      0
+    ],
+    "cuda": "12.8",
+    "cuda_available": true,
+    "device": "NVIDIA A100-SXM4-80GB",
+    "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "toggles": {
+      "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE": "1",
+      "MINISGL_DSV4_SM80_HC": "1",
+      "MINISGL_DSV4_SM80_INDEXER_BF16": "1",
+      "MINISGL_DSV4_SM80_KV_BF16": "1",
+      "MINISGL_DSV4_SM80_MOE_ROUTE": "1",
+      "MINISGL_DSV4_SM80_RMSNORM": "1",
+      "MINISGL_DSV4_SM80_SPARSE_ATTN_BF16": "1",
+      "MINISGL_DSV4_SM80_SWIGLU": "1",
+      "MINISGL_DSV4_SM80_TOPK": "1"
+    },
+    "torch": "2.9.1+cu128"
+  },
+  "results": [
+    {
+      "boundary_note": "fused wq_a+wkv F.linear, q_a RMSNorm, wq_b, q head norm/RoPE, kv norm/RoPE/cache store",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 direct, bf16 KV cache",
+      "max_ms": 0.26419198513031006,
+      "mean_ms": 0.24872960150241852,
+      "median_ms": 0.24729599803686142,
+      "min_ms": 0.23756800591945648,
+      "name": "attention_front_cache_insert_tokens4",
+      "p90_ms": 0.2590720057487488,
+      "repeat": 10,
+      "samples_ms": [
+        0.26419198513031006,
+        0.25600001215934753,
+        0.2590720057487488,
+        0.2467840015888214,
+        0.24268800020217896,
+        0.24780799448490143,
+        0.24063999950885773,
+        0.23756800591945648,
+        0.24166400730609894,
+        0.25088000297546387
+      ],
+      "shape": {
+        "fused_wqa_wkv_weight": [
+          1536,
+          4096
+        ],
+        "hidden": [
+          4,
+          4096
+        ],
+        "kv_cache": [
+          8192,
+          512
+        ],
+        "q": [
+          4,
+          8,
+          512
+        ],
+        "wq_b_weight": [
+          4096,
+          1024
+        ]
+      },
+      "status": "pass",
+      "subgraph": "attention_front_projection_and_cache_insert",
+      "tokens": 4,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "mini exact sparse attention kernel, two-source SWA+C4/C128; excludes indexer/topk construction",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 cache/output",
+      "max_ms": 0.5928959846496582,
+      "mean_ms": 0.5879807949066163,
+      "median_ms": 0.5877760052680969,
+      "min_ms": 0.5847039818763733,
+      "name": "sparse_attention_two_source_tokens4",
+      "p90_ms": 0.5928959846496582,
+      "repeat": 10,
+      "samples_ms": [
+        0.5928959846496582,
+        0.5877760052680969,
+        0.5898240208625793,
+        0.5847039818763733,
+        0.5877760052680969,
+        0.5857279896736145,
+        0.5847039818763733,
+        0.5847039818763733,
+        0.5928959846496582,
+        0.5888000130653381
+      ],
+      "shape": {
+        "cache": [
+          8192,
+          512
+        ],
+        "compressed_indices": [
+          4,
+          512
+        ],
+        "q": [
+          4,
+          8,
+          512
+        ],
+        "swa_indices": [
+          4,
+          128
+        ]
+      },
+      "status": "pass",
+      "subgraph": "sparse_attention_and_indexer",
+      "tokens": 4,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "mini C4 indexer logits + topk transform; deterministic synthetic page table",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 indexer cache/query, fp32 weights/logits",
+      "max_ms": 0.35225600004196167,
+      "mean_ms": 0.32993280291557314,
+      "median_ms": 0.32870399951934814,
+      "min_ms": 0.3184640109539032,
+      "name": "indexer_select_bf16_tokens4",
+      "p90_ms": 0.33792001008987427,
+      "repeat": 10,
+      "samples_ms": [
+        0.33792001008987427,
+        0.33587199449539185,
+        0.32972800731658936,
+        0.32870399951934814,
+        0.32870399951934814,
+        0.3246079981327057,
+        0.3184640109539032,
+        0.35225600004196167,
+        0.3184640109539032,
+        0.3246079981327057
+      ],
+      "shape": {
+        "cache": [
+          4096,
+          128
+        ],
+        "page_table": [
+          4,
+          64
+        ],
+        "q": [
+          4,
+          64,
+          128
+        ],
+        "topk_width": 512,
+        "weights": [
+          4,
+          64
+        ]
+      },
+      "status": "pass",
+      "subgraph": "sparse_attention_and_indexer",
+      "tokens": 4,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "mini grouped routed expert kernel only; excludes gate and TP all-reduce",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 activations, packed fp4 expert weights, ue8m0 scales, fp32 route weights",
+      "max_ms": 2.2906880378723145,
+      "mean_ms": 2.2702080249786376,
+      "median_ms": 2.2676481008529663,
+      "min_ms": 2.2599680423736572,
+      "name": "moe_routed_grouped_fp4_tokens4",
+      "p90_ms": 2.283519983291626,
+      "repeat": 10,
+      "samples_ms": [
+        2.283519983291626,
+        2.2722558975219727,
+        2.2906880378723145,
+        2.264064073562622,
+        2.2599680423736572,
+        2.2671360969543457,
+        2.2609920501708984,
+        2.274303913116455,
+        2.2609920501708984,
+        2.268160104751587
+      ],
+      "shape": {
+        "hidden": [
+          4,
+          4096
+        ],
+        "topk": 6,
+        "w13": [
+          256,
+          2,
+          256,
+          2048
+        ],
+        "w2": [
+          256,
+          4096,
+          128
+        ]
+      },
+      "status": "pass",
+      "subgraph": "moe_route_and_routed_experts",
+      "tokens": 4,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "local TP shard of shared experts; excludes reduce-once combine",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 activations/weights, fp32 activation math",
+      "max_ms": 0.20684799551963806,
+      "mean_ms": 0.19957760125398635,
+      "median_ms": 0.19763199985027313,
+      "min_ms": 0.1955839991569519,
+      "name": "shared_experts_local_tokens4",
+      "p90_ms": 0.20582400262355804,
+      "repeat": 10,
+      "samples_ms": [
+        0.2017280012369156,
+        0.20070399343967438,
+        0.20684799551963806,
+        0.19763199985027313,
+        0.19660800695419312,
+        0.19660800695419312,
+        0.20582400262355804,
+        0.19660800695419312,
+        0.19763199985027313,
+        0.1955839991569519
+      ],
+      "shape": {
+        "down_local_weight": [
+          4096,
+          256
+        ],
+        "gate_up_local_weight": [
+          512,
+          4096
+        ],
+        "hidden": [
+          4,
+          4096
+        ]
+      },
+      "status": "pass",
+      "subgraph": "shared_experts",
+      "tokens": 4,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "HC head + final RMSNorm stand-in; layer HC pre/post appears in macro profile",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 activations, fp32 HC mix math",
+      "max_ms": 0.347135990858078,
+      "mean_ms": 0.33822720050811766,
+      "median_ms": 0.33740800619125366,
+      "min_ms": 0.3317759931087494,
+      "name": "hc_head_rmsnorm_tokens4",
+      "p90_ms": 0.34406399726867676,
+      "repeat": 10,
+      "samples_ms": [
+        0.347135990858078,
+        0.33792001008987427,
+        0.33792001008987427,
+        0.3409920036792755,
+        0.33587199449539185,
+        0.3317759931087494,
+        0.34406399726867676,
+        0.3338240087032318,
+        0.33689600229263306,
+        0.33587199449539185
+      ],
+      "shape": {
+        "fn": [
+          4,
+          16384
+        ],
+        "hc_input": [
+          4,
+          4,
+          4096
+        ]
+      },
+      "status": "pass",
+      "subgraph": "hc_rmsnorm_final_layers",
+      "tokens": 4,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "fused wq_a+wkv F.linear, q_a RMSNorm, wq_b, q head norm/RoPE, kv norm/RoPE/cache store",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 direct, bf16 KV cache",
+      "max_ms": 0.7731199860572815,
+      "mean_ms": 0.7707306742668152,
+      "median_ms": 0.7700480222702026,
+      "min_ms": 0.7690240144729614,
+      "name": "attention_front_cache_insert_tokens4096",
+      "p90_ms": 0.7700480222702026,
+      "repeat": 3,
+      "samples_ms": [
+        0.7731199860572815,
+        0.7700480222702026,
+        0.7690240144729614
+      ],
+      "shape": {
+        "fused_wqa_wkv_weight": [
+          1536,
+          4096
+        ],
+        "hidden": [
+          4096,
+          4096
+        ],
+        "kv_cache": [
+          8192,
+          512
+        ],
+        "q": [
+          4096,
+          8,
+          512
+        ],
+        "wq_b_weight": [
+          4096,
+          1024
+        ]
+      },
+      "status": "pass",
+      "subgraph": "attention_front_projection_and_cache_insert",
+      "tokens": 4096,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "mini exact sparse attention kernel, two-source SWA+C4/C128; excludes indexer/topk construction",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 cache/output",
+      "max_ms": 30.1844482421875,
+      "mean_ms": 30.178304036458332,
+      "median_ms": 30.17728042602539,
+      "min_ms": 30.17318344116211,
+      "name": "sparse_attention_two_source_tokens4096",
+      "p90_ms": 30.17728042602539,
+      "repeat": 3,
+      "samples_ms": [
+        30.1844482421875,
+        30.17728042602539,
+        30.17318344116211
+      ],
+      "shape": {
+        "cache": [
+          8192,
+          512
+        ],
+        "compressed_indices": [
+          4096,
+          512
+        ],
+        "q": [
+          4096,
+          8,
+          512
+        ],
+        "swa_indices": [
+          4096,
+          128
+        ]
+      },
+      "status": "pass",
+      "subgraph": "sparse_attention_and_indexer",
+      "tokens": 4096,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "mini C4 indexer logits + topk transform; deterministic synthetic page table",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 indexer cache/query, fp32 weights/logits",
+      "max_ms": 44.51123046875,
+      "mean_ms": 44.50372187296549,
+      "median_ms": 44.50406265258789,
+      "min_ms": 44.495872497558594,
+      "name": "indexer_select_bf16_tokens4096",
+      "p90_ms": 44.50406265258789,
+      "repeat": 3,
+      "samples_ms": [
+        44.50406265258789,
+        44.51123046875,
+        44.495872497558594
+      ],
+      "shape": {
+        "cache": [
+          4096,
+          128
+        ],
+        "page_table": [
+          4096,
+          64
+        ],
+        "q": [
+          4096,
+          64,
+          128
+        ],
+        "topk_width": 512,
+        "weights": [
+          4096,
+          64
+        ]
+      },
+      "status": "pass",
+      "subgraph": "sparse_attention_and_indexer",
+      "tokens": 4096,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "mini grouped routed expert kernel only; excludes gate and TP all-reduce",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 activations, packed fp4 expert weights, ue8m0 scales, fp32 route weights",
+      "max_ms": 98.38591766357422,
+      "mean_ms": 98.22890726725261,
+      "median_ms": 98.15347290039062,
+      "min_ms": 98.14733123779297,
+      "name": "moe_routed_grouped_fp4_tokens4096",
+      "p90_ms": 98.15347290039062,
+      "repeat": 3,
+      "samples_ms": [
+        98.38591766357422,
+        98.14733123779297,
+        98.15347290039062
+      ],
+      "shape": {
+        "hidden": [
+          4096,
+          4096
+        ],
+        "topk": 6,
+        "w13": [
+          256,
+          2,
+          256,
+          2048
+        ],
+        "w2": [
+          256,
+          4096,
+          128
+        ]
+      },
+      "status": "pass",
+      "subgraph": "moe_route_and_routed_experts",
+      "tokens": 4096,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "local TP shard of shared experts; excludes reduce-once combine",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 activations/weights, fp32 activation math",
+      "max_ms": 0.22630399465560913,
+      "mean_ms": 0.2256213277578354,
+      "median_ms": 0.22630399465560913,
+      "min_ms": 0.2242559939622879,
+      "name": "shared_experts_local_tokens4096",
+      "p90_ms": 0.22630399465560913,
+      "repeat": 3,
+      "samples_ms": [
+        0.22630399465560913,
+        0.2242559939622879,
+        0.22630399465560913
+      ],
+      "shape": {
+        "down_local_weight": [
+          4096,
+          256
+        ],
+        "gate_up_local_weight": [
+          512,
+          4096
+        ],
+        "hidden": [
+          4096,
+          4096
+        ]
+      },
+      "status": "pass",
+      "subgraph": "shared_experts",
+      "tokens": 4096,
+      "warmup": 2
+    },
+    {
+      "boundary_note": "HC head + final RMSNorm stand-in; layer HC pre/post appears in macro profile",
+      "cuda_sync": "torch.cuda.synchronize after every measured iteration",
+      "dtype": "bf16 activations, fp32 HC mix math",
+      "max_ms": 1.955839991569519,
+      "mean_ms": 1.9531093041102092,
+      "median_ms": 1.9517439603805542,
+      "min_ms": 1.9517439603805542,
+      "name": "hc_head_rmsnorm_tokens4096",
+      "p90_ms": 1.9517439603805542,
+      "repeat": 3,
+      "samples_ms": [
+        1.9517439603805542,
+        1.955839991569519,
+        1.9517439603805542
+      ],
+      "shape": {
+        "fn": [
+          4,
+          16384
+        ],
+        "hc_input": [
+          4096,
+          4,
+          4096
+        ]
+      },
+      "status": "pass",
+      "subgraph": "hc_rmsnorm_final_layers",
+      "tokens": 4096,
+      "warmup": 2
+    }
+  ],
+  "scope": "DeepSeek V4 Flash, A100/sm80, synthetic single-rank subgraphs",
+  "started_at_unix": 1782869587.1850348,
+  "suite": "mini_subgraph_microbench"
+}

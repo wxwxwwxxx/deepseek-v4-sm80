@@ -1,5 +1,10 @@
 # New Thread Prompt for TARGET 07.2
 
+Archived note: TARGET 07.2 now has recorded artifacts in
+`performance_milestones/target07_comm_graph/` and should not be used as the
+default next thread. Use `prompts/THREAD_PROMPT_TARGET_07.md` for the current
+TARGET 07 cycle unless you specifically need to replay or audit 07.2.
+
 你好，请继续推进 `/workspace/mini-sglang` 中 DeepSeek V4 Flash 在
 A100/sm80 上的性能追赶工作。总目标见 `prompts/target.md`，当前大目标是
 `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md`：在 TP8、page/block size

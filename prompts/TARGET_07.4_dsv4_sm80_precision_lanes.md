@@ -24,6 +24,22 @@ explicit quality and performance gates.
 - vLLM fused MoE:
   `/workspace/vllm-dsv4-docker/vllm/model_executor/layers/fused_moe/`
 
+## Start Conditions
+
+Do not start this target just because vLLM uses a different precision policy.
+Start TARGET 07.4 only after one of these is true:
+
+- TARGET 07.35 or a later parity report shows precision lane is a top-two
+  remaining bottleneck after exact MoE/attention work;
+- exact mini reaches at least 80 output tok/s on 4096/1024/batch4 and needs
+  precision experiments to cross the 114.07 tok/s win line;
+- exact MoE V2 remains compute-bound after structural MoE fixes, and an opt-in
+  INT8/FP8 experiment is the best evidenced next step.
+
+If exact mini is still dominated by MoE boundary, sparse attention/indexer, or
+communication, return to the corresponding target instead of opening precision
+lanes.
+
 ## Precision Roadmap
 
 1. bf16-direct baseline.
@@ -73,6 +89,25 @@ explicit quality and performance gates.
      gates pass.
    - Record rejected lanes with evidence so later threads do not repeat the same
      experiment.
+
+## Stop Conditions
+
+Stop a precision lane when any of these happens:
+
+- it fails wrapper parity, logits/top-k, or text smoke in a way that is not
+  fixed by one focused correctness pass;
+- it improves only microbench numbers but regresses or fails to improve
+  4096/1024/batch4 macro throughput;
+- one serious implementation cut plus one focused follow-up fail to produce at
+  least 1.3x E2E improvement for INT8 MoE or a clearly documented macro win for
+  fp8/fp4 activation quantization;
+- the new profile shows a structural exact-path bottleneck is still larger than
+  the precision-lane opportunity.
+
+Record rejected lanes with commands, artifacts, quality failures, and measured
+speed before stopping. Do not keep adding extra quant/dequant glue kernels to
+rescue a lane unless the profile shows the lane still has a credible path to
+the 114.07 tok/s win line.
 
 ## Quality Gates
 
