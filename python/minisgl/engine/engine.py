@@ -50,6 +50,11 @@ class Engine:
         with torch.device("meta"), torch_dtype(config.dtype):
             self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
+        prepare_for_cuda_graph_capture = getattr(self.model, "prepare_for_cuda_graph_capture", None)
+        if callable(prepare_for_cuda_graph_capture):
+            self.model_prepare_report = prepare_for_cuda_graph_capture()
+        else:
+            self.model_prepare_report = {}
 
         # ======================= KV cache initialization ========================
         self.num_pages = self._determine_num_pages(init_free_memory, config)

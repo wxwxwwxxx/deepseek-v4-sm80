@@ -61,6 +61,7 @@ DSV4_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
+DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 BASELINE_TP_SIZE = 8
 
 
@@ -597,6 +598,41 @@ VARIANTS: tuple[Variant, ...] = (
     Variant(
         (
             "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_metacopy_"
+            "idxfp8cache_actqtriton_qwqbbf16cache_graph_hc_rmsnorm_"
+            "fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+        ),
+        {
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
+            DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_GLOBAL_TOPK_LENS_TOGGLE: "1",
+            DSV4_SPARSE_SPLITK_BF16_TOGGLE: "1",
+            DSV4_REPLAY_METADATA_COPY_TOGGLE: "1",
+            DSV4_INDEXER_FP8_CACHE_TOGGLE: "1",
+            DSV4_FP8_ACT_QUANT_TRITON_TOGGLE: "1",
+            DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "TARGET 07.58 q_wqb-only cached BF16 dequantized weight projection "
+            "path on top of the promoted 07.54 graph-layout stack."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        (
+            "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_metacopy_"
             "idxfp8cache_actqtriton_scalecache_graph_hc_rmsnorm_fwqakvcache_"
             "qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
         ),
@@ -1011,6 +1047,7 @@ def run_variant(
             "allow_dsv4_cuda_graph": runtime_options["allow_dsv4_cuda_graph"],
             "cuda_graph_bs": runtime_options["cuda_graph_bs"],
             "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
+            "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
             "distributed_init_method": _distributed_init_method(args, tp_size),
             "temperature": args.temperature,
             "top_p": args.top_p,
@@ -1119,6 +1156,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                     "cuda_graph_capture_greedy_sample"
                 ],
                 "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
+                "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
                 "distributed_init_method": distributed_init_method,
                 "memory_ratio": args.memory_ratio,
                 "max_seq_len": args.max_seq_len,

@@ -110,6 +110,72 @@ def _cached_projection_scale(
     return cached
 
 
+def _tensor_cache_meta(tensor: torch.Tensor | None) -> tuple | None:
+    if tensor is None:
+        return None
+    return (
+        tensor.data_ptr(),
+        int(getattr(tensor, "_version", 0)),
+        tensor.device.type,
+        tensor.device.index,
+        tensor.dtype,
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        int(tensor.storage_offset()),
+    )
+
+
+def _fp8_bf16_weight_cache_meta(
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    out_dtype: torch.dtype,
+) -> tuple:
+    return (_tensor_cache_meta(weight), _tensor_cache_meta(scale), out_dtype)
+
+
+def _cached_fp8_bf16_weight(
+    owner: object,
+    cache_name: str,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    *,
+    out_dtype: torch.dtype,
+    allow_build: bool,
+    owner_label: str,
+) -> torch.Tensor:
+    if weight.dtype != dsv4_kernel.fp8_dtype():
+        raise RuntimeError(
+            f"{owner_label} cached BF16 weight path requires FP8 weights, got {weight.dtype}."
+        )
+    if scale is not None and scale.device != weight.device:
+        raise RuntimeError(
+            f"{owner_label} cached BF16 weight path requires scale on the same device "
+            f"as weight, got weight={weight.device} scale={scale.device}."
+        )
+    if out_dtype != torch.bfloat16:
+        raise RuntimeError(
+            f"{owner_label} cached BF16 weight path requires out_dtype=torch.bfloat16, got {out_dtype}."
+        )
+
+    meta_name = f"{cache_name}_meta"
+    meta = _fp8_bf16_weight_cache_meta(weight, scale, out_dtype)
+    cached = getattr(owner, cache_name, None)
+    if cached is not None and getattr(owner, meta_name, None) == meta:
+        return cached
+
+    if not allow_build:
+        raise RuntimeError(
+            f"{owner_label} cached BF16 weight is missing or stale. "
+            "Call prepare_for_cuda_graph_capture() after weights are loaded and before "
+            "decode CUDA graph capture/replay; rebuilding inside forward is disabled."
+        )
+
+    cached = dsv4_kernel.dequant_fp8_weight(weight, scale, out_dtype=out_dtype).contiguous()
+    setattr(owner, cache_name, cached)
+    setattr(owner, meta_name, meta)
+    return cached
+
+
 def _cached_gate_fp32_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
     return _cached_fp32_weight(
         owner,
@@ -296,6 +362,50 @@ class DSV4Linear(BaseOP):
                 label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
             )
         return y
+
+    def prepare_fp8_bf16_weight_cache(
+        self,
+        cache_name: str,
+        *,
+        owner_label: str,
+    ) -> dict[str, object]:
+        scale = getattr(self, "weight_scale_inv", None)
+        cached = _cached_fp8_bf16_weight(
+            self,
+            cache_name,
+            self.weight,
+            scale,
+            out_dtype=torch.bfloat16,
+            allow_build=True,
+            owner_label=owner_label,
+        )
+        return {
+            "owner": owner_label,
+            "shape": list(cached.shape),
+            "dtype": str(cached.dtype),
+            "device": str(cached.device),
+            "bytes": int(cached.numel() * cached.element_size()),
+        }
+
+    def forward_fp8_cached_bf16_weight(
+        self,
+        x: torch.Tensor,
+        *,
+        cache_name: str,
+        owner_label: str,
+    ) -> torch.Tensor:
+        scale = getattr(self, "weight_scale_inv", None)
+        cached_weight = _cached_fp8_bf16_weight(
+            self,
+            cache_name,
+            self.weight,
+            scale,
+            out_dtype=x.dtype,
+            allow_build=False,
+            owner_label=owner_label,
+        )
+        x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+        return F.linear(x_quant, cached_weight)
 
 
 class DSV4Compressor(BaseOP):
@@ -499,6 +609,22 @@ class DSV4Attention(BaseOP):
         if ratio == 4:
             self.indexer = DSV4Indexer(config, layer_id)
 
+    @property
+    def _q_wqb_bf16_weight_cache_name(self) -> str:
+        return "_dsv4_q_wqb_bf16_weight_cache"
+
+    @property
+    def _q_wqb_owner_label(self) -> str:
+        return f"layer{self.layer_id}.attn.q_wqb"
+
+    def prepare_q_wqb_bf16_weight_cache(self) -> dict[str, object] | None:
+        if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
+            return None
+        return self.wq_b.prepare_fp8_bf16_weight_cache(
+            self._q_wqb_bf16_weight_cache_name,
+            owner_label=self._q_wqb_owner_label,
+        )
+
     def _sequence_spans(self, batch: Batch, total_tokens: int) -> list[tuple[int, int]]:
         reqs = getattr(batch, "padded_reqs", batch.reqs)
         spans = []
@@ -601,13 +727,20 @@ class DSV4Attention(BaseOP):
                     eps=self.rms_norm_eps,
                 )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_wqb"):
-            q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
-                "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
-            )
-            q = self.wq_b.forward(
-                q_lora,
-                fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
-            ).view(-1, self.num_local_heads, self.head_dim)
+            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
+                q = self.wq_b.forward_fp8_cached_bf16_weight(
+                    q_lora,
+                    cache_name=self._q_wqb_bf16_weight_cache_name,
+                    owner_label=self._q_wqb_owner_label,
+                ).view(-1, self.num_local_heads, self.head_dim)
+            else:
+                q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+                    "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
+                )
+                q = self.wq_b.forward(
+                    q_lora,
+                    fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
+                ).view(-1, self.num_local_heads, self.head_dim)
         if fused_q_kv_norm_rope_store and kv is None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
                 kv = (
@@ -1390,6 +1523,24 @@ class DeepseekV4Model(BaseOP):
         self._hc_head_fn_bf16: torch.Tensor | None = None
         self._hc_head_fn_bf16_meta: tuple | None = None
 
+    def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
+        q_wqb_reports: list[dict[str, object]] = []
+        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
+            for layer in self.layers.op_list:
+                report = layer.self_attn.prepare_q_wqb_bf16_weight_cache()
+                if report is not None:
+                    q_wqb_reports.append(report)
+        total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
+        return {
+            "q_wqb_bf16_weight_cache": {
+                "enabled": bool(q_wqb_reports),
+                "toggle": dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,
+                "layers_cached": len(q_wqb_reports),
+                "total_bytes": total_q_wqb_bytes,
+                "entries": q_wqb_reports,
+            }
+        }
+
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
         hc_head_fn = _cached_hc_bf16_weight(self, "_hc_head_fn_bf16", self.hc_head_fn)
         return dsv4_kernel.hc_head_fallback(
@@ -1419,6 +1570,9 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
         self.model = DeepseekV4Model(config)
         self.lm_head = DSV4VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         super().__init__()
+
+    def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
+        return self.model.prepare_for_cuda_graph_capture()
 
     def forward(self):
         batch = get_global_ctx().batch
