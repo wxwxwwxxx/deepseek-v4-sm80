@@ -64,6 +64,7 @@ DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
 DSV4_BF16_PROJECTION_CACHE_TOGGLE = "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE"
 DSV4_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
 DSV4_DECODE_METADATA_DEFOREST_TOGGLE = "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
+DSV4_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
 DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
 DSV4_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
@@ -723,6 +724,19 @@ VARIANTS: tuple[Variant, ...] = (
             "stack: Marlin WNA16 MoE, graph replay, FP8 indexer cache, split-K "
             "sparse decode, four attention/indexer BF16 projection caches, "
             "and shared expert BF16 projection caches."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        "dsv4_sm80_a100_victory_hccleanup",
+        {
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_HC_GRAPH_CLEANUP_TOGGLE: "1",
+        },
+        (
+            "TARGET 07.68 smoke opt-in: dsv4_sm80_a100_victory plus fused "
+            "HC prenorm/split boundary cleanup."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,

@@ -46,6 +46,7 @@ DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
 DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE = (
     "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
 )
+DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
 DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE = (
     "MINISGL_DSV4_SM80_FUSED_TOPK_SWA_INDICES"
 )
@@ -168,6 +169,7 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE,
     DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE,
     DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE,
+    DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE,
     DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE,
     DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,
     DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,
@@ -2488,6 +2490,22 @@ def hc_pre_fallback(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     shape = x.shape
     flat = x.flatten(1)
+    if dsv4_sm80_triton_enabled(DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE) and dsv4_sm80_triton_enabled(
+        "MINISGL_DSV4_SM80_HC"
+    ):
+        mixes = linear_bf16_fp32_fallback(flat, fn)
+        fused = _triton_dsv4_ops().hc_prenorm_split_pre(
+            mixes.contiguous(),
+            x,
+            scale,
+            base,
+            hc_mult=hc_mult,
+            sinkhorn_iters=sinkhorn_iters,
+            eps=eps,
+            norm_eps=norm_eps,
+        )
+        if fused is not None:
+            return fused
     flat_float = flat.float()
     rsqrt = torch.rsqrt(flat_float.square().mean(-1, keepdim=True) + norm_eps)
     mixes = linear_bf16_fp32_fallback(flat, fn) * rsqrt
@@ -3875,6 +3893,7 @@ __all__ = [
     "DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE",
     "DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST",
     "DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE",
+    "DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE",
     "DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE",
     "DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE",
     "DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE",

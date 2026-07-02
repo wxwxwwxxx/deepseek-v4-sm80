@@ -59,7 +59,9 @@ attributed the remaining direct-copy owners and selected MoE/shared-expert
 staging.  TARGET 07.66 promoted the shared expert BF16 weight cache into the
 victory bundle and changed the bottleneck order again.  TARGET 07.67 confirmed
 the promoted path and selected HC/elementwise graph cleanup as the next exact
-implementation target.
+implementation target.  TARGET 07.68 proved that HC cleanup is correct but too
+small to promote, so the active next step is projection/GEMM backend and owner
+re-attribution on the current promoted path.
 
 ## New TARGET 07 Organization
 
@@ -93,7 +95,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.65 | `prompts/TARGET_07.65_dsv4_sm80_direct_copy_owner_attribution.md` | completed | Measurement-only attribution reached `99.97%` direct-copy owner coverage and selected MoE/shared-expert staging as the next implementation target. |
 | TARGET 07.66 | `prompts/TARGET_07.66_dsv4_sm80_moe_shared_expert_staging_cleanup.md` | completed | Promoted shared expert BF16 weight cache into `dsv4_sm80_a100_victory`; MoE/shared direct-copy staging fell `0.379204s -> 0.097361s`, and 4096/1024 reached `131.7707 output tok/s`. |
 | TARGET 07.67 | `prompts/TARGET_07.67_dsv4_sm80_post_shared_expert_reprofile.md` | completed | Confirmed the promoted post-07.66 path at `131.6263 output tok/s` on 4096/1024 and selected HC/elementwise graph cleanup from fresh bucket evidence. |
-| TARGET 07.68 | `prompts/TARGET_07.68_dsv4_sm80_hc_elementwise_graph_cleanup.md` | next todo | Align and clean up mini's HC/elementwise graph boundary against vLLM `mhc_pre` / `mhc_post`, keeping projection/GEMM, NCCL, sparse attention, MoE finalization, and precision routes out of scope. |
+| TARGET 07.68 | `prompts/TARGET_07.68_dsv4_sm80_hc_elementwise_graph_cleanup.md` | completed | Added an exact BF16 opt-in HC graph cleanup path. Focused HC pre improved, correctness passed, but 4096/1024 macro and profile gates failed; keep opt-in, do not promote. |
+| TARGET 07.69 | `prompts/TARGET_07.69_dsv4_sm80_projection_gemm_backend_owner_reattribution.md` | next todo | Re-attribute the current promoted projection/GEMM bucket by owner and backend after the cached BF16 projection/shared-expert wins, then choose one evidence-backed implementation target. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -130,7 +133,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.68 next.
+Run TARGET 07.69 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -532,11 +535,36 @@ Fresh 4096/128/batch4 rank0 decode-envelope buckets:
 | NCCL communication | `0.338786` | `11.45%` | important, but not top-two |
 | MoE routed/backend | `0.300138` | `10.14%` | backend compute, not finalization |
 
-The next target is TARGET 07.68: HC / elementwise graph boundary cleanup.  It
-should compare mini's `hc_pre_fallback` / `hc_post_fallback` and Triton kernels
-against vLLM's `torch.ops.vllm.mhc_pre` / `mhc_post`, then test one opt-in
-exact-path cleanup.  Projection/GEMM is still important, but it should be
-handled as a separate backend/precision target rather than mixed into HC.
+TARGET 07.68 completed the HC / elementwise graph boundary cleanup as an
+opt-in experiment:
+
+- new opt-in toggle: `MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP=1`;
+- new opt-in variant: `dsv4_sm80_a100_victory_hccleanup`;
+- focused HC microbench improved `hc_pre` from `0.247450 ms` to
+  `0.196063 ms` and reduced HC-pre kernel events from `11` to `6`;
+- output comparison, unit tests, TP8 text smoke, graph replay, and eager-decode
+  gates passed;
+- same-run 4096/128 improved `+3.30%`;
+- same-run 4096/1024 improved only `+0.73%`;
+- HC/elementwise bucket fell only `0.536306s -> 0.519303s`;
+- combined HC/elementwise plus HC-owned direct-copy reduction was about
+  `0.0533s`, below the `0.15s` profile gate.
+
+Decision: keep the HC cleanup path as an opt-in experiment and do not add it to
+`dsv4_sm80_a100_victory`.  It establishes a useful mini-owned MHC boundary,
+but it does not move the promoted long-decode path enough.  A stronger HC
+target would need to move prenorm/squared-sum closer to the matmul backend or
+make an explicit FP32-carrier decision against vLLM's `post/comb` behavior.
+
+The active next target is TARGET 07.69: projection/GEMM backend and owner
+re-attribution.  The important nuance is that TARGET 07.57's projection owner
+table is stale: after the cached BF16 projection stack and shared expert cache,
+the remaining `0.778887s` projection/GEMM bucket may be owned by different
+paths such as HC pre linear, remaining attention/indexer projections, cached
+BF16 small-M GEMMs, shared expert compute, lm-head/logits, or backend-generated
+cublasLt split/reduce kernels.  TARGET 07.69 must explain the current bucket by
+owner and backend before selecting any further GEMM, cache, precision, or graph
+implementation target.
 
 ## Precision Policy
 

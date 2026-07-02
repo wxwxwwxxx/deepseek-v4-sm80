@@ -1048,6 +1048,129 @@ def _hc_post_kernel(
 
 
 @triton.jit
+def _hc_prenorm_split_pre_kernel(
+    mixes_ptr,
+    x_ptr,
+    scale_ptr,
+    base_ptr,
+    pre_ptr,
+    post_ptr,
+    comb_ptr,
+    tokens: tl.constexpr,
+    hidden: tl.constexpr,
+    hc_mult: tl.constexpr,
+    mix_hc: tl.constexpr,
+    eps: tl.constexpr,
+    norm_eps: tl.constexpr,
+    sinkhorn_steps: tl.constexpr,
+    BLOCK_HC: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+) -> None:
+    token = tl.program_id(0)
+    total = hidden * hc_mult
+    token_base = token * total
+
+    sq_sum = tl.zeros((), dtype=tl.float32)
+    for start in range(0, total, BLOCK_N):
+        offsets = start + tl.arange(0, BLOCK_N)
+        mask = offsets < total
+        values = tl.load(x_ptr + token_base + offsets, mask=mask, other=0.0).to(tl.float32)
+        sq_sum += tl.sum(values * values)
+    rsqrt = 1.0 / tl.sqrt(sq_sum / total + norm_eps)
+
+    hc_offsets = tl.arange(0, BLOCK_HC)
+    hc_mask = hc_offsets < hc_mult
+    mix_base = token * mix_hc
+    scale0 = tl.load(scale_ptr + 0).to(tl.float32)
+    scale1 = tl.load(scale_ptr + 1).to(tl.float32)
+    scale2 = tl.load(scale_ptr + 2).to(tl.float32)
+
+    pre_logits = (
+        tl.load(mixes_ptr + mix_base + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
+        * rsqrt
+        * scale0
+        + tl.load(base_ptr + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
+    )
+    pre = tl.sigmoid(pre_logits) + eps
+    pre = tl.where(hc_mask, pre, 0.0)
+    tl.store(pre_ptr + token * hc_mult + hc_offsets, pre, mask=hc_mask)
+
+    post_start = hc_mult
+    post_logits = (
+        tl.load(mixes_ptr + mix_base + post_start + hc_offsets, mask=hc_mask, other=0.0).to(
+            tl.float32
+        )
+        * rsqrt
+        * scale1
+        + tl.load(base_ptr + post_start + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
+    )
+    post = 2.0 * tl.sigmoid(post_logits)
+    post = tl.where(hc_mask, post, 0.0)
+    tl.store(post_ptr + token * hc_mult + hc_offsets, post, mask=hc_mask)
+
+    rows = tl.arange(0, BLOCK_HC)[:, None]
+    cols = tl.arange(0, BLOCK_HC)[None, :]
+    matrix_mask = (rows < hc_mult) & (cols < hc_mult)
+    comb_start = 2 * hc_mult
+    comb_offsets = comb_start + rows * hc_mult + cols
+    comb_logits = (
+        tl.load(mixes_ptr + mix_base + comb_offsets, mask=matrix_mask, other=0.0).to(tl.float32)
+        * rsqrt
+        * scale2
+        + tl.load(base_ptr + comb_offsets, mask=matrix_mask, other=0.0).to(tl.float32)
+    )
+    comb_logits = tl.where(matrix_mask, comb_logits, -3.4028234663852886e38)
+    row_max = tl.max(comb_logits, axis=1)
+    exp_logits = tl.where(matrix_mask, tl.exp(comb_logits - row_max[:, None]), 0.0)
+    row_sum = tl.sum(exp_logits, axis=1)
+    comb = exp_logits / tl.maximum(row_sum[:, None], eps)
+    comb = tl.where(matrix_mask, comb + eps, 0.0)
+
+    col_sum = tl.sum(comb, axis=0)
+    comb = tl.where(matrix_mask, comb / (col_sum[None, :] + eps), 0.0)
+    for _ in range(0, sinkhorn_steps):
+        row_sum_iter = tl.sum(comb, axis=1)
+        comb = tl.where(matrix_mask, comb / (row_sum_iter[:, None] + eps), 0.0)
+        col_sum_iter = tl.sum(comb, axis=0)
+        comb = tl.where(matrix_mask, comb / (col_sum_iter[None, :] + eps), 0.0)
+
+    tl.store(
+        comb_ptr + token * hc_mult * hc_mult + rows * hc_mult + cols,
+        comb,
+        mask=matrix_mask,
+    )
+
+
+@triton.jit
+def _hc_layer_input_kernel(
+    x_ptr,
+    pre_ptr,
+    y_ptr,
+    tokens: tl.constexpr,
+    hidden: tl.constexpr,
+    hc_mult: tl.constexpr,
+    BLOCK_HC: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    token = tl.program_id(0)
+    d_block = tl.program_id(1)
+    hc_offsets = tl.arange(0, BLOCK_HC)
+    d_offsets = d_block * BLOCK_D + tl.arange(0, BLOCK_D)
+    hc_mask = hc_offsets < hc_mult
+    d_mask = d_offsets < hidden
+
+    pre = tl.load(
+        pre_ptr + token * hc_mult + hc_offsets,
+        mask=hc_mask,
+        other=0.0,
+    ).to(tl.float32)
+    x_offsets = token * hc_mult * hidden + hc_offsets[:, None] * hidden + d_offsets[None, :]
+    x_values = tl.load(x_ptr + x_offsets, mask=hc_mask[:, None] & d_mask[None, :], other=0.0)
+    y = tl.sum(pre[:, None] * x_values.to(tl.float32), axis=0)
+    tl.store(y_ptr + token * hidden + d_offsets, y, mask=d_mask)
+
+
+@triton.jit
 def _paged_mqa_attention_bf16_kernel(
     q_ptr,
     cache_ptr,
@@ -4061,6 +4184,79 @@ def hc_split_pre(
     return y, post, comb
 
 
+def hc_prenorm_split_pre(
+    mixes: torch.Tensor,
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    hc_mult: int,
+    sinkhorn_iters: int,
+    eps: float,
+    norm_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    if (
+        x.ndim != 3
+        or mixes.ndim != 2
+        or x.numel() == 0
+        or not x.is_cuda
+        or not mixes.is_cuda
+        or not scale.is_cuda
+        or not base.is_cuda
+        or not x.is_contiguous()
+        or not mixes.is_contiguous()
+        or x.shape[0] != mixes.shape[0]
+        or x.shape[1] != hc_mult
+        or hc_mult < 1
+        or hc_mult > 8
+    ):
+        return None
+    mix_hc = (2 + hc_mult) * hc_mult
+    if mixes.shape[1] != mix_hc or scale.numel() < 3 or base.numel() < mix_hc:
+        return None
+    if x.dtype is not torch.bfloat16:
+        return None
+    tokens, _, hidden = x.shape
+    pre = torch.empty((tokens, hc_mult), dtype=x.dtype, device=x.device)
+    y = torch.empty((tokens, hidden), dtype=x.dtype, device=x.device)
+    post = torch.empty((tokens, hc_mult), dtype=x.dtype, device=x.device)
+    comb = torch.empty((tokens, hc_mult, hc_mult), dtype=x.dtype, device=x.device)
+    block_hc = triton.next_power_of_2(hc_mult)
+    _hc_prenorm_split_pre_kernel[(tokens,)](
+        mixes,
+        x,
+        scale.contiguous(),
+        base.contiguous(),
+        pre,
+        post,
+        comb,
+        tokens=tokens,
+        hidden=hidden,
+        hc_mult=int(hc_mult),
+        mix_hc=int(mix_hc),
+        eps=float(eps),
+        norm_eps=float(norm_eps),
+        sinkhorn_steps=max(int(sinkhorn_iters) - 1, 0),
+        BLOCK_HC=block_hc,
+        BLOCK_N=1024,
+        num_warps=4,
+    )
+    block_d = 256 if hidden >= 256 else 128
+    grid = (tokens, triton.cdiv(hidden, block_d))
+    _hc_layer_input_kernel[grid](
+        x,
+        pre,
+        y,
+        tokens=tokens,
+        hidden=hidden,
+        hc_mult=int(hc_mult),
+        BLOCK_HC=block_hc,
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return y, post, comb
+
+
 def hc_post(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -4777,6 +4973,7 @@ __all__ = [
     "build_moe_route_plan",
     "grouped_fp4_moe",
     "grouped_fp4_moe_fused_compute",
+    "hc_prenorm_split_pre",
     "hc_post",
     "hc_split_pre",
     "indexer_bf16_logits",

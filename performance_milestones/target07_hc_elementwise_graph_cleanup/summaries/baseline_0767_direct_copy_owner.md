@@ -1,0 +1,51 @@
+# Direct-Copy Owner Attribution: sqlite
+
+- total direct_copy: `0.449200s` / `137012` kernels
+- named owner coverage: `99.94%`
+- residual: `0.000251s` (`0.06%`)
+
+## Direct-Copy Owner Table
+
+| Direct-copy owner | Kernel s | Count | Share | Source file/function | Evidence |
+| --- | ---: | ---: | ---: | --- | --- |
+| `graph node source: dsv4.layer*.mlp.runner.experts` | `0.054128` | 16202 | `12.05%` | `python/minisgl/models/deepseek_v4.py:DSV4MoE/DSV4FusedMoERunner.forward` | graphNodeId original creation under coarse layer MLP/MoE NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.lm_head` | `0.044396` | 381 | `9.88%` | `python/minisgl/models/deepseek_v4.py:DeepseekV4ForCausalLM.forward` | graphNodeId original creation under lm_head NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.layer*.hc_ffn_pre` | `0.042060` | 10879 | `9.36%` | `python/minisgl/models/deepseek_v4.py:DSV4DecoderLayer.forward` | graphNodeId original creation under hidden-carrier staging NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.layer*.hc_attn_pre` | `0.038678` | 10731 | `8.61%` | `python/minisgl/models/deepseek_v4.py:DSV4DecoderLayer.forward` | graphNodeId original creation under hidden-carrier staging NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.layer*.mlp.runner.shared` | `0.031477` | 10764 | `7.01%` | `python/minisgl/models/deepseek_v4.py:DSV4MoE/DSV4FusedMoERunner.forward` | graphNodeId original creation under coarse layer MLP/MoE NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.layer*.attn.kv_quant` | `0.029523` | 10764 | `6.57%` | `python/minisgl/models/deepseek_v4.py:DSV4Attention.forward` | graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `moe shared expert staging.runner finalize to fp32.layer*` | `0.023019` | 5391 | `5.12%` | `python/minisgl/models/deepseek_v4.py:DSV4FusedMoERunner/DSV4SharedExperts` | direct NVTX around MoE/shared expert dtype staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX |
+| `moe shared expert staging.runner shared to fp32.layer*` | `0.022545` | 5379 | `5.02%` | `python/minisgl/models/deepseek_v4.py:DSV4FusedMoERunner/DSV4SharedExperts` | direct NVTX around MoE/shared expert dtype staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX |
+| `graph node source: dsv4.layer*.mlp.runner.route` | `0.021852` | 5814 | `4.86%` | `python/minisgl/models/deepseek_v4.py:DSV4MoE/DSV4FusedMoERunner.forward` | graphNodeId original creation under coarse layer MLP/MoE NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.layer*.attn.indexer_store` | `0.021156` | 10476 | `4.71%` | `python/minisgl/models/deepseek_v4.py:DSV4Attention.forward` | graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.layer*.attn.q_proj` | `0.016200` | 5384 | `3.61%` | `python/minisgl/models/deepseek_v4.py:DSV4Attention.forward` | graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.layer*.attn.compress` | `0.015224` | 5270 | `3.39%` | `python/minisgl/models/deepseek_v4.py:DSV4Attention.forward` | graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.indexer.compressor` | `0.014173` | 5224 | `3.16%` | `python/minisgl/models/deepseek_v4.py:DSV4Indexer.forward` | graphNodeId original creation under coarse indexer NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `attention boundary.positions to i64.layer*` | `0.012210` | 5376 | `2.72%` | `python/minisgl/models/deepseek_v4.py and python/minisgl/attention/deepseek_v4.py` | direct NVTX around attention positions/cache/index dtype or layout staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX |
+| `moe shared expert staging.runner output to flat dtype.layer*` | `0.011886` | 5368 | `2.65%` | `python/minisgl/models/deepseek_v4.py:DSV4FusedMoERunner/DSV4SharedExperts` | direct NVTX around MoE/shared expert dtype staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX |
+| `graph node source: dsv4.layer*.attn.backend` | `0.011364` | 5072 | `2.53%` | `python/minisgl/models/deepseek_v4.py:DSV4Attention.forward` | graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.layer*.attn.compress_store` | `0.009955` | 5274 | `2.22%` | `python/minisgl/models/deepseek_v4.py:DSV4Attention.forward` | graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `moe shared expert staging.shared hidden to up dtype` | `0.007818` | 5383 | `1.74%` | `python/minisgl/models/deepseek_v4.py:DSV4FusedMoERunner/DSV4SharedExperts` | direct NVTX around MoE/shared expert dtype staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX |
+| `graph node source: dsv4.layer*.attn.indexer` | `0.007310` | 2599 | `1.63%` | `python/minisgl/models/deepseek_v4.py:DSV4Attention.forward` | graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `batch forward bridge.prepare metadata.decode.bs*` | `0.006480` | 2520 | `1.44%` | `python/minisgl/scheduler/scheduler.py:Scheduler._prepare_batch/_forward` | direct NVTX around scheduler to engine bridge; innermost direct-copy NVTX |
+| `batch forward bridge.engine forward batch.decode.bs*` | `0.002528` | 854 | `0.56%` | `python/minisgl/scheduler/scheduler.py:Scheduler._prepare_batch/_forward` | direct NVTX around scheduler to engine bridge; innermost direct-copy NVTX |
+| `sampler logits staging.next tokens to cpu.bs*` | `0.001304` | 443 | `0.29%` | `python/minisgl/engine/engine.py:Engine.forward_batch` | direct NVTX around sampler/logits token staging; innermost direct-copy NVTX |
+| `batch forward bridge.token pool write.decode.bs*` | `0.001227` | 449 | `0.27%` | `python/minisgl/scheduler/scheduler.py:Scheduler._prepare_batch/_forward` | direct NVTX around scheduler to engine bridge; innermost direct-copy NVTX |
+| `graph node source: dsv4.model.hc_head` | `0.001110` | 381 | `0.25%` | `python/minisgl/models/deepseek_v4.py:DeepseekV4Model.forward` | graphNodeId original creation under coarse model NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `graph node source: dsv4.model.hc_expand` | `0.000403` | 127 | `0.09%` | `python/minisgl/models/deepseek_v4.py:DeepseekV4Model.forward` | graphNodeId original creation under coarse model NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `batch forward bridge.prepare input tuple.decode.bs*` | `0.000352` | 126 | `0.08%` | `python/minisgl/scheduler/scheduler.py:Scheduler._prepare_batch/_forward` | direct NVTX around scheduler to engine bridge; innermost direct-copy NVTX |
+| `replay metadata copy.fallback scalar vectors.bs*` | `0.000289` | 127 | `0.06%` | `python/minisgl/attention/deepseek_v4.py:DSV4AttentionBackend._copy_metadata_for_replay` | direct NVTX around replay metadata helper/fallback copies; innermost direct-copy NVTX |
+| `graph node source: dsv4.model.embed` | `0.000283` | 127 | `0.06%` | `python/minisgl/models/deepseek_v4.py:DeepseekV4Model.forward` | graphNodeId original creation under coarse model NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX |
+| `residual coarse benchmark envelope: batch_forward:decode:bs*:padded*` | `0.000251` | 127 | `0.06%` | `benchmark/offline/deepseek_v4_perf_matrix.py:BenchScheduler._forward` | coarse benchmark NVTX; coarse benchmark NVTX; pre-instrumentation only |
+
+## Residual Table
+
+| Residual owner | Kernel s | Share | Needed NVTX |
+| --- | ---: | ---: | --- |
+| `residual coarse benchmark envelope: batch_forward:decode:bs*:padded*` | `0.000251` | `0.06%` | narrow direct-copy NVTX around the source boundary |
+
+## Notes
+
+- Classifier first uses innermost direct-copy NVTX in the decode envelope.
+- If replay kernels are only under coarse graph replay ranges, graphNodeId is mapped through originalGraphNodeId to capture-time direct-copy or dsv4 source NVTX when Nsight exposes it.
+- Residual static_graph_replay or batch_forward owners mean more graph-node/source NVTX is needed before an implementation target is safe.

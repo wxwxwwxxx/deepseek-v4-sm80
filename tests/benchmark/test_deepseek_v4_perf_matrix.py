@@ -523,6 +523,29 @@ def test_configure_variant_records_shared_expert_bf16_cache(monkeypatch):
     )
 
 
+def test_configure_variant_records_hc_graph_cleanup(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            return os.environ.get(name) in {"1", "true"}
+
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()["dsv4_sm80_a100_victory_hccleanup"],
+    )
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"] == "1"
+    assert "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP" in result["active_dsv4_toggles"]
+
+
 def test_shared_prefix_workload_repeats_prefix_and_disables_radix_in_scenario():
     bench = _load_module()
     scenario = bench._scenario_map()["shared_prompt_no_radix_bs8"]

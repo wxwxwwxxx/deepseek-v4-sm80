@@ -494,6 +494,29 @@ def test_configure_variant_sets_shared_expert_bf16_cache(monkeypatch):
     )
 
 
+def test_configure_variant_sets_hc_graph_cleanup(monkeypatch):
+    smoke = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            return os.environ.get(name) in {"1", "true"}
+
+    result = smoke.configure_variant(
+        FakeKernel,
+        smoke._variant_map()["dsv4_sm80_a100_victory_hccleanup"],
+    )
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"] == "1"
+    assert "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP" in result["active_dsv4_toggles"]
+
+
 def test_tp_rank_size_defaults_to_tp8_under_torchrun_env(monkeypatch):
     smoke = _load_module()
     args = smoke.parse_args([])
