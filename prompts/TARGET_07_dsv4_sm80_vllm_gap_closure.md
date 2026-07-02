@@ -76,7 +76,7 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.59 | `prompts/TARGET_07.59_dsv4_sm80_cached_bf16_wo_b_projection_backend.md` | completed | Extended cached BF16 to row-parallel `attn.wo_b`; 4096/128 reached `49.6585 output tok/s`, 4096/1024 reached `98.6953`, and `wo_b` local compute fell to `0.070595s` while all-reduce remained `0.161865s`. |
 | TARGET 07.60 | `prompts/TARGET_07.60_dsv4_sm80_cached_bf16_indexer_wq_b_projection_backend.md` | completed | Extended cached BF16 to `indexer.wq_b`; 4096/128 reached `51.2962 output tok/s`, 4096/1024 reached `105.7645`, and the three cached owners cost exactly `1.0000 GiB/rank`. |
 | TARGET 07.61 | `prompts/TARGET_07.61_dsv4_sm80_post_cached_bf16_vllm_parity_reprofile.md` | completed | Completed post-cached-BF16 parity reprofile. vLLM runtime bucket timing is still unavailable, but mini owner timing plus vLLM source parity select `attn.wo_a` as the next narrow boundary. |
-| TARGET 07.62 | `prompts/TARGET_07.62_dsv4_sm80_wo_a_attention_boundary_parity.md` | next todo | Adapt mini's `attn.wo_a` boundary toward vLLM's SM80 per-group BF16 BMM/cache path, with focused owner/macro/memory gates and no default precision change. |
+| TARGET 07.62 | `prompts/TARGET_07.62_dsv4_sm80_wo_a_attention_boundary_parity.md` | completed | Adapted mini's `attn.wo_a` boundary to an opt-in BF16 grouped BMM cache; 4096/1024 reached `116.2553 output tok/s`, crossing the old `114.07` victory line. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -113,7 +113,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.62 next.
+Current milestone: `dsv4_sm80_a100_victory`.
 
 TARGET 07.395 proved that mini's exact bf16 sparse decode boundary can match
 the comparable vLLM gather+split-K decode boundary:
@@ -378,6 +378,24 @@ This target must preserve graph replay, keep eager decode at `0`, record the
 new memory cost, and stop if the owner or macro gates do not move.  Do not jump
 straight to vLLM's fused inverse-RoPE plus FP8 einsum path unless the final
 report recommends it as a separate precision-boundary target.
+
+TARGET 07.62 completed successfully:
+
+- new milestone variant: `dsv4_sm80_a100_victory`;
+- compatibility alias: `target0762_woabf16bmmcache`;
+- top-level bundle toggle: `MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE=1`;
+- projection-cache sub-bundle: `MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE=1`;
+- 4096/128/batch4 improved from `51.2962` to `53.5877 output tok/s`;
+- 4096/1024/batch4 improved from `105.7645` to `116.2553 output tok/s`;
+- `attn.wo_a` replay owner dropped from `0.481377s` to `0.068948s`;
+- graph replay stayed active and eager decode stayed `0`;
+- total cached BF16 projection memory is `1.3359 GiB/rank`, about
+  `18865.83` KV tokens or `73.69` pages per rank.
+
+The milestone bundle intentionally no longer enables the stale
+`Q_WQB/WO_B/INDEXER_WQB_FP8_GEMM` opt-ins because the BF16 projection-cache
+paths supersede them in the current best stack.  Keep the individual cache
+toggles for ablation because they have explicit memory tradeoffs.
 
 ## Precision Policy
 

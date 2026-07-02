@@ -55,6 +55,8 @@ DSV4_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
+DSV4_BF16_PROJECTION_CACHE_TOGGLE = "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE"
+DSV4_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
 DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
 DSV4_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
@@ -854,35 +856,22 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
-        name="target0762_woabf16bmmcache",
-        env={
-            DSV4_V1_MOE_TOGGLE: "1",
-            DSV4_MOE_V2_TOGGLE: "1",
-            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
-            DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
-            DSV4_HC_TOGGLE: "1",
-            DSV4_RMSNORM_TOGGLE: "1",
-            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
-            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
-            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
-            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
-            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
-            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
-            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
-            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
-            DSV4_GLOBAL_TOPK_LENS_TOGGLE: "1",
-            DSV4_SPARSE_SPLITK_BF16_TOGGLE: "1",
-            DSV4_REPLAY_METADATA_COPY_TOGGLE: "1",
-            DSV4_INDEXER_FP8_CACHE_TOGGLE: "1",
-            DSV4_FP8_ACT_QUANT_TRITON_TOGGLE: "1",
-            DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE: "1",
-            DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE: "1",
-            DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE: "1",
-            DSV4_WO_A_BF16_BMM_CACHE_TOGGLE: "1",
-        },
+        name="dsv4_sm80_a100_victory",
+        env={DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1"},
         description=(
-            "TARGET 07.62 opt-in attn.wo_a BF16 grouped BMM cache on top of "
-            "the TARGET 07.60 three-owner cached BF16 stack."
+            "Milestone bundle for the TARGET 07.62 A100/sm80 victory stack: "
+            "Marlin WNA16 MoE, graph replay, FP8 indexer cache, split-K sparse "
+            "decode, and four BF16 projection caches."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name="target0762_woabf16bmmcache",
+        env={DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1"},
+        description=(
+            "Legacy alias for dsv4_sm80_a100_victory kept for TARGET 07.62 "
+            "artifacts and scripts."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
