@@ -36,12 +36,12 @@ Current best milestone stack:
 - page size 256;
 - TP8 on 8x A100.
 
-Current confirmed macro from TARGET 07.66:
+Current confirmed macro from TARGET 07.67:
 
 | Workload | Output tok/s | Note |
 | --- | ---: | --- |
-| 4096/128/batch4 | `62.2034` | Shared expert BF16 cache audit variant before promotion |
-| 4096/1024/batch4 | `131.7707` | Stable above old `114.07` victory line |
+| 4096/128/batch4 | `62.1364` | Promoted path after shared expert BF16 cache promotion |
+| 4096/1024/batch4 | `131.6263` | Stable above old `114.07` victory line |
 
 Reference lines:
 
@@ -57,8 +57,9 @@ and rebuilt the bottleneck order.  TARGET 07.64 added a correct metadata
 deforestation opt-in, but it did not meet the promote gate.  TARGET 07.65 then
 attributed the remaining direct-copy owners and selected MoE/shared-expert
 staging.  TARGET 07.66 promoted the shared expert BF16 weight cache into the
-victory bundle and changed the bottleneck order again; the next step is a
-fresh post-shared-expert reprofile.
+victory bundle and changed the bottleneck order again.  TARGET 07.67 confirmed
+the promoted path and selected HC/elementwise graph cleanup as the next exact
+implementation target.
 
 ## New TARGET 07 Organization
 
@@ -91,7 +92,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.64 | `prompts/TARGET_07.64_dsv4_sm80_decode_metadata_deforestation.md` | completed | Added an opt-in decode metadata helper. Microbench was strong and macro improved to `122.9414 output tok/s`, but `graph_runtime_copy_cat_index` only fell by `0.012003s`; keep opt-in, do not promote. |
 | TARGET 07.65 | `prompts/TARGET_07.65_dsv4_sm80_direct_copy_owner_attribution.md` | completed | Measurement-only attribution reached `99.97%` direct-copy owner coverage and selected MoE/shared-expert staging as the next implementation target. |
 | TARGET 07.66 | `prompts/TARGET_07.66_dsv4_sm80_moe_shared_expert_staging_cleanup.md` | completed | Promoted shared expert BF16 weight cache into `dsv4_sm80_a100_victory`; MoE/shared direct-copy staging fell `0.379204s -> 0.097361s`, and 4096/1024 reached `131.7707 output tok/s`. |
-| TARGET 07.67 | `prompts/TARGET_07.67_dsv4_sm80_post_shared_expert_reprofile.md` | next todo | Reprofile the promoted post-07.66 path and select the next target from fresh evidence rather than chasing stale runner-finalization assumptions. |
+| TARGET 07.67 | `prompts/TARGET_07.67_dsv4_sm80_post_shared_expert_reprofile.md` | completed | Confirmed the promoted post-07.66 path at `131.6263 output tok/s` on 4096/1024 and selected HC/elementwise graph cleanup from fresh bucket evidence. |
+| TARGET 07.68 | `prompts/TARGET_07.68_dsv4_sm80_hc_elementwise_graph_cleanup.md` | next todo | Align and clean up mini's HC/elementwise graph boundary against vLLM `mhc_pre` / `mhc_post`, keeping projection/GEMM, NCCL, sparse attention, MoE finalization, and precision routes out of scope. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -128,7 +130,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.67 next.
+Run TARGET 07.68 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -509,6 +511,32 @@ The remaining direct-copy owners are diffuse.  Do not automatically continue
 into runner finalization just because it remains visible; TARGET 07.67 should
 first reprofile the promoted post-07.66 path and reset the whole bottleneck
 order.
+
+TARGET 07.67 completed that reset without runtime changes:
+
+- promoted `dsv4_sm80_a100_victory` reproduced the 07.66 audit variant within
+  normal noise;
+- 4096/128/batch4 reached `62.1364 output tok/s`;
+- 4096/1024/batch4 reached `131.6263 output tok/s`;
+- graph replay stayed active and eager decode stayed `0`;
+- total direct_copy stayed stable at `0.449200s`;
+- shared expert projection owners remained absent.
+
+Fresh 4096/128/batch4 rank0 decode-envelope buckets:
+
+| Bucket | Kernel s | Share | Decision |
+| --- | ---: | ---: | --- |
+| projection/GEMM | `0.778887` | `26.31%` | largest bucket, but likely backend/precision work |
+| direct-copy/layout | `0.557626` | `18.84%` | broad and owner-diffuse after 07.66 |
+| HC/elementwise | `0.536306` | `18.12%` | selected exact cleanup target |
+| NCCL communication | `0.338786` | `11.45%` | important, but not top-two |
+| MoE routed/backend | `0.300138` | `10.14%` | backend compute, not finalization |
+
+The next target is TARGET 07.68: HC / elementwise graph boundary cleanup.  It
+should compare mini's `hc_pre_fallback` / `hc_post_fallback` and Triton kernels
+against vLLM's `torch.ops.vllm.mhc_pre` / `mhc_post`, then test one opt-in
+exact-path cleanup.  Projection/GEMM is still important, but it should be
+handled as a separate backend/precision target rather than mixed into HC.
 
 ## Precision Policy
 
