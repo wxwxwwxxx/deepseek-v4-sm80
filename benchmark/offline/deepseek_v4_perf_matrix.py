@@ -57,6 +57,9 @@ DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
 DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
+DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = (
+    "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
+)
 
 
 @dataclass(frozen=True)
@@ -807,6 +810,44 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         description=(
             "TARGET 07.59 q_wqb plus row-parallel wo_b cached BF16 "
             "dequantized weight projection path."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=(
+            "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_metacopy_"
+            "idxfp8cache_actqtriton_qwqbbf16cache_wobbf16cache_idxwqbbf16cache_"
+            "graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_"
+            "gatecache_idxstorecache"
+        ),
+        env={
+            DSV4_V1_MOE_TOGGLE: "1",
+            DSV4_MOE_V2_TOGGLE: "1",
+            DSV4_MOE_VLLM_RUNNER_TOGGLE: "1",
+            DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+            DSV4_HC_TOGGLE: "1",
+            DSV4_RMSNORM_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_SHARED_ACT_TOGGLE: "1",
+            DSV4_FUSED_WQA_WKV_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_FUSED_Q_KV_NORM_ROPE_STORE_TOGGLE: "1",
+            DSV4_Q_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_WO_B_FP8_GEMM_TOGGLE: "1",
+            DSV4_INDEXER_WQB_FP8_GEMM_TOGGLE: "1",
+            DSV4_GATE_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_GLOBAL_TOPK_LENS_TOGGLE: "1",
+            DSV4_SPARSE_SPLITK_BF16_TOGGLE: "1",
+            DSV4_REPLAY_METADATA_COPY_TOGGLE: "1",
+            DSV4_INDEXER_FP8_CACHE_TOGGLE: "1",
+            DSV4_FP8_ACT_QUANT_TRITON_TOGGLE: "1",
+            DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE: "1",
+            DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 07.60 q_wqb, row-parallel wo_b, and indexer.wq_b cached "
+            "BF16 dequantized weight projection path."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,

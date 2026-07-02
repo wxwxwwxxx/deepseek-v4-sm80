@@ -452,7 +452,7 @@ class DSV4Compressor(BaseOP):
 
 class DSV4Indexer(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int):
-        _ = layer_id
+        self.layer_id = layer_id
         self.n_heads = config.index_n_heads
         self.head_dim = config.index_head_dim
         self.weight_scale = (self.head_dim**-0.5) * (self.n_heads**-0.5)
@@ -469,9 +469,37 @@ class DSV4Indexer(BaseOP):
         )
         self.compressor = DSV4Compressor(config, ratio=4, head_dim=self.head_dim)
 
+    @property
+    def _wq_b_bf16_weight_cache_name(self) -> str:
+        return "_dsv4_indexer_wq_b_bf16_weight_cache"
+
+    @property
+    def _wq_b_owner_label(self) -> str:
+        return f"layer{self.layer_id}.attn.indexer.wq_b"
+
+    def prepare_wq_b_bf16_weight_cache(self) -> dict[str, object] | None:
+        if not dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE
+        ):
+            return None
+        return self.wq_b.prepare_fp8_bf16_weight_cache(
+            self._wq_b_bf16_weight_cache_name,
+            owner_label=self._wq_b_owner_label,
+        )
+
     def _wq_b_forward(self, q_lora: torch.Tensor) -> torch.Tensor:
-        fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM")
         with _dsv4_capture_nvtx("indexer.wq_b"):
+            if dsv4_kernel.dsv4_env_flag(
+                dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE
+            ):
+                return self.wq_b.forward_fp8_cached_bf16_weight(
+                    q_lora,
+                    cache_name=self._wq_b_bf16_weight_cache_name,
+                    owner_label=self._wq_b_owner_label,
+                )
+            fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+                "MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM"
+            )
             return self.wq_b.forward(q_lora, fp8_gemm=fp8_gemm if fp8_gemm else None)
 
     def prepare_bf16_query(
@@ -648,6 +676,15 @@ class DSV4Attention(BaseOP):
             self._wo_b_bf16_weight_cache_name,
             owner_label=self._wo_b_owner_label,
         )
+
+    def prepare_indexer_wq_b_bf16_weight_cache(self) -> dict[str, object] | None:
+        if not dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE
+        ):
+            return None
+        if not hasattr(self, "indexer"):
+            return None
+        return self.indexer.prepare_wq_b_bf16_weight_cache()
 
     def _sequence_spans(self, batch: Batch, total_tokens: int) -> list[tuple[int, int]]:
         reqs = getattr(batch, "padded_reqs", batch.reqs)
@@ -1568,8 +1605,19 @@ class DeepseekV4Model(BaseOP):
                 report = layer.self_attn.prepare_wo_b_bf16_weight_cache()
                 if report is not None:
                     wo_b_reports.append(report)
+        indexer_wq_b_reports: list[dict[str, object]] = []
+        if dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE
+        ):
+            for layer in self.layers.op_list:
+                report = layer.self_attn.prepare_indexer_wq_b_bf16_weight_cache()
+                if report is not None:
+                    indexer_wq_b_reports.append(report)
         total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
         total_wo_b_bytes = int(sum(int(report["bytes"]) for report in wo_b_reports))
+        total_indexer_wq_b_bytes = int(
+            sum(int(report["bytes"]) for report in indexer_wq_b_reports)
+        )
         return {
             "q_wqb_bf16_weight_cache": {
                 "enabled": bool(q_wqb_reports),
@@ -1585,9 +1633,16 @@ class DeepseekV4Model(BaseOP):
                 "total_bytes": total_wo_b_bytes,
                 "entries": wo_b_reports,
             },
+            "indexer_wq_b_bf16_weight_cache": {
+                "enabled": bool(indexer_wq_b_reports),
+                "toggle": dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,
+                "layers_cached": len(indexer_wq_b_reports),
+                "total_bytes": total_indexer_wq_b_bytes,
+                "entries": indexer_wq_b_reports,
+            },
             "projection_bf16_weight_cache_total": {
-                "total_bytes": total_q_wqb_bytes + total_wo_b_bytes,
-                "owners": ["attn.q_wqb", "attn.wo_b"],
+                "total_bytes": total_q_wqb_bytes + total_wo_b_bytes + total_indexer_wq_b_bytes,
+                "owners": ["attn.q_wqb", "attn.wo_b", "indexer.wq_b"],
             },
         }
 

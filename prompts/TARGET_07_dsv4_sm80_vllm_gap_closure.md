@@ -74,7 +74,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.57 | `prompts/TARGET_07.57_dsv4_sm80_projection_gemm_backend_parity.md` | completed | Attributed projection/GEMM by owner; selected `_quantized_linear_fp8_kernel` across `attn.q_wqb`, `attn.wo_b`, and `indexer.wq_b` as the next backend contract. |
 | TARGET 07.58 | `prompts/TARGET_07.58_dsv4_sm80_cached_bf16_projection_backend.md` | completed | Promoted opt-in cached BF16 dequantized weights for `attn.q_wqb`; 4096/128 improved to `47.9464 output tok/s`, 4096/1024 to `92.5170`, with only `0.3359 GiB/rank` extra cache. |
 | TARGET 07.59 | `prompts/TARGET_07.59_dsv4_sm80_cached_bf16_wo_b_projection_backend.md` | completed | Extended cached BF16 to row-parallel `attn.wo_b`; 4096/128 reached `49.6585 output tok/s`, 4096/1024 reached `98.6953`, and `wo_b` local compute fell to `0.070595s` while all-reduce remained `0.161865s`. |
-| TARGET 07.60 | `prompts/TARGET_07.60_dsv4_sm80_cached_bf16_indexer_wq_b_projection_backend.md` | next todo | Extend cached BF16 to the remaining large same-contract owner `indexer.wq_b`, then run a fresh post-sequence profile before choosing the next bottleneck. |
+| TARGET 07.60 | `prompts/TARGET_07.60_dsv4_sm80_cached_bf16_indexer_wq_b_projection_backend.md` | completed | Extended cached BF16 to `indexer.wq_b`; 4096/128 reached `51.2962 output tok/s`, 4096/1024 reached `105.7645`, and the three cached owners cost exactly `1.0000 GiB/rank`. |
+| TARGET 07.61 | `prompts/TARGET_07.61_dsv4_sm80_post_cached_bf16_vllm_parity_reprofile.md` | next todo | Freeze the three-owner cached BF16 mini baseline, compare it against vLLM at macro/bucket/owner/source-boundary levels, and choose the next implementation target from evidence. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -111,7 +112,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.60 next.
+Run TARGET 07.61 next.
 
 TARGET 07.395 proved that mini's exact bf16 sparse decode boundary can match
 the comparable vLLM gather+split-K decode boundary:
@@ -335,6 +336,29 @@ The next target is TARGET 07.60: extend cached BF16 to `indexer.wq_b`.  After
 that target, the original q_wqb/wo_b/indexer_wq_b projection sequence is
 complete, so the thread must run a fresh profile and choose the next bottleneck
 from evidence rather than continuing cached-weight work by inertia.
+
+TARGET 07.60 completed successfully:
+
+- 4096/128/batch4 improved from `49.6585` to `51.2962 output tok/s`;
+- 4096/1024/batch4 improved from `98.6953` to `105.7645 output tok/s`;
+- `indexer.wq_b` intrinsic dropped from `0.364997s` to `0.050961s`;
+- graph replay stayed active, eager decode remained `0`, and text smoke passed;
+- three-owner cached BF16 memory is exactly `1.0000 GiB/rank`, about
+  `14121.79` KV tokens or `55.16` pages per rank.
+
+The fresh 07.60 post-sequence profile says not to continue cached-weight work
+without new evidence.  The largest current mini clusters are:
+
+- graph/runtime/copy/cat/index: `1.141006s`, `25.88%`;
+- projection/GEMM: `0.805080s`, `18.26%`;
+- elementwise graph nodes: `0.639409s`, `14.50%`;
+- NCCL communication: `0.346671s`, `7.86%`;
+- MoE/Marlin: `0.316854s`, `7.19%`.
+
+TARGET 07.61 is therefore an evidence target: freeze this mini baseline,
+compare it against vLLM at macro, bucket, owner, and source-dispatch levels,
+then select exactly one next implementation target.  Do not start another
+cached-weight expansion or generic graph/layout pass before that parity report.
 
 ## Precision Policy
 
