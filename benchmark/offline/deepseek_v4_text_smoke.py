@@ -74,6 +74,9 @@ DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = (
 DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
 )
+DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = (
+    "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
+)
 BASELINE_TP_SIZE = 8
 
 
@@ -742,6 +745,19 @@ VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        "dsv4_sm80_a100_victory_bf16smallgemm",
+        {
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE: "1",
+        },
+        (
+            "TARGET 07.70 opt-in: dsv4_sm80_a100_victory plus pretransposed "
+            "cached BF16 weights for small-M projection GEMMs."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         "dsv4_sm80_a100_victory_sharedbf16",
         {
             DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
@@ -1075,6 +1091,18 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
     }
 
 
+def _graph_init_variant(variants: Sequence[Variant]) -> Variant:
+    for variant in variants:
+        if variant.env.get(DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE, "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return variant
+    return variants[0]
+
+
 def _gather_payloads(group, payload: dict[str, Any]) -> list[dict[str, Any]]:
     if torch.distributed.is_initialized():
         world_size = torch.distributed.get_world_size(group=group)
@@ -1232,7 +1260,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
     variants = [_variant_map()[name] for name in (args.variants or ["fallback", "v0_bf16"])]
     runtime_options = _runtime_options(args, variants)
     if runtime_options["allow_dsv4_cuda_graph"]:
-        configure_variant(dsv4_kernel, variants[0])
+        configure_variant(dsv4_kernel, _graph_init_variant(variants))
 
     llm = None
     reports: list[dict[str, Any]] = []

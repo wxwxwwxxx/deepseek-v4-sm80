@@ -5,8 +5,27 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "benchmark" / "offline" / "deepseek_v4_text_smoke.py"
+
+
+@pytest.fixture(autouse=True)
+def _restore_dsv4_sm80_env():
+    original = {
+        name: value
+        for name, value in os.environ.items()
+        if name.startswith("MINISGL_DSV4_SM80_")
+    }
+    for name in tuple(os.environ):
+        if name.startswith("MINISGL_DSV4_SM80_"):
+            os.environ.pop(name, None)
+    yield
+    for name in tuple(os.environ):
+        if name.startswith("MINISGL_DSV4_SM80_"):
+            os.environ.pop(name, None)
+    os.environ.update(original)
 
 
 def _load_module():
@@ -491,6 +510,52 @@ def test_configure_variant_sets_shared_expert_bf16_cache(monkeypatch):
     assert (
         "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
         in result["active_dsv4_toggles"]
+    )
+
+
+def test_configure_variant_sets_bf16_small_gemm_pretranspose(monkeypatch):
+    smoke = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            return os.environ.get(name) in {"1", "true"}
+
+    result = smoke.configure_variant(
+        FakeKernel,
+        smoke._variant_map()["dsv4_sm80_a100_victory_bf16smallgemm"],
+    )
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
+    assert (
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"]
+        == "1"
+    )
+    assert (
+        "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
+        in result["active_dsv4_toggles"]
+    )
+
+
+def test_graph_init_variant_prefers_bf16_small_gemm_pretranspose():
+    smoke = _load_module()
+    variants = [
+        smoke._variant_map()["dsv4_sm80_a100_victory"],
+        smoke._variant_map()["dsv4_sm80_a100_victory_bf16smallgemm"],
+    ]
+
+    assert (
+        smoke._graph_init_variant(variants).name
+        == "dsv4_sm80_a100_victory_bf16smallgemm"
+    )
+    assert (
+        smoke._graph_init_variant([smoke._variant_map()["dsv4_sm80_a100_victory"]]).name
+        == "dsv4_sm80_a100_victory"
     )
 
 

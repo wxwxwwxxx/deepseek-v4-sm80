@@ -5,8 +5,27 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "benchmark" / "offline" / "deepseek_v4_perf_matrix.py"
+
+
+@pytest.fixture(autouse=True)
+def _restore_dsv4_sm80_env():
+    original = {
+        name: value
+        for name, value in os.environ.items()
+        if name.startswith("MINISGL_DSV4_SM80_")
+    }
+    for name in tuple(os.environ):
+        if name.startswith("MINISGL_DSV4_SM80_"):
+            os.environ.pop(name, None)
+    yield
+    for name in tuple(os.environ):
+        if name.startswith("MINISGL_DSV4_SM80_"):
+            os.environ.pop(name, None)
+    os.environ.update(original)
 
 
 def _load_module():
@@ -520,6 +539,52 @@ def test_configure_variant_records_shared_expert_bf16_cache(monkeypatch):
     assert (
         "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
         in result["active_dsv4_toggles"]
+    )
+
+
+def test_configure_variant_records_bf16_small_gemm_pretranspose(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            return os.environ.get(name) in {"1", "true"}
+
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()["dsv4_sm80_a100_victory_bf16smallgemm"],
+    )
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
+    assert (
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"]
+        == "1"
+    )
+    assert (
+        "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
+        in result["active_dsv4_toggles"]
+    )
+
+
+def test_graph_init_variant_prefers_bf16_small_gemm_pretranspose():
+    bench = _load_module()
+    variants = [
+        bench._variant_map()["dsv4_sm80_a100_victory"],
+        bench._variant_map()["dsv4_sm80_a100_victory_bf16smallgemm"],
+    ]
+
+    assert (
+        bench._graph_init_variant(variants).name
+        == "dsv4_sm80_a100_victory_bf16smallgemm"
+    )
+    assert (
+        bench._graph_init_variant([bench._variant_map()["dsv4_sm80_a100_victory"]]).name
+        == "dsv4_sm80_a100_victory"
     )
 
 

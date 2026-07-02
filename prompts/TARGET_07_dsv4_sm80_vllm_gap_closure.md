@@ -63,7 +63,10 @@ implementation target.  TARGET 07.68 proved that HC cleanup is correct but too
 small to promote, so the active next step is projection/GEMM backend and owner
 re-attribution on the current promoted path.  TARGET 07.69 proved that the old
 FP8 quantized-linear projection bottleneck is gone and selected the current
-BF16 small-GEMM backend cluster as the next implementation surface.
+BF16 small-GEMM backend cluster as the next implementation surface.  TARGET
+07.70 showed that a narrow exact BF16 pretranspose/backend route has local
+microbench signal but no meaningful profile or macro gain, so the active next
+step is a short precision/boundary pivot.
 
 ## New TARGET 07 Organization
 
@@ -99,7 +102,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.67 | `prompts/TARGET_07.67_dsv4_sm80_post_shared_expert_reprofile.md` | completed | Confirmed the promoted post-07.66 path at `131.6263 output tok/s` on 4096/1024 and selected HC/elementwise graph cleanup from fresh bucket evidence. |
 | TARGET 07.68 | `prompts/TARGET_07.68_dsv4_sm80_hc_elementwise_graph_cleanup.md` | completed | Added an exact BF16 opt-in HC graph cleanup path. Focused HC pre improved, correctness passed, but 4096/1024 macro and profile gates failed; keep opt-in, do not promote. |
 | TARGET 07.69 | `prompts/TARGET_07.69_dsv4_sm80_projection_gemm_backend_owner_reattribution.md` | completed | Re-attributed the current promoted projection/GEMM bucket with `98.94%` named coverage. No single owner clears `0.20s`; the selected next surface is the BF16 small-GEMM + splitK/reduce cluster at `0.521619s`. |
-| TARGET 07.70 | `prompts/TARGET_07.70_dsv4_sm80_bf16_small_gemm_backend_cluster.md` | next todo | Try exact-route BF16 small-GEMM backend solutions: cuBLASLt algorithm/splitK policy, prepacked layout, CUTLASS/Triton small-M kernels, owner-local grouped/fused GEMM, and narrow compile probes only if earlier lanes fail. |
+| TARGET 07.70 | `prompts/TARGET_07.70_dsv4_sm80_bf16_small_gemm_backend_cluster.md` | completed | Tested exact-route BF16 pretranspose small-GEMM path. Microbench passed, text smoke passed, but profile and macro gates failed; keep audit opt-in only, do not promote. |
+| TARGET 07.71 | `prompts/TARGET_07.71_dsv4_sm80_precision_boundary_pivot.md` | next todo | Short pivot target: decide whether next implementation should attack HC/router FP32 ownership or move to vLLM-aligned FP8/custom projection-cache-indexer boundaries. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -136,7 +140,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.70 next.
+Run TARGET 07.71 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -581,13 +585,39 @@ decode-small BF16 GEMMs with fixed backend/launch/splitK overhead spread across
 attention WQA/WKV/compress, shared experts, `wo_a`, `q_wqb`, `wo_b`, indexer
 projections, and related owners.
 
-The active next target is TARGET 07.70: BF16 small-GEMM backend cluster.  It
-should try exact-route backend solutions first: cuBLASLt algorithm and splitK
-policy, prepacked/pretransposed BF16 layouts, custom CUTLASS/Triton small-M
-kernels, owner-local grouped/fused GEMM where dependencies allow it, and narrow
-compile probes only if the backend lanes fail.  Promotion requires a fresh
-profile reduction of at least `0.10s` in projection/GEMM or at least `20%` in
-the BF16 cluster, plus at least `3%` same-run 4096/1024 macro improvement.
+TARGET 07.70 completed the exact-route BF16 small-GEMM backend cluster target.
+It implemented one explicit opt-in candidate:
+
+- variant: `dsv4_sm80_a100_victory_bf16smallgemm`;
+- toggle: `MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE=1`;
+- behavior: build pretransposed BF16 cached weights before graph capture and
+  route decode-small `rows <= 16` GEMMs through `torch.mm(x_2d, weight_t)`;
+- owners covered: fused WQA/WKV/compress, `q_wqb`, `wo_b`, indexer `wq_b`,
+  shared expert gate/up, and shared expert down.
+
+The focused microbench gate passed, with representative `M=4` owner speedups
+around `15%-18%`, and TP8 text smoke passed with graph replay active and eager
+decode `0`.  However, the profile and macro gates failed:
+
+- extra cache: `1.7559 GiB/rank`, about `24,796` KV tokens or `96.86` pages;
+- 4096/128 output tok/s: `62.3274 -> 62.3750`, only `+0.08%`;
+- 4096/1024 output tok/s: `131.7927 -> 131.9084`, only `+0.09%`;
+- projection/GEMM: `0.778887s -> 0.778170s`;
+- BF16 cluster: `0.521619s -> 0.521012s`;
+- CUTLASS BF16 moved down, but cuBLASLt BF16 moved up, so aggregate time was
+  flat.
+
+Decision: keep `dsv4_sm80_a100_victory_bf16smallgemm` as an audit/profiling
+variant only and do not promote it.  Do not continue narrow BF16 layout
+polishing without new evidence.
+
+The active next target is TARGET 07.71: precision/boundary pivot.  It should be
+short and evidence-first: evaluate whether the remaining exact-ish FP32 owners
+such as HC pre linear and MoE router have a low-risk TF32/BF16 path, and in
+parallel rank vLLM-aligned FP8/custom boundaries such as FP8 projection/cache,
+`fused_inv_rope_fp8_quant`, `deepseek_v4_fp8_einsum`, and fused
+indexer/rope/quant.  The output should be one selected implementation target,
+not a full implementation inside the pivot thread.
 
 ## Precision Policy
 

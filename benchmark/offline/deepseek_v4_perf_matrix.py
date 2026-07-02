@@ -68,6 +68,9 @@ DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = (
 DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
 )
+DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = (
+    "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
+)
 
 
 @dataclass(frozen=True)
@@ -886,6 +889,19 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        name="dsv4_sm80_a100_victory_bf16smallgemm",
+        env={
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 07.70 opt-in: dsv4_sm80_a100_victory plus pretransposed "
+            "cached BF16 weights for small-M projection GEMMs."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         name="dsv4_sm80_a100_victory_sharedbf16",
         env={
             DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
@@ -1658,6 +1674,18 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
     }
 
 
+def _graph_init_variant(variants: Sequence[Variant]) -> Variant:
+    for variant in variants:
+        if variant.env.get(DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE, "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return variant
+    return variants[0]
+
+
 def _max_running_req(scenarios: Sequence[Scenario]) -> int:
     return max((scenario.batch_size for scenario in scenarios), default=1)
 
@@ -2378,7 +2406,9 @@ def run_matrix(args: argparse.Namespace) -> int:
 
     from minisgl.kernel import deepseek_v4 as dsv4_kernel
 
-    init_variant = variants[0] if runtime_options["allow_dsv4_cuda_graph"] else DEFAULT_VARIANTS[0]
+    init_variant = (
+        _graph_init_variant(variants) if runtime_options["allow_dsv4_cuda_graph"] else DEFAULT_VARIANTS[0]
+    )
     configure_variant(dsv4_kernel, init_variant)
     tracer = KernelCallTracer(dsv4_kernel)
     tracer.install()
