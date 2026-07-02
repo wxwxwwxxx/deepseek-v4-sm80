@@ -353,7 +353,8 @@ class DSV4Indexer(BaseOP):
 
     def _wq_b_forward(self, q_lora: torch.Tensor) -> torch.Tensor:
         fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM")
-        return self.wq_b.forward(q_lora, fp8_gemm=fp8_gemm if fp8_gemm else None)
+        with _dsv4_capture_nvtx("indexer.wq_b"):
+            return self.wq_b.forward(q_lora, fp8_gemm=fp8_gemm if fp8_gemm else None)
 
     def prepare_bf16_query(
         self,
@@ -379,7 +380,8 @@ class DSV4Indexer(BaseOP):
             beta_fast=beta_fast,
             beta_slow=beta_slow,
         )
-        weights = self.weights_proj.forward(x) * self.weight_scale
+        with _dsv4_capture_nvtx("indexer.weights_proj"):
+            weights = self.weights_proj.forward(x) * self.weight_scale
         return q, weights
 
     def prepare_fp8_query(
@@ -396,7 +398,8 @@ class DSV4Indexer(BaseOP):
         beta_slow: int,
     ) -> dsv4_kernel.DSV4IndexerFP8Query:
         q = self._wq_b_forward(q_lora).view(-1, self.n_heads, self.head_dim)
-        weights = self.weights_proj.forward(x)
+        with _dsv4_capture_nvtx("indexer.weights_proj"):
+            weights = self.weights_proj.forward(x)
         return dsv4_kernel.indexer_q_rope_fp8_fallback(
             q,
             weights,
@@ -420,10 +423,12 @@ class DSV4Indexer(BaseOP):
         apply_norm: bool = True,
         touch_projections: bool = True,
     ) -> torch.Tensor:
-        compressed_kv = self.compressor.forward(x, positions, apply_norm=apply_norm)
+        with _dsv4_capture_nvtx("indexer.compressor"):
+            compressed_kv = self.compressor.forward(x, positions, apply_norm=apply_norm)
         if touch_projections:
             self._wq_b_forward(q_lora)
-            self.weights_proj.forward(x)
+            with _dsv4_capture_nvtx("indexer.weights_proj"):
+                self.weights_proj.forward(x)
         return compressed_kv
 
 
@@ -1062,22 +1067,24 @@ class DSV4SharedExperts(BaseOP):
 
     def forward(self, hidden_states: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
         fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_SHARED_FP8_GEMM")
-        gate_up = self.gate_up_proj.forward(
-            hidden_states,
-            fp8_gemm=fp8_gemm if fp8_gemm else None,
-        )
+        with _dsv4_capture_nvtx("shared_experts.gate_up_proj"):
+            gate_up = self.gate_up_proj.forward(
+                hidden_states,
+                fp8_gemm=fp8_gemm if fp8_gemm else None,
+            )
         gate, up = gate_up.chunk(2, dim=-1)
         hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
             gate,
             up,
             swiglu_limit=self.swiglu_limit,
         )
-        return self.down_proj.forward(
-            hidden.to(up.dtype),
-            reduce=reduce,
-            reduce_label="dsv4.shared_expert_all_reduce",
-            fp8_gemm=fp8_gemm if fp8_gemm else None,
-        )
+        with _dsv4_capture_nvtx("shared_experts.down_proj"):
+            return self.down_proj.forward(
+                hidden.to(up.dtype),
+                reduce=reduce,
+                reduce_label="dsv4.shared_expert_all_reduce",
+                fp8_gemm=fp8_gemm if fp8_gemm else None,
+            )
 
 
 @dataclass(frozen=True)

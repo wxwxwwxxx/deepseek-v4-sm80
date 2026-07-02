@@ -1,0 +1,1087 @@
+{
+  "decode_envelope": [
+    87524987535,
+    92961963153
+  ],
+  "decode_envelope_s": 5.436975618,
+  "decode_forward_count": 127,
+  "decode_forward_wall_s_sum": 5.003459037,
+  "decode_kernel_count": 793018,
+  "decode_projection_gemm_graph_nodes": 795,
+  "decode_projection_gemm_s": 1.796817573,
+  "dsv4_nvtx_range_count": 9016,
+  "owner_attributed_intrinsic_gemm_s": 1.462900827,
+  "owners": [
+    {
+      "activation_quant_s": 0.012790532000000965,
+      "backend_contract": "FP8 WQA/WKV projection; active fwqakvcache path may dequantize cached BF16 weights and run F.linear.",
+      "capture_graph_node_count": 1118,
+      "categories": {
+        "activation_quant": {
+          "count": 5461,
+          "duration_s": 0.012790532000000965,
+          "graph_node_count": 43
+        },
+        "intrinsic_gemm": {
+          "count": 10922,
+          "duration_s": 0.08975483500000377,
+          "graph_node_count": 86
+        },
+        "sampling_logits_norm": {
+          "count": 5461,
+          "duration_s": 0.012229595000000022,
+          "graph_node_count": 43
+        },
+        "wrapper_copy_layout": {
+          "count": 5461,
+          "duration_s": 0.01648580899999969,
+          "graph_node_count": 43
+        }
+      },
+      "decision_hint": "keep if fused WQA/WKV owns >=0.50s; otherwise use as context.",
+      "decode_kernel_count": 27305,
+      "decode_kernel_s": 0.131260771,
+      "elementwise_scale_math_s": 0.0,
+      "graph_node_count": 215,
+      "intrinsic_gemm_s": 0.08975483500000377,
+      "nvtx_range_count": 602,
+      "nvtx_unique_names": [
+        "dsv4.layer0.attn.kv_proj",
+        "dsv4.layer0.attn.q_proj",
+        "dsv4.layer1.attn.kv_proj",
+        "dsv4.layer1.attn.q_proj",
+        "dsv4.layer10.attn.kv_proj",
+        "dsv4.layer10.attn.q_proj",
+        "dsv4.layer11.attn.kv_proj",
+        "dsv4.layer11.attn.q_proj",
+        "dsv4.layer12.attn.kv_proj",
+        "dsv4.layer12.attn.q_proj",
+        "dsv4.layer13.attn.kv_proj",
+        "dsv4.layer13.attn.q_proj",
+        "dsv4.layer14.attn.kv_proj",
+        "dsv4.layer14.attn.q_proj",
+        "dsv4.layer15.attn.kv_proj",
+        "dsv4.layer15.attn.q_proj",
+        "dsv4.layer16.attn.kv_proj",
+        "dsv4.layer16.attn.q_proj",
+        "dsv4.layer17.attn.kv_proj",
+        "dsv4.layer17.attn.q_proj",
+        "dsv4.layer18.attn.kv_proj",
+        "dsv4.layer18.attn.q_proj",
+        "dsv4.layer19.attn.kv_proj",
+        "dsv4.layer19.attn.q_proj",
+        "dsv4.layer2.attn.kv_proj",
+        "dsv4.layer2.attn.q_proj",
+        "dsv4.layer20.attn.kv_proj",
+        "dsv4.layer20.attn.q_proj",
+        "dsv4.layer21.attn.kv_proj",
+        "dsv4.layer21.attn.q_proj",
+        "dsv4.layer22.attn.kv_proj",
+        "dsv4.layer22.attn.q_proj",
+        "dsv4.layer23.attn.kv_proj",
+        "dsv4.layer23.attn.q_proj",
+        "dsv4.layer24.attn.kv_proj",
+        "dsv4.layer24.attn.q_proj",
+        "dsv4.layer25.attn.kv_proj",
+        "dsv4.layer25.attn.q_proj",
+        "dsv4.layer26.attn.kv_proj",
+        "dsv4.layer26.attn.q_proj",
+        "dsv4.layer27.attn.kv_proj",
+        "dsv4.layer27.attn.q_proj",
+        "dsv4.layer28.attn.kv_proj",
+        "dsv4.layer28.attn.q_proj",
+        "dsv4.layer29.attn.kv_proj",
+        "dsv4.layer29.attn.q_proj",
+        "dsv4.layer3.attn.kv_proj",
+        "dsv4.layer3.attn.q_proj",
+        "dsv4.layer30.attn.kv_proj",
+        "dsv4.layer30.attn.q_proj",
+        "dsv4.layer31.attn.kv_proj",
+        "dsv4.layer31.attn.q_proj",
+        "dsv4.layer32.attn.kv_proj",
+        "dsv4.layer32.attn.q_proj",
+        "dsv4.layer33.attn.kv_proj",
+        "dsv4.layer33.attn.q_proj",
+        "dsv4.layer34.attn.kv_proj",
+        "dsv4.layer34.attn.q_proj",
+        "dsv4.layer35.attn.kv_proj",
+        "dsv4.layer35.attn.q_proj",
+        "dsv4.layer36.attn.kv_proj",
+        "dsv4.layer36.attn.q_proj",
+        "dsv4.layer37.attn.kv_proj",
+        "dsv4.layer37.attn.q_proj",
+        "dsv4.layer38.attn.kv_proj",
+        "dsv4.layer38.attn.q_proj",
+        "dsv4.layer39.attn.kv_proj",
+        "dsv4.layer39.attn.q_proj",
+        "dsv4.layer4.attn.kv_proj",
+        "dsv4.layer4.attn.q_proj",
+        "dsv4.layer40.attn.kv_proj",
+        "dsv4.layer40.attn.q_proj",
+        "dsv4.layer41.attn.kv_proj",
+        "dsv4.layer41.attn.q_proj",
+        "dsv4.layer42.attn.kv_proj",
+        "dsv4.layer42.attn.q_proj",
+        "dsv4.layer5.attn.kv_proj",
+        "dsv4.layer5.attn.q_proj",
+        "dsv4.layer6.attn.kv_proj",
+        "dsv4.layer6.attn.q_proj",
+        "dsv4.layer7.attn.kv_proj",
+        "dsv4.layer7.attn.q_proj",
+        "dsv4.layer8.attn.kv_proj",
+        "dsv4.layer8.attn.q_proj",
+        "dsv4.layer9.attn.kv_proj",
+        "dsv4.layer9.attn.q_proj"
+      ],
+      "owner": "attn.q_proj_wqa_wkv",
+      "pattern": "^dsv4\\.layer\\d+\\.attn\\.(q_proj|kv_proj)$",
+      "runtime_copy_s": 0.029276341000000653,
+      "top_kernels": [
+        {
+          "count": 5461,
+          "duration_s": 0.07778406699999972,
+          "graph_node_count": 43,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.01648580899999969,
+          "graph_node_count": 43,
+          "name": "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.012790532000000965,
+          "graph_node_count": 43,
+          "name": "_fp8_activation_quantize_kernel"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.012229595000000022,
+          "graph_node_count": 43,
+          "name": "_rms_norm_bf16_kernel"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.011970767999999549,
+          "graph_node_count": 43,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.01648580899999969
+    },
+    {
+      "activation_quant_s": 0.01134287500000007,
+      "backend_contract": "DSV4Linear ColumnParallel FP8: quantize_fp8_activation_ref/_fp8_activation_quantize_kernel + _quantized_linear_fp8_kernel.",
+      "capture_graph_node_count": 774,
+      "categories": {
+        "activation_quant": {
+          "count": 5461,
+          "duration_s": 0.01134287500000007,
+          "graph_node_count": 43
+        },
+        "intrinsic_gemm": {
+          "count": 5461,
+          "duration_s": 0.40417846799999935,
+          "graph_node_count": 43
+        },
+        "wrapper_copy_layout": {
+          "count": 5461,
+          "duration_s": 0.01842340599999974,
+          "graph_node_count": 43
+        }
+      },
+      "decision_hint": "keep if >=0.50s; compare against vLLM lifted wq_b ColumnParallelLinear.",
+      "decode_kernel_count": 16383,
+      "decode_kernel_s": 0.433944749,
+      "elementwise_scale_math_s": 0.0,
+      "graph_node_count": 129,
+      "intrinsic_gemm_s": 0.40417846799999935,
+      "nvtx_range_count": 301,
+      "nvtx_unique_names": [
+        "dsv4.layer0.attn.q_wqb",
+        "dsv4.layer1.attn.q_wqb",
+        "dsv4.layer10.attn.q_wqb",
+        "dsv4.layer11.attn.q_wqb",
+        "dsv4.layer12.attn.q_wqb",
+        "dsv4.layer13.attn.q_wqb",
+        "dsv4.layer14.attn.q_wqb",
+        "dsv4.layer15.attn.q_wqb",
+        "dsv4.layer16.attn.q_wqb",
+        "dsv4.layer17.attn.q_wqb",
+        "dsv4.layer18.attn.q_wqb",
+        "dsv4.layer19.attn.q_wqb",
+        "dsv4.layer2.attn.q_wqb",
+        "dsv4.layer20.attn.q_wqb",
+        "dsv4.layer21.attn.q_wqb",
+        "dsv4.layer22.attn.q_wqb",
+        "dsv4.layer23.attn.q_wqb",
+        "dsv4.layer24.attn.q_wqb",
+        "dsv4.layer25.attn.q_wqb",
+        "dsv4.layer26.attn.q_wqb",
+        "dsv4.layer27.attn.q_wqb",
+        "dsv4.layer28.attn.q_wqb",
+        "dsv4.layer29.attn.q_wqb",
+        "dsv4.layer3.attn.q_wqb",
+        "dsv4.layer30.attn.q_wqb",
+        "dsv4.layer31.attn.q_wqb",
+        "dsv4.layer32.attn.q_wqb",
+        "dsv4.layer33.attn.q_wqb",
+        "dsv4.layer34.attn.q_wqb",
+        "dsv4.layer35.attn.q_wqb",
+        "dsv4.layer36.attn.q_wqb",
+        "dsv4.layer37.attn.q_wqb",
+        "dsv4.layer38.attn.q_wqb",
+        "dsv4.layer39.attn.q_wqb",
+        "dsv4.layer4.attn.q_wqb",
+        "dsv4.layer40.attn.q_wqb",
+        "dsv4.layer41.attn.q_wqb",
+        "dsv4.layer42.attn.q_wqb",
+        "dsv4.layer5.attn.q_wqb",
+        "dsv4.layer6.attn.q_wqb",
+        "dsv4.layer7.attn.q_wqb",
+        "dsv4.layer8.attn.q_wqb",
+        "dsv4.layer9.attn.q_wqb"
+      ],
+      "owner": "attn.q_wqb",
+      "pattern": "^dsv4\\.layer\\d+\\.attn\\.q_wqb$",
+      "runtime_copy_s": 0.02976628099999981,
+      "top_kernels": [
+        {
+          "count": 5461,
+          "duration_s": 0.40417846799999935,
+          "graph_node_count": 43,
+          "name": "_quantized_linear_fp8_kernel"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.01842340599999974,
+          "graph_node_count": 43,
+          "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.01134287500000007,
+          "graph_node_count": 43,
+          "name": "_fp8_activation_quantize_kernel"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.01842340599999974
+    },
+    {
+      "activation_quant_s": 0.0,
+      "backend_contract": "Grouped output projection: wo_a_grouped_projection_fp8 when enabled, otherwise dequant/einsum fallback.",
+      "capture_graph_node_count": 1978,
+      "categories": {
+        "elementwise_scale_math": {
+          "count": 5461,
+          "duration_s": 0.13696675399999972,
+          "graph_node_count": 43
+        },
+        "intrinsic_gemm": {
+          "count": 10922,
+          "duration_s": 0.053439600999998144,
+          "graph_node_count": 86
+        },
+        "wrapper_copy_layout": {
+          "count": 27305,
+          "duration_s": 0.29084322599999846,
+          "graph_node_count": 215
+        }
+      },
+      "decision_hint": "keep if >=0.50s; compare against vLLM SM80 wo_a BMM/reference and fp8_einsum boundary.",
+      "decode_kernel_count": 43688,
+      "decode_kernel_s": 0.481249581,
+      "elementwise_scale_math_s": 0.13696675399999972,
+      "graph_node_count": 344,
+      "intrinsic_gemm_s": 0.053439600999998144,
+      "nvtx_range_count": 301,
+      "nvtx_unique_names": [
+        "dsv4.layer0.attn.wo_a",
+        "dsv4.layer1.attn.wo_a",
+        "dsv4.layer10.attn.wo_a",
+        "dsv4.layer11.attn.wo_a",
+        "dsv4.layer12.attn.wo_a",
+        "dsv4.layer13.attn.wo_a",
+        "dsv4.layer14.attn.wo_a",
+        "dsv4.layer15.attn.wo_a",
+        "dsv4.layer16.attn.wo_a",
+        "dsv4.layer17.attn.wo_a",
+        "dsv4.layer18.attn.wo_a",
+        "dsv4.layer19.attn.wo_a",
+        "dsv4.layer2.attn.wo_a",
+        "dsv4.layer20.attn.wo_a",
+        "dsv4.layer21.attn.wo_a",
+        "dsv4.layer22.attn.wo_a",
+        "dsv4.layer23.attn.wo_a",
+        "dsv4.layer24.attn.wo_a",
+        "dsv4.layer25.attn.wo_a",
+        "dsv4.layer26.attn.wo_a",
+        "dsv4.layer27.attn.wo_a",
+        "dsv4.layer28.attn.wo_a",
+        "dsv4.layer29.attn.wo_a",
+        "dsv4.layer3.attn.wo_a",
+        "dsv4.layer30.attn.wo_a",
+        "dsv4.layer31.attn.wo_a",
+        "dsv4.layer32.attn.wo_a",
+        "dsv4.layer33.attn.wo_a",
+        "dsv4.layer34.attn.wo_a",
+        "dsv4.layer35.attn.wo_a",
+        "dsv4.layer36.attn.wo_a",
+        "dsv4.layer37.attn.wo_a",
+        "dsv4.layer38.attn.wo_a",
+        "dsv4.layer39.attn.wo_a",
+        "dsv4.layer4.attn.wo_a",
+        "dsv4.layer40.attn.wo_a",
+        "dsv4.layer41.attn.wo_a",
+        "dsv4.layer42.attn.wo_a",
+        "dsv4.layer5.attn.wo_a",
+        "dsv4.layer6.attn.wo_a",
+        "dsv4.layer7.attn.wo_a",
+        "dsv4.layer8.attn.wo_a",
+        "dsv4.layer9.attn.wo_a"
+      ],
+      "owner": "attn.wo_a",
+      "pattern": "^dsv4\\.layer\\d+\\.attn\\.wo_a$",
+      "runtime_copy_s": 0.42780997999999815,
+      "top_kernels": [
+        {
+          "count": 10922,
+          "duration_s": 0.15107114899999932,
+          "graph_node_count": 86,
+          "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.13696675399999972,
+          "graph_node_count": 43,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3)"
+        },
+        {
+          "count": 10922,
+          "duration_s": 0.09036110700000084,
+          "graph_node_count": 86,
+          "name": "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.04941097000000037,
+          "graph_node_count": 43,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.04030690599999964,
+          "graph_node_count": 43,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.013132694999999963,
+          "graph_node_count": 43,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.29084322599999846
+    },
+    {
+      "activation_quant_s": 0.011370203999999738,
+      "backend_contract": "DSV4Linear RowParallel FP8: _quantized_linear_fp8_kernel plus row-parallel all-reduce.",
+      "capture_graph_node_count": 1290,
+      "categories": {
+        "activation_quant": {
+          "count": 5461,
+          "duration_s": 0.011370203999999738,
+          "graph_node_count": 43
+        },
+        "communication": {
+          "count": 5461,
+          "duration_s": 0.16917173100000052,
+          "graph_node_count": 43
+        },
+        "intrinsic_gemm": {
+          "count": 5461,
+          "duration_s": 0.40371024899999836,
+          "graph_node_count": 43
+        },
+        "wrapper_copy_layout": {
+          "count": 5461,
+          "duration_s": 0.017130886999999782,
+          "graph_node_count": 43
+        }
+      },
+      "decision_hint": "keep if >=0.50s; compare against vLLM RowParallelLinear quant path.",
+      "decode_kernel_count": 21844,
+      "decode_kernel_s": 0.601383071,
+      "elementwise_scale_math_s": 0.0,
+      "graph_node_count": 172,
+      "intrinsic_gemm_s": 0.40371024899999836,
+      "nvtx_range_count": 301,
+      "nvtx_unique_names": [
+        "dsv4.layer0.attn.wo_b",
+        "dsv4.layer1.attn.wo_b",
+        "dsv4.layer10.attn.wo_b",
+        "dsv4.layer11.attn.wo_b",
+        "dsv4.layer12.attn.wo_b",
+        "dsv4.layer13.attn.wo_b",
+        "dsv4.layer14.attn.wo_b",
+        "dsv4.layer15.attn.wo_b",
+        "dsv4.layer16.attn.wo_b",
+        "dsv4.layer17.attn.wo_b",
+        "dsv4.layer18.attn.wo_b",
+        "dsv4.layer19.attn.wo_b",
+        "dsv4.layer2.attn.wo_b",
+        "dsv4.layer20.attn.wo_b",
+        "dsv4.layer21.attn.wo_b",
+        "dsv4.layer22.attn.wo_b",
+        "dsv4.layer23.attn.wo_b",
+        "dsv4.layer24.attn.wo_b",
+        "dsv4.layer25.attn.wo_b",
+        "dsv4.layer26.attn.wo_b",
+        "dsv4.layer27.attn.wo_b",
+        "dsv4.layer28.attn.wo_b",
+        "dsv4.layer29.attn.wo_b",
+        "dsv4.layer3.attn.wo_b",
+        "dsv4.layer30.attn.wo_b",
+        "dsv4.layer31.attn.wo_b",
+        "dsv4.layer32.attn.wo_b",
+        "dsv4.layer33.attn.wo_b",
+        "dsv4.layer34.attn.wo_b",
+        "dsv4.layer35.attn.wo_b",
+        "dsv4.layer36.attn.wo_b",
+        "dsv4.layer37.attn.wo_b",
+        "dsv4.layer38.attn.wo_b",
+        "dsv4.layer39.attn.wo_b",
+        "dsv4.layer4.attn.wo_b",
+        "dsv4.layer40.attn.wo_b",
+        "dsv4.layer41.attn.wo_b",
+        "dsv4.layer42.attn.wo_b",
+        "dsv4.layer5.attn.wo_b",
+        "dsv4.layer6.attn.wo_b",
+        "dsv4.layer7.attn.wo_b",
+        "dsv4.layer8.attn.wo_b",
+        "dsv4.layer9.attn.wo_b"
+      ],
+      "owner": "attn.wo_b",
+      "pattern": "^dsv4\\.layer\\d+\\.attn\\.wo_b$",
+      "runtime_copy_s": 0.02850109099999952,
+      "top_kernels": [
+        {
+          "count": 5461,
+          "duration_s": 0.40371024899999836,
+          "graph_node_count": 43,
+          "name": "_quantized_linear_fp8_kernel"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.16917173100000052,
+          "graph_node_count": 43,
+          "name": "ncclDevKernel_AllReduce_Sum_bf16_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.017130886999999782,
+          "graph_node_count": 43,
+          "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.011370203999999738,
+          "graph_node_count": 43,
+          "name": "_fp8_activation_quantize_kernel"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.017130886999999782
+    },
+    {
+      "activation_quant_s": 0.005213119000000023,
+      "backend_contract": "Indexer query projection DSV4Linear FP8: _quantized_linear_fp8_kernel plus activation quant.",
+      "capture_graph_node_count": 378,
+      "categories": {
+        "activation_quant": {
+          "count": 2667,
+          "duration_s": 0.005213119000000023,
+          "graph_node_count": 21
+        },
+        "intrinsic_gemm": {
+          "count": 2667,
+          "duration_s": 0.36475582400000106,
+          "graph_node_count": 21
+        },
+        "wrapper_copy_layout": {
+          "count": 2667,
+          "duration_s": 0.012866358000000027,
+          "graph_node_count": 21
+        }
+      },
+      "decision_hint": "keep if >=0.50s; otherwise context for FP8 indexer cache path.",
+      "decode_kernel_count": 8001,
+      "decode_kernel_s": 0.382835301,
+      "elementwise_scale_math_s": 0.0,
+      "graph_node_count": 63,
+      "intrinsic_gemm_s": 0.36475582400000106,
+      "nvtx_range_count": 147,
+      "nvtx_unique_names": [
+        "dsv4.indexer.wq_b"
+      ],
+      "owner": "indexer.wq_b",
+      "pattern": "^dsv4\\.indexer\\.wq_b$",
+      "runtime_copy_s": 0.018079477000000052,
+      "top_kernels": [
+        {
+          "count": 2667,
+          "duration_s": 0.36475582400000106,
+          "graph_node_count": 21,
+          "name": "_quantized_linear_fp8_kernel"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.012866358000000027,
+          "graph_node_count": 21,
+          "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.005213119000000023,
+          "graph_node_count": 21,
+          "name": "_fp8_activation_quantize_kernel"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.012866358000000027
+    },
+    {
+      "activation_quant_s": 0.0,
+      "backend_contract": "Indexer weights/logits projection: BF16 F.linear/sgemm plus scale multiply.",
+      "capture_graph_node_count": 252,
+      "categories": {
+        "intrinsic_gemm": {
+          "count": 5334,
+          "duration_s": 0.018783185999999334,
+          "graph_node_count": 42
+        }
+      },
+      "decision_hint": "keep only if BF16 projection dominates.",
+      "decode_kernel_count": 5334,
+      "decode_kernel_s": 0.018783186,
+      "elementwise_scale_math_s": 0.0,
+      "graph_node_count": 42,
+      "intrinsic_gemm_s": 0.018783185999999334,
+      "nvtx_range_count": 147,
+      "nvtx_unique_names": [
+        "dsv4.indexer.weights_proj"
+      ],
+      "owner": "indexer.weights_proj",
+      "pattern": "^dsv4\\.indexer\\.weights_proj$",
+      "runtime_copy_s": 0.0,
+      "top_kernels": [
+        {
+          "count": 2667,
+          "duration_s": 0.011860139999999953,
+          "graph_node_count": 21,
+          "name": "ampere_s16816gemm_bf16_64x64_ldg8_stages_64x5_tn"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.006923046000000037,
+          "graph_node_count": 21,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.0
+    },
+    {
+      "activation_quant_s": 0.0,
+      "backend_contract": "Indexer compressor projection/norm/cache-adjacent work.",
+      "capture_graph_node_count": 504,
+      "categories": {
+        "elementwise_scale_math": {
+          "count": 10668,
+          "duration_s": 0.026896438000000942,
+          "graph_node_count": 84
+        },
+        "intrinsic_gemm": {
+          "count": 5334,
+          "duration_s": 0.02672776300000027,
+          "graph_node_count": 42
+        },
+        "sampling_logits_norm": {
+          "count": 2667,
+          "duration_s": 0.01151353499999989,
+          "graph_node_count": 21
+        },
+        "wrapper_copy_layout": {
+          "count": 13335,
+          "duration_s": 0.035581889999999956,
+          "graph_node_count": 105
+        }
+      },
+      "decision_hint": "context; not the primary projection owner unless it dominates.",
+      "decode_kernel_count": 32004,
+      "decode_kernel_s": 0.100719626,
+      "elementwise_scale_math_s": 0.026896438000000942,
+      "graph_node_count": 252,
+      "intrinsic_gemm_s": 0.02672776300000027,
+      "nvtx_range_count": 147,
+      "nvtx_unique_names": [
+        "dsv4.indexer.compressor"
+      ],
+      "owner": "indexer.compressor",
+      "pattern": "^dsv4\\.indexer\\.compressor$",
+      "runtime_copy_s": 0.0624783280000009,
+      "top_kernels": [
+        {
+          "count": 2667,
+          "duration_s": 0.019646879999999884,
+          "graph_node_count": 21,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "count": 5334,
+          "duration_s": 0.01581580299999988,
+          "graph_node_count": 42,
+          "name": "void at::native::<unnamed>::CatArrayBatchedCopy<at::native::<unnamed>::OpaqueType<(unsigned int)4>, unsigned int, (int)3, (int)64, (int)64>(T1 *, at::native::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::native::<unnamed>::TensorSizeStride<T2, (unsigned int)4>, int, T2)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.011861671999999894,
+          "graph_node_count": 21,
+          "name": "void at::native::reduce_kernel<(int)128, (int)4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator ()(at::TensorIterator &)::[lambda(float, float) (instance 1)]>, unsigned int, float, (int)4, (int)4>>(T3)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.01151353499999989,
+          "graph_node_count": 21,
+          "name": "void at::native::<unnamed>::cunn_SpatialSoftMaxForward<float, float, float, int, at::native::<unnamed>::SoftMaxForwardEpilogue>(T3 *, const T1 *, T4, T4, T4)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.010382492000000038,
+          "graph_node_count": 21,
+          "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.00708088300000006,
+          "graph_node_count": 21,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.005511842999999999,
+          "graph_node_count": 21,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)2, at::native::BUnaryFunctor<long, long, long, at::native::remainder_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 4)]::operator ()() const::[lambda(long, long) (instance 1)]>, std::array<char *, (unsigned long)2>>(int, T2, T3)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.005430197999999976,
+          "graph_node_count": 21,
+          "name": "void at::native::vectorized_gather_kernel<(int)16, long>(char *, char *, T2 *, int, long, long, long, long, bool)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.005392097000000018,
+          "graph_node_count": 21,
+          "name": "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.004130825999999895,
+          "graph_node_count": 21,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3)"
+        },
+        {
+          "count": 2667,
+          "duration_s": 0.00395339699999997,
+          "graph_node_count": 21,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.035581889999999956
+    },
+    {
+      "activation_quant_s": 0.012786575000000158,
+      "backend_contract": "Shared expert FP8 gate/up projection through DSV4Linear.",
+      "capture_graph_node_count": 2236,
+      "categories": {
+        "activation_quant": {
+          "count": 5461,
+          "duration_s": 0.012786575000000158,
+          "graph_node_count": 43
+        },
+        "elementwise_scale_math": {
+          "count": 5461,
+          "duration_s": 0.04525251500000033,
+          "graph_node_count": 43
+        },
+        "intrinsic_gemm": {
+          "count": 10922,
+          "duration_s": 0.04566810599999863,
+          "graph_node_count": 86
+        },
+        "wrapper_copy_layout": {
+          "count": 27305,
+          "duration_s": 0.17026952799999026,
+          "graph_node_count": 215
+        }
+      },
+      "decision_hint": "keep if shared expert projection is >=0.50s and not already MoE/Marlin dominated.",
+      "decode_kernel_count": 49149,
+      "decode_kernel_s": 0.273976724,
+      "elementwise_scale_math_s": 0.04525251500000033,
+      "graph_node_count": 387,
+      "intrinsic_gemm_s": 0.04566810599999863,
+      "nvtx_range_count": 301,
+      "nvtx_unique_names": [
+        "dsv4.shared_experts.gate_up_proj"
+      ],
+      "owner": "shared_experts.gate_up_proj",
+      "pattern": "^dsv4\\.shared_experts\\.gate_up_proj$",
+      "runtime_copy_s": 0.22830861799999075,
+      "top_kernels": [
+        {
+          "count": 10922,
+          "duration_s": 0.08879911699999792,
+          "graph_node_count": 86,
+          "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+        },
+        {
+          "count": 10922,
+          "duration_s": 0.05623723800000042,
+          "graph_node_count": 86,
+          "name": "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.04525251500000033,
+          "graph_node_count": 43,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.031180261999999567,
+          "graph_node_count": 43,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.02523317300000028,
+          "graph_node_count": 43,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.014487844000000236,
+          "graph_node_count": 43,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.012786575000000158,
+          "graph_node_count": 43,
+          "name": "_fp8_activation_quantize_kernel"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.17026952799999026
+    },
+    {
+      "activation_quant_s": 0.010879586999999934,
+      "backend_contract": "Shared expert FP8 down projection through DSV4Linear plus optional all-reduce.",
+      "capture_graph_node_count": 2322,
+      "categories": {
+        "activation_quant": {
+          "count": 5461,
+          "duration_s": 0.010879586999999934,
+          "graph_node_count": 43
+        },
+        "elementwise_scale_math": {
+          "count": 5461,
+          "duration_s": 0.02564662400000032,
+          "graph_node_count": 43
+        },
+        "intrinsic_gemm": {
+          "count": 5461,
+          "duration_s": 0.029229029000000368,
+          "graph_node_count": 43
+        },
+        "wrapper_copy_layout": {
+          "count": 32766,
+          "duration_s": 0.12960064900000653,
+          "graph_node_count": 258
+        }
+      },
+      "decision_hint": "keep if shared expert projection is >=0.50s and not already MoE/Marlin dominated.",
+      "decode_kernel_count": 49149,
+      "decode_kernel_s": 0.195355889,
+      "elementwise_scale_math_s": 0.02564662400000032,
+      "graph_node_count": 387,
+      "intrinsic_gemm_s": 0.029229029000000368,
+      "nvtx_range_count": 301,
+      "nvtx_unique_names": [
+        "dsv4.shared_experts.down_proj"
+      ],
+      "owner": "shared_experts.down_proj",
+      "pattern": "^dsv4\\.shared_experts\\.down_proj$",
+      "runtime_copy_s": 0.1661268600000068,
+      "top_kernels": [
+        {
+          "count": 10922,
+          "duration_s": 0.06731373599999976,
+          "graph_node_count": 86,
+          "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+        },
+        {
+          "count": 10922,
+          "duration_s": 0.03874927600000115,
+          "graph_node_count": 86,
+          "name": "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.029229029000000368,
+          "graph_node_count": 43,
+          "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(T1::Params)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.02564662400000032,
+          "graph_node_count": 43,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3)"
+        },
+        {
+          "count": 10922,
+          "duration_s": 0.023537636999998304,
+          "graph_node_count": 86,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.010879586999999934,
+          "graph_node_count": 43,
+          "name": "_fp8_activation_quantize_kernel"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.12960064900000653
+    },
+    {
+      "activation_quant_s": 0.0,
+      "backend_contract": "Routed expert backend, usually Marlin WNA16 in the active variant.",
+      "capture_graph_node_count": 4386,
+      "categories": {
+        "elementwise_scale_math": {
+          "count": 27305,
+          "duration_s": 0.06678226700000406,
+          "graph_node_count": 215
+        },
+        "moe_marlin": {
+          "count": 27305,
+          "duration_s": 0.2848519770000035,
+          "graph_node_count": 215
+        },
+        "wrapper_copy_layout": {
+          "count": 32766,
+          "duration_s": 0.07663972100000127,
+          "graph_node_count": 258
+        }
+      },
+      "decision_hint": "context; out of scope unless projection attribution shows shared/routed FFN dominates.",
+      "decode_kernel_count": 87376,
+      "decode_kernel_s": 0.428273965,
+      "elementwise_scale_math_s": 0.06678226700000406,
+      "graph_node_count": 688,
+      "intrinsic_gemm_s": 0.0,
+      "nvtx_range_count": 301,
+      "nvtx_unique_names": [
+        "dsv4.layer0.mlp.runner.experts",
+        "dsv4.layer1.mlp.runner.experts",
+        "dsv4.layer10.mlp.runner.experts",
+        "dsv4.layer11.mlp.runner.experts",
+        "dsv4.layer12.mlp.runner.experts",
+        "dsv4.layer13.mlp.runner.experts",
+        "dsv4.layer14.mlp.runner.experts",
+        "dsv4.layer15.mlp.runner.experts",
+        "dsv4.layer16.mlp.runner.experts",
+        "dsv4.layer17.mlp.runner.experts",
+        "dsv4.layer18.mlp.runner.experts",
+        "dsv4.layer19.mlp.runner.experts",
+        "dsv4.layer2.mlp.runner.experts",
+        "dsv4.layer20.mlp.runner.experts",
+        "dsv4.layer21.mlp.runner.experts",
+        "dsv4.layer22.mlp.runner.experts",
+        "dsv4.layer23.mlp.runner.experts",
+        "dsv4.layer24.mlp.runner.experts",
+        "dsv4.layer25.mlp.runner.experts",
+        "dsv4.layer26.mlp.runner.experts",
+        "dsv4.layer27.mlp.runner.experts",
+        "dsv4.layer28.mlp.runner.experts",
+        "dsv4.layer29.mlp.runner.experts",
+        "dsv4.layer3.mlp.runner.experts",
+        "dsv4.layer30.mlp.runner.experts",
+        "dsv4.layer31.mlp.runner.experts",
+        "dsv4.layer32.mlp.runner.experts",
+        "dsv4.layer33.mlp.runner.experts",
+        "dsv4.layer34.mlp.runner.experts",
+        "dsv4.layer35.mlp.runner.experts",
+        "dsv4.layer36.mlp.runner.experts",
+        "dsv4.layer37.mlp.runner.experts",
+        "dsv4.layer38.mlp.runner.experts",
+        "dsv4.layer39.mlp.runner.experts",
+        "dsv4.layer4.mlp.runner.experts",
+        "dsv4.layer40.mlp.runner.experts",
+        "dsv4.layer41.mlp.runner.experts",
+        "dsv4.layer42.mlp.runner.experts",
+        "dsv4.layer5.mlp.runner.experts",
+        "dsv4.layer6.mlp.runner.experts",
+        "dsv4.layer7.mlp.runner.experts",
+        "dsv4.layer8.mlp.runner.experts",
+        "dsv4.layer9.mlp.runner.experts"
+      ],
+      "owner": "mlp.routed_experts",
+      "pattern": "^dsv4\\.layer\\d+\\.mlp\\.runner\\.experts$",
+      "runtime_copy_s": 0.14342198800000533,
+      "top_kernels": [
+        {
+          "count": 5461,
+          "duration_s": 0.14692166799999995,
+          "graph_node_count": 43,
+          "name": "void marlin_moe_wna16::Marlin<(long)1125899906909960, (long)562949953487106, (long)1125899906909960, (long)2814749767106568, (int)128, (int)1, (int)4, (int)8, (bool)1, (int)4, (int)2, (bool)0>(const int4 *, const int4 *, int4 *, int4 *, const int4 *, const float *, const int4 *, const float *, const int4 *, const int *, const int *, const int *, const int *, const float *, int, bool, int, int, int, int, int *, bool, bool, bool)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.10284635299999985,
+          "graph_node_count": 43,
+          "name": "void marlin_moe_wna16::Marlin<(long)1125899906909960, (long)562949953487106, (long)1125899906909960, (long)2814749767106568, (int)128, (int)1, (int)8, (int)4, (bool)1, (int)4, (int)2, (bool)0>(const int4 *, const int4 *, int4 *, int4 *, const int4 *, const float *, const int4 *, const float *, const int4 *, const int *, const int *, const int *, const int *, const float *, int, bool, int, int, int, int, int *, bool, bool, bool)"
+        },
+        {
+          "count": 10922,
+          "duration_s": 0.04620403800000096,
+          "graph_node_count": 86,
+          "name": "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.028663328999999654,
+          "graph_node_count": 43,
+          "name": "void at::native::reduce_kernel<(int)128, (int)4, at::native::ReduceOp<c10::BFloat16, at::native::func_wrapper_t<c10::BFloat16, at::native::sum_functor<c10::BFloat16, float, c10::BFloat16>::operator ()(at::TensorIterator &)::[lambda(float, float) (instance 1)]>, unsigned int, c10::BFloat16, (int)4, (int)4>>(T3)"
+        },
+        {
+          "count": 16383,
+          "duration_s": 0.022168245000000947,
+          "graph_node_count": 129,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::FillFunctor<int>, std::array<char *, (unsigned long)1>>(int, T2, T3)"
+        },
+        {
+          "count": 10922,
+          "duration_s": 0.018837977999999343,
+          "graph_node_count": 86,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::<unnamed>::launch_clamp_scalar(at::TensorIteratorBase &, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.016872574000000216,
+          "graph_node_count": 43,
+          "name": "_moe_route_fill_kernel"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.010565924000000313,
+          "graph_node_count": 43,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::<unnamed>::silu_kernel(at::TensorIteratorBase &)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.009917569000000018,
+          "graph_node_count": 43,
+          "name": "_moe_route_offsets_kernel"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.008715036000000145,
+          "graph_node_count": 43,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3)"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.008293813000000117,
+          "graph_node_count": 43,
+          "name": "_moe_route_count_kernel"
+        },
+        {
+          "count": 5461,
+          "duration_s": 0.008267437999999966,
+          "graph_node_count": 43,
+          "name": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.07663972100000127
+    },
+    {
+      "activation_quant_s": 0.0,
+      "backend_contract": "Vocab-parallel output linear: BF16/FP32 F.linear plus all-gather.",
+      "capture_graph_node_count": 34,
+      "categories": {
+        "communication": {
+          "count": 127,
+          "duration_s": 0.0052741900000000015,
+          "graph_node_count": 1
+        },
+        "intrinsic_gemm": {
+          "count": 127,
+          "duration_s": 0.026653766000000006,
+          "graph_node_count": 1
+        },
+        "wrapper_copy_layout": {
+          "count": 381,
+          "duration_s": 0.044759750000000036,
+          "graph_node_count": 3
+        }
+      },
+      "decision_hint": "context for decode envelope; not a projection backend PoC unless dominant.",
+      "decode_kernel_count": 635,
+      "decode_kernel_s": 0.076687706,
+      "elementwise_scale_math_s": 0.0,
+      "graph_node_count": 5,
+      "intrinsic_gemm_s": 0.026653766000000006,
+      "nvtx_range_count": 7,
+      "nvtx_unique_names": [
+        "dsv4.lm_head"
+      ],
+      "owner": "lm_head",
+      "pattern": "^dsv4\\.lm_head$",
+      "runtime_copy_s": 0.044759750000000036,
+      "top_kernels": [
+        {
+          "count": 254,
+          "duration_s": 0.044057682000000015,
+          "graph_node_count": 2,
+          "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+        },
+        {
+          "count": 127,
+          "duration_s": 0.026653766000000006,
+          "graph_node_count": 1,
+          "name": "void gemmSN_TN_kernel<float, (int)128, (int)16, (int)2, (int)4, (int)4, (int)4, (bool)1, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<float>>(cublasGemmSmallNParams<T9, T10, T11, T1>)"
+        },
+        {
+          "count": 127,
+          "duration_s": 0.0052741900000000015,
+          "graph_node_count": 1,
+          "name": "ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)"
+        },
+        {
+          "count": 127,
+          "duration_s": 0.0007020679999999999,
+          "graph_node_count": 1,
+          "name": "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+        }
+      ],
+      "wrapper_copy_layout_s": 0.044759750000000036
+    }
+  ],
+  "repeat_nvtx": "repeat:decode_throughput_bs8:0",
+  "repeat_range": [
+    80956795183,
+    92983612729
+  ],
+  "sqlite_path": "/tmp/nsys_target0757_projection_owner_4096x128_bs4_np128_rank0.sqlite",
+  "unattributed_intrinsic_gemm_s": 0.3339167460000001
+}

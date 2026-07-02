@@ -1,0 +1,100 @@
+[
+  {
+    "bottleneck_labels": [
+      "prefill dominated",
+      "attention",
+      "MoE / expert GEMM",
+      "fp4 expert handling",
+      "KV cache writes",
+      "metadata construction",
+      "metadata construction"
+    ],
+    "classification": "baseline",
+    "communication_by_label": {
+      "dsv4.embedding_all_reduce": {
+        "bytes": 1073741824,
+        "count": 8
+      },
+      "dsv4.lm_head_all_gather": {
+        "bytes": 16547840,
+        "count": 8
+      },
+      "dsv4.row_parallel_projection_all_reduce": {
+        "bytes": 46170898432,
+        "count": 344
+      },
+      "dsv4.v1_moe_reduce_once_all_reduce": {
+        "bytes": 92341796864,
+        "count": 344
+      }
+    },
+    "communication_total_bytes": 139602984960,
+    "communication_total_count": 704,
+    "decode_tokens_per_s": 97.64098863887658,
+    "elapsed_s": 12.028412288054824,
+    "end_to_end_output_tokens_per_s": 42.56588382063167,
+    "fallback_wrapper_calls_total": 8752,
+    "graph_runner": {
+      "capture_compressed_locs_in_graph": true,
+      "capture_greedy_sample": true,
+      "captured_bs": [
+        4,
+        2,
+        1
+      ],
+      "eager_decode_count": 0,
+      "eager_decode_count_by_batch_size": {},
+      "enabled": true,
+      "error": null,
+      "greedy_sample_replay_count": 127,
+      "greedy_sample_replay_count_by_batch_size": {
+        "4": 127
+      },
+      "replay_count": 127,
+      "replay_count_by_batch_size": {
+        "4": 127
+      },
+      "replay_count_by_padded_size": {
+        "4": 127
+      },
+      "replay_input_copy_bytes": 6096,
+      "requested_bs": [
+        1,
+        2,
+        4
+      ]
+    },
+    "kv_cache_memory_bytes_per_rank_max": 2491495680,
+    "peak_gpu_memory_allocated_bytes": 45856870400,
+    "prefill_tokens_per_s": 2824.885868000364,
+    "report_path": "/tmp/dsv4_target0757_projection_owner_4096x128_bs4_np128/reports/000_decode_throughput_bs8__v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_metacopy_idxfp8cache_actqtriton_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache.json",
+    "scenario": "decode_throughput_bs8",
+    "schedule_summary": {
+      "batch_size_counts": {
+        "4": 128
+      },
+      "max_batch_size": 4,
+      "max_padded_size": 4,
+      "padded_size_counts": {
+        "4": 128
+      },
+      "phase_batch_size_counts": {
+        "decode:bs4": 127,
+        "prefill:bs4": 1
+      },
+      "phase_counts": {
+        "decode": 127,
+        "prefill": 1
+      },
+      "phase_padded_size_counts": {
+        "decode:padded4": 127,
+        "prefill:padded4": 1
+      },
+      "total_batches": 128
+    },
+    "status": "pass",
+    "ttft_s_mean": 6.562650602310896,
+    "unsupported_kernel_skips_total": 0,
+    "variant": "v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_metacopy_idxfp8cache_actqtriton_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache"
+  }
+]

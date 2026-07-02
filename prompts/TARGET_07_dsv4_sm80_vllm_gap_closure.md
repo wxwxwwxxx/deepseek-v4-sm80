@@ -71,7 +71,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.54 | `prompts/TARGET_07.54_dsv4_sm80_graph_layout_replay_deforestation.md` | completed | Fused the repeated FP8 activation fake-quant chain into an opt-in Triton helper; graph/layout cluster dropped `38.59%`, 4096/1024 improved to `87.08 output tok/s`, but projection/GEMM is now tied with remaining graph/layout. |
 | TARGET 07.55 | `prompts/TARGET_07.55_dsv4_sm80_remaining_graph_layout_or_projection_pivot.md` | completed | Re-attributed the remaining graph/layout cluster; no single concentrated layout PoC met the gate, and the decision is to pivot to projection/GEMM backend parity. |
 | TARGET 07.56 | `prompts/TARGET_07.56_dsv4_sm80_low_cost_graph_layout_compile_preflight.md` | completed | Static scale cache removed focused wrapper copy/cast events but only improved 4096/128 by `+0.35%`; no low-cost graph/layout cut was promoted. |
-| TARGET 07.57 | `prompts/TARGET_07.57_dsv4_sm80_projection_gemm_backend_parity.md` | next todo | Attribute projection/GEMM by owner, compare mini and vLLM backend contracts, then select one evidence-backed PoC such as small-M kernel retune, vLLM boundary adaptation, or quantization+GEMM fusion. |
+| TARGET 07.57 | `prompts/TARGET_07.57_dsv4_sm80_projection_gemm_backend_parity.md` | completed | Attributed projection/GEMM by owner; selected `_quantized_linear_fp8_kernel` across `attn.q_wqb`, `attn.wo_b`, and `indexer.wq_b` as the next backend contract. |
+| TARGET 07.58 | `prompts/TARGET_07.58_dsv4_sm80_cached_bf16_projection_backend.md` | next todo | Test an opt-in cached BF16 dequantized-weight path for `attn.q_wqb` first, with explicit VRAM and KV-token/page accounting before expanding to `wo_b` or `indexer.wq_b`. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -108,7 +109,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.57 next.
+Run TARGET 07.58 next.
 
 TARGET 07.395 proved that mini's exact bf16 sparse decode boundary can match
 the comparable vLLM gather+split-K decode boundary:
@@ -266,12 +267,32 @@ TARGET 07.56 completed the preflight with one tiny opt-in PoC:
   cache already proved low-cost staging cuts were too small to be the main
   path.
 
-The next target is therefore TARGET 07.57: projection/GEMM backend parity
-against vLLM.  Quantization+GEMM fusion is now a first-class candidate, but
-only after the target attributes the `1.7968 s` projection/GEMM bucket to a
-specific owner or backend contract.  On SM80 this should focus on reducing
-intermediate quant/layout materialization and specializing decode-small
-`M <= 16` projection paths, not relying on native FP8 Tensor Cores.
+TARGET 07.57 completed the projection/GEMM backend attribution without landing
+a large kernel PoC.  Its key result is that the strongest bottleneck is the
+mini `_quantized_linear_fp8_kernel` backend contract, not a broad graph/layout
+issue and not `wo_a`:
+
+- `attn.q_wqb`: `0.404178 s` intrinsic projection time;
+- `attn.wo_b`: `0.403710 s` intrinsic projection time, plus row-parallel
+  all-reduce;
+- `indexer.wq_b`: `0.364756 s` intrinsic projection time;
+- combined same-contract total: `1.172645 s`.
+
+The real-weight microbench in 07.57 showed that current wrapper time is much
+larger than cached-dequant BF16 `F.linear` time:
+
+- `attn.q_wqb`: about `0.412 ms` wrapper vs about `0.053 ms` cached-dequant
+  BF16 matmul;
+- `attn.wo_b`: about `0.660 ms` wrapper vs about `0.052 ms` cached-dequant
+  BF16 matmul;
+- `indexer.wq_b`: about `0.168 ms` wrapper vs about `0.019 ms`
+  cached-dequant BF16 matmul.
+
+The next target is therefore TARGET 07.58: an opt-in cached BF16 dequantized
+weight backend for the dominant FP8 projection contract.  It should start with
+`attn.q_wqb` only, because that owner is large and does not include `wo_b`'s
+communication.  The target must record the VRAM cost and convert it to lost KV
+cache tokens/pages before expanding to `wo_b` or `indexer.wq_b`.
 
 ## Precision Policy
 
