@@ -76,6 +76,40 @@ def _cached_fp32_weight(
     return cached
 
 
+def _cached_projection_scale(
+    owner: object,
+    cache_name: str,
+    scale: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if scale is None:
+        return None
+    if not (
+        dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE)
+        and scale.is_cuda
+    ):
+        return scale
+    if scale.dtype is torch.float32 and scale.is_contiguous():
+        return scale
+
+    meta_name = f"{cache_name}_meta"
+    meta = (
+        scale.data_ptr(),
+        int(getattr(scale, "_version", 0)),
+        scale.device.type,
+        scale.device.index,
+        scale.dtype,
+        tuple(scale.shape),
+        tuple(scale.stride()),
+        int(scale.storage_offset()),
+    )
+    cached = getattr(owner, cache_name, None)
+    if cached is None or getattr(owner, meta_name, None) != meta:
+        cached = scale.float().contiguous()
+        setattr(owner, cache_name, cached)
+        setattr(owner, meta_name, meta)
+    return cached
+
+
 def _cached_gate_fp32_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
     return _cached_fp32_weight(
         owner,
@@ -243,6 +277,7 @@ class DSV4Linear(BaseOP):
         fp8_gemm: bool | None = None,
     ) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
+        scale = _cached_projection_scale(self, "_dsv4_weight_scale_fp32_contiguous", scale)
         if self.weight.dtype is torch.int8:
             y = dsv4_kernel.quantized_linear_ref(x, self.weight, scale, weight_kind="fp4")
         elif self.weight.dtype is dsv4_kernel.fp8_dtype():
@@ -811,10 +846,15 @@ class DSV4Attention(BaseOP):
         d_per_group = self.num_local_heads * self.head_dim // self.num_local_groups
         o = o.reshape(x.shape[0], self.num_local_groups, d_per_group)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_a"):
+            wo_a_scale = _cached_projection_scale(
+                self.wo_a,
+                "_dsv4_weight_scale_fp32_contiguous",
+                getattr(self.wo_a, "weight_scale_inv", None),
+            )
             o = dsv4_kernel.wo_a_grouped_projection_fallback(
                 o,
                 self.wo_a.weight,
-                getattr(self.wo_a, "weight_scale_inv", None),
+                wo_a_scale,
                 num_local_groups=self.num_local_groups,
                 o_lora_rank=self.o_lora_rank,
             )

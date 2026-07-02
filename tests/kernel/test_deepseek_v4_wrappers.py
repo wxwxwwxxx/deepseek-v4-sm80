@@ -976,6 +976,132 @@ def test_quantized_linear_fp8_per_call_gemm_matches_fallback(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_static_projection_scale_cache_preserves_projection_outputs(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(756)
+
+    x = torch.randn(4, 128, device=device, dtype=torch.bfloat16)
+    fp8_weight = (
+        torch.randn(256, 128, device=device, dtype=torch.float32)
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
+    )
+    fp8_scale = torch.rand(
+        dsv4_kernel.scale_dim(fp8_weight.shape[0]),
+        dsv4_kernel.scale_dim(fp8_weight.shape[1]),
+        device=device,
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+
+    class Owner:
+        pass
+
+    owner = Owner()
+    assert (
+        dsv4_model._cached_projection_scale(owner, "_test_scale_cache", fp8_scale)
+        is fp8_scale
+    )
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE, "1")
+    cached_fp8_scale = dsv4_model._cached_projection_scale(
+        owner,
+        "_test_scale_cache",
+        fp8_scale,
+    )
+    assert cached_fp8_scale is not fp8_scale
+    assert cached_fp8_scale.dtype is torch.float32
+    assert cached_fp8_scale.is_contiguous()
+    assert (
+        dsv4_model._cached_projection_scale(owner, "_test_scale_cache", fp8_scale)
+        is cached_fp8_scale
+    )
+    assert (
+        dsv4_model._cached_projection_scale(owner, "_test_scale_cache", fp8_scale.clone())
+        is not cached_fp8_scale
+    )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_FP8_GEMM", "1")
+    expected_fp8 = dsv4_kernel.quantized_linear_ref(
+        x,
+        fp8_weight,
+        fp8_scale,
+        weight_kind="fp8",
+        fp8_gemm=True,
+    )
+    actual_fp8 = dsv4_kernel.quantized_linear_ref(
+        x,
+        fp8_weight,
+        cached_fp8_scale,
+        weight_kind="fp8",
+        fp8_gemm=True,
+    )
+    assert torch.allclose(actual_fp8, expected_fp8, atol=3e-2, rtol=3e-2)
+
+    fp4_weight = torch.randint(-128, 127, (96, 64), device=device, dtype=torch.int8)
+    fp4_scale = torch.rand(96, 4, device=device, dtype=torch.float32).to(
+        dsv4_kernel.e8m0_dtype()
+    )
+    fp4_owner = Owner()
+    cached_fp4_scale = dsv4_model._cached_projection_scale(
+        fp4_owner,
+        "_test_scale_cache",
+        fp4_scale,
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_FP4_GEMM", "1")
+    expected_fp4 = dsv4_kernel.quantized_linear_ref(
+        x[:, :64],
+        fp4_weight,
+        fp4_scale,
+        weight_kind="fp4",
+    )
+    actual_fp4 = dsv4_kernel.quantized_linear_ref(
+        x[:, :64],
+        fp4_weight,
+        cached_fp4_scale,
+        weight_kind="fp4",
+    )
+    assert torch.allclose(actual_fp4, expected_fp4, atol=3e-2, rtol=3e-2)
+
+    wo_o = torch.randn(4, 2, 64, device=device, dtype=torch.bfloat16)
+    wo_rank = 48
+    wo_weight = (
+        torch.randn(2 * wo_rank, wo_o.shape[-1], device=device, dtype=torch.float32)
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
+    )
+    wo_scale = torch.rand(
+        dsv4_kernel.scale_dim(2 * wo_rank),
+        dsv4_kernel.scale_dim(wo_o.shape[-1]),
+        device=device,
+        dtype=torch.float32,
+    ).to(dsv4_kernel.e8m0_dtype())
+    wo_owner = Owner()
+    cached_wo_scale = dsv4_model._cached_projection_scale(
+        wo_owner,
+        "_test_scale_cache",
+        wo_scale,
+    )
+    monkeypatch.setenv("MINISGL_DSV4_SM80_WO_A_BF16", "1")
+    expected_wo = dsv4_kernel.wo_a_grouped_projection_fallback(
+        wo_o,
+        wo_weight,
+        wo_scale,
+        num_local_groups=2,
+        o_lora_rank=wo_rank,
+    )
+    actual_wo = dsv4_kernel.wo_a_grouped_projection_fallback(
+        wo_o,
+        wo_weight,
+        cached_wo_scale,
+        num_local_groups=2,
+        o_lora_rank=wo_rank,
+    )
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_wo, expected_wo, atol=4e-2, rtol=4e-2)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_quantized_linear_fp8_pair_shared_activation_matches_fallback(monkeypatch):
     device = torch.device("cuda")
     _clear_dsv4_sm80_env(monkeypatch)

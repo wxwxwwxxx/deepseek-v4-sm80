@@ -69,7 +69,9 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.52 | `prompts/TARGET_07.52_dsv4_sm80_vllm_fp8_indexer_backend_port.md` | completed | Ported a vLLM-aligned FP8 paged indexer backend as an opt-in path; microbench reached vLLM-adjacent speed and 4096/1024 improved to `73.67 output tok/s`, but the main gap remains. |
 | TARGET 07.53 | `prompts/TARGET_07.53_dsv4_sm80_post_fp8_indexer_reprofile.md` | completed | Reprofiled the FP8-indexer stack; graph/layout copy/cat/index plus elementwise graph nodes are the largest actionable cluster, with projection/GEMM as pivot. |
 | TARGET 07.54 | `prompts/TARGET_07.54_dsv4_sm80_graph_layout_replay_deforestation.md` | completed | Fused the repeated FP8 activation fake-quant chain into an opt-in Triton helper; graph/layout cluster dropped `38.59%`, 4096/1024 improved to `87.08 output tok/s`, but projection/GEMM is now tied with remaining graph/layout. |
-| TARGET 07.55 | `prompts/TARGET_07.55_dsv4_sm80_remaining_graph_layout_or_projection_pivot.md` | next todo | Run exactly one more evidence-first cut on remaining graph/layout, or pivot to projection/GEMM backend parity against vLLM if no concentrated subgraph clears the gate. |
+| TARGET 07.55 | `prompts/TARGET_07.55_dsv4_sm80_remaining_graph_layout_or_projection_pivot.md` | completed | Re-attributed the remaining graph/layout cluster; no single concentrated layout PoC met the gate, and the decision is to pivot to projection/GEMM backend parity. |
+| TARGET 07.56 | `prompts/TARGET_07.56_dsv4_sm80_low_cost_graph_layout_compile_preflight.md` | completed | Static scale cache removed focused wrapper copy/cast events but only improved 4096/128 by `+0.35%`; no low-cost graph/layout cut was promoted. |
+| TARGET 07.57 | `prompts/TARGET_07.57_dsv4_sm80_projection_gemm_backend_parity.md` | next todo | Attribute projection/GEMM by owner, compare mini and vLLM backend contracts, then select one evidence-backed PoC such as small-M kernel retune, vLLM boundary adaptation, or quantization+GEMM fusion. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -106,7 +108,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.55 next.
+Run TARGET 07.57 next.
 
 TARGET 07.395 proved that mini's exact bf16 sparse decode boundary can match
 the comparable vLLM gather+split-K decode boundary:
@@ -223,6 +225,53 @@ projection/GEMM pivot.  It should attribute the remaining direct-copy,
 bf16/float8 copy, CatArray/index/gather, and pow/mean/mul nodes against vLLM
 source boundaries; implement at most one concentrated graph/layout PoC; and
 stop if the next best change is really projection/GEMM backend work.
+
+TARGET 07.55 completed that triage without changing runtime code.  Its
+conclusion was:
+
+- remaining direct-copy kernels are large (`0.9456 s`) but too diffuse across
+  graph input copy, attention metadata, projection reshape/contiguous, and
+  linear wrappers;
+- BF16/float8 copy kernels (`0.1318 s`) are below the standalone graph/layout
+  gate;
+- CatArray/index/gather/topk assembly barely reaches the old gate only when
+  multiple subpaths are stacked (`0.1830 s`);
+- pow/mean/mul elementwise nodes remain sizable (`0.5148 s`) but are not
+  attributable to one stable source boundary;
+- projection/GEMM (`1.7968 s`) is now effectively tied with the whole remaining
+  graph/layout cluster (`1.8271 s`).
+
+The next major direction is projection/GEMM backend parity against vLLM.
+However, code review found a few low-cost preflight candidates that are worth
+settling first because they sit on projection-adjacent staging boundaries:
+
+- cache static projection scales that are repeatedly converted with
+  `scale.float().contiguous()`;
+- try a narrow `torch.compile` probe for pure HC-head math, similar to vLLM's
+  compiled `hc_head`;
+- audit no-op reshape/view/contiguous clutter around projection/quant
+  boundaries, inspired by vLLM's compile cleanup passes.
+
+TARGET 07.56 should run only this short preflight.  If it does not produce a
+small justified win, proceed directly to projection/GEMM backend parity.
+
+TARGET 07.56 completed the preflight with one tiny opt-in PoC:
+
+- `MINISGL_DSV4_SM80_STATIC_SCALE_CACHE=1`;
+- focused wrapper microbench removed `scale.float().contiguous()` copy/cast
+  events and saved about `16-17 us` per decode-small FP8 wrapper call;
+- 4096/128/batch4 moved only from `43.0685` to `43.2194 output tok/s`
+  (`+0.35%`), below the `+2%` preflight gate;
+- HC-head compile and no-op cleanup were not implemented because static scale
+  cache already proved low-cost staging cuts were too small to be the main
+  path.
+
+The next target is therefore TARGET 07.57: projection/GEMM backend parity
+against vLLM.  Quantization+GEMM fusion is now a first-class candidate, but
+only after the target attributes the `1.7968 s` projection/GEMM bucket to a
+specific owner or backend contract.  On SM80 this should focus on reducing
+intermediate quant/layout materialization and specializing decode-small
+`M <= 16` projection paths, not relying on native FP8 Tensor Cores.
 
 ## Precision Policy
 
