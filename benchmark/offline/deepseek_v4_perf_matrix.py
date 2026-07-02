@@ -57,6 +57,7 @@ DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
 DSV4_BF16_PROJECTION_CACHE_TOGGLE = "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE"
 DSV4_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
+DSV4_DECODE_METADATA_DEFOREST_TOGGLE = "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
 DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
 DSV4_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
@@ -862,6 +863,19 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
             "Milestone bundle for the TARGET 07.62 A100/sm80 victory stack: "
             "Marlin WNA16 MoE, graph replay, FP8 indexer cache, split-K sparse "
             "decode, and four BF16 projection caches."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name="dsv4_sm80_a100_victory_metadatadeforest",
+        env={
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_DECODE_METADATA_DEFOREST_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 07.64 opt-in: dsv4_sm80_a100_victory plus fused decode "
+            "metadata indices/lens assembly."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,

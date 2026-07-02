@@ -524,9 +524,59 @@ class DSV4AttentionBackend(BaseAttnBackend):
         assert offset == positions.numel()
 
         seq_lens = positions + 1
-        page_table = self._make_page_table(table_indices, max_seqlen_k)
-        swa_page_indices = self._make_swa_indices(table_indices, positions)
-        swa_topk_lengths = torch.clamp(seq_lens, max=self.window_size)
+        deforested = None
+        if batch.is_decode and dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE
+        ):
+            deforested = dsv4_kernel.decode_metadata_deforest_fallback(
+                get_global_ctx().page_table,
+                table_indices,
+                positions,
+                page_size=self.page_size,
+                max_seqlen_k=max_seqlen_k,
+                window_size=self.window_size,
+                index_topk=self.index_topk,
+                alignment=_PAGE_INDEX_ALIGNMENT,
+            )
+            if deforested is None:
+                raise RuntimeError(
+                    f"{dsv4_kernel.DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE}=1 "
+                    "requires the SM80 Triton decode metadata helper for decode batches."
+                )
+
+        if deforested is not None:
+            page_table = deforested.page_table
+            swa_page_indices = deforested.swa_page_indices
+            swa_topk_lengths = deforested.swa_topk_lengths
+            c4_topk_lengths_raw = deforested.c4_topk_lengths_raw
+            c4_topk_lengths_clamp1 = deforested.c4_topk_lengths_clamp1
+            c4_sparse_topk_lengths = deforested.c4_sparse_topk_lengths
+            c4_sparse_raw_indices = deforested.c4_sparse_raw_indices
+            c4_sparse_page_indices = deforested.c4_sparse_page_indices
+            c4_sparse_full_indices = deforested.c4_sparse_full_indices
+            c128_topk_lengths_clamp1 = deforested.c128_topk_lengths_clamp1
+            c128_raw_indices = deforested.c128_raw_indices
+            c128_page_indices = deforested.c128_page_indices
+            c128_full_indices = deforested.c128_full_indices
+        else:
+            page_table = self._make_page_table(table_indices, max_seqlen_k)
+            swa_page_indices = self._make_swa_indices(table_indices, positions)
+            swa_topk_lengths = torch.clamp(seq_lens, max=self.window_size)
+
+            c4_topk_lengths_raw = torch.div(seq_lens, 4, rounding_mode="floor")
+            c4_topk_lengths_clamp1 = c4_topk_lengths_raw.clamp_min(1)
+            c4_sparse_topk_lengths = c4_topk_lengths_raw.clamp(min=0, max=self.index_topk)
+            (
+                c4_sparse_raw_indices,
+                c4_sparse_page_indices,
+                c4_sparse_full_indices,
+            ) = self._make_sparse_compressed_indices(table_indices, c4_topk_lengths_raw, 4)
+
+            c128_lengths_raw = torch.div(seq_lens, 128, rounding_mode="floor")
+            c128_topk_lengths_clamp1 = c128_lengths_raw.clamp_min(1)
+            c128_raw_indices, c128_page_indices, c128_full_indices = (
+                self._make_all_compressed_indices(table_indices, c128_lengths_raw, 128)
+            )
 
         c4_out_loc = self.kvcache.compressed_locs_from_full_locs(raw_out_loc, 4, positions)
         c128_out_loc = self.kvcache.compressed_locs_from_full_locs(raw_out_loc, 128, positions)
@@ -534,21 +584,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             c4_out_loc = None
         if c128_out_loc.numel() == 0:
             c128_out_loc = None
-
-        c4_topk_lengths_raw = torch.div(seq_lens, 4, rounding_mode="floor")
-        c4_topk_lengths_clamp1 = c4_topk_lengths_raw.clamp_min(1)
-        c4_sparse_topk_lengths = c4_topk_lengths_raw.clamp(min=0, max=self.index_topk)
-        (
-            c4_sparse_raw_indices,
-            c4_sparse_page_indices,
-            c4_sparse_full_indices,
-        ) = self._make_sparse_compressed_indices(table_indices, c4_topk_lengths_raw, 4)
-
-        c128_lengths_raw = torch.div(seq_lens, 128, rounding_mode="floor")
-        c128_topk_lengths_clamp1 = c128_lengths_raw.clamp_min(1)
-        c128_raw_indices, c128_page_indices, c128_full_indices = self._make_all_compressed_indices(
-            table_indices, c128_lengths_raw, 128
-        )
 
         core = DSV4CoreAttentionMetadata(
             raw_out_loc=raw_out_loc,

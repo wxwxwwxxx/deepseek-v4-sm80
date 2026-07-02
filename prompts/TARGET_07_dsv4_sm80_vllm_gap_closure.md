@@ -35,12 +35,12 @@ Current best milestone stack:
 - page size 256;
 - TP8 on 8x A100.
 
-Current milestone macro from TARGET 07.62:
+Current confirmed macro from TARGET 07.63:
 
 | Workload | Output tok/s | Note |
 | --- | ---: | --- |
-| 4096/128/batch4 | `53.5877` | Post-`wo_a` BF16 grouped BMM cache |
-| 4096/1024/batch4 | `116.2553` | First crossing of old `114.07` victory line |
+| 4096/128/batch4 | `59.5264` | Post-victory confirmation, repeat spread `0.41%` |
+| 4096/1024/batch4 | `119.4153` | Stable crossing of old `114.07` victory line |
 
 Reference lines:
 
@@ -51,8 +51,10 @@ Reference lines:
   precision-neutral.
 
 This milestone is an opt-in best path, not a declaration that every component
-should become default.  TARGET 07.63 must confirm the bundle after opt-in
-cleanup and rebuild the bottleneck order before more implementation work.
+should become default.  TARGET 07.63 confirmed the bundle after opt-in cleanup
+and rebuilt the bottleneck order.  TARGET 07.64 added a correct metadata
+deforestation opt-in, but it did not meet the promote gate.  TARGET 07.65 should
+now attribute the remaining direct-copy owners before more implementation.
 
 ## New TARGET 07 Organization
 
@@ -81,7 +83,9 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.60 | `prompts/TARGET_07.60_dsv4_sm80_cached_bf16_indexer_wq_b_projection_backend.md` | completed | Extended cached BF16 to `indexer.wq_b`; 4096/128 reached `51.2962 output tok/s`, 4096/1024 reached `105.7645`, and the three cached owners cost exactly `1.0000 GiB/rank`. |
 | TARGET 07.61 | `prompts/TARGET_07.61_dsv4_sm80_post_cached_bf16_vllm_parity_reprofile.md` | completed | Completed post-cached-BF16 parity reprofile. vLLM runtime bucket timing is still unavailable, but mini owner timing plus vLLM source parity select `attn.wo_a` as the next narrow boundary. |
 | TARGET 07.62 | `prompts/TARGET_07.62_dsv4_sm80_wo_a_attention_boundary_parity.md` | completed | Adapted mini's `attn.wo_a` boundary to an opt-in BF16 grouped BMM cache; 4096/1024 reached `116.2553 output tok/s`, crossing the old `114.07` victory line. |
-| TARGET 07.63 | `prompts/TARGET_07.63_dsv4_sm80_post_victory_reprofile_and_next_bottleneck.md` | next todo | Confirm the post-victory `dsv4_sm80_a100_victory` bundle, rerun smoke/macro/profile/memory-ledger checks, rebuild the mini-vs-vLLM top-bucket parity table, and select exactly one next implementation target. |
+| TARGET 07.63 | `prompts/TARGET_07.63_dsv4_sm80_post_victory_reprofile_and_next_bottleneck.md` | completed | Confirmed `dsv4_sm80_a100_victory`: text smoke pass, 4096/1024 reached `119.4153 output tok/s`, graph replay stayed active, eager decode stayed `0`, and fresh profile selected `graph_runtime_copy_cat_index` as the next implementation target. |
+| TARGET 07.64 | `prompts/TARGET_07.64_dsv4_sm80_decode_metadata_deforestation.md` | completed | Added an opt-in decode metadata helper. Microbench was strong and macro improved to `122.9414 output tok/s`, but `graph_runtime_copy_cat_index` only fell by `0.012003s`; keep opt-in, do not promote. |
+| TARGET 07.65 | `prompts/TARGET_07.65_dsv4_sm80_direct_copy_owner_attribution.md` | next todo | Measurement-only attribution of the remaining graph-replay `direct_copy` surface under `batch_forward` and `batch_forward_enqueue`, using profiling-only NVTX and updated classifiers before choosing any implementation target. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -118,7 +122,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.63 next.
+Run TARGET 07.65 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -404,13 +408,61 @@ The milestone bundle intentionally no longer enables the stale
 paths supersede them in the current best stack.  Keep the individual cache
 toggles for ablation because they have explicit memory tradeoffs.
 
-TARGET 07.63 should now freeze this milestone and reset the bottleneck order.
-Because the victory bundle cleanup changed how the current best path is
-selected, new runs should use `--variants dsv4_sm80_a100_victory`; the old
-`target0762_woabf16bmmcache` name is only a compatibility alias.  The target
-must not implement another optimization.  It should confirm correctness,
-macro throughput, graph replay/eager decode, memory cost, and a fresh owner/nsys
-profile, then choose exactly one next target from evidence.
+TARGET 07.63 completed the post-victory confirmation and bottleneck reset:
+
+- text smoke passed for `dsv4_sm80_a100_victory`;
+- 4096/128/batch4 reached `59.5264 output tok/s`;
+- 4096/1024/batch4 reached `119.4153 output tok/s`, `+4.68%` above the old
+  `114.07` serving line;
+- graph replay stayed active and eager decode stayed `0`;
+- the compatibility alias `target0762_woabf16bmmcache` still expands to the
+  same env, but new reports should use `dsv4_sm80_a100_victory`;
+- the stale `Q_WQB/WO_B/INDEXER_WQB_FP8_GEMM` opt-ins are inactive in the
+  current best path;
+- a config-path fix made `DeepSeekV4KVCache` use
+  `dsv4_env_flag(MINISGL_DSV4_SM80_INDEXER_FP8_CACHE)` so bundle expansion and
+  FP8 indexer side-cache allocation agree.
+
+The fresh 4096/128/batch4 profile selected the next implementation target:
+
+| Bucket | Kernel s | Share | Decision |
+| --- | ---: | ---: | --- |
+| `graph_runtime_copy_cat_index` | `0.846795` | `21.48%` | selected |
+| `projection_gemm` | `0.812100` | `20.60%` | hold; diffuse after cached BF16 projection wins |
+| `elementwise_graph_nodes` | `0.497965` | `12.63%` | secondary validation only |
+| `nccl_communication` | `0.340015` | `8.62%` | hold |
+| `moe_marlin` | `0.300516` | `7.62%` | hold |
+
+TARGET 07.64 should implement a narrow decode metadata deforestation pass for
+`graph_runtime_copy_cat_index`.  The vLLM source-parity references are
+`compute_global_topk_indices_and_lens`, `combine_topk_swa_indices`, and
+`flat_index_dequant_gather_blocked` under
+`/workspace/vllm-dsv4-docker/vllm/v1/attention/ops/deepseek_v4_ops/cache_utils.py`.
+Do not continue into projection, communication, MoE, broad graph cleanup, or
+full FP8 KV cache inside 07.64.
+
+TARGET 07.64 completed with a correct opt-in helper but did not clear the
+promotion gate:
+
+- new opt-in variant: `dsv4_sm80_a100_victory_metadatadeforest`;
+- new toggle: `MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST=1`;
+- helper microbench showed `6.8x-8.5x` local metadata construction speedup;
+- text smoke passed, graph replay stayed active, eager decode stayed `0`;
+- 4096/1024/batch4 improved from `119.4153` to `122.9414 output tok/s`
+  (`+2.95%`), below the `+5%` gate;
+- `graph_runtime_copy_cat_index` moved only from `0.846795s` to `0.834792s`
+  (`-0.012003s`), far below the `-0.25s` gate;
+- the optimized source-owned `batch_prepare:decode:bs4` metadata slice dropped
+  from `0.019838s` to `0.005991s`, but this slice was too small to move the
+  overall bucket;
+- the large remaining direct-copy surface is under
+  `batch_forward:decode:bs4:padded4` and
+  `batch_forward_enqueue:decode:bs4:padded4`.
+
+Therefore keep the 07.64 helper as an opt-in ablation and do not add it to
+`dsv4_sm80_a100_victory`.  TARGET 07.65 should be measurement-only direct-copy
+owner attribution.  It may add profiling-only NVTX and classifier scripts, but
+must not implement a performance optimization.
 
 ## Precision Policy
 

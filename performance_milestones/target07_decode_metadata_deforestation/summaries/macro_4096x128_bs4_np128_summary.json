@@ -1,0 +1,100 @@
+[
+  {
+    "bottleneck_labels": [
+      "prefill dominated",
+      "attention",
+      "MoE / expert GEMM",
+      "fp4 expert handling",
+      "KV cache writes",
+      "metadata construction",
+      "metadata construction"
+    ],
+    "classification": "baseline",
+    "communication_by_label": {
+      "dsv4.attn.wo_b.row_parallel_projection_all_reduce": {
+        "bytes": 184683593728,
+        "count": 1376
+      },
+      "dsv4.embedding_all_reduce": {
+        "bytes": 4294967296,
+        "count": 32
+      },
+      "dsv4.lm_head_all_gather": {
+        "bytes": 66191360,
+        "count": 32
+      },
+      "dsv4.v1_moe_reduce_once_all_reduce": {
+        "bytes": 369367187456,
+        "count": 1376
+      }
+    },
+    "communication_total_bytes": 558411939840,
+    "communication_total_count": 2816,
+    "decode_tokens_per_s": 150.00418185357495,
+    "elapsed_s": 25.44386775046587,
+    "end_to_end_output_tokens_per_s": 60.36818046155252,
+    "fallback_wrapper_calls_total": 25408,
+    "graph_runner": {
+      "capture_compressed_locs_in_graph": true,
+      "capture_greedy_sample": true,
+      "captured_bs": [
+        4,
+        2,
+        1
+      ],
+      "eager_decode_count": 0,
+      "eager_decode_count_by_batch_size": {},
+      "enabled": true,
+      "error": null,
+      "greedy_sample_replay_count": 508,
+      "greedy_sample_replay_count_by_batch_size": {
+        "4": 508
+      },
+      "replay_count": 508,
+      "replay_count_by_batch_size": {
+        "4": 508
+      },
+      "replay_count_by_padded_size": {
+        "4": 508
+      },
+      "replay_input_copy_bytes": 24384,
+      "requested_bs": [
+        1,
+        2,
+        4
+      ]
+    },
+    "kv_cache_memory_bytes_per_rank_max": 2491495680,
+    "peak_gpu_memory_allocated_bytes": 47294730240,
+    "prefill_tokens_per_s": 3824.4190925717853,
+    "report_path": "/tmp/dsv4_target0764_4096x128_bs4_np128/reports/000_decode_throughput_bs8__dsv4_sm80_a100_victory_metadatadeforest.json",
+    "scenario": "decode_throughput_bs8",
+    "schedule_summary": {
+      "batch_size_counts": {
+        "4": 384
+      },
+      "max_batch_size": 4,
+      "max_padded_size": 4,
+      "padded_size_counts": {
+        "4": 384
+      },
+      "phase_batch_size_counts": {
+        "decode:bs4": 381,
+        "prefill:bs4": 3
+      },
+      "phase_counts": {
+        "decode": 381,
+        "prefill": 3
+      },
+      "phase_padded_size_counts": {
+        "decode:padded4": 381,
+        "prefill:padded4": 3
+      },
+      "total_batches": 384
+    },
+    "status": "pass",
+    "ttft_s_mean": 4.970393757646282,
+    "unsupported_kernel_skips_total": 0,
+    "variant": "dsv4_sm80_a100_victory_metadatadeforest"
+  }
+]

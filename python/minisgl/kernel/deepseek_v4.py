@@ -43,6 +43,12 @@ DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
 DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE = "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE"
 DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
+DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE = (
+    "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
+)
+DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE = (
+    "MINISGL_DSV4_SM80_FUSED_TOPK_SWA_INDICES"
+)
 DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
 DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
@@ -157,6 +163,8 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE,
     DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE,
     DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE,
+    DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE,
+    DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE,
     DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,
     DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,
     DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,
@@ -230,6 +238,23 @@ class DSV4IndexerSelectOutput:
 class DSV4IndexerFP8Query:
     q_values: torch.Tensor
     weights: torch.Tensor
+
+
+@dataclass(frozen=True)
+class DSV4DecodeMetadataDeforestOutput:
+    page_table: torch.Tensor
+    swa_page_indices: torch.Tensor
+    swa_topk_lengths: torch.Tensor
+    c4_topk_lengths_raw: torch.Tensor
+    c4_topk_lengths_clamp1: torch.Tensor
+    c4_sparse_topk_lengths: torch.Tensor
+    c4_sparse_raw_indices: torch.Tensor
+    c4_sparse_page_indices: torch.Tensor
+    c4_sparse_full_indices: torch.Tensor
+    c128_topk_lengths_clamp1: torch.Tensor
+    c128_raw_indices: torch.Tensor
+    c128_page_indices: torch.Tensor
+    c128_full_indices: torch.Tensor
 
 
 DSV4_KERNEL_INVENTORY: tuple[DSV4KernelInventoryEntry, ...] = (
@@ -3341,6 +3366,113 @@ def store_indexer_fp8_cache_fallback(
     return True
 
 
+def decode_metadata_deforest_fallback(
+    ctx_page_table: torch.Tensor,
+    table_indices: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    page_size: int,
+    max_seqlen_k: int,
+    window_size: int,
+    index_topk: int,
+    alignment: int = 64,
+) -> DSV4DecodeMetadataDeforestOutput | None:
+    if not dsv4_sm80_triton_enabled(DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE):
+        return None
+    if (
+        ctx_page_table.ndim != 2
+        or table_indices.ndim != 1
+        or positions.ndim != 1
+        or table_indices.numel() != positions.numel()
+        or ctx_page_table.dtype is not torch.int32
+        or table_indices.dtype is not torch.int32
+        or positions.dtype is not torch.int32
+        or page_size <= 0
+        or window_size <= 0
+        or index_topk <= 0
+        or alignment <= 0
+        or page_size & (page_size - 1)
+    ):
+        return None
+    if not (ctx_page_table.is_cuda and table_indices.is_cuda and positions.is_cuda):
+        return None
+    if not (ctx_page_table.is_contiguous() and table_indices.is_contiguous()):
+        return None
+
+    rows = positions.numel()
+    device = positions.device
+    page_table_width = max(div_ceil(max(int(max_seqlen_k), 1), int(page_size)), 1)
+    swa_width = div_ceil(int(window_size), int(alignment)) * int(alignment)
+    c4_width = div_ceil(max(int(index_topk), 1), int(alignment)) * int(alignment)
+    c128_len = max(int(max_seqlen_k), 1) // 128
+    c128_width = div_ceil(max(c128_len, 1), int(alignment)) * int(alignment)
+
+    page_table = torch.empty((rows, page_table_width), dtype=torch.int32, device=device)
+    swa_page_indices = torch.empty((rows, swa_width), dtype=torch.int32, device=device)
+    swa_topk_lengths = torch.empty((rows,), dtype=torch.int32, device=device)
+    c4_topk_lengths_raw = torch.empty((rows,), dtype=torch.int32, device=device)
+    c4_topk_lengths_clamp1 = torch.empty((rows,), dtype=torch.int32, device=device)
+    c4_sparse_topk_lengths = torch.empty((rows,), dtype=torch.int32, device=device)
+    c4_sparse_raw_indices = torch.empty((rows, c4_width), dtype=torch.int32, device=device)
+    c4_sparse_page_indices = torch.empty_like(c4_sparse_raw_indices)
+    c4_sparse_full_indices = torch.empty_like(c4_sparse_raw_indices)
+    c128_topk_lengths_clamp1 = torch.empty((rows,), dtype=torch.int32, device=device)
+    c128_raw_indices = torch.empty((rows, c128_width), dtype=torch.int32, device=device)
+    c128_page_indices = torch.empty_like(c128_raw_indices)
+    c128_full_indices = torch.empty_like(c128_raw_indices)
+
+    try:
+        ok = _triton_dsv4_ops().build_decode_metadata_indices(
+            ctx_page_table,
+            table_indices,
+            positions,
+            page_table,
+            swa_page_indices,
+            swa_topk_lengths,
+            c4_topk_lengths_raw,
+            c4_topk_lengths_clamp1,
+            c4_sparse_topk_lengths,
+            c4_sparse_raw_indices,
+            c4_sparse_page_indices,
+            c4_sparse_full_indices,
+            c128_topk_lengths_clamp1,
+            c128_raw_indices,
+            c128_page_indices,
+            c128_full_indices,
+            page_size=int(page_size),
+            max_seqlen_k=int(max_seqlen_k),
+            window_size=int(window_size),
+            index_topk=int(index_topk),
+        )
+        if ok:
+            return DSV4DecodeMetadataDeforestOutput(
+                page_table=page_table,
+                swa_page_indices=swa_page_indices,
+                swa_topk_lengths=swa_topk_lengths,
+                c4_topk_lengths_raw=c4_topk_lengths_raw,
+                c4_topk_lengths_clamp1=c4_topk_lengths_clamp1,
+                c4_sparse_topk_lengths=c4_sparse_topk_lengths,
+                c4_sparse_raw_indices=c4_sparse_raw_indices,
+                c4_sparse_page_indices=c4_sparse_page_indices,
+                c4_sparse_full_indices=c4_sparse_full_indices,
+                c128_topk_lengths_clamp1=c128_topk_lengths_clamp1,
+                c128_raw_indices=c128_raw_indices,
+                c128_page_indices=c128_page_indices,
+                c128_full_indices=c128_full_indices,
+            )
+    except Exception as exc:
+        if _cuda_graph_capture_active(device):
+            raise RuntimeError(
+                "DSV4 CUDA graph capture failed in decode metadata deforestation."
+            ) from exc
+    if _cuda_graph_capture_active(device):
+        raise RuntimeError(
+            "DSV4 CUDA graph capture requires the decode metadata deforestation path "
+            f"when {DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE}=1."
+        )
+    return None
+
+
 def copy_masked_compressed_locs(
     raw_out_loc: torch.Tensor,
     positions: torch.Tensor,
@@ -3737,6 +3869,8 @@ __all__ = [
     "DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST",
     "DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE",
     "DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST",
+    "DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE",
+    "DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE",
     "DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE",
     "DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE",
     "DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE",
@@ -3763,6 +3897,7 @@ __all__ = [
     "DSV4_SM80_V0_BF16_WHITELIST",
     "DSV4_SM80_V1_MOE_TOGGLE",
     "DSV4_SM80_V1_MOE_WHITELIST",
+    "DSV4DecodeMetadataDeforestOutput",
     "DSV4MoEExecutionPlan",
     "DSV4MoERoutePlan",
     "DSV4MoEWorkspace",
@@ -3774,6 +3909,7 @@ __all__ = [
     "build_moe_v2_execution_plan",
     "copy_masked_compressed_locs",
     "copy_decode_metadata_for_replay",
+    "decode_metadata_deforest_fallback",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
     "compressor_plan_fallback",
