@@ -73,7 +73,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.56 | `prompts/TARGET_07.56_dsv4_sm80_low_cost_graph_layout_compile_preflight.md` | completed | Static scale cache removed focused wrapper copy/cast events but only improved 4096/128 by `+0.35%`; no low-cost graph/layout cut was promoted. |
 | TARGET 07.57 | `prompts/TARGET_07.57_dsv4_sm80_projection_gemm_backend_parity.md` | completed | Attributed projection/GEMM by owner; selected `_quantized_linear_fp8_kernel` across `attn.q_wqb`, `attn.wo_b`, and `indexer.wq_b` as the next backend contract. |
 | TARGET 07.58 | `prompts/TARGET_07.58_dsv4_sm80_cached_bf16_projection_backend.md` | completed | Promoted opt-in cached BF16 dequantized weights for `attn.q_wqb`; 4096/128 improved to `47.9464 output tok/s`, 4096/1024 to `92.5170`, with only `0.3359 GiB/rank` extra cache. |
-| TARGET 07.59 | `prompts/TARGET_07.59_dsv4_sm80_cached_bf16_wo_b_projection_backend.md` | next todo | Extend the same owner-scoped cached BF16 backend to row-parallel `attn.wo_b`, separating local projection speedup from all-reduce cost and recording incremental memory/KV-token impact. |
+| TARGET 07.59 | `prompts/TARGET_07.59_dsv4_sm80_cached_bf16_wo_b_projection_backend.md` | completed | Extended cached BF16 to row-parallel `attn.wo_b`; 4096/128 reached `49.6585 output tok/s`, 4096/1024 reached `98.6953`, and `wo_b` local compute fell to `0.070595s` while all-reduce remained `0.161865s`. |
+| TARGET 07.60 | `prompts/TARGET_07.60_dsv4_sm80_cached_bf16_indexer_wq_b_projection_backend.md` | next todo | Extend cached BF16 to the remaining large same-contract owner `indexer.wq_b`, then run a fresh post-sequence profile before choosing the next bottleneck. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -110,7 +111,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.59 next.
+Run TARGET 07.60 next.
 
 TARGET 07.395 proved that mini's exact bf16 sparse decode boundary can match
 the comparable vLLM gather+split-K decode boundary:
@@ -312,6 +313,28 @@ row-parallel, so the target must report local projection compute separately
 from row-parallel all-reduce.  If local projection improves but macro gain is
 masked by communication, the next decision should name that explicitly rather
 than treating cached BF16 as failed.
+
+TARGET 07.59 completed successfully:
+
+- 4096/128/batch4 improved from `47.9464` to `49.6585 output tok/s`;
+- 4096/1024/batch4 improved from `92.5170` to `98.6953 output tok/s`;
+- `wo_b` local projection dropped from the old FP8 path to
+  `0.059160s` BF16 GEMM plus `0.011435s` activation quant;
+- `wo_b` row-parallel all-reduce remains `0.161865s`;
+- q_wqb+wo_b cached BF16 memory is `721,420,288 bytes/rank`
+  (`0.6719 GiB/rank`), about `9488` KV tokens or `37.06` pages.
+
+The largest remaining same-contract projection owner is now `indexer.wq_b`:
+
+- intrinsic `_quantized_linear_fp8_kernel`: `0.364997s`;
+- activation quant: `0.005293s`;
+- copy/layout: `0.012928s`;
+- C4/indexer layers: `21`.
+
+The next target is TARGET 07.60: extend cached BF16 to `indexer.wq_b`.  After
+that target, the original q_wqb/wo_b/indexer_wq_b projection sequence is
+complete, so the thread must run a fresh profile and choose the next bottleneck
+from evidence rather than continuing cached-weight work by inertia.
 
 ## Precision Policy
 

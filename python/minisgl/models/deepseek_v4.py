@@ -393,6 +393,8 @@ class DSV4Linear(BaseOP):
         *,
         cache_name: str,
         owner_label: str,
+        reduce: bool = False,
+        reduce_label: str | None = None,
     ) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         cached_weight = _cached_fp8_bf16_weight(
@@ -405,7 +407,13 @@ class DSV4Linear(BaseOP):
             owner_label=owner_label,
         )
         x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
-        return F.linear(x_quant, cached_weight)
+        y = F.linear(x_quant, cached_weight)
+        if reduce and self.row_parallel and self._tp_size > 1:
+            y = self._comm.all_reduce(
+                y,
+                label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
+            )
+        return y
 
 
 class DSV4Compressor(BaseOP):
@@ -617,12 +625,28 @@ class DSV4Attention(BaseOP):
     def _q_wqb_owner_label(self) -> str:
         return f"layer{self.layer_id}.attn.q_wqb"
 
+    @property
+    def _wo_b_bf16_weight_cache_name(self) -> str:
+        return "_dsv4_wo_b_bf16_weight_cache"
+
+    @property
+    def _wo_b_owner_label(self) -> str:
+        return f"layer{self.layer_id}.attn.wo_b"
+
     def prepare_q_wqb_bf16_weight_cache(self) -> dict[str, object] | None:
         if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
             return None
         return self.wq_b.prepare_fp8_bf16_weight_cache(
             self._q_wqb_bf16_weight_cache_name,
             owner_label=self._q_wqb_owner_label,
+        )
+
+    def prepare_wo_b_bf16_weight_cache(self) -> dict[str, object] | None:
+        if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE):
+            return None
+        return self.wo_b.prepare_fp8_bf16_weight_cache(
+            self._wo_b_bf16_weight_cache_name,
+            owner_label=self._wo_b_owner_label,
         )
 
     def _sequence_spans(self, batch: Batch, total_tokens: int) -> list[tuple[int, int]]:
@@ -997,6 +1021,14 @@ class DSV4Attention(BaseOP):
                 o_lora_rank=self.o_lora_rank,
             )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_b"):
+            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE):
+                return self.wo_b.forward_fp8_cached_bf16_weight(
+                    o,
+                    cache_name=self._wo_b_bf16_weight_cache_name,
+                    owner_label=self._wo_b_owner_label,
+                    reduce=True,
+                    reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+                )
             wo_b_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_WO_B_FP8_GEMM")
             return self.wo_b.forward(
                 o,
@@ -1530,7 +1562,14 @@ class DeepseekV4Model(BaseOP):
                 report = layer.self_attn.prepare_q_wqb_bf16_weight_cache()
                 if report is not None:
                     q_wqb_reports.append(report)
+        wo_b_reports: list[dict[str, object]] = []
+        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE):
+            for layer in self.layers.op_list:
+                report = layer.self_attn.prepare_wo_b_bf16_weight_cache()
+                if report is not None:
+                    wo_b_reports.append(report)
         total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
+        total_wo_b_bytes = int(sum(int(report["bytes"]) for report in wo_b_reports))
         return {
             "q_wqb_bf16_weight_cache": {
                 "enabled": bool(q_wqb_reports),
@@ -1538,7 +1577,18 @@ class DeepseekV4Model(BaseOP):
                 "layers_cached": len(q_wqb_reports),
                 "total_bytes": total_q_wqb_bytes,
                 "entries": q_wqb_reports,
-            }
+            },
+            "wo_b_bf16_weight_cache": {
+                "enabled": bool(wo_b_reports),
+                "toggle": dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,
+                "layers_cached": len(wo_b_reports),
+                "total_bytes": total_wo_b_bytes,
+                "entries": wo_b_reports,
+            },
+            "projection_bf16_weight_cache_total": {
+                "total_bytes": total_q_wqb_bytes + total_wo_b_bytes,
+                "owners": ["attn.q_wqb", "attn.wo_b"],
+            },
         }
 
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
