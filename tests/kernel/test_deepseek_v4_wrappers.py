@@ -413,13 +413,44 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
     assert dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert (
+        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+        in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    )
+    assert (
         dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE
         in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
+    )
+    assert (
+        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+        in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
+    )
+    assert (
+        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+        not in dsv4_kernel.DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST
+    )
+    assert (
+        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+        in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
     )
     assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE)
     assert not any(
         dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST
     )
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, "1")
+    assert dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+    )
+    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, raising=False)
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE, "1")
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+    )
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE, "1")
+    assert dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+    )
+    _clear_dsv4_sm80_env(monkeypatch)
 
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE, "1")
     enabled = {

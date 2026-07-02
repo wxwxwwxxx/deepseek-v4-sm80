@@ -1466,7 +1466,8 @@ class DSV4FusedRoutedExperts(BaseOP):
 
 
 class DSV4SharedExperts(BaseOP):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, layer_id: int | None = None):
+        self.layer_id = layer_id
         intermediate = config.moe_intermediate_size * max(config.n_shared_experts, 1)
         self.swiglu_limit = config.swiglu_limit or 0.0
         self.gate_up_proj = DSV4Linear(
@@ -1484,13 +1485,59 @@ class DSV4SharedExperts(BaseOP):
             row_parallel=True,
         )
 
+    @property
+    def _gate_up_bf16_weight_cache_name(self) -> str:
+        return "_dsv4_shared_gate_up_bf16_weight_cache"
+
+    @property
+    def _down_bf16_weight_cache_name(self) -> str:
+        return "_dsv4_shared_down_bf16_weight_cache"
+
+    @property
+    def _gate_up_owner_label(self) -> str:
+        if self.layer_id is None:
+            return "shared_experts.gate_up_proj"
+        return f"layer{self.layer_id}.shared_experts.gate_up_proj"
+
+    @property
+    def _down_owner_label(self) -> str:
+        if self.layer_id is None:
+            return "shared_experts.down_proj"
+        return f"layer{self.layer_id}.shared_experts.down_proj"
+
+    def prepare_bf16_weight_cache(self) -> list[dict[str, object]]:
+        if not dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+        ):
+            return []
+        return [
+            self.gate_up_proj.prepare_fp8_bf16_weight_cache(
+                self._gate_up_bf16_weight_cache_name,
+                owner_label=self._gate_up_owner_label,
+            ),
+            self.down_proj.prepare_fp8_bf16_weight_cache(
+                self._down_bf16_weight_cache_name,
+                owner_label=self._down_owner_label,
+            ),
+        ]
+
     def forward(self, hidden_states: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
         fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_SHARED_FP8_GEMM")
+        use_bf16_weight_cache = dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+        )
         with _dsv4_capture_nvtx("shared_experts.gate_up_proj"):
-            gate_up = self.gate_up_proj.forward(
-                hidden_states,
-                fp8_gemm=fp8_gemm if fp8_gemm else None,
-            )
+            if use_bf16_weight_cache:
+                gate_up = self.gate_up_proj.forward_fp8_cached_bf16_weight(
+                    hidden_states,
+                    cache_name=self._gate_up_bf16_weight_cache_name,
+                    owner_label=self._gate_up_owner_label,
+                )
+            else:
+                gate_up = self.gate_up_proj.forward(
+                    hidden_states,
+                    fp8_gemm=fp8_gemm if fp8_gemm else None,
+                )
         gate, up = gate_up.chunk(2, dim=-1)
         hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
             gate,
@@ -1503,6 +1550,14 @@ class DSV4SharedExperts(BaseOP):
                 hidden=hidden,
             ):
                 hidden_for_down = hidden.to(up.dtype)
+            if use_bf16_weight_cache:
+                return self.down_proj.forward_fp8_cached_bf16_weight(
+                    hidden_for_down,
+                    cache_name=self._down_bf16_weight_cache_name,
+                    owner_label=self._down_owner_label,
+                    reduce=reduce,
+                    reduce_label="dsv4.shared_expert_all_reduce",
+                )
             return self.down_proj.forward(
                 hidden_for_down,
                 reduce=reduce,
@@ -1672,7 +1727,7 @@ class DSV4MoE(BaseOP):
             self.topk = DSV4TopK(config)
         self.experts = DSV4FusedRoutedExperts(config)
         if config.n_shared_experts > 0:
-            self.shared_experts = DSV4SharedExperts(config)
+            self.shared_experts = DSV4SharedExperts(config, layer_id=layer_id)
         self._runner = DSV4FusedMoERunner(
             layer_id=layer_id,
             gate=self.gate,
@@ -1854,12 +1909,28 @@ class DeepseekV4Model(BaseOP):
                 report = layer.self_attn.prepare_indexer_wq_b_bf16_weight_cache()
                 if report is not None:
                     indexer_wq_b_reports.append(report)
+        shared_expert_reports: list[dict[str, object]] = []
+        if dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+        ):
+            for layer in self.layers.op_list:
+                shared_experts = getattr(layer.mlp, "shared_experts", None)
+                if shared_experts is not None:
+                    shared_expert_reports.extend(shared_experts.prepare_bf16_weight_cache())
         total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
         total_wo_b_bytes = int(sum(int(report["bytes"]) for report in wo_b_reports))
         total_indexer_wq_b_bytes = int(
             sum(int(report["bytes"]) for report in indexer_wq_b_reports)
         )
         total_wo_a_bytes = int(sum(int(report["bytes"]) for report in wo_a_reports))
+        total_shared_expert_bytes = int(
+            sum(int(report["bytes"]) for report in shared_expert_reports)
+        )
+        projection_cache_owners = ["attn.q_wqb", "attn.wo_b", "indexer.wq_b", "attn.wo_a"]
+        if shared_expert_reports:
+            projection_cache_owners.extend(
+                ["shared_experts.gate_up_proj", "shared_experts.down_proj"]
+            )
         return {
             "q_wqb_bf16_weight_cache": {
                 "enabled": bool(q_wqb_reports),
@@ -1889,14 +1960,22 @@ class DeepseekV4Model(BaseOP):
                 "total_bytes": total_indexer_wq_b_bytes,
                 "entries": indexer_wq_b_reports,
             },
+            "shared_expert_bf16_weight_cache": {
+                "enabled": bool(shared_expert_reports),
+                "toggle": dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE,
+                "layers_cached": len(shared_expert_reports) // 2,
+                "total_bytes": total_shared_expert_bytes,
+                "entries": shared_expert_reports,
+            },
             "projection_bf16_weight_cache_total": {
                 "total_bytes": (
                     total_q_wqb_bytes
                     + total_wo_b_bytes
                     + total_indexer_wq_b_bytes
                     + total_wo_a_bytes
+                    + total_shared_expert_bytes
                 ),
-                "owners": ["attn.q_wqb", "attn.wo_b", "indexer.wq_b", "attn.wo_a"],
+                "owners": projection_cache_owners,
             },
         }
 

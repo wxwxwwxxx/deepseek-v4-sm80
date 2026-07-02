@@ -449,6 +449,11 @@ def test_configure_variant_sets_wo_a_bf16_bmm_cache(monkeypatch):
         def dsv4_env_flag(name: str) -> bool:
             if name == "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND":
                 return False
+            if (
+                name == "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
+                and os.environ.get("MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE") == "1"
+            ):
+                return True
             return os.environ.get(name) in {"1", "true"}
 
     result = smoke.configure_variant(
@@ -456,8 +461,37 @@ def test_configure_variant_sets_wo_a_bf16_bmm_cache(monkeypatch):
         smoke._variant_map()["target0762_woabf16bmmcache"],
     )
 
-    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"] == "1"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
+    assert "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE" not in result["raw_dsv4_sm80_env"]
     assert "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE" in result["active_dsv4_toggles"]
+
+
+def test_configure_variant_sets_shared_expert_bf16_cache(monkeypatch):
+    smoke = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            return os.environ.get(name) in {"1", "true"}
+
+    result = smoke.configure_variant(
+        FakeKernel,
+        smoke._variant_map()["dsv4_sm80_a100_victory_sharedbf16"],
+    )
+
+    assert (
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"]
+        == "1"
+    )
+    assert (
+        "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
+        in result["active_dsv4_toggles"]
+    )
 
 
 def test_tp_rank_size_defaults_to_tp8_under_torchrun_env(monkeypatch):

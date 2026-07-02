@@ -13,7 +13,12 @@ from minisgl.distributed import set_tp_info
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
-from minisgl.models.deepseek_v4 import DSV4FusedRoutedExperts, DSV4MoE, DSV4MoEGate
+from minisgl.models.deepseek_v4 import (
+    DSV4FusedRoutedExperts,
+    DSV4MoE,
+    DSV4MoEGate,
+    DSV4SharedExperts,
+)
 from minisgl.models.register import get_model_class
 
 
@@ -62,6 +67,11 @@ def _reset_globals(*, tp_rank: int = 0, tp_size: int = 1) -> None:
     core._GLOBAL_CTX = None
     dist_info._TP_INFO = None
     set_tp_info(tp_rank, tp_size)
+
+
+def _clear_dsv4_sm80_env(monkeypatch) -> None:
+    for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES:
+        monkeypatch.delenv(name, raising=False)
 
 
 
@@ -645,3 +655,50 @@ def test_deepseek_v4_vllm_runner_correction_bias_routing(monkeypatch):
 
     assert len(seen_indices) == 1
     assert seen_indices[0].tolist() == [[1], [1]]
+
+
+def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
+    _reset_globals()
+    _clear_dsv4_sm80_env(monkeypatch)
+    cfg = _tiny_dsv4_config()
+    shared = DSV4SharedExperts(cfg, layer_id=0)
+    torch.manual_seed(766)
+
+    with torch.no_grad():
+        shared.gate_up_proj.weight.copy_(
+            torch.randn_like(shared.gate_up_proj.weight.float()).clamp(-2, 2).to(
+                dsv4_kernel.fp8_dtype()
+            )
+        )
+        shared.down_proj.weight.copy_(
+            torch.randn_like(shared.down_proj.weight.float()).clamp(-2, 2).to(
+                dsv4_kernel.fp8_dtype()
+            )
+        )
+        shared.gate_up_proj.weight_scale_inv.copy_(
+            torch.ones_like(shared.gate_up_proj.weight_scale_inv.float()).to(
+                dsv4_kernel.e8m0_dtype()
+            )
+        )
+        shared.down_proj.weight_scale_inv.copy_(
+            torch.ones_like(shared.down_proj.weight_scale_inv.float()).to(
+                dsv4_kernel.e8m0_dtype()
+            )
+        )
+
+    hidden = torch.randn(3, cfg.hidden_size, dtype=torch.bfloat16)
+    expected = shared.forward(hidden, reduce=False)
+
+    assert shared.prepare_bf16_weight_cache() == []
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE, "1")
+    reports = shared.prepare_bf16_weight_cache()
+    actual = shared.forward(hidden, reduce=False)
+
+    assert {report["owner"] for report in reports} == {
+        "layer0.shared_experts.gate_up_proj",
+        "layer0.shared_experts.down_proj",
+    }
+    assert sum(int(report["bytes"]) for report in reports) == (
+        shared.gate_up_proj.weight.numel() + shared.down_proj.weight.numel()
+    ) * torch.tensor([], dtype=torch.bfloat16).element_size()
+    assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)

@@ -31,16 +31,17 @@ Current best milestone stack:
 - FP8 indexer cache backend and fused FP8 activation quant helper;
 - cached BF16 projection stack for `q_wqb`, `wo_b`, `indexer.wq_b`, and
   `wo_a` grouped BMM;
+- cached BF16 shared expert gate/up/down projection weights;
 - DSV4 decode CUDA graph replay;
 - page size 256;
 - TP8 on 8x A100.
 
-Current confirmed macro from TARGET 07.63:
+Current confirmed macro from TARGET 07.66:
 
 | Workload | Output tok/s | Note |
 | --- | ---: | --- |
-| 4096/128/batch4 | `59.5264` | Post-victory confirmation, repeat spread `0.41%` |
-| 4096/1024/batch4 | `119.4153` | Stable crossing of old `114.07` victory line |
+| 4096/128/batch4 | `62.2034` | Shared expert BF16 cache audit variant before promotion |
+| 4096/1024/batch4 | `131.7707` | Stable above old `114.07` victory line |
 
 Reference lines:
 
@@ -55,7 +56,9 @@ should become default.  TARGET 07.63 confirmed the bundle after opt-in cleanup
 and rebuilt the bottleneck order.  TARGET 07.64 added a correct metadata
 deforestation opt-in, but it did not meet the promote gate.  TARGET 07.65 then
 attributed the remaining direct-copy owners and selected MoE/shared-expert
-staging as the next implementation target.
+staging.  TARGET 07.66 promoted the shared expert BF16 weight cache into the
+victory bundle and changed the bottleneck order again; the next step is a
+fresh post-shared-expert reprofile.
 
 ## New TARGET 07 Organization
 
@@ -87,7 +90,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.63 | `prompts/TARGET_07.63_dsv4_sm80_post_victory_reprofile_and_next_bottleneck.md` | completed | Confirmed `dsv4_sm80_a100_victory`: text smoke pass, 4096/1024 reached `119.4153 output tok/s`, graph replay stayed active, eager decode stayed `0`, and fresh profile selected `graph_runtime_copy_cat_index` as the next implementation target. |
 | TARGET 07.64 | `prompts/TARGET_07.64_dsv4_sm80_decode_metadata_deforestation.md` | completed | Added an opt-in decode metadata helper. Microbench was strong and macro improved to `122.9414 output tok/s`, but `graph_runtime_copy_cat_index` only fell by `0.012003s`; keep opt-in, do not promote. |
 | TARGET 07.65 | `prompts/TARGET_07.65_dsv4_sm80_direct_copy_owner_attribution.md` | completed | Measurement-only attribution reached `99.97%` direct-copy owner coverage and selected MoE/shared-expert staging as the next implementation target. |
-| TARGET 07.66 | `prompts/TARGET_07.66_dsv4_sm80_moe_shared_expert_staging_cleanup.md` | next todo | Clean up MoE/shared-expert direct-copy staging under the current bf16/exact victory stack; keep INT8 MoE as a separate future target. |
+| TARGET 07.66 | `prompts/TARGET_07.66_dsv4_sm80_moe_shared_expert_staging_cleanup.md` | completed | Promoted shared expert BF16 weight cache into `dsv4_sm80_a100_victory`; MoE/shared direct-copy staging fell `0.379204s -> 0.097361s`, and 4096/1024 reached `131.7707 output tok/s`. |
+| TARGET 07.67 | `prompts/TARGET_07.67_dsv4_sm80_post_shared_expert_reprofile.md` | next todo | Reprofile the promoted post-07.66 path and select the next target from fresh evidence rather than chasing stale runner-finalization assumptions. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -124,7 +128,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.66 next.
+Run TARGET 07.67 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -486,12 +490,34 @@ MoE/shared-expert projection and finalization staging.  It should stay on the
 current bf16/exact route; INT8 MoE belongs in a separate future target with
 independent quality and backend gates.
 
+TARGET 07.66 completed and promoted the shared expert BF16 weight cache:
+
+- new promoted toggle:
+  `MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE=1`;
+- `dsv4_sm80_a100_victory` now includes the shared expert cache;
+- `dsv4_sm80_a100_victory_sharedbf16` remains as an explicit audit variant;
+- shared expert gate/up/down projection owners disappeared from the
+  direct-copy table;
+- total direct_copy fell from `0.737039s` to `0.449052s`;
+- MoE/shared staging fell from `0.379204s` to `0.097361s`;
+- 4096/128/batch4 improved from `59.5264` to `62.2034 output tok/s`;
+- 4096/1024/batch4 improved from `119.4153` to `131.7707 output tok/s`;
+- incremental cache cost is `270,532,608 bytes/rank` (`0.251953 GiB/rank`),
+  about `14.01` KV pages/rank.
+
+The remaining direct-copy owners are diffuse.  Do not automatically continue
+into runner finalization just because it remains visible; TARGET 07.67 should
+first reprofile the promoted post-07.66 path and reset the whole bottleneck
+order.
+
 ## Precision Policy
 
 Default exact path:
 
 - bf16 activation/cache for attention, indexer, and DSV4 cache state;
 - Marlin WNA16 for MXFP4 expert weights;
+- cached BF16 dequantized projection weights for the promoted attention,
+  indexer, `wo_a`, and shared expert boundaries;
 - no activation quantization by default;
 - no packed `fp8_ds_mla` KV cache by default;
 - no FP8/FP4 indexer cache by default.

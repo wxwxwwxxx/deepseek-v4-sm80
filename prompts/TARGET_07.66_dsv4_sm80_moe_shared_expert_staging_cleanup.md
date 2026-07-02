@@ -183,7 +183,7 @@ Out of scope:
 - broad graph/layout cleanup outside the named MoE/shared owners.
 
 If INT8 MoE looks attractive during review, write a separate future target such
-as `TARGET 07.67: DSV4 SM80 INT8 MoE Feasibility`, with independent accuracy
+as `TARGET 07.xx: DSV4 SM80 INT8 MoE Feasibility`, with independent accuracy
 and performance gates.
 
 ## Candidate Fixes
@@ -460,4 +460,3 @@ Stop and write the report when:
 
 Do not keep polishing small local copies after the main owner group has been
 tested.  Select the next target from the final profile.
-

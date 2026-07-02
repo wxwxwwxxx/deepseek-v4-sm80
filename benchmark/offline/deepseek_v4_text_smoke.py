@@ -70,6 +70,9 @@ DSV4_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
 DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
 )
+DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = (
+    "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
+)
 BASELINE_TP_SIZE = 8
 
 
@@ -716,9 +719,24 @@ VARIANTS: tuple[Variant, ...] = (
         "dsv4_sm80_a100_victory",
         {DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1"},
         (
-            "Milestone smoke bundle for the TARGET 07.62 A100/sm80 victory "
+            "Milestone smoke bundle for the TARGET 07.66 A100/sm80 victory "
             "stack: Marlin WNA16 MoE, graph replay, FP8 indexer cache, split-K "
-            "sparse decode, and four BF16 projection caches."
+            "sparse decode, four attention/indexer BF16 projection caches, "
+            "and shared expert BF16 projection caches."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        "dsv4_sm80_a100_victory_sharedbf16",
+        {
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE: "1",
+        },
+        (
+            "TARGET 07.66 smoke audit variant: dsv4_sm80_a100_victory with "
+            "explicit shared expert gate/up and down cached BF16 dequantized "
+            "weight projection env."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
