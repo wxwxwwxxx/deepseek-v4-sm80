@@ -1,0 +1,987 @@
+{
+  "backend_clusters": [
+    {
+      "backend_cluster": "BF16 small-GEMM + splitK/reduce cluster",
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.19431932400000768,
+        "cuBLASLt BF16 GEMM": 0.21991156800000214,
+        "cuBLASLt splitK/reduce": 0.10738784800001386
+      },
+      "count": 84328,
+      "duration_s": 0.5216187399999539,
+      "owner_groups": {
+        "HC pre linear": 0.03551933599999872,
+        "MoE router / route projection": 0.01263636000000048,
+        "attention WQA/WKV/compress": 0.11945750099999732,
+        "attention q_wqb": 0.05639151699999948,
+        "attention wo_a": 0.06385714699999986,
+        "attention wo_b local": 0.054506674999999394,
+        "indexer weight/compressor projection": 0.04364739399999919,
+        "indexer wq_b": 0.0427268460000001,
+        "model HC head/expand": 0.00046136899999999994,
+        "residual / coarse owner": 0.006567008000000004,
+        "shared experts cached BF16": 0.0858475870000024
+      },
+      "share_of_projection_gemm": 0.6696972812175153
+    },
+    {
+      "backend_cluster": "FP32/SGEMM small-GEMM cluster",
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.25726860899999654
+      },
+      "count": 16637,
+      "duration_s": 0.25726860899999654,
+      "owner_groups": {
+        "HC pre linear": 0.14285371300000063,
+        "MoE router / route projection": 0.08447286100000029,
+        "lm_head": 0.026769150000000002,
+        "model HC head/expand": 0.0014538969999999996,
+        "residual / coarse owner": 0.0017189879999999999
+      },
+      "share_of_projection_gemm": 0.3303027187825439
+    }
+  ],
+  "backends": [
+    {
+      "backend_family": "cuBLAS SGEMM/FP32 GEMM",
+      "count": 16637,
+      "duration_s": 0.25726860899999654,
+      "owner_groups": {
+        "HC pre linear": 0.14285371300000063,
+        "MoE router / route projection": 0.08447286100000029,
+        "lm_head": 0.026769150000000002,
+        "model HC head/expand": 0.0014538969999999996,
+        "residual / coarse owner": 0.0017189879999999999
+      },
+      "share_of_projection_gemm": 0.3303027187825439,
+      "top_kernels": [
+        {
+          "duration_s": 0.23049945899999716,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.026769150000000002,
+          "name": "void gemmSN_TN_kernel<float, (int)128, (int)16, (int)2, (int)4, (int)4, (int)4, (bool)1, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<float>>(cublasGemmSmallNParams<T9, T10, T11, T1>)"
+        }
+      ]
+    },
+    {
+      "backend_family": "cuBLASLt BF16 GEMM",
+      "count": 21717,
+      "duration_s": 0.21991156800000214,
+      "owner_groups": {
+        "attention q_wqb": 0.05639151699999948,
+        "attention wo_a": 0.052331726999999974,
+        "attention wo_b local": 0.054506674999999394,
+        "indexer weight/compressor projection": 0.01142640499999993,
+        "indexer wq_b": 0.0427268460000001,
+        "residual / coarse owner": 0.0025283980000000007
+      },
+      "share_of_projection_gemm": 0.28234065976597233,
+      "top_kernels": [
+        {
+          "duration_s": 0.11185964699999996,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn"
+        },
+        {
+          "duration_s": 0.05256493899999995,
+          "name": "ampere_s16816gemm_bf16_64x64_sliced1x2_ldg8_stages_64x6_nn"
+        },
+        {
+          "duration_s": 0.04376608600000013,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn"
+        },
+        {
+          "duration_s": 0.011720895999999918,
+          "name": "ampere_s16816gemm_bf16_64x64_ldg8_stages_64x5_tn"
+        }
+      ]
+    },
+    {
+      "backend_family": "CUTLASS BF16 GEMM",
+      "count": 21717,
+      "duration_s": 0.19431932400000768,
+      "owner_groups": {
+        "attention WQA/WKV/compress": 0.10162259199999946,
+        "indexer weight/compressor projection": 0.018296337999999933,
+        "residual / coarse owner": 0.0027950699999999993,
+        "shared experts cached BF16": 0.07160532399999936
+      },
+      "share_of_projection_gemm": 0.24948322019803604,
+      "top_kernels": [
+        {
+          "duration_s": 0.1599493150000026,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.03437000900000024,
+          "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(T1::Params)"
+        }
+      ]
+    },
+    {
+      "backend_family": "cuBLASLt splitK/reduce",
+      "count": 40894,
+      "duration_s": 0.10738784800001386,
+      "owner_groups": {
+        "HC pre linear": 0.03551933599999872,
+        "MoE router / route projection": 0.01263636000000048,
+        "attention WQA/WKV/compress": 0.017834909000000152,
+        "attention wo_a": 0.011525420000000407,
+        "indexer weight/compressor projection": 0.013924650999999953,
+        "model HC head/expand": 0.00046136899999999994,
+        "residual / coarse owner": 0.0012435399999999978,
+        "shared experts cached BF16": 0.014242262999999958
+      },
+      "share_of_projection_gemm": 0.13787340125359648,
+      "top_kernels": [
+        {
+          "duration_s": 0.05835904199999561,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        },
+        {
+          "duration_s": 0.04902880600000116,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ]
+    }
+  ],
+  "decode_envelope_s": 3.591306012,
+  "graph_node_owner_map_count": 29222,
+  "owner_groups": [
+    {
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.14285371300000063,
+        "cuBLASLt splitK/reduce": 0.03551933599999872
+      },
+      "count": 21638,
+      "duration_s": 0.1783730490000204,
+      "graph_node_count": 172,
+      "owner": "HC pre linear",
+      "owners": {
+        "dsv4.layer*.hc_attn_pre": 0.08817992400000275,
+        "dsv4.layer*.hc_ffn_pre": 0.09019312500000304
+      },
+      "share_of_projection_gemm": 0.2290100734452195,
+      "top_kernels": [
+        {
+          "duration_s": 0.14285371300000063,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.03551933599999872,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.10162259199999946,
+        "cuBLASLt splitK/reduce": 0.017834909000000152
+      },
+      "count": 16039,
+      "duration_s": 0.11945750099999732,
+      "graph_node_count": 128,
+      "owner": "attention WQA/WKV/compress",
+      "owners": {
+        "dsv4.layer*.attn.compress": 0.042933057999999635,
+        "dsv4.layer*.attn.q_proj": 0.07652444299999965
+      },
+      "share_of_projection_gemm": 0.1533694200494865,
+      "top_kernels": [
+        {
+          "duration_s": 0.10162259199999946,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.017834909000000152,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.08447286100000029,
+        "cuBLASLt splitK/reduce": 0.01263636000000048
+      },
+      "count": 10868,
+      "duration_s": 0.09710922100000233,
+      "graph_node_count": 86,
+      "owner": "MoE router / route projection",
+      "owners": {
+        "dsv4.layer*.mlp.runner.route": 0.09710922100000233
+      },
+      "share_of_projection_gemm": 0.12467684977126808,
+      "top_kernels": [
+        {
+          "duration_s": 0.08447286100000029,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.01263636000000048,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.07160532399999936,
+        "cuBLASLt splitK/reduce": 0.014242262999999958
+      },
+      "count": 16149,
+      "duration_s": 0.0858475870000024,
+      "graph_node_count": 129,
+      "owner": "shared experts cached BF16",
+      "owners": {
+        "dsv4.shared_experts.down_proj": 0.033878715000000274,
+        "dsv4.shared_experts.gate_up_proj": 0.05196887199999672
+      },
+      "share_of_projection_gemm": 0.11021823259837406,
+      "top_kernels": [
+        {
+          "duration_s": 0.037726608999999404,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.033878715000000274,
+          "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.014242262999999958,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "cuBLASLt BF16 GEMM": 0.052331726999999974,
+        "cuBLASLt splitK/reduce": 0.011525420000000407
+      },
+      "count": 10873,
+      "duration_s": 0.06385714699999986,
+      "graph_node_count": 86,
+      "owner": "attention wo_a",
+      "owners": {
+        "dsv4.layer*.attn.wo_a": 0.06385714699999986
+      },
+      "share_of_projection_gemm": 0.08198508690889998,
+      "top_kernels": [
+        {
+          "duration_s": 0.052331726999999974,
+          "name": "ampere_s16816gemm_bf16_64x64_sliced1x2_ldg8_stages_64x6_nn"
+        },
+        {
+          "duration_s": 0.011525420000000407,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "cuBLASLt BF16 GEMM": 0.05639151699999948
+      },
+      "count": 5391,
+      "duration_s": 0.05639151699999948,
+      "graph_node_count": 43,
+      "owner": "attention q_wqb",
+      "owners": {
+        "dsv4.layer*.attn.q_wqb": 0.05639151699999948
+      },
+      "share_of_projection_gemm": 0.07240009363665555,
+      "top_kernels": [
+        {
+          "duration_s": 0.05639151699999948,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "cuBLASLt BF16 GEMM": 0.054506674999999394
+      },
+      "count": 5439,
+      "duration_s": 0.054506674999999394,
+      "graph_node_count": 43,
+      "owner": "attention wo_b local",
+      "owners": {
+        "dsv4.layer*.attn.wo_b": 0.054506674999999394
+      },
+      "share_of_projection_gemm": 0.06998017758278686,
+      "top_kernels": [
+        {
+          "duration_s": 0.054506674999999394,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.018296337999999933,
+        "cuBLASLt BF16 GEMM": 0.01142640499999993,
+        "cuBLASLt splitK/reduce": 0.013924650999999953
+      },
+      "count": 10418,
+      "duration_s": 0.04364739399999919,
+      "graph_node_count": 84,
+      "owner": "indexer weight/compressor projection",
+      "owners": {
+        "dsv4.indexer.compressor": 0.025174652999999575,
+        "dsv4.indexer.weights_proj": 0.018472741000000414
+      },
+      "share_of_projection_gemm": 0.0560381344696928,
+      "top_kernels": [
+        {
+          "duration_s": 0.018296337999999933,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.013924650999999953,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        },
+        {
+          "duration_s": 0.01142640499999993,
+          "name": "ampere_s16816gemm_bf16_64x64_ldg8_stages_64x5_tn"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "cuBLASLt BF16 GEMM": 0.0427268460000001
+      },
+      "count": 2603,
+      "duration_s": 0.0427268460000001,
+      "graph_node_count": 21,
+      "owner": "indexer wq_b",
+      "owners": {
+        "dsv4.indexer.wq_b": 0.0427268460000001
+      },
+      "share_of_projection_gemm": 0.054856258809263765,
+      "top_kernels": [
+        {
+          "duration_s": 0.0427268460000001,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.026769150000000002
+      },
+      "count": 127,
+      "duration_s": 0.026769150000000002,
+      "graph_node_count": 1,
+      "owner": "lm_head",
+      "owners": {
+        "dsv4.lm_head": 0.026769150000000002
+      },
+      "share_of_projection_gemm": 0.03436844883200599,
+      "top_kernels": [
+        {
+          "duration_s": 0.026769150000000002,
+          "name": "void gemmSN_TN_kernel<float, (int)128, (int)16, (int)2, (int)4, (int)4, (int)4, (bool)1, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<float>>(cublasGemmSmallNParams<T9, T10, T11, T1>)"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.0027950699999999993,
+        "cuBLAS SGEMM/FP32 GEMM": 0.0017189879999999999,
+        "cuBLASLt BF16 GEMM": 0.0025283980000000007,
+        "cuBLASLt splitK/reduce": 0.0012435399999999978
+      },
+      "count": 1166,
+      "duration_s": 0.008285996000000016,
+      "graph_node_count": 125,
+      "owner": "residual / coarse owner",
+      "owners": {
+        "batch_forward_bridge.engine_forward_batch.decode.bs*": 0.003850409999999992,
+        "batch_forward_bridge.token_pool_write.decode.bs*": 0.002347673999999999,
+        "sampler_logits_staging.next_tokens_to_cpu.bs*": 0.0020879119999999995
+      },
+      "share_of_projection_gemm": 0.01063824699507481,
+      "top_kernels": [
+        {
+          "duration_s": 0.0023037759999999996,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.0017189879999999999,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.00103924,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn"
+        },
+        {
+          "duration_s": 0.000961455,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn"
+        },
+        {
+          "duration_s": 0.0008317990000000003,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ]
+    },
+    {
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.0014538969999999996,
+        "cuBLASLt splitK/reduce": 0.00046136899999999994
+      },
+      "count": 254,
+      "duration_s": 0.0019152659999999958,
+      "graph_node_count": 2,
+      "owner": "model HC head/expand",
+      "owners": {
+        "dsv4.model.hc_head": 0.0019152659999999958
+      },
+      "share_of_projection_gemm": 0.002458976901421249,
+      "top_kernels": [
+        {
+          "duration_s": 0.0014538969999999996,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.00046136899999999994,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ]
+    }
+  ],
+  "owners": [
+    {
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.08447286100000029,
+        "cuBLASLt splitK/reduce": 0.01263636000000048
+      },
+      "count": 10868,
+      "duration_s": 0.09710922100000233,
+      "graph_node_count": 86,
+      "owner": "dsv4.layer*.mlp.runner.route",
+      "owner_family": "MoE router / route projection",
+      "share_of_projection_gemm": 0.12467684977126808,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4FusedMoERunner.route / DSV4TopK.forward",
+      "top_kernels": [
+        {
+          "duration_s": 0.08447286100000029,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.01263636000000048,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/models/deepseek_v4.py:DeepseekV4MoE GateLinear / FusedMoE router"
+    },
+    {
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.07233140800000047,
+        "cuBLASLt splitK/reduce": 0.017861716999999333
+      },
+      "count": 10885,
+      "duration_s": 0.09019312500000304,
+      "graph_node_count": 86,
+      "owner": "dsv4.layer*.hc_ffn_pre",
+      "owner_family": "HC pre linear",
+      "share_of_projection_gemm": 0.11579739369988679,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DeepseekV4DecoderLayer._hc_pre; python/minisgl/kernel/deepseek_v4.py:linear_bf16_fp32_fallback",
+      "top_kernels": [
+        {
+          "duration_s": 0.07233140800000047,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.017861716999999333,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/layers/mhc.py:mhc_pre SM80 reference uses FP32 matmul plus fused Triton pre kernel"
+    },
+    {
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.07052230500000024,
+        "cuBLASLt splitK/reduce": 0.017657618999999288
+      },
+      "count": 10753,
+      "duration_s": 0.08817992400000275,
+      "graph_node_count": 86,
+      "owner": "dsv4.layer*.hc_attn_pre",
+      "owner_family": "HC pre linear",
+      "share_of_projection_gemm": 0.11321267974531396,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DeepseekV4DecoderLayer._hc_pre; python/minisgl/kernel/deepseek_v4.py:linear_bf16_fp32_fallback",
+      "top_kernels": [
+        {
+          "duration_s": 0.07052230500000024,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.017657618999999288,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/layers/mhc.py:mhc_pre SM80 reference uses FP32 matmul plus fused Triton pre kernel"
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.06499256700000004,
+        "cuBLASLt splitK/reduce": 0.011531876000000474
+      },
+      "count": 10770,
+      "duration_s": 0.07652444299999965,
+      "graph_node_count": 86,
+      "owner": "dsv4.layer*.attn.q_proj",
+      "owner_family": "attention WQA/WKV/compress",
+      "share_of_projection_gemm": 0.0982484092189422,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward q_proj/compress",
+      "top_kernels": [
+        {
+          "duration_s": 0.06499256700000004,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.011531876000000474,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/models/deepseek_v4.py:fused_wqa_wkv; layers/deepseek_v4_attention.py wrapper"
+    },
+    {
+      "backend_families": {
+        "cuBLASLt BF16 GEMM": 0.052331726999999974,
+        "cuBLASLt splitK/reduce": 0.011525420000000407
+      },
+      "count": 10873,
+      "duration_s": 0.06385714699999986,
+      "graph_node_count": 86,
+      "owner": "dsv4.layer*.attn.wo_a",
+      "owner_family": "attention wo_a",
+      "share_of_projection_gemm": 0.08198508690889998,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward wo_a cached BF16 BMM",
+      "top_kernels": [
+        {
+          "duration_s": 0.052331726999999974,
+          "name": "ampere_s16816gemm_bf16_64x64_sliced1x2_ldg8_stages_64x6_nn"
+        },
+        {
+          "duration_s": 0.011525420000000407,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/layers/deepseek_v4_attention.py:DeepseekV4MLA wrapper"
+    },
+    {
+      "backend_families": {
+        "cuBLASLt BF16 GEMM": 0.05639151699999948
+      },
+      "count": 5391,
+      "duration_s": 0.05639151699999948,
+      "graph_node_count": 43,
+      "owner": "dsv4.layer*.attn.q_wqb",
+      "owner_family": "attention q_wqb",
+      "share_of_projection_gemm": 0.07240009363665555,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward q_wqb cached BF16",
+      "top_kernels": [
+        {
+          "duration_s": 0.05639151699999948,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/layers/deepseek_v4_attention.py:DeepseekV4MLA wrapper"
+    },
+    {
+      "backend_families": {
+        "cuBLASLt BF16 GEMM": 0.054506674999999394
+      },
+      "count": 5439,
+      "duration_s": 0.054506674999999394,
+      "graph_node_count": 43,
+      "owner": "dsv4.layer*.attn.wo_b",
+      "owner_family": "attention wo_b local",
+      "share_of_projection_gemm": 0.06998017758278686,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward wo_b cached BF16 local GEMM",
+      "top_kernels": [
+        {
+          "duration_s": 0.054506674999999394,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/layers/deepseek_v4_attention.py:DeepseekV4MLA wrapper"
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.037726608999999404,
+        "cuBLASLt splitK/reduce": 0.014242262999999958
+      },
+      "count": 10766,
+      "duration_s": 0.05196887199999672,
+      "graph_node_count": 86,
+      "owner": "dsv4.shared_experts.gate_up_proj",
+      "owner_family": "shared experts cached BF16",
+      "share_of_projection_gemm": 0.06672193619106156,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4SharedExperts.forward cached BF16",
+      "top_kernels": [
+        {
+          "duration_s": 0.037726608999999404,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.014242262999999958,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/models/deepseek_v4.py:DeepseekV4MoE shared_experts passed to FusedMoE"
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.036630024999999906,
+        "cuBLASLt splitK/reduce": 0.006303032999999896
+      },
+      "count": 5269,
+      "duration_s": 0.042933057999999635,
+      "graph_node_count": 42,
+      "owner": "dsv4.layer*.attn.compress",
+      "owner_family": "attention WQA/WKV/compress",
+      "share_of_projection_gemm": 0.05512101083054683,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward q_proj/compress",
+      "top_kernels": [
+        {
+          "duration_s": 0.036630024999999906,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.006303032999999896,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/models/deepseek_v4.py:fused_wqa_wkv; layers/deepseek_v4_attention.py wrapper"
+    },
+    {
+      "backend_families": {
+        "cuBLASLt BF16 GEMM": 0.0427268460000001
+      },
+      "count": 2603,
+      "duration_s": 0.0427268460000001,
+      "graph_node_count": 21,
+      "owner": "dsv4.indexer.wq_b",
+      "owner_family": "indexer wq_b",
+      "share_of_projection_gemm": 0.054856258809263765,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4Indexer._wq_b_forward cached BF16",
+      "top_kernels": [
+        {
+          "duration_s": 0.0427268460000001,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/layers/deepseek_v4_attention.py:DeepseekV4Indexer and fused_indexer_q_rope_quant"
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.033878715000000274
+      },
+      "count": 5383,
+      "duration_s": 0.033878715000000274,
+      "graph_node_count": 43,
+      "owner": "dsv4.shared_experts.down_proj",
+      "owner_family": "shared experts cached BF16",
+      "share_of_projection_gemm": 0.04349629640730554,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4SharedExperts.forward cached BF16",
+      "top_kernels": [
+        {
+          "duration_s": 0.033878715000000274,
+          "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(T1::Params)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/models/deepseek_v4.py:DeepseekV4MoE shared_experts passed to FusedMoE"
+    },
+    {
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.026769150000000002
+      },
+      "count": 127,
+      "duration_s": 0.026769150000000002,
+      "graph_node_count": 1,
+      "owner": "dsv4.lm_head",
+      "owner_family": "lm_head",
+      "share_of_projection_gemm": 0.03436844883200599,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DeepseekV4ForCausalLM.forward / DSV4VocabParallelEmbedding.linear",
+      "top_kernels": [
+        {
+          "duration_s": 0.026769150000000002,
+          "name": "void gemmSN_TN_kernel<float, (int)128, (int)16, (int)2, (int)4, (int)4, (int)4, (bool)1, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<float>>(cublasGemmSmallNParams<T9, T10, T11, T1>)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/models/deepseek_v4.py:ParallelLMHead / logits_processor"
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.018296337999999933,
+        "cuBLASLt splitK/reduce": 0.006878315000000032
+      },
+      "count": 5216,
+      "duration_s": 0.025174652999999575,
+      "graph_node_count": 42,
+      "owner": "dsv4.indexer.compressor",
+      "owner_family": "indexer weight/compressor projection",
+      "share_of_projection_gemm": 0.03232130170341574,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4Indexer.forward / DSV4Compressor.forward",
+      "top_kernels": [
+        {
+          "duration_s": 0.018296337999999933,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.006878315000000032,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/layers/deepseek_v4_attention.py:DeepseekV4Indexer and fused_indexer_q_rope_quant"
+    },
+    {
+      "backend_families": {
+        "cuBLASLt BF16 GEMM": 0.01142640499999993,
+        "cuBLASLt splitK/reduce": 0.007046335999999984
+      },
+      "count": 5202,
+      "duration_s": 0.018472741000000414,
+      "graph_node_count": 42,
+      "owner": "dsv4.indexer.weights_proj",
+      "owner_family": "indexer weight/compressor projection",
+      "share_of_projection_gemm": 0.023716832766278097,
+      "source_boundary": "python/minisgl/models/deepseek_v4.py:DSV4Indexer.forward / DSV4Compressor.forward",
+      "top_kernels": [
+        {
+          "duration_s": 0.01142640499999993,
+          "name": "ampere_s16816gemm_bf16_64x64_ldg8_stages_64x5_tn"
+        },
+        {
+          "duration_s": 0.007046335999999984,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "vllm/model_executor/layers/deepseek_v4_attention.py:DeepseekV4Indexer and fused_indexer_q_rope_quant"
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.0014223840000000007,
+        "cuBLAS SGEMM/FP32 GEMM": 0.0009832510000000005,
+        "cuBLASLt BF16 GEMM": 0.0009032459999999999,
+        "cuBLASLt splitK/reduce": 0.0005415290000000006
+      },
+      "count": 535,
+      "duration_s": 0.003850409999999992,
+      "graph_node_count": 82,
+      "owner": "batch_forward_bridge.engine_forward_batch.decode.bs*",
+      "owner_family": "residual / coarse owner",
+      "share_of_projection_gemm": 0.004943474823341193,
+      "source_boundary": "profile graphNodeId owner mapping",
+      "top_kernels": [
+        {
+          "duration_s": 0.001107186,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.0009832510000000005,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.00039045600000000007,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn"
+        },
+        {
+          "duration_s": 0.0003506830000000004,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        },
+        {
+          "duration_s": 0.000315198,
+          "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(T1::Params)"
+        }
+      ],
+      "vllm_analogue": "no focused vLLM source analogue selected"
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.0006638269999999999,
+        "cuBLAS SGEMM/FP32 GEMM": 0.00036131,
+        "cuBLASLt BF16 GEMM": 0.000956588,
+        "cuBLASLt splitK/reduce": 0.0003659490000000001
+      },
+      "count": 329,
+      "duration_s": 0.002347673999999999,
+      "graph_node_count": 52,
+      "owner": "batch_forward_bridge.token_pool_write.decode.bs*",
+      "owner_family": "residual / coarse owner",
+      "share_of_projection_gemm": 0.00301413805605448,
+      "source_boundary": "profile graphNodeId owner mapping",
+      "top_kernels": [
+        {
+          "duration_s": 0.0006323389999999999,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.0004385180000000001,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn"
+        },
+        {
+          "duration_s": 0.00036131,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.00032680899999999995,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn"
+        },
+        {
+          "duration_s": 0.00026233299999999985,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "no focused vLLM source analogue selected"
+    },
+    {
+      "backend_families": {
+        "CUTLASS BF16 GEMM": 0.0007088590000000003,
+        "cuBLAS SGEMM/FP32 GEMM": 0.000374427,
+        "cuBLASLt BF16 GEMM": 0.0006685639999999999,
+        "cuBLASLt splitK/reduce": 0.0003360620000000001
+      },
+      "count": 302,
+      "duration_s": 0.0020879119999999995,
+      "graph_node_count": 56,
+      "owner": "sampler_logits_staging.next_tokens_to_cpu.bs*",
+      "owner_family": "residual / coarse owner",
+      "share_of_projection_gemm": 0.0026806341156791033,
+      "source_boundary": "profile graphNodeId owner mapping",
+      "top_kernels": [
+        {
+          "duration_s": 0.000564251,
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+        },
+        {
+          "duration_s": 0.000374427,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.00032204399999999995,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn"
+        },
+        {
+          "duration_s": 0.00021878299999999995,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        },
+        {
+          "duration_s": 0.00021026600000000002,
+          "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn"
+        }
+      ],
+      "vllm_analogue": "no focused vLLM source analogue selected"
+    },
+    {
+      "backend_families": {
+        "cuBLAS SGEMM/FP32 GEMM": 0.0014538969999999996,
+        "cuBLASLt splitK/reduce": 0.00046136899999999994
+      },
+      "count": 254,
+      "duration_s": 0.0019152659999999958,
+      "graph_node_count": 2,
+      "owner": "dsv4.model.hc_head",
+      "owner_family": "model HC head/expand",
+      "share_of_projection_gemm": 0.002458976901421249,
+      "source_boundary": "profile graphNodeId owner mapping",
+      "top_kernels": [
+        {
+          "duration_s": 0.0014538969999999996,
+          "name": "ampere_sgemm_32x32_sliced1x4_tn"
+        },
+        {
+          "duration_s": 0.00046136899999999994,
+          "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+        }
+      ],
+      "vllm_analogue": "no focused vLLM source analogue selected"
+    }
+  ],
+  "projection_gemm_count": 100965,
+  "projection_gemm_s": 0.7788873489999043,
+  "repeat_nvtx": "repeat:decode_throughput_bs8:0",
+  "sqlite_path": "performance_milestones/target07_post_shared_expert_reprofile/raw/nsys_target0767_dsv4_sm80_a100_victory_4096x128_bs4_np128_rank0.sqlite",
+  "top_kernels": [
+    {
+      "backend_family": "cuBLAS SGEMM/FP32 GEMM",
+      "count": 16510,
+      "duration_s": 0.23049945899999716,
+      "graph_count": 16510,
+      "graph_node_count": 130,
+      "name": "ampere_sgemm_32x32_sliced1x4_tn"
+    },
+    {
+      "backend_family": "CUTLASS BF16 GEMM",
+      "count": 16256,
+      "duration_s": 0.1599493150000026,
+      "graph_count": 16256,
+      "graph_node_count": 128,
+      "name": "void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_64x64_64x6_tn_align8>(T1::Params)"
+    },
+    {
+      "backend_family": "cuBLASLt BF16 GEMM",
+      "count": 10922,
+      "duration_s": 0.11185964699999996,
+      "graph_count": 10922,
+      "graph_node_count": 86,
+      "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x6_tn"
+    },
+    {
+      "backend_family": "cuBLASLt splitK/reduce",
+      "count": 24384,
+      "duration_s": 0.05835904199999561,
+      "graph_count": 24384,
+      "graph_node_count": 192,
+      "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+    },
+    {
+      "backend_family": "cuBLASLt BF16 GEMM",
+      "count": 5461,
+      "duration_s": 0.05256493899999995,
+      "graph_count": 5461,
+      "graph_node_count": 43,
+      "name": "ampere_s16816gemm_bf16_64x64_sliced1x2_ldg8_stages_64x6_nn"
+    },
+    {
+      "backend_family": "cuBLASLt splitK/reduce",
+      "count": 16510,
+      "duration_s": 0.04902880600000116,
+      "graph_count": 16510,
+      "graph_node_count": 130,
+      "name": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+    },
+    {
+      "backend_family": "cuBLASLt BF16 GEMM",
+      "count": 2667,
+      "duration_s": 0.04376608600000013,
+      "graph_count": 2667,
+      "graph_node_count": 21,
+      "name": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_tn"
+    },
+    {
+      "backend_family": "CUTLASS BF16 GEMM",
+      "count": 5461,
+      "duration_s": 0.03437000900000024,
+      "graph_count": 5461,
+      "graph_node_count": 43,
+      "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(T1::Params)"
+    },
+    {
+      "backend_family": "cuBLAS SGEMM/FP32 GEMM",
+      "count": 127,
+      "duration_s": 0.026769150000000002,
+      "graph_count": 127,
+      "graph_node_count": 1,
+      "name": "void gemmSN_TN_kernel<float, (int)128, (int)16, (int)2, (int)4, (int)4, (int)4, (bool)1, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<float>>(cublasGemmSmallNParams<T9, T10, T11, T1>)"
+    },
+    {
+      "backend_family": "cuBLASLt BF16 GEMM",
+      "count": 2667,
+      "duration_s": 0.011720895999999918,
+      "graph_count": 2667,
+      "graph_node_count": 21,
+      "name": "ampere_s16816gemm_bf16_64x64_ldg8_stages_64x5_tn"
+    }
+  ]
+}

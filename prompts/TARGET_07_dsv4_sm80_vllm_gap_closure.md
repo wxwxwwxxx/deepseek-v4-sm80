@@ -61,7 +61,9 @@ victory bundle and changed the bottleneck order again.  TARGET 07.67 confirmed
 the promoted path and selected HC/elementwise graph cleanup as the next exact
 implementation target.  TARGET 07.68 proved that HC cleanup is correct but too
 small to promote, so the active next step is projection/GEMM backend and owner
-re-attribution on the current promoted path.
+re-attribution on the current promoted path.  TARGET 07.69 proved that the old
+FP8 quantized-linear projection bottleneck is gone and selected the current
+BF16 small-GEMM backend cluster as the next implementation surface.
 
 ## New TARGET 07 Organization
 
@@ -96,7 +98,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.66 | `prompts/TARGET_07.66_dsv4_sm80_moe_shared_expert_staging_cleanup.md` | completed | Promoted shared expert BF16 weight cache into `dsv4_sm80_a100_victory`; MoE/shared direct-copy staging fell `0.379204s -> 0.097361s`, and 4096/1024 reached `131.7707 output tok/s`. |
 | TARGET 07.67 | `prompts/TARGET_07.67_dsv4_sm80_post_shared_expert_reprofile.md` | completed | Confirmed the promoted post-07.66 path at `131.6263 output tok/s` on 4096/1024 and selected HC/elementwise graph cleanup from fresh bucket evidence. |
 | TARGET 07.68 | `prompts/TARGET_07.68_dsv4_sm80_hc_elementwise_graph_cleanup.md` | completed | Added an exact BF16 opt-in HC graph cleanup path. Focused HC pre improved, correctness passed, but 4096/1024 macro and profile gates failed; keep opt-in, do not promote. |
-| TARGET 07.69 | `prompts/TARGET_07.69_dsv4_sm80_projection_gemm_backend_owner_reattribution.md` | next todo | Re-attribute the current promoted projection/GEMM bucket by owner and backend after the cached BF16 projection/shared-expert wins, then choose one evidence-backed implementation target. |
+| TARGET 07.69 | `prompts/TARGET_07.69_dsv4_sm80_projection_gemm_backend_owner_reattribution.md` | completed | Re-attributed the current promoted projection/GEMM bucket with `98.94%` named coverage. No single owner clears `0.20s`; the selected next surface is the BF16 small-GEMM + splitK/reduce cluster at `0.521619s`. |
+| TARGET 07.70 | `prompts/TARGET_07.70_dsv4_sm80_bf16_small_gemm_backend_cluster.md` | next todo | Try exact-route BF16 small-GEMM backend solutions: cuBLASLt algorithm/splitK policy, prepacked layout, CUTLASS/Triton small-M kernels, owner-local grouped/fused GEMM, and narrow compile probes only if earlier lanes fail. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -133,7 +136,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.69 next.
+Run TARGET 07.70 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -556,15 +559,35 @@ but it does not move the promoted long-decode path enough.  A stronger HC
 target would need to move prenorm/squared-sum closer to the matmul backend or
 make an explicit FP32-carrier decision against vLLM's `post/comb` behavior.
 
-The active next target is TARGET 07.69: projection/GEMM backend and owner
-re-attribution.  The important nuance is that TARGET 07.57's projection owner
-table is stale: after the cached BF16 projection stack and shared expert cache,
-the remaining `0.778887s` projection/GEMM bucket may be owned by different
-paths such as HC pre linear, remaining attention/indexer projections, cached
-BF16 small-M GEMMs, shared expert compute, lm-head/logits, or backend-generated
-cublasLt split/reduce kernels.  TARGET 07.69 must explain the current bucket by
-owner and backend before selecting any further GEMM, cache, precision, or graph
-implementation target.
+TARGET 07.69 completed projection/GEMM backend and owner re-attribution without
+runtime changes.  Existing 07.67/07.68 profiles were sufficient; no new profile
+or projection-specific NVTX was required.  The key results were:
+
+- projection/GEMM bucket: `0.778887s`;
+- named/grouped owner coverage: `98.94%`;
+- residual/coarse owner time: `0.008286s`;
+- residual `_quantized_linear_fp8_kernel` time: `0.000000s`;
+- largest single owner: HC pre linear, `0.178373s`, below the `0.20s`
+  single-owner gate;
+- selected backend cluster: BF16 small-GEMM + splitK/reduce,
+  `0.521619s`, `66.97%` of projection/GEMM;
+- FP32/SGEMM small-GEMM cluster: `0.257269s`, useful context but not the
+  selected surface.
+
+This proves that TARGET 07.57's old projection conclusion is obsolete.  The
+promoted cached BF16 projection stack removed the old FP8 quantized-linear
+bottleneck.  The remaining exact-route projection problem is now many
+decode-small BF16 GEMMs with fixed backend/launch/splitK overhead spread across
+attention WQA/WKV/compress, shared experts, `wo_a`, `q_wqb`, `wo_b`, indexer
+projections, and related owners.
+
+The active next target is TARGET 07.70: BF16 small-GEMM backend cluster.  It
+should try exact-route backend solutions first: cuBLASLt algorithm and splitK
+policy, prepacked/pretransposed BF16 layouts, custom CUTLASS/Triton small-M
+kernels, owner-local grouped/fused GEMM where dependencies allow it, and narrow
+compile probes only if the backend lanes fail.  Promotion requires a fresh
+profile reduction of at least `0.10s` in projection/GEMM or at least `20%` in
+the BF16 cluster, plus at least `3%` same-run 4096/1024 macro improvement.
 
 ## Precision Policy
 
