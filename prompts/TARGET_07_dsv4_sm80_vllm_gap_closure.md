@@ -75,7 +75,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.58 | `prompts/TARGET_07.58_dsv4_sm80_cached_bf16_projection_backend.md` | completed | Promoted opt-in cached BF16 dequantized weights for `attn.q_wqb`; 4096/128 improved to `47.9464 output tok/s`, 4096/1024 to `92.5170`, with only `0.3359 GiB/rank` extra cache. |
 | TARGET 07.59 | `prompts/TARGET_07.59_dsv4_sm80_cached_bf16_wo_b_projection_backend.md` | completed | Extended cached BF16 to row-parallel `attn.wo_b`; 4096/128 reached `49.6585 output tok/s`, 4096/1024 reached `98.6953`, and `wo_b` local compute fell to `0.070595s` while all-reduce remained `0.161865s`. |
 | TARGET 07.60 | `prompts/TARGET_07.60_dsv4_sm80_cached_bf16_indexer_wq_b_projection_backend.md` | completed | Extended cached BF16 to `indexer.wq_b`; 4096/128 reached `51.2962 output tok/s`, 4096/1024 reached `105.7645`, and the three cached owners cost exactly `1.0000 GiB/rank`. |
-| TARGET 07.61 | `prompts/TARGET_07.61_dsv4_sm80_post_cached_bf16_vllm_parity_reprofile.md` | next todo | Freeze the three-owner cached BF16 mini baseline, compare it against vLLM at macro/bucket/owner/source-boundary levels, and choose the next implementation target from evidence. |
+| TARGET 07.61 | `prompts/TARGET_07.61_dsv4_sm80_post_cached_bf16_vllm_parity_reprofile.md` | completed | Completed post-cached-BF16 parity reprofile. vLLM runtime bucket timing is still unavailable, but mini owner timing plus vLLM source parity select `attn.wo_a` as the next narrow boundary. |
+| TARGET 07.62 | `prompts/TARGET_07.62_dsv4_sm80_wo_a_attention_boundary_parity.md` | next todo | Adapt mini's `attn.wo_a` boundary toward vLLM's SM80 per-group BF16 BMM/cache path, with focused owner/macro/memory gates and no default precision change. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -112,7 +113,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.61 next.
+Run TARGET 07.62 next.
 
 TARGET 07.395 proved that mini's exact bf16 sparse decode boundary can match
 the comparable vLLM gather+split-K decode boundary:
@@ -359,6 +360,24 @@ TARGET 07.61 is therefore an evidence target: freeze this mini baseline,
 compare it against vLLM at macro, bucket, owner, and source-dispatch levels,
 then select exactly one next implementation target.  Do not start another
 cached-weight expansion or generic graph/layout pass before that parity report.
+
+TARGET 07.61 completed without landing a runtime optimization.  It confirmed:
+
+- mini 07.60 remains at `105.7645 output tok/s` on 4096/1024/batch4, about
+  `7.28%` below the old `114.07 output tok/s` serving victory line;
+- vLLM macro remains much faster, about `202.03 output tok/s` on
+  4096/1024/batch4, but the fresh vLLM Nsight repeat window did not contain
+  usable CUDA kernels, so vLLM per-bucket timing remains unavailable;
+- the strongest mini single-owner boundary is `attn.wo_a`, with `0.481377s`
+  owner time, including `0.290148s` copy/layout and `0.137695s` elementwise;
+- vLLM has a concrete SM80 source boundary for this owner: per-group BF16 BMM
+  weight cache via `_ensure_wo_a_bmm_weight()` and `_apply_wo_a_bmm()`.
+
+TARGET 07.62 should therefore test an opt-in `wo_a` BF16 grouped BMM/cache path.
+This target must preserve graph replay, keep eager decode at `0`, record the
+new memory cost, and stop if the owner or macro gates do not move.  Do not jump
+straight to vLLM's fused inverse-RoPE plus FP8 einsum path unless the final
+report recommends it as a separate precision-boundary target.
 
 ## Precision Policy
 
