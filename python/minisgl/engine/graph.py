@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Dict, List
 import torch
 from minisgl.core import Batch, Req, get_global_ctx
 from minisgl.distributed import get_tp_info
-from minisgl.utils import init_logger
+from minisgl.utils import dsv4_direct_copy_nvtx, init_logger
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -55,9 +55,24 @@ class GraphCaptureBuffer:
 
     def copy_from(self, batch: Batch) -> int:
         _slice = slice(batch.padded_size)
-        self.input_ids[_slice] = batch.input_ids
-        self.out_loc[_slice] = batch.out_loc
-        self.positions[_slice] = batch.positions
+        with dsv4_direct_copy_nvtx(
+            f"graph_input_staging.input_ids.bs{batch.size}.padded{batch.padded_size}",
+            dst=self.input_ids[_slice],
+            src=batch.input_ids,
+        ):
+            self.input_ids[_slice] = batch.input_ids
+        with dsv4_direct_copy_nvtx(
+            f"graph_input_staging.out_loc.bs{batch.size}.padded{batch.padded_size}",
+            dst=self.out_loc[_slice],
+            src=batch.out_loc,
+        ):
+            self.out_loc[_slice] = batch.out_loc
+        with dsv4_direct_copy_nvtx(
+            f"graph_input_staging.positions.bs{batch.size}.padded{batch.padded_size}",
+            dst=self.positions[_slice],
+            src=batch.positions,
+        ):
+            self.positions[_slice] = batch.positions
         copied_items = int(batch.padded_size)
         return copied_items * (
             self.input_ids.element_size()
@@ -255,10 +270,22 @@ class GraphRunner:
 
     def _replay_to_buffer(self, batch: Batch) -> None:
         assert self.can_use_cuda_graph(batch)
-        copied_bytes = self.buffer.copy_from(batch)
+        with dsv4_direct_copy_nvtx(
+            f"graph_input_staging.copy_from.bs{batch.size}.padded{batch.padded_size}",
+            input_ids=batch.input_ids,
+            out_loc=batch.out_loc,
+            positions=batch.positions,
+        ):
+            copied_bytes = self.buffer.copy_from(batch)
         g = self.graph_map[batch.padded_size]
-        self.attn_backend.prepare_for_replay(batch)
-        g.replay()
+        with dsv4_direct_copy_nvtx(
+            f"replay_metadata_copy.prepare_for_replay.bs{batch.size}.padded{batch.padded_size}"
+        ):
+            self.attn_backend.prepare_for_replay(batch)
+        with dsv4_direct_copy_nvtx(
+            f"static_graph_replay.g.replay.bs{batch.size}.padded{batch.padded_size}"
+        ):
+            g.replay()
         self.capture_status["replay_count"] = int(self.capture_status["replay_count"]) + 1
         self.capture_status["replay_input_copy_bytes"] = int(
             self.capture_status["replay_input_copy_bytes"]

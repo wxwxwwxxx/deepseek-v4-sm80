@@ -1,0 +1,56 @@
+{
+  "decode_envelope_wall_s": 4.010319755,
+  "decode_forward_count": 127,
+  "mode": "subboundary_summary",
+  "named_owner_direct_copy_s": 0,
+  "named_owner_share": 0.0,
+  "notes": [
+    "Pre-instrumentation control built from existing sub-boundary summary because raw sqlite is not present in this workspace.",
+    "Coarse batch_forward owners are intentionally residual for the 07.65 owner gate."
+  ],
+  "owners": [
+    {
+      "count": 118072,
+      "display_owner": "residual coarse benchmark envelope: batch_forward:decode:bs4:padded4",
+      "duration_s": 0.47133428900006114,
+      "evidence": "existing sub-boundary JSON owner_breakdown; coarse benchmark NVTX; pre-instrumentation only",
+      "example_kernels": [],
+      "graph_count": null,
+      "named_owner": false,
+      "owner": "batch_forward:decode:bs4:padded4",
+      "share_of_direct_copy": 0.6440449519746665,
+      "source": "benchmark/offline/deepseek_v4_perf_matrix.py:BenchScheduler._forward"
+    },
+    {
+      "count": 70904,
+      "display_owner": "residual coarse benchmark envelope: batch_forward_enqueue:decode:bs4:padded4",
+      "duration_s": 0.2586622069999933,
+      "evidence": "existing sub-boundary JSON owner_breakdown; coarse benchmark NVTX; pre-instrumentation only",
+      "example_kernels": [],
+      "graph_count": null,
+      "named_owner": false,
+      "owner": "batch_forward_enqueue:decode:bs4:padded4",
+      "share_of_direct_copy": 0.353443601649254,
+      "source": "benchmark/offline/deepseek_v4_perf_matrix.py:BenchScheduler._forward"
+    },
+    {
+      "count": 756,
+      "display_owner": "residual coarse benchmark envelope: batch_prepare:decode:bs4",
+      "duration_s": 0.0018379629999999932,
+      "evidence": "existing sub-boundary JSON owner_breakdown; coarse benchmark NVTX; pre-instrumentation only",
+      "example_kernels": [],
+      "graph_count": null,
+      "named_owner": false,
+      "owner": "batch_prepare:decode:bs4",
+      "share_of_direct_copy": 0.002511446376153754,
+      "source": "benchmark/offline/deepseek_v4_perf_matrix.py:BenchScheduler._forward"
+    }
+  ],
+  "repeat_nvtx": "repeat:decode_throughput_bs8:0",
+  "residual_direct_copy_s": 0.7318344590000544,
+  "residual_share": 1.0000000000000742,
+  "sqlite_path": "/tmp/nsys_target0764_metadatadeforest_4096x128_bs4_np128_rank0.sqlite",
+  "summary_path": "performance_milestones/target07_decode_metadata_deforestation/summaries/nsys_target0764_metadatadeforest_4096x128_bs4_np128_rank0_decode_metadata_subboundary.json",
+  "total_direct_copy_count": 189732,
+  "total_direct_copy_s": 0.7318344590000001
+}

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from minisgl.core import Batch, get_global_ctx
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
-from minisgl.utils import div_ceil
+from minisgl.utils import div_ceil, dsv4_direct_copy_nvtx
 
 from .base import BaseAttnBackend, BaseAttnMetadata
 
@@ -483,13 +483,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if getattr(batch, "attn_metadata", None) is not self.capture:
             return
         core = self.capture.core_metadata
-        dsv4_kernel.copy_masked_compressed_locs(
-            core.raw_out_loc,
-            core.positions,
-            core.c4_out_loc,
-            core.c128_out_loc,
-            batch.padded_size,
-        )
+        with dsv4_direct_copy_nvtx(
+            f"static_graph_input_updates.capture_compressed_locs.bs{batch.size}.padded{batch.padded_size}",
+            raw_out_loc=core.raw_out_loc,
+            positions=core.positions,
+        ):
+            dsv4_kernel.copy_masked_compressed_locs(
+                core.raw_out_loc,
+                core.positions,
+                core.c4_out_loc,
+                core.c128_out_loc,
+                batch.padded_size,
+            )
 
     def prepare_for_replay(self, batch: Batch) -> None:
         assert self.capture is not None
@@ -829,39 +834,72 @@ class DSV4AttentionBackend(BaseAttnBackend):
         rows = q.shape[0]
         if rows == 0:
             return q.new_empty(q.shape)
-        swa_indices = metadata.swa_page_indices[:rows].to(device=q.device, dtype=torch.int32)
-        swa_lengths = metadata.swa_topk_lengths[:rows].to(device=q.device, dtype=torch.int32)
+        with dsv4_direct_copy_nvtx(
+            f"attention_boundary.swa_indices_to_i32.layer{layer_id}.rows{rows}",
+            src=metadata.swa_page_indices[:rows],
+        ):
+            swa_indices = metadata.swa_page_indices[:rows].to(device=q.device, dtype=torch.int32)
+        with dsv4_direct_copy_nvtx(
+            f"attention_boundary.swa_lengths_to_i32.layer{layer_id}.rows{rows}",
+            src=metadata.swa_topk_lengths[:rows],
+        ):
+            swa_lengths = metadata.swa_topk_lengths[:rows].to(device=q.device, dtype=torch.int32)
         swa_lengths = swa_lengths.clamp(max=swa_indices.shape[-1])
 
         compressed_cache = None
         compressed_indices = None
         compressed_lengths = None
         if compress_ratio == 4:
-            compressed_cache = self.kvcache.c4_cache(layer_id).to(q.dtype)
-            compressed_indices = metadata.c4_sparse_page_indices[:rows].to(
-                device=q.device,
-                dtype=torch.int32,
-            )
-            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE):
-                compressed_lengths = metadata.c4_sparse_topk_lengths[:rows].to(
+            with dsv4_direct_copy_nvtx(
+                f"attention_boundary.c4_cache_to_q_dtype.layer{layer_id}.rows{rows}",
+                src=self.kvcache.c4_cache(layer_id),
+            ):
+                compressed_cache = self.kvcache.c4_cache(layer_id).to(q.dtype)
+            with dsv4_direct_copy_nvtx(
+                f"attention_boundary.c4_sparse_page_indices_to_i32.layer{layer_id}.rows{rows}",
+                src=metadata.c4_sparse_page_indices[:rows],
+            ):
+                compressed_indices = metadata.c4_sparse_page_indices[:rows].to(
                     device=q.device,
                     dtype=torch.int32,
                 )
+            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE):
+                with dsv4_direct_copy_nvtx(
+                    f"attention_boundary.c4_sparse_topk_lengths_to_i32.layer{layer_id}.rows{rows}",
+                    src=metadata.c4_sparse_topk_lengths[:rows],
+                ):
+                    compressed_lengths = metadata.c4_sparse_topk_lengths[:rows].to(
+                        device=q.device,
+                        dtype=torch.int32,
+                    )
                 compressed_lengths = compressed_lengths.clamp(max=compressed_indices.shape[-1])
             else:
                 compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
         elif compress_ratio == 128:
-            compressed_cache = self.kvcache.c128_cache(layer_id).to(q.dtype)
-            compressed_indices = metadata.c128_page_indices[:rows].to(
-                device=q.device,
-                dtype=torch.int32,
-            )
+            with dsv4_direct_copy_nvtx(
+                f"attention_boundary.c128_cache_to_q_dtype.layer{layer_id}.rows{rows}",
+                src=self.kvcache.c128_cache(layer_id),
+            ):
+                compressed_cache = self.kvcache.c128_cache(layer_id).to(q.dtype)
+            with dsv4_direct_copy_nvtx(
+                f"attention_boundary.c128_page_indices_to_i32.layer{layer_id}.rows{rows}",
+                src=metadata.c128_page_indices[:rows],
+            ):
+                compressed_indices = metadata.c128_page_indices[:rows].to(
+                    device=q.device,
+                    dtype=torch.int32,
+                )
             compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
 
         if metadata.max_seqlen_q <= 1:
+            with dsv4_direct_copy_nvtx(
+                f"attention_boundary.swa_cache_to_q_dtype.splitk.layer{layer_id}.rows{rows}",
+                src=self.kvcache.swa_cache(layer_id),
+            ):
+                splitk_swa_cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
             fast = dsv4_kernel.dsv4_sparse_attention_two_source_splitk_bf16(
                 q,
-                self.kvcache.swa_cache(layer_id).to(q.dtype),
+                splitk_swa_cache,
                 swa_indices,
                 swa_lengths,
                 compressed_cache=compressed_cache,
@@ -873,9 +911,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
             if fast is not None:
                 return fast
 
+        with dsv4_direct_copy_nvtx(
+            f"attention_boundary.swa_cache_to_q_dtype.base.layer{layer_id}.rows{rows}",
+            src=self.kvcache.swa_cache(layer_id),
+        ):
+            base_swa_cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
         fast = dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
             q,
-            self.kvcache.swa_cache(layer_id).to(q.dtype),
+            base_swa_cache,
             swa_indices,
             swa_lengths,
             compressed_cache=compressed_cache,
@@ -888,9 +931,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
             return fast
         if compressed_cache is None:
             return None
+        with dsv4_direct_copy_nvtx(
+            f"attention_boundary.swa_cache_to_q_dtype.torch_fallback.layer{layer_id}.rows{rows}",
+            src=self.kvcache.swa_cache(layer_id),
+        ):
+            fallback_swa_cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
         return self._two_source_attention_torch(
             q,
-            self.kvcache.swa_cache(layer_id).to(q.dtype),
+            fallback_swa_cache,
             swa_indices,
             swa_lengths,
             compressed_cache=compressed_cache,
@@ -1002,60 +1050,72 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> None:
         dst_core = dst.core_metadata
         src_core = src.core_metadata
-        if dsv4_kernel.copy_decode_metadata_for_replay(
-            dst_raw_out_loc=dst_core.raw_out_loc,
-            src_raw_out_loc=src_core.raw_out_loc,
-            dst_seq_lens=dst_core.seq_lens,
-            src_seq_lens=src_core.seq_lens,
-            dst_req_seq_lens=dst_core.req_seq_lens,
-            src_req_seq_lens=src_core.req_seq_lens,
-            dst_extend_lens=dst_core.extend_lens,
-            src_extend_lens=src_core.extend_lens,
-            dst_positions=dst_core.positions,
-            src_positions=src_core.positions,
-            dst_req_table_indices=dst_core.req_table_indices,
-            src_req_table_indices=src_core.req_table_indices,
-            dst_swa_topk_lengths=dst_core.swa_topk_lengths,
-            src_swa_topk_lengths=src_core.swa_topk_lengths,
-            dst_c4_topk_lengths_raw=dst_core.c4_topk_lengths_raw,
-            src_c4_topk_lengths_raw=src_core.c4_topk_lengths_raw,
-            dst_c4_topk_lengths_clamp1=dst_core.c4_topk_lengths_clamp1,
-            src_c4_topk_lengths_clamp1=src_core.c4_topk_lengths_clamp1,
-            dst_c4_sparse_topk_lengths=dst_core.c4_sparse_topk_lengths,
-            src_c4_sparse_topk_lengths=src_core.c4_sparse_topk_lengths,
-            dst_c128_topk_lengths_clamp1=dst_core.c128_topk_lengths_clamp1,
-            src_c128_topk_lengths_clamp1=src_core.c128_topk_lengths_clamp1,
-            dst_cu_seqlens_q=dst_core.cu_seqlens_q,
-            src_cu_seqlens_q=src_core.cu_seqlens_q,
-            dst_page_table=dst_core.page_table,
-            src_page_table=src_core.page_table,
-            dst_swa_page_indices=dst_core.swa_page_indices,
-            src_swa_page_indices=src_core.swa_page_indices,
-            dst_c4_sparse_raw_indices=dst_core.c4_sparse_raw_indices,
-            src_c4_sparse_raw_indices=src_core.c4_sparse_raw_indices,
-            dst_c4_sparse_page_indices=dst_core.c4_sparse_page_indices,
-            src_c4_sparse_page_indices=src_core.c4_sparse_page_indices,
-            dst_c4_sparse_full_indices=dst_core.c4_sparse_full_indices,
-            src_c4_sparse_full_indices=src_core.c4_sparse_full_indices,
-            dst_c128_raw_indices=dst_core.c128_raw_indices,
-            src_c128_raw_indices=src_core.c128_raw_indices,
-            dst_c128_page_indices=dst_core.c128_page_indices,
-            src_c128_page_indices=src_core.c128_page_indices,
-            dst_c128_full_indices=dst_core.c128_full_indices,
-            src_c128_full_indices=src_core.c128_full_indices,
-            rows=bs,
-            graph_inputs_bound=self._capture_graph_inputs_bound,
+        with dsv4_direct_copy_nvtx(
+            f"replay_metadata_copy.fused_decode_metadata.bs{bs}",
+            page_table=src_core.page_table,
+            swa_page_indices=src_core.swa_page_indices,
+            c4_sparse_page_indices=src_core.c4_sparse_page_indices,
         ):
+            copied_by_helper = dsv4_kernel.copy_decode_metadata_for_replay(
+                dst_raw_out_loc=dst_core.raw_out_loc,
+                src_raw_out_loc=src_core.raw_out_loc,
+                dst_seq_lens=dst_core.seq_lens,
+                src_seq_lens=src_core.seq_lens,
+                dst_req_seq_lens=dst_core.req_seq_lens,
+                src_req_seq_lens=src_core.req_seq_lens,
+                dst_extend_lens=dst_core.extend_lens,
+                src_extend_lens=src_core.extend_lens,
+                dst_positions=dst_core.positions,
+                src_positions=src_core.positions,
+                dst_req_table_indices=dst_core.req_table_indices,
+                src_req_table_indices=src_core.req_table_indices,
+                dst_swa_topk_lengths=dst_core.swa_topk_lengths,
+                src_swa_topk_lengths=src_core.swa_topk_lengths,
+                dst_c4_topk_lengths_raw=dst_core.c4_topk_lengths_raw,
+                src_c4_topk_lengths_raw=src_core.c4_topk_lengths_raw,
+                dst_c4_topk_lengths_clamp1=dst_core.c4_topk_lengths_clamp1,
+                src_c4_topk_lengths_clamp1=src_core.c4_topk_lengths_clamp1,
+                dst_c4_sparse_topk_lengths=dst_core.c4_sparse_topk_lengths,
+                src_c4_sparse_topk_lengths=src_core.c4_sparse_topk_lengths,
+                dst_c128_topk_lengths_clamp1=dst_core.c128_topk_lengths_clamp1,
+                src_c128_topk_lengths_clamp1=src_core.c128_topk_lengths_clamp1,
+                dst_cu_seqlens_q=dst_core.cu_seqlens_q,
+                src_cu_seqlens_q=src_core.cu_seqlens_q,
+                dst_page_table=dst_core.page_table,
+                src_page_table=src_core.page_table,
+                dst_swa_page_indices=dst_core.swa_page_indices,
+                src_swa_page_indices=src_core.swa_page_indices,
+                dst_c4_sparse_raw_indices=dst_core.c4_sparse_raw_indices,
+                src_c4_sparse_raw_indices=src_core.c4_sparse_raw_indices,
+                dst_c4_sparse_page_indices=dst_core.c4_sparse_page_indices,
+                src_c4_sparse_page_indices=src_core.c4_sparse_page_indices,
+                dst_c4_sparse_full_indices=dst_core.c4_sparse_full_indices,
+                src_c4_sparse_full_indices=src_core.c4_sparse_full_indices,
+                dst_c128_raw_indices=dst_core.c128_raw_indices,
+                src_c128_raw_indices=src_core.c128_raw_indices,
+                dst_c128_page_indices=dst_core.c128_page_indices,
+                src_c128_page_indices=src_core.c128_page_indices,
+                dst_c128_full_indices=dst_core.c128_full_indices,
+                src_c128_full_indices=src_core.c128_full_indices,
+                rows=bs,
+                graph_inputs_bound=self._capture_graph_inputs_bound,
+            )
+        if copied_by_helper:
             if not self._capture_compressed_locs_in_graph:
-                dsv4_kernel.copy_masked_compressed_locs(
-                    src_core.raw_out_loc,
-                    src_core.positions,
-                    dst_core.c4_out_loc,
-                    dst_core.c128_out_loc,
-                    bs,
-                )
+                with dsv4_direct_copy_nvtx(
+                    f"replay_metadata_copy.masked_compressed_locs_after_helper.bs{bs}",
+                    raw_out_loc=src_core.raw_out_loc,
+                    positions=src_core.positions,
+                ):
+                    dsv4_kernel.copy_masked_compressed_locs(
+                        src_core.raw_out_loc,
+                        src_core.positions,
+                        dst_core.c4_out_loc,
+                        dst_core.c128_out_loc,
+                        bs,
+                    )
             return
-        for name in (
+        scalar_names = (
             "raw_out_loc",
             "seq_lens",
             "req_seq_lens",
@@ -1067,12 +1127,22 @@ class DSV4AttentionBackend(BaseAttnBackend):
             "c4_topk_lengths_clamp1",
             "c4_sparse_topk_lengths",
             "c128_topk_lengths_clamp1",
+        )
+        with dsv4_direct_copy_nvtx(
+            f"replay_metadata_copy.fallback_scalar_vectors.bs{bs}",
+            positions=src_core.positions,
+            seq_lens=src_core.seq_lens,
         ):
-            if self._capture_graph_inputs_bound and name in {"raw_out_loc", "positions"}:
-                continue
-            getattr(dst_core, name)[:bs].copy_(getattr(src_core, name)[:bs])
-        dst_core.cu_seqlens_q[: bs + 1].copy_(src_core.cu_seqlens_q[: bs + 1])
-        self._copy_2d(dst_core.page_table, src_core.page_table, bs, fill=0)
+            for name in scalar_names:
+                if self._capture_graph_inputs_bound and name in {"raw_out_loc", "positions"}:
+                    continue
+                getattr(dst_core, name)[:bs].copy_(getattr(src_core, name)[:bs])
+            dst_core.cu_seqlens_q[: bs + 1].copy_(src_core.cu_seqlens_q[: bs + 1])
+        with dsv4_direct_copy_nvtx(
+            f"replay_metadata_copy.fallback_page_table.bs{bs}",
+            page_table=src_core.page_table,
+        ):
+            self._copy_2d(dst_core.page_table, src_core.page_table, bs, fill=0)
         for name in (
             "swa_page_indices",
             "c4_sparse_raw_indices",
@@ -1082,15 +1152,24 @@ class DSV4AttentionBackend(BaseAttnBackend):
             "c128_page_indices",
             "c128_full_indices",
         ):
-            self._copy_2d(getattr(dst_core, name), getattr(src_core, name), bs, fill=-1)
+            with dsv4_direct_copy_nvtx(
+                f"replay_metadata_copy.fallback_{name}.bs{bs}",
+                src=getattr(src_core, name),
+            ):
+                self._copy_2d(getattr(dst_core, name), getattr(src_core, name), bs, fill=-1)
         if not self._capture_compressed_locs_in_graph:
-            dsv4_kernel.copy_masked_compressed_locs(
-                src_core.raw_out_loc,
-                src_core.positions,
-                dst_core.c4_out_loc,
-                dst_core.c128_out_loc,
-                bs,
-            )
+            with dsv4_direct_copy_nvtx(
+                f"replay_metadata_copy.fallback_masked_compressed_locs.bs{bs}",
+                raw_out_loc=src_core.raw_out_loc,
+                positions=src_core.positions,
+            ):
+                dsv4_kernel.copy_masked_compressed_locs(
+                    src_core.raw_out_loc,
+                    src_core.positions,
+                    dst_core.c4_out_loc,
+                    dst_core.c128_out_loc,
+                    bs,
+                )
 
     def _copy_2d(self, dst: torch.Tensor, src: torch.Tensor, rows: int, *, fill: int) -> None:
         rows = min(rows, dst.shape[0], src.shape[0])

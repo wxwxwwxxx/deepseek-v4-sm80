@@ -1,0 +1,483 @@
+{
+  "decode_envelope": [
+    91101684858,
+    95097124480
+  ],
+  "decode_envelope_wall_s": 3.995439622,
+  "decode_forward_count": 127,
+  "graph_node_owner_map_count": 32318,
+  "mode": "sqlite",
+  "named_owner_direct_copy_s": 0.7367944869999893,
+  "named_owner_share": 0.9996677843558025,
+  "notes": [
+    "Classifier first uses innermost direct-copy NVTX in the decode envelope.",
+    "If replay kernels are only under coarse graph replay ranges, graphNodeId is mapped through originalGraphNodeId to capture-time direct-copy or dsv4 source NVTX when Nsight exposes it.",
+    "Residual static_graph_replay or batch_forward owners mean more graph-node/source NVTX is needed before an implementation target is safe."
+  ],
+  "owners": [
+    {
+      "count": 26802,
+      "display_owner": "graph node source: dsv4.shared_experts.gate_up_proj",
+      "duration_s": 0.16575118699999125,
+      "evidence": "graphNodeId original creation under coarse shared_experts NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]",
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o",
+        "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned l"
+      ],
+      "graph_count": 26802,
+      "named_owner": true,
+      "owner": "dsv4.shared_experts.gate_up_proj",
+      "share_of_direct_copy": 0.2248878415707092,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4SharedExperts.forward"
+    },
+    {
+      "count": 26835,
+      "display_owner": "graph node source: dsv4.shared_experts.down_proj",
+      "duration_s": 0.11972368999999877,
+      "evidence": "graphNodeId original creation under coarse shared_experts NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]",
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o",
+        "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned l"
+      ],
+      "graph_count": 26835,
+      "named_owner": true,
+      "owner": "dsv4.shared_experts.down_proj",
+      "share_of_direct_copy": 0.16243866916610283,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4SharedExperts.forward"
+    },
+    {
+      "count": 16072,
+      "display_owner": "graph node source: dsv4.layer*.mlp.runner.experts",
+      "duration_s": 0.05371367200000286,
+      "evidence": "graphNodeId original creation under coarse layer MLP/MoE NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::opera",
+        "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned l"
+      ],
+      "graph_count": 16072,
+      "named_owner": true,
+      "owner": "dsv4.layer*.mlp.runner.experts",
+      "share_of_direct_copy": 0.07287761842042387,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4MoE/DSV4FusedMoERunner.forward"
+    },
+    {
+      "count": 381,
+      "display_owner": "graph node source: dsv4.lm_head",
+      "duration_s": 0.04471958100000005,
+      "evidence": "graphNodeId original creation under lm_head NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]",
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o"
+      ],
+      "graph_count": 381,
+      "named_owner": true,
+      "owner": "dsv4.lm_head",
+      "share_of_direct_copy": 0.06067461855966702,
+      "source": "python/minisgl/models/deepseek_v4.py:DeepseekV4ForCausalLM.forward"
+    },
+    {
+      "count": 10826,
+      "display_owner": "graph node source: dsv4.layer*.hc_ffn_pre",
+      "duration_s": 0.04172202200000015,
+      "evidence": "graphNodeId original creation under hidden-carrier staging NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o"
+      ],
+      "graph_count": 10826,
+      "named_owner": true,
+      "owner": "dsv4.layer*.hc_ffn_pre",
+      "share_of_direct_copy": 0.0566075914349028,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4DecoderLayer.forward"
+    },
+    {
+      "count": 10794,
+      "display_owner": "graph node source: dsv4.layer*.hc_attn_pre",
+      "duration_s": 0.038527287000000354,
+      "evidence": "graphNodeId original creation under hidden-carrier staging NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o"
+      ],
+      "graph_count": 10794,
+      "named_owner": true,
+      "owner": "dsv4.layer*.hc_attn_pre",
+      "share_of_direct_copy": 0.05227303992100992,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4DecoderLayer.forward"
+    },
+    {
+      "count": 10722,
+      "display_owner": "graph node source: dsv4.layer*.mlp.runner.shared",
+      "duration_s": 0.031285653999996395,
+      "evidence": "graphNodeId original creation under coarse layer MLP/MoE NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]"
+      ],
+      "graph_count": 10722,
+      "named_owner": true,
+      "owner": "dsv4.layer*.mlp.runner.shared",
+      "share_of_direct_copy": 0.042447739455329425,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4MoE/DSV4FusedMoERunner.forward"
+    },
+    {
+      "count": 10842,
+      "display_owner": "graph node source: dsv4.layer*.attn.kv_quant",
+      "duration_s": 0.02974306100000065,
+      "evidence": "graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]"
+      ],
+      "graph_count": 10842,
+      "named_owner": true,
+      "owner": "dsv4.layer*.attn.kv_quant",
+      "share_of_direct_copy": 0.04035478062667774,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward"
+    },
+    {
+      "count": 5354,
+      "display_owner": "moe shared expert staging.runner finalize to fp32.layer*",
+      "duration_s": 0.022872406000000317,
+      "evidence": "direct NVTX around MoE/shared expert dtype staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o"
+      ],
+      "graph_count": 5354,
+      "named_owner": true,
+      "owner": "moe_shared_expert_staging.runner_finalize_to_fp32.layer*",
+      "share_of_direct_copy": 0.031032815571144484,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4FusedMoERunner/DSV4SharedExperts"
+    },
+    {
+      "count": 5773,
+      "display_owner": "graph node source: dsv4.layer*.mlp.runner.route",
+      "duration_s": 0.021675252999999933,
+      "evidence": "graphNodeId original creation under coarse layer MLP/MoE NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 4)]::o",
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o"
+      ],
+      "graph_count": 5773,
+      "named_owner": true,
+      "owner": "dsv4.layer*.mlp.runner.route",
+      "share_of_direct_copy": 0.02940854271329762,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4MoE/DSV4FusedMoERunner.forward"
+    },
+    {
+      "count": 10628,
+      "display_owner": "graph node source: dsv4.layer*.attn.indexer_store",
+      "duration_s": 0.02148768299999964,
+      "evidence": "graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 4)]::o",
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o",
+        "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned l"
+      ],
+      "graph_count": 10628,
+      "named_owner": true,
+      "owner": "dsv4.layer*.attn.indexer_store",
+      "share_of_direct_copy": 0.02915405154972311,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward"
+    },
+    {
+      "count": 5374,
+      "display_owner": "moe shared expert staging.runner shared to fp32.layer*",
+      "duration_s": 0.020026415999999613,
+      "evidence": "direct NVTX around MoE/shared expert dtype staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o"
+      ],
+      "graph_count": 5374,
+      "named_owner": true,
+      "owner": "moe_shared_expert_staging.runner_shared_to_fp32.layer*",
+      "share_of_direct_copy": 0.02717143418488621,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4FusedMoERunner/DSV4SharedExperts"
+    },
+    {
+      "count": 5420,
+      "display_owner": "graph node source: dsv4.layer*.attn.q_proj",
+      "duration_s": 0.016408067999999793,
+      "evidence": "graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]"
+      ],
+      "graph_count": 5420,
+      "named_owner": true,
+      "owner": "dsv4.layer*.attn.q_proj",
+      "share_of_direct_copy": 0.02226213316267576,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward"
+    },
+    {
+      "count": 5319,
+      "display_owner": "graph node source: dsv4.layer*.attn.compress",
+      "duration_s": 0.01538082700000012,
+      "evidence": "graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o",
+        "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned l"
+      ],
+      "graph_count": 5319,
+      "named_owner": true,
+      "owner": "dsv4.layer*.attn.compress",
+      "share_of_direct_copy": 0.020868393452909004,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward"
+    },
+    {
+      "count": 5306,
+      "display_owner": "graph node source: dsv4.indexer.compressor",
+      "duration_s": 0.014391684000000056,
+      "evidence": "graphNodeId original creation under coarse indexer NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o",
+        "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned l"
+      ],
+      "graph_count": 5306,
+      "named_owner": true,
+      "owner": "dsv4.indexer.compressor",
+      "share_of_direct_copy": 0.019526344335186532,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4Indexer.forward"
+    },
+    {
+      "count": 5414,
+      "display_owner": "attention boundary.positions to i64.layer*",
+      "duration_s": 0.012146911999999796,
+      "evidence": "direct NVTX around attention positions/cache/index dtype or layout staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 4)]::o"
+      ],
+      "graph_count": 5414,
+      "named_owner": true,
+      "owner": "attention_boundary.positions_to_i64.layer*",
+      "share_of_direct_copy": 0.01648068331136262,
+      "source": "python/minisgl/models/deepseek_v4.py and python/minisgl/attention/deepseek_v4.py"
+    },
+    {
+      "count": 5394,
+      "display_owner": "moe shared expert staging.runner output to flat dtype.layer*",
+      "duration_s": 0.011814992999999633,
+      "evidence": "direct NVTX around MoE/shared expert dtype staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned l"
+      ],
+      "graph_count": 5394,
+      "named_owner": true,
+      "owner": "moe_shared_expert_staging.runner_output_to_flat_dtype.layer*",
+      "share_of_direct_copy": 0.016030342358532224,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4FusedMoERunner/DSV4SharedExperts"
+    },
+    {
+      "count": 5063,
+      "display_owner": "graph node source: dsv4.layer*.attn.backend",
+      "duration_s": 0.011540009000000002,
+      "evidence": "graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 3)]::o",
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 4)]::o"
+      ],
+      "graph_count": 5063,
+      "named_owner": true,
+      "owner": "dsv4.layer*.attn.backend",
+      "share_of_direct_copy": 0.015657249656478755,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward"
+    },
+    {
+      "count": 5320,
+      "display_owner": "graph node source: dsv4.layer*.attn.compress_store",
+      "duration_s": 0.01003892599999996,
+      "evidence": "graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 4)]::o"
+      ],
+      "graph_count": 5320,
+      "named_owner": true,
+      "owner": "dsv4.layer*.attn.compress_store",
+      "share_of_direct_copy": 0.013620610752115963,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward"
+    },
+    {
+      "count": 5357,
+      "display_owner": "moe shared expert staging.shared hidden to up dtype",
+      "duration_s": 0.007729735999999992,
+      "evidence": "direct NVTX around MoE/shared expert dtype staging; graphNodeId originalGraphNodeId mapped to capture-time direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned l"
+      ],
+      "graph_count": 5357,
+      "named_owner": true,
+      "owner": "moe_shared_expert_staging.shared_hidden_to_up_dtype",
+      "share_of_direct_copy": 0.010487548695210838,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4FusedMoERunner/DSV4SharedExperts"
+    },
+    {
+      "count": 2643,
+      "display_owner": "graph node source: dsv4.layer*.attn.indexer",
+      "duration_s": 0.007401606000000037,
+      "evidence": "graphNodeId original creation under coarse layer attention NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o"
+      ],
+      "graph_count": 2643,
+      "named_owner": true,
+      "owner": "dsv4.layer*.attn.indexer",
+      "share_of_direct_copy": 0.010042348580567973,
+      "source": "python/minisgl/models/deepseek_v4.py:DSV4Attention.forward"
+    },
+    {
+      "count": 2520,
+      "display_owner": "batch forward bridge.prepare metadata.decode.bs*",
+      "duration_s": 0.00647695699999999,
+      "evidence": "direct NVTX around scheduler to engine bridge; innermost direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]",
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 4)]::o"
+      ],
+      "graph_count": 0,
+      "named_owner": true,
+      "owner": "batch_forward_bridge.prepare_metadata.decode.bs*",
+      "share_of_direct_copy": 0.008787803611182407,
+      "source": "python/minisgl/scheduler/scheduler.py:Scheduler._prepare_batch/_forward"
+    },
+    {
+      "count": 992,
+      "display_owner": "batch forward bridge.engine forward batch.decode.bs*",
+      "duration_s": 0.004227779999999995,
+      "evidence": "direct NVTX around scheduler to engine bridge; innermost direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]",
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::opera",
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]"
+      ],
+      "graph_count": 992,
+      "named_owner": true,
+      "owner": "batch_forward_bridge.engine_forward_batch.decode.bs*",
+      "share_of_direct_copy": 0.005736165972892019,
+      "source": "python/minisgl/scheduler/scheduler.py:Scheduler._prepare_batch/_forward"
+    },
+    {
+      "count": 715,
+      "display_owner": "sampler logits staging.next tokens to cpu.bs*",
+      "duration_s": 0.0028833429999999974,
+      "evidence": "direct NVTX around sampler/logits token staging; innermost direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]",
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::opera",
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]"
+      ],
+      "graph_count": 715,
+      "named_owner": true,
+      "owner": "sampler_logits_staging.next_tokens_to_cpu.bs*",
+      "share_of_direct_copy": 0.003912061177444521,
+      "source": "python/minisgl/engine/engine.py:Engine.forward_batch"
+    },
+    {
+      "count": 741,
+      "display_owner": "batch forward bridge.token pool write.decode.bs*",
+      "duration_s": 0.0026812259999999975,
+      "evidence": "direct NVTX around scheduler to engine bridge; innermost direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]",
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::opera",
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]"
+      ],
+      "graph_count": 741,
+      "named_owner": true,
+      "owner": "batch_forward_bridge.token_pool_write.decode.bs*",
+      "share_of_direct_copy": 0.0036378329399432753,
+      "source": "python/minisgl/scheduler/scheduler.py:Scheduler._prepare_batch/_forward"
+    },
+    {
+      "count": 381,
+      "display_owner": "graph node source: dsv4.model.hc_head",
+      "duration_s": 0.0010963030000000012,
+      "evidence": "graphNodeId original creation under coarse model NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::o",
+        "void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned l"
+      ],
+      "graph_count": 381,
+      "named_owner": true,
+      "owner": "dsv4.model.hc_head",
+      "share_of_direct_copy": 0.001487441627657885,
+      "source": "python/minisgl/models/deepseek_v4.py:DeepseekV4Model.forward"
+    },
+    {
+      "count": 127,
+      "display_owner": "graph node source: dsv4.model.hc_expand",
+      "duration_s": 0.0004069069999999997,
+      "evidence": "graphNodeId original creation under coarse model NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]"
+      ],
+      "graph_count": 127,
+      "named_owner": true,
+      "owner": "dsv4.model.hc_expand",
+      "share_of_direct_copy": 0.0005520831470728311,
+      "source": "python/minisgl/models/deepseek_v4.py:DeepseekV4Model.forward"
+    },
+    {
+      "count": 126,
+      "display_owner": "batch forward bridge.prepare input tuple.decode.bs*",
+      "duration_s": 0.00034943899999999995,
+      "evidence": "direct NVTX around scheduler to engine bridge; innermost direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 4)]::o"
+      ],
+      "graph_count": 0,
+      "named_owner": true,
+      "owner": "batch_forward_bridge.prepare_input_tuple.decode.bs*",
+      "share_of_direct_copy": 0.00047411173273004183,
+      "source": "python/minisgl/scheduler/scheduler.py:Scheduler._prepare_batch/_forward"
+    },
+    {
+      "count": 127,
+      "display_owner": "replay metadata copy.fallback scalar vectors.bs*",
+      "duration_s": 0.0002897240000000003,
+      "evidence": "direct NVTX around replay metadata helper/fallback copies; innermost direct-copy NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 3)]::o"
+      ],
+      "graph_count": 0,
+      "named_owner": true,
+      "owner": "replay_metadata_copy.fallback_scalar_vectors.bs*",
+      "share_of_direct_copy": 0.0003930916344583141,
+      "source": "python/minisgl/attention/deepseek_v4.py:DSV4AttentionBackend._copy_metadata_for_replay"
+    },
+    {
+      "count": 127,
+      "display_owner": "graph node source: dsv4.model.embed",
+      "duration_s": 0.0002821350000000001,
+      "evidence": "graphNodeId original creation under coarse model NVTX; graphNodeId originalGraphNodeId mapped to capture-time dsv4 NVTX",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 4)]::o"
+      ],
+      "graph_count": 127,
+      "named_owner": true,
+      "owner": "dsv4.model.embed",
+      "share_of_direct_copy": 0.00038279503350739446,
+      "source": "python/minisgl/models/deepseek_v4.py:DeepseekV4Model.forward"
+    },
+    {
+      "count": 127,
+      "display_owner": "residual coarse benchmark envelope: batch_forward:decode:bs*:padded*",
+      "duration_s": 0.00024485599999999973,
+      "evidence": "coarse benchmark NVTX; coarse benchmark NVTX; pre-instrumentation only",
+      "example_kernels": [
+        "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 3)]::o"
+      ],
+      "graph_count": 127,
+      "named_owner": false,
+      "owner": "batch_forward:decode:bs*:padded*",
+      "share_of_direct_copy": 0.00033221564401611443,
+      "source": "benchmark/offline/deepseek_v4_perf_matrix.py:BenchScheduler._forward"
+    }
+  ],
+  "repeat_nvtx": "repeat:decode_throughput_bs8:0",
+  "repeat_range": [
+    84518167389,
+    95118413610
+  ],
+  "residual_direct_copy_s": 0.00024485599999999973,
+  "residual_share": 0.00033221564401611443,
+  "sqlite_path": "/tmp/nsys_target0765_dsv4_sm80_a100_victory_4096x128_bs4_np128_rank0.sqlite",
+  "total_direct_copy_count": 191622,
+  "total_direct_copy_s": 0.737039343000123
+}

@@ -11,7 +11,13 @@ from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
 from minisgl.layers import set_rope_device
 from minisgl.models import create_model, load_weight
 from minisgl.moe import create_moe_backend
-from minisgl.utils import init_logger, is_sm90_supported, is_sm100_supported, torch_dtype
+from minisgl.utils import (
+    dsv4_direct_copy_nvtx,
+    init_logger,
+    is_sm90_supported,
+    is_sm100_supported,
+    torch_dtype,
+)
 
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory, mem_GB
@@ -217,8 +223,16 @@ class Engine:
             req.complete_one()
 
         if next_tokens_gpu is None:
-            next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
-        next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
+            with dsv4_direct_copy_nvtx(
+                f"sampler_logits_staging.sample_to_int32.bs{batch.size}",
+                logits=logits[: batch.size],
+            ):
+                next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
+        with dsv4_direct_copy_nvtx(
+            f"sampler_logits_staging.next_tokens_to_cpu.bs{batch.size}",
+            next_tokens=next_tokens_gpu,
+        ):
+            next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
         copy_done_event = self._acquire_copy_done_event()
         copy_done_event.record(self.stream)
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)

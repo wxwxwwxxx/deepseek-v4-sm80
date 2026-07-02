@@ -13,7 +13,7 @@ from minisgl.message import (
     ExitMsg,
     UserMsg,
 )
-from minisgl.utils import init_logger, load_tokenizer
+from minisgl.utils import dsv4_direct_copy_nvtx, init_logger, load_tokenizer
 
 from .cache import CacheManager
 from .config import SchedulerConfig
@@ -214,11 +214,30 @@ class Scheduler(SchedulerIOMixin):
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
         self.engine.graph_runner.pad_batch(batch)
         self.cache_manager.allocate_paged(batch.reqs)
-        batch.positions = _make_positions(batch, self.device)
-        input_mapping = _make_input_tuple(batch, self.device)
-        write_mapping = _make_write_tuple(batch, self.device)
-        batch.out_loc = self.engine.page_table[input_mapping]
-        self.engine.attn_backend.prepare_metadata(batch)
+        with dsv4_direct_copy_nvtx(
+            f"batch_forward_bridge.prepare_positions.{batch.phase}.bs{batch.size}"
+        ):
+            batch.positions = _make_positions(batch, self.device)
+        with dsv4_direct_copy_nvtx(
+            f"batch_forward_bridge.prepare_input_tuple.{batch.phase}.bs{batch.size}",
+            positions=batch.positions,
+        ):
+            input_mapping = _make_input_tuple(batch, self.device)
+        with dsv4_direct_copy_nvtx(
+            f"batch_forward_bridge.prepare_write_tuple.{batch.phase}.bs{batch.size}"
+        ):
+            write_mapping = _make_write_tuple(batch, self.device)
+        with dsv4_direct_copy_nvtx(
+            f"batch_forward_bridge.out_loc_gather.{batch.phase}.bs{batch.size}",
+            page_table=self.engine.page_table,
+            token_mapping=input_mapping[0],
+            positions=input_mapping[1],
+        ):
+            batch.out_loc = self.engine.page_table[input_mapping]
+        with dsv4_direct_copy_nvtx(
+            f"batch_forward_bridge.prepare_metadata.{batch.phase}.bs{batch.size}"
+        ):
+            self.engine.attn_backend.prepare_metadata(batch)
         return ForwardInput(
             batch=batch,
             sample_args=self.engine.sampler.prepare(batch),
@@ -236,9 +255,24 @@ class Scheduler(SchedulerIOMixin):
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input
-        batch.input_ids = self.token_pool[input_mapping]
-        forward_output = self.engine.forward_batch(batch, sample_args)
-        self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        with dsv4_direct_copy_nvtx(
+            f"batch_forward_bridge.input_ids_gather.{batch.phase}.bs{batch.size}",
+            token_pool=self.token_pool,
+            token_mapping=input_mapping[0],
+            positions=input_mapping[1],
+        ):
+            batch.input_ids = self.token_pool[input_mapping]
+        with dsv4_direct_copy_nvtx(
+            f"batch_forward_bridge.engine_forward_batch.{batch.phase}.bs{batch.size}"
+        ):
+            forward_output = self.engine.forward_batch(batch, sample_args)
+        with dsv4_direct_copy_nvtx(
+            f"batch_forward_bridge.token_pool_write.{batch.phase}.bs{batch.size}",
+            token_pool=self.token_pool,
+            output_mapping=output_mapping[0],
+            next_tokens=forward_output.next_tokens_gpu,
+        ):
+            self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 

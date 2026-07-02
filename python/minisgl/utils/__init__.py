@@ -11,7 +11,7 @@ from .mp import (
     ZmqSubQueue,
 )
 from .registry import Registry
-from .torch_utils import nvtx_annotate, torch_dtype
+from .torch_utils import dsv4_direct_copy_nvtx, dsv4_direct_copy_nvtx_enabled, nvtx_annotate, torch_dtype
 
 __all__ = [
     "cached_load_hf_config",
@@ -30,6 +30,8 @@ __all__ = [
     "Unset",
     "torch_dtype",
     "nvtx_annotate",
+    "dsv4_direct_copy_nvtx",
+    "dsv4_direct_copy_nvtx_enabled",
     "Registry",
     "ZmqPushQueue",
     "ZmqPullQueue",

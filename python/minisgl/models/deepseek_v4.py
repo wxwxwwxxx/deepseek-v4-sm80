@@ -12,7 +12,7 @@ from minisgl.core import Batch, get_global_ctx
 from minisgl.distributed import DistributedCommunicator, get_tp_info
 from minisgl.layers import BaseOP, OPList
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
-from minisgl.utils import div_ceil, div_even
+from minisgl.utils import div_ceil, div_even, dsv4_direct_copy_nvtx
 
 from .base import BaseLLMModel
 
@@ -875,7 +875,11 @@ class DSV4Attention(BaseOP):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
-        positions = batch.positions.to(device=x.device, dtype=torch.long)
+        with dsv4_direct_copy_nvtx(
+            f"attention_boundary.positions_to_i64.layer{self.layer_id}",
+            positions=batch.positions,
+        ):
+            positions = batch.positions.to(device=x.device, dtype=torch.long)
         attn_backend = getattr(get_global_ctx(), "attn_backend", None)
         attn_metadata = getattr(batch, "attn_metadata", None)
         use_dsv4_backend = isinstance(attn_metadata, DSV4AttentionMetadata)
@@ -1355,8 +1359,13 @@ class DSV4FusedRoutedExperts(BaseOP):
             swiglu_limit=self.swiglu_limit,
             weights=weights,
         )
+        with dsv4_direct_copy_nvtx(
+            f"moe_shared_expert_staging.expert_hidden_to_input_dtype.expert{local_idx}",
+            hidden=hidden,
+        ):
+            hidden_for_w2 = hidden.to(x.dtype)
         return dsv4_kernel.quantized_linear_ref(
-            hidden.to(x.dtype),
+            hidden_for_w2,
             self.w2_weight[local_idx],
             self.w2_weight_scale_inv[local_idx],
             weight_kind="fp4",
@@ -1385,10 +1394,20 @@ class DSV4FusedRoutedExperts(BaseOP):
                 cache=self._marlin_wna16_weights,
             )
             if reduce and self._tp_size > 1:
-                grouped = self._comm.all_reduce(
-                    grouped.float(),
+                with dsv4_direct_copy_nvtx(
+                    "moe_shared_expert_staging.routed_grouped_to_fp32_for_reduce",
+                    grouped=grouped,
+                ):
+                    grouped_for_reduce = grouped.float()
+                grouped_reduced = self._comm.all_reduce(
+                    grouped_for_reduce,
                     label="dsv4.routed_expert_all_reduce",
-                ).to(grouped.dtype)
+                )
+                with dsv4_direct_copy_nvtx(
+                    "moe_shared_expert_staging.routed_reduce_to_grouped_dtype",
+                    grouped=grouped_reduced,
+                ):
+                    grouped = grouped_reduced.to(grouped.dtype)
             return grouped
 
         workspace = None
@@ -1411,10 +1430,20 @@ class DSV4FusedRoutedExperts(BaseOP):
         )
         if grouped is not None:
             if reduce and self._tp_size > 1:
-                grouped = self._comm.all_reduce(
-                    grouped.float(),
+                with dsv4_direct_copy_nvtx(
+                    "moe_shared_expert_staging.routed_grouped_to_fp32_for_reduce",
+                    grouped=grouped,
+                ):
+                    grouped_for_reduce = grouped.float()
+                grouped_reduced = self._comm.all_reduce(
+                    grouped_for_reduce,
                     label="dsv4.routed_expert_all_reduce",
-                ).to(grouped.dtype)
+                )
+                with dsv4_direct_copy_nvtx(
+                    "moe_shared_expert_staging.routed_reduce_to_grouped_dtype",
+                    grouped=grouped_reduced,
+                ):
+                    grouped = grouped_reduced.to(grouped.dtype)
             return grouped
 
         y = torch.zeros_like(hidden_states, dtype=torch.float32)
@@ -1429,7 +1458,11 @@ class DSV4FusedRoutedExperts(BaseOP):
             ).float()
         if reduce and self._tp_size > 1:
             y = self._comm.all_reduce(y, label="dsv4.routed_expert_all_reduce")
-        return y.to(hidden_states.dtype)
+        with dsv4_direct_copy_nvtx(
+            "moe_shared_expert_staging.routed_fallback_to_hidden_dtype",
+            y=y,
+        ):
+            return y.to(hidden_states.dtype)
 
 
 class DSV4SharedExperts(BaseOP):
@@ -1465,8 +1498,13 @@ class DSV4SharedExperts(BaseOP):
             swiglu_limit=self.swiglu_limit,
         )
         with _dsv4_capture_nvtx("shared_experts.down_proj"):
+            with dsv4_direct_copy_nvtx(
+                "moe_shared_expert_staging.shared_hidden_to_up_dtype",
+                hidden=hidden,
+            ):
+                hidden_for_down = hidden.to(up.dtype)
             return self.down_proj.forward(
-                hidden.to(up.dtype),
+                hidden_for_down,
                 reduce=reduce,
                 reduce_label="dsv4.shared_expert_all_reduce",
                 fp8_gemm=fp8_gemm if fp8_gemm else None,
@@ -1557,12 +1595,21 @@ class DSV4FusedMoERunner:
         # The current grouped FP4 backend already applies top-k weights and
         # sums routes to [tokens, hidden]. Keep the boundary explicit so a
         # future exact backend can return per-route output here.
-        return routed_output.float()
+        with dsv4_direct_copy_nvtx(
+            f"moe_shared_expert_staging.runner_finalize_to_fp32.layer{self.layer_id}",
+            routed_output=routed_output,
+        ):
+            return routed_output.float()
 
     def apply_shared(self, flat: torch.Tensor) -> torch.Tensor | None:
         if self.shared_experts is None:
             return None
-        return self.shared_experts.forward(flat, reduce=False).float()
+        shared = self.shared_experts.forward(flat, reduce=False)
+        with dsv4_direct_copy_nvtx(
+            f"moe_shared_expert_staging.runner_shared_to_fp32.layer{self.layer_id}",
+            shared=shared,
+        ):
+            return shared.float()
 
     def maybe_reduce_final(
         self,
@@ -1603,7 +1650,11 @@ class DSV4FusedMoERunner:
                 comm=comm,
                 reduce_label=prepared.moe_plan.final_reduce_label,
             )
-        return y.to(flat.dtype).view_as(hidden_states)
+        with dsv4_direct_copy_nvtx(
+            f"moe_shared_expert_staging.runner_output_to_flat_dtype.layer{self.layer_id}",
+            y=y,
+        ):
+            return y.to(flat.dtype).view_as(hidden_states)
 
 
 class DSV4MoE(BaseOP):

@@ -53,8 +53,9 @@ Reference lines:
 This milestone is an opt-in best path, not a declaration that every component
 should become default.  TARGET 07.63 confirmed the bundle after opt-in cleanup
 and rebuilt the bottleneck order.  TARGET 07.64 added a correct metadata
-deforestation opt-in, but it did not meet the promote gate.  TARGET 07.65 should
-now attribute the remaining direct-copy owners before more implementation.
+deforestation opt-in, but it did not meet the promote gate.  TARGET 07.65 then
+attributed the remaining direct-copy owners and selected MoE/shared-expert
+staging as the next implementation target.
 
 ## New TARGET 07 Organization
 
@@ -85,7 +86,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.62 | `prompts/TARGET_07.62_dsv4_sm80_wo_a_attention_boundary_parity.md` | completed | Adapted mini's `attn.wo_a` boundary to an opt-in BF16 grouped BMM cache; 4096/1024 reached `116.2553 output tok/s`, crossing the old `114.07` victory line. |
 | TARGET 07.63 | `prompts/TARGET_07.63_dsv4_sm80_post_victory_reprofile_and_next_bottleneck.md` | completed | Confirmed `dsv4_sm80_a100_victory`: text smoke pass, 4096/1024 reached `119.4153 output tok/s`, graph replay stayed active, eager decode stayed `0`, and fresh profile selected `graph_runtime_copy_cat_index` as the next implementation target. |
 | TARGET 07.64 | `prompts/TARGET_07.64_dsv4_sm80_decode_metadata_deforestation.md` | completed | Added an opt-in decode metadata helper. Microbench was strong and macro improved to `122.9414 output tok/s`, but `graph_runtime_copy_cat_index` only fell by `0.012003s`; keep opt-in, do not promote. |
-| TARGET 07.65 | `prompts/TARGET_07.65_dsv4_sm80_direct_copy_owner_attribution.md` | next todo | Measurement-only attribution of the remaining graph-replay `direct_copy` surface under `batch_forward` and `batch_forward_enqueue`, using profiling-only NVTX and updated classifiers before choosing any implementation target. |
+| TARGET 07.65 | `prompts/TARGET_07.65_dsv4_sm80_direct_copy_owner_attribution.md` | completed | Measurement-only attribution reached `99.97%` direct-copy owner coverage and selected MoE/shared-expert staging as the next implementation target. |
+| TARGET 07.66 | `prompts/TARGET_07.66_dsv4_sm80_moe_shared_expert_staging_cleanup.md` | next todo | Clean up MoE/shared-expert direct-copy staging under the current bf16/exact victory stack; keep INT8 MoE as a separate future target. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -122,7 +124,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.65 next.
+Run TARGET 07.66 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -463,6 +465,26 @@ Therefore keep the 07.64 helper as an opt-in ablation and do not add it to
 `dsv4_sm80_a100_victory`.  TARGET 07.65 should be measurement-only direct-copy
 owner attribution.  It may add profiling-only NVTX and classifier scripts, but
 must not implement a performance optimization.
+
+TARGET 07.65 completed that attribution pass.  It added default-off
+profiling-only direct-copy NVTX and classifier support, then mapped replay
+direct-copy kernels through CUDA graph `originalGraphNodeId`.  The result
+assigned `99.97%` of the 4096/128/batch4 rank0 `direct_copy` bucket to named
+owners:
+
+- total direct_copy: `0.737039s`;
+- named owner direct_copy: `0.736794s`;
+- residual: `0.000245s`;
+- MoE/shared expert staging: `0.379204s`, `51.45%`;
+- attention/indexer boundary: `0.138539s`, `18.80%`;
+- graph/replay metadata: only `0.000290s`, `0.04%`.
+
+The dominant individual owners are `dsv4.shared_experts.gate_up_proj`
+(`0.165751s`) and `dsv4.shared_experts.down_proj` (`0.119724s`).  The 07.64
+metadata opt-in did not change this shape, so TARGET 07.66 should focus on
+MoE/shared-expert projection and finalization staging.  It should stay on the
+current bf16/exact route; INT8 MoE belongs in a separate future target with
+independent quality and backend gates.
 
 ## Precision Policy
 
