@@ -411,6 +411,11 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
     assert dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    assert dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    assert (
+        dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE
+        in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
+    )
     assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE)
     assert not any(
         dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST

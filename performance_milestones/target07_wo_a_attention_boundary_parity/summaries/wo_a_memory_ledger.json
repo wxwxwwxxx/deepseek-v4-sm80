@@ -1,0 +1,2193 @@
+{
+  "owners": [
+    {
+      "owner": "attn.q_wqb",
+      "enabled": true,
+      "toggle": "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE",
+      "layers_cached": 43,
+      "shape_per_local_rank": [
+        4096,
+        1024
+      ],
+      "source_weight_shape_per_local_rank": null,
+      "extra_bytes_per_rank": 360710144,
+      "extra_gib_per_rank": 0.3359375,
+      "kv_tokens_lost_per_rank": 4744.037926083019,
+      "kv_pages_lost_per_rank": 18.53139814876179
+    },
+    {
+      "owner": "attn.wo_b",
+      "enabled": true,
+      "toggle": "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE",
+      "layers_cached": 43,
+      "shape_per_local_rank": [
+        4096,
+        1024
+      ],
+      "source_weight_shape_per_local_rank": null,
+      "extra_bytes_per_rank": 360710144,
+      "extra_gib_per_rank": 0.3359375,
+      "kv_tokens_lost_per_rank": 4744.037926083019,
+      "kv_pages_lost_per_rank": 18.53139814876179
+    },
+    {
+      "owner": "indexer.wq_b",
+      "enabled": true,
+      "toggle": "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE",
+      "layers_cached": 21,
+      "shape_per_local_rank": [
+        8192,
+        1024
+      ],
+      "source_weight_shape_per_local_rank": null,
+      "extra_bytes_per_rank": 352321536,
+      "extra_gib_per_rank": 0.328125,
+      "kv_tokens_lost_per_rank": 4633.711462685739,
+      "kv_pages_lost_per_rank": 18.10043540111617
+    },
+    {
+      "owner": "attn.wo_a",
+      "enabled": true,
+      "toggle": "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE",
+      "layers_cached": 43,
+      "shape_per_local_rank": [
+        1,
+        4096,
+        1024
+      ],
+      "source_weight_shape_per_local_rank": [
+        1024,
+        4096
+      ],
+      "extra_bytes_per_rank": 360710144,
+      "extra_gib_per_rank": 0.3359375,
+      "kv_tokens_lost_per_rank": 4744.037926083019,
+      "kv_pages_lost_per_rank": 18.53139814876179
+    }
+  ],
+  "total": {
+    "owner": "total_cached_bf16_projection",
+    "extra_bytes_per_rank": 1434451968,
+    "extra_gib_per_rank": 1.3359375,
+    "kv_tokens_lost_per_rank": 18865.825240934795,
+    "kv_pages_lost_per_rank": 73.69462984740154
+  },
+  "wo_a_incremental": {
+    "owner": "attn.wo_a",
+    "extra_bytes_per_rank": 360710144,
+    "extra_gib_per_rank": 0.3359375,
+    "kv_tokens_lost_per_rank": 4744.037926083019,
+    "kv_pages_lost_per_rank": 18.53139814876179
+  },
+  "num_pages": 128,
+  "page_size": 256,
+  "kv_cache_memory_bytes_per_rank_max": 2491495680,
+  "bytes_per_kv_token_per_rank": 76034.4140625,
+  "memory_delta_vs_baseline": {
+    "peak_allocated_delta": 360710144,
+    "peak_reserved_delta": 381681664
+  },
+  "metrics": {
+    "output_tok_s": 53.58769518348801,
+    "decode_tok_s": 149.4224193064209,
+    "peak_allocated": 47294730240,
+    "peak_reserved": 49759125504,
+    "kv_cache_memory": 2491495680
+  },
+  "baseline_metrics": {
+    "output_tok_s": 51.29618621954428,
+    "decode_tok_s": 132.30126057564067,
+    "peak_allocated": 46934020096,
+    "peak_reserved": 49377443840,
+    "kv_cache_memory": 2491495680
+  },
+  "graph_status": {
+    "capture_compressed_locs_in_graph": true,
+    "capture_greedy_sample": true,
+    "captured_bs": [
+      4,
+      2,
+      1
+    ],
+    "eager_decode_count": 0,
+    "eager_decode_count_by_batch_size": {},
+    "enabled": true,
+    "error": null,
+    "greedy_sample_replay_count": 127,
+    "greedy_sample_replay_count_by_batch_size": {
+      "4": 127
+    },
+    "replay_count": 127,
+    "replay_count_by_batch_size": {
+      "4": 127
+    },
+    "replay_count_by_padded_size": {
+      "4": 127
+    },
+    "replay_input_copy_bytes": 6096,
+    "requested_bs": [
+      1,
+      2,
+      4
+    ]
+  },
+  "prepare_report": {
+    "indexer_wq_b_bf16_weight_cache": {
+      "enabled": true,
+      "entries": [
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer2.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer4.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer6.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer8.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer10.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer12.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer14.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer16.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer18.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer20.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer22.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer24.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer26.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer28.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer30.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer32.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer34.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer36.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer38.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer40.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        },
+        {
+          "bytes": 16777216,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer42.attn.indexer.wq_b",
+          "shape": [
+            8192,
+            1024
+          ]
+        }
+      ],
+      "layers_cached": 21,
+      "toggle": "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE",
+      "total_bytes": 352321536
+    },
+    "projection_bf16_weight_cache_total": {
+      "owners": [
+        "attn.q_wqb",
+        "attn.wo_b",
+        "indexer.wq_b",
+        "attn.wo_a"
+      ],
+      "total_bytes": 1434451968
+    },
+    "q_wqb_bf16_weight_cache": {
+      "enabled": true,
+      "entries": [
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer0.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer1.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer2.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer3.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer4.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer5.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer6.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer7.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer8.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer9.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer10.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer11.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer12.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer13.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer14.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer15.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer16.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer17.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer18.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer19.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer20.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer21.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer22.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer23.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer24.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer25.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer26.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer27.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer28.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer29.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer30.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer31.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer32.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer33.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer34.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer35.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer36.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer37.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer38.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer39.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer40.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer41.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer42.attn.q_wqb",
+          "shape": [
+            4096,
+            1024
+          ]
+        }
+      ],
+      "layers_cached": 43,
+      "toggle": "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE",
+      "total_bytes": 360710144
+    },
+    "wo_a_bf16_bmm_cache": {
+      "enabled": true,
+      "entries": [
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer0.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer1.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer2.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer3.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer4.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer5.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer6.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer7.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer8.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer9.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer10.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer11.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer12.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer13.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer14.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer15.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer16.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer17.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer18.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer19.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer20.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer21.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer22.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer23.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer24.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer25.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer26.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer27.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer28.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer29.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer30.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer31.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer32.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer33.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer34.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer35.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer36.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer37.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer38.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer39.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer40.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer41.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "d_per_group": 4096,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "num_local_groups": 1,
+          "o_lora_rank": 1024,
+          "owner": "layer42.attn.wo_a",
+          "scale_shape": [
+            8,
+            32
+          ],
+          "shape": [
+            1,
+            4096,
+            1024
+          ],
+          "source_weight_shape": [
+            1024,
+            4096
+          ]
+        }
+      ],
+      "layers_cached": 43,
+      "toggle": "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE",
+      "total_bytes": 360710144
+    },
+    "wo_b_bf16_weight_cache": {
+      "enabled": true,
+      "entries": [
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer0.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer1.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer2.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer3.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer4.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer5.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer6.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer7.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer8.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer9.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer10.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer11.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer12.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer13.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer14.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer15.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer16.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer17.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer18.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer19.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer20.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer21.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer22.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer23.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer24.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer25.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer26.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer27.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer28.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer29.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer30.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer31.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer32.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer33.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer34.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer35.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer36.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer37.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer38.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer39.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer40.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer41.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        },
+        {
+          "bytes": 8388608,
+          "device": "cuda:0",
+          "dtype": "torch.bfloat16",
+          "owner": "layer42.attn.wo_b",
+          "shape": [
+            4096,
+            1024
+          ]
+        }
+      ],
+      "layers_cached": 43,
+      "toggle": "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE",
+      "total_bytes": 360710144
+    }
+  }
+}

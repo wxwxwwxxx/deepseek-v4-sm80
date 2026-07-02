@@ -454,6 +454,41 @@ def test_configure_variant_records_marlin_wna16_indexer_fp8_cache(monkeypatch):
     assert "MINISGL_DSV4_SM80_INDEXER_FP8" not in result["raw_dsv4_sm80_env"]
 
 
+def test_configure_variant_records_wo_a_bf16_bmm_cache(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_V1_MOE",
+            "MINISGL_DSV4_SM80_MOE_V2",
+            "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS",
+            "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16",
+            "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY",
+            "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE",
+            "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON",
+            "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE",
+            "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE",
+            "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE",
+            "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND":
+                return False
+            return os.environ.get(name) in {"1", "true"}
+
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()["target0762_woabf16bmmcache"],
+    )
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"] == "1"
+    assert "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE" in result["active_dsv4_toggles"]
+
+
 def test_shared_prefix_workload_repeats_prefix_and_disables_radix_in_scenario():
     bench = _load_module()
     scenario = bench._scenario_map()["shared_prompt_no_radix_bs8"]

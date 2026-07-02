@@ -176,6 +176,127 @@ def _cached_fp8_bf16_weight(
     return cached
 
 
+def _wo_a_bf16_bmm_weight_cache_meta(
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    *,
+    out_dtype: torch.dtype,
+    num_local_groups: int,
+    o_lora_rank: int,
+    d_per_group: int,
+) -> tuple:
+    return (
+        _fp8_bf16_weight_cache_meta(weight, scale, out_dtype),
+        int(num_local_groups),
+        int(o_lora_rank),
+        int(d_per_group),
+    )
+
+
+def _cached_wo_a_bf16_bmm_weight(
+    owner: object,
+    cache_name: str,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    *,
+    out_dtype: torch.dtype,
+    num_local_groups: int,
+    o_lora_rank: int,
+    d_per_group: int,
+    allow_build: bool,
+    owner_label: str,
+) -> torch.Tensor:
+    if num_local_groups <= 0:
+        raise RuntimeError(f"{owner_label} BF16 BMM cache requires num_local_groups > 0.")
+    if o_lora_rank <= 0:
+        raise RuntimeError(f"{owner_label} BF16 BMM cache requires o_lora_rank > 0.")
+    if d_per_group <= 0:
+        raise RuntimeError(f"{owner_label} BF16 BMM cache requires d_per_group > 0.")
+    expected_shape = (num_local_groups * o_lora_rank, d_per_group)
+    if tuple(weight.shape) != expected_shape:
+        raise RuntimeError(
+            f"{owner_label} BF16 BMM cache expected FP8 weight shape {expected_shape}, "
+            f"got {tuple(weight.shape)}."
+        )
+    if weight.dtype != dsv4_kernel.fp8_dtype():
+        raise RuntimeError(
+            f"{owner_label} BF16 BMM cache requires FP8 weights, got {weight.dtype}."
+        )
+    if scale is not None and scale.device != weight.device:
+        raise RuntimeError(
+            f"{owner_label} BF16 BMM cache requires scale on the same device as weight, "
+            f"got weight={weight.device} scale={scale.device}."
+        )
+    if out_dtype != torch.bfloat16:
+        raise RuntimeError(
+            f"{owner_label} BF16 BMM cache requires out_dtype=torch.bfloat16, got {out_dtype}."
+        )
+
+    meta_name = f"{cache_name}_meta"
+    meta = _wo_a_bf16_bmm_weight_cache_meta(
+        weight,
+        scale,
+        out_dtype=out_dtype,
+        num_local_groups=num_local_groups,
+        o_lora_rank=o_lora_rank,
+        d_per_group=d_per_group,
+    )
+    cached = getattr(owner, cache_name, None)
+    if cached is not None and getattr(owner, meta_name, None) == meta:
+        return cached
+
+    if not allow_build:
+        raise RuntimeError(
+            f"{owner_label} BF16 BMM cache is missing or stale. "
+            "Call prepare_for_cuda_graph_capture() after weights are loaded and before "
+            "decode CUDA graph capture/replay; rebuilding inside forward is disabled."
+        )
+
+    dequant = dsv4_kernel.dequant_fp8_weight(weight, scale, out_dtype=out_dtype)
+    cached = (
+        dequant.view(num_local_groups, o_lora_rank, d_per_group)
+        .transpose(1, 2)
+        .contiguous()
+    )
+    setattr(owner, cache_name, cached)
+    setattr(owner, meta_name, meta)
+    return cached
+
+
+def _wo_a_bf16_bmm_projection(
+    o: torch.Tensor,
+    cached_weight: torch.Tensor,
+    *,
+    owner_label: str,
+) -> torch.Tensor:
+    if o.dtype != torch.bfloat16:
+        raise RuntimeError(
+            f"{owner_label} BF16 BMM projection requires bf16 activations, got {o.dtype}."
+        )
+    if cached_weight.dtype != torch.bfloat16:
+        raise RuntimeError(
+            f"{owner_label} BF16 BMM projection requires bf16 cached weight, "
+            f"got {cached_weight.dtype}."
+        )
+    if o.ndim != 3 or cached_weight.ndim != 3:
+        raise RuntimeError(
+            f"{owner_label} BF16 BMM projection expects o=[tokens, groups, d] and "
+            f"weight=[groups, d, rank], got o={tuple(o.shape)} weight={tuple(cached_weight.shape)}."
+        )
+    tokens, num_local_groups, d_per_group = o.shape
+    if (
+        cached_weight.shape[0] != num_local_groups
+        or cached_weight.shape[1] != d_per_group
+    ):
+        raise RuntimeError(
+            f"{owner_label} BF16 BMM projection shape mismatch: "
+            f"o={tuple(o.shape)} weight={tuple(cached_weight.shape)}."
+        )
+    x = o.transpose(0, 1).contiguous()
+    y = torch.bmm(x, cached_weight)
+    return y.transpose(0, 1).reshape(tokens, num_local_groups * cached_weight.shape[2])
+
+
 def _cached_gate_fp32_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
     return _cached_fp32_weight(
         owner,
@@ -661,6 +782,17 @@ class DSV4Attention(BaseOP):
     def _wo_b_owner_label(self) -> str:
         return f"layer{self.layer_id}.attn.wo_b"
 
+    @property
+    def _wo_a_bf16_bmm_cache_name(self) -> str:
+        return "_dsv4_wo_a_bf16_bmm_weight_cache"
+
+    @property
+    def _wo_a_owner_label(self) -> str:
+        return f"layer{self.layer_id}.attn.wo_a"
+
+    def _wo_a_d_per_group(self) -> int:
+        return self.num_local_heads * self.head_dim // self.num_local_groups
+
     def prepare_q_wqb_bf16_weight_cache(self) -> dict[str, object] | None:
         if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
             return None
@@ -676,6 +808,38 @@ class DSV4Attention(BaseOP):
             self._wo_b_bf16_weight_cache_name,
             owner_label=self._wo_b_owner_label,
         )
+
+    def prepare_wo_a_bf16_bmm_cache(self) -> dict[str, object] | None:
+        if not dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE
+        ):
+            return None
+        scale = getattr(self.wo_a, "weight_scale_inv", None)
+        d_per_group = self._wo_a_d_per_group()
+        cached = _cached_wo_a_bf16_bmm_weight(
+            self.wo_a,
+            self._wo_a_bf16_bmm_cache_name,
+            self.wo_a.weight,
+            scale,
+            out_dtype=torch.bfloat16,
+            num_local_groups=self.num_local_groups,
+            o_lora_rank=self.o_lora_rank,
+            d_per_group=d_per_group,
+            allow_build=True,
+            owner_label=self._wo_a_owner_label,
+        )
+        return {
+            "owner": self._wo_a_owner_label,
+            "shape": list(cached.shape),
+            "source_weight_shape": list(self.wo_a.weight.shape),
+            "scale_shape": list(scale.shape) if scale is not None else None,
+            "dtype": str(cached.dtype),
+            "device": str(cached.device),
+            "bytes": int(cached.numel() * cached.element_size()),
+            "num_local_groups": int(self.num_local_groups),
+            "d_per_group": int(d_per_group),
+            "o_lora_rank": int(self.o_lora_rank),
+        }
 
     def prepare_indexer_wq_b_bf16_weight_cache(self) -> dict[str, object] | None:
         if not dsv4_kernel.dsv4_env_flag(
@@ -1042,21 +1206,41 @@ class DSV4Attention(BaseOP):
                 beta_fast=self.beta_fast,
                 beta_slow=self.beta_slow,
             )
-        d_per_group = self.num_local_heads * self.head_dim // self.num_local_groups
+        d_per_group = self._wo_a_d_per_group()
         o = o.reshape(x.shape[0], self.num_local_groups, d_per_group)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_a"):
-            wo_a_scale = _cached_projection_scale(
-                self.wo_a,
-                "_dsv4_weight_scale_fp32_contiguous",
-                getattr(self.wo_a, "weight_scale_inv", None),
-            )
-            o = dsv4_kernel.wo_a_grouped_projection_fallback(
-                o,
-                self.wo_a.weight,
-                wo_a_scale,
-                num_local_groups=self.num_local_groups,
-                o_lora_rank=self.o_lora_rank,
-            )
+            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE):
+                wo_a_scale = getattr(self.wo_a, "weight_scale_inv", None)
+                cached_wo_a = _cached_wo_a_bf16_bmm_weight(
+                    self.wo_a,
+                    self._wo_a_bf16_bmm_cache_name,
+                    self.wo_a.weight,
+                    wo_a_scale,
+                    out_dtype=o.dtype,
+                    num_local_groups=self.num_local_groups,
+                    o_lora_rank=self.o_lora_rank,
+                    d_per_group=d_per_group,
+                    allow_build=False,
+                    owner_label=self._wo_a_owner_label,
+                )
+                o = _wo_a_bf16_bmm_projection(
+                    o,
+                    cached_wo_a,
+                    owner_label=self._wo_a_owner_label,
+                )
+            else:
+                wo_a_scale = _cached_projection_scale(
+                    self.wo_a,
+                    "_dsv4_weight_scale_fp32_contiguous",
+                    getattr(self.wo_a, "weight_scale_inv", None),
+                )
+                o = dsv4_kernel.wo_a_grouped_projection_fallback(
+                    o,
+                    self.wo_a.weight,
+                    wo_a_scale,
+                    num_local_groups=self.num_local_groups,
+                    o_lora_rank=self.o_lora_rank,
+                )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_b"):
             if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE):
                 return self.wo_b.forward_fp8_cached_bf16_weight(
@@ -1605,6 +1789,12 @@ class DeepseekV4Model(BaseOP):
                 report = layer.self_attn.prepare_wo_b_bf16_weight_cache()
                 if report is not None:
                     wo_b_reports.append(report)
+        wo_a_reports: list[dict[str, object]] = []
+        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE):
+            for layer in self.layers.op_list:
+                report = layer.self_attn.prepare_wo_a_bf16_bmm_cache()
+                if report is not None:
+                    wo_a_reports.append(report)
         indexer_wq_b_reports: list[dict[str, object]] = []
         if dsv4_kernel.dsv4_env_flag(
             dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE
@@ -1618,6 +1808,7 @@ class DeepseekV4Model(BaseOP):
         total_indexer_wq_b_bytes = int(
             sum(int(report["bytes"]) for report in indexer_wq_b_reports)
         )
+        total_wo_a_bytes = int(sum(int(report["bytes"]) for report in wo_a_reports))
         return {
             "q_wqb_bf16_weight_cache": {
                 "enabled": bool(q_wqb_reports),
@@ -1633,6 +1824,13 @@ class DeepseekV4Model(BaseOP):
                 "total_bytes": total_wo_b_bytes,
                 "entries": wo_b_reports,
             },
+            "wo_a_bf16_bmm_cache": {
+                "enabled": bool(wo_a_reports),
+                "toggle": dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,
+                "layers_cached": len(wo_a_reports),
+                "total_bytes": total_wo_a_bytes,
+                "entries": wo_a_reports,
+            },
             "indexer_wq_b_bf16_weight_cache": {
                 "enabled": bool(indexer_wq_b_reports),
                 "toggle": dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,
@@ -1641,8 +1839,13 @@ class DeepseekV4Model(BaseOP):
                 "entries": indexer_wq_b_reports,
             },
             "projection_bf16_weight_cache_total": {
-                "total_bytes": total_q_wqb_bytes + total_wo_b_bytes + total_indexer_wq_b_bytes,
-                "owners": ["attn.q_wqb", "attn.wo_b", "indexer.wq_b"],
+                "total_bytes": (
+                    total_q_wqb_bytes
+                    + total_wo_b_bytes
+                    + total_indexer_wq_b_bytes
+                    + total_wo_a_bytes
+                ),
+                "owners": ["attn.q_wqb", "attn.wo_b", "indexer.wq_b", "attn.wo_a"],
             },
         }
 
