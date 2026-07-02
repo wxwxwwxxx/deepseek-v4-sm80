@@ -66,7 +66,9 @@ FP8 quantized-linear projection bottleneck is gone and selected the current
 BF16 small-GEMM backend cluster as the next implementation surface.  TARGET
 07.70 showed that a narrow exact BF16 pretranspose/backend route has local
 microbench signal but no meaningful profile or macro gain, so the active next
-step is a short precision/boundary pivot.
+step is a short precision/boundary pivot.  TARGET 07.71 rejected HC/router
+exact-ish precision as the next lane and selected a bounded vLLM-aligned
+FP8/custom projection-cache boundary target.
 
 ## New TARGET 07 Organization
 
@@ -103,7 +105,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.68 | `prompts/TARGET_07.68_dsv4_sm80_hc_elementwise_graph_cleanup.md` | completed | Added an exact BF16 opt-in HC graph cleanup path. Focused HC pre improved, correctness passed, but 4096/1024 macro and profile gates failed; keep opt-in, do not promote. |
 | TARGET 07.69 | `prompts/TARGET_07.69_dsv4_sm80_projection_gemm_backend_owner_reattribution.md` | completed | Re-attributed the current promoted projection/GEMM bucket with `98.94%` named coverage. No single owner clears `0.20s`; the selected next surface is the BF16 small-GEMM + splitK/reduce cluster at `0.521619s`. |
 | TARGET 07.70 | `prompts/TARGET_07.70_dsv4_sm80_bf16_small_gemm_backend_cluster.md` | completed | Tested exact-route BF16 pretranspose small-GEMM path. Microbench passed, text smoke passed, but profile and macro gates failed; keep audit opt-in only, do not promote. |
-| TARGET 07.71 | `prompts/TARGET_07.71_dsv4_sm80_precision_boundary_pivot.md` | next todo | Short pivot target: decide whether next implementation should attack HC/router FP32 ownership or move to vLLM-aligned FP8/custom projection-cache-indexer boundaries. |
+| TARGET 07.71 | `prompts/TARGET_07.71_dsv4_sm80_precision_boundary_pivot.md` | completed | Rejected HC/router TF32 and BF16-like precision lanes; selected vLLM-aligned FP8/custom projection-cache cluster as the next bounded implementation target. |
+| TARGET 07.72 | `prompts/TARGET_07.72_dsv4_sm80_vllm_aligned_fp8_custom_projection_cache_boundary.md` | next todo | Opt-in implementation target for a vLLM-aligned FP8/custom projection-cache boundary across the coherent projection cluster; excludes full FP8 KV-cache E2E and HC/router precision changes. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -140,7 +143,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.71 next.
+Run TARGET 07.72 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -611,13 +614,33 @@ Decision: keep `dsv4_sm80_a100_victory_bf16smallgemm` as an audit/profiling
 variant only and do not promote it.  Do not continue narrow BF16 layout
 polishing without new evidence.
 
-The active next target is TARGET 07.71: precision/boundary pivot.  It should be
-short and evidence-first: evaluate whether the remaining exact-ish FP32 owners
-such as HC pre linear and MoE router have a low-risk TF32/BF16 path, and in
-parallel rank vLLM-aligned FP8/custom boundaries such as FP8 projection/cache,
-`fused_inv_rope_fp8_quant`, `deepseek_v4_fp8_einsum`, and fused
-indexer/rope/quant.  The output should be one selected implementation target,
-not a full implementation inside the pivot thread.
+TARGET 07.71 completed the precision/boundary pivot.  It did not implement or
+promote any opt-in path.  Its conclusion:
+
+- TF32 HC/router is quality-stable but gives no credible decode-small speedup;
+- BF16-like HC/router is faster in microbench, but router top-k changes on the
+  larger-row probe (`top-k set overlap 0.992350`, exact order match 0.854492,
+  `149 / 1024` rows changed);
+- HC-only BF16-like is barely above the theoretical gain threshold and changes
+  HC outputs;
+- standalone `wo_a` FP8/einsum and standalone indexer continuation are too
+  small after previous targets;
+- full `fp8_ds_mla` KV-cache E2E and whole-model compile are too large for the
+  next small target.
+
+Decision: choose TARGET 07.72, a bounded vLLM-aligned FP8/custom
+projection-cache boundary implementation target.  The selected coherent
+surface is the current projection-cache cluster around `0.521s`, including
+WQA/WKV/compress, shared experts, `wo_a`, `q_wqb`, `wo_b`, and indexer
+projection pieces.  The target should be opt-in, compare against the promoted
+BF16 path, and require quality, profile, and macro gates before any promotion.
+
+HC precision note: vLLM keeps HC `post/comb` as FP32 while mini's promoted path
+keeps HC carrier tensors as BF16.  This is a known precision-contract
+difference.  Because current text smokes and performance runs do not indicate a
+severe correctness problem, do not change HC in TARGET 07.72.  Defer large HC
+contract evaluation and broader correctness smoke until after the current
+performance route stabilizes.
 
 ## Precision Policy
 
