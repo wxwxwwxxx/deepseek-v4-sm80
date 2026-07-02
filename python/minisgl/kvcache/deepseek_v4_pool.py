@@ -15,6 +15,15 @@ DSV4_INDEXER_FP8_CACHE_ENV = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
+def _indexer_fp8_cache_enabled() -> bool:
+    try:
+        from minisgl.kernel import deepseek_v4 as dsv4_kernel
+
+        return bool(dsv4_kernel.dsv4_env_flag(DSV4_INDEXER_FP8_CACHE_ENV))
+    except Exception:
+        return os.environ.get(DSV4_INDEXER_FP8_CACHE_ENV, "").strip().lower() in _TRUE_ENV_VALUES
+
+
 def _lcm(a: int, b: int) -> int:
     return a // gcd(a, b) * b
 
@@ -206,9 +215,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             dtype=self._dtype,
             device=device,
         )
-        self._use_indexer_fp8_cache = (
-            os.environ.get(DSV4_INDEXER_FP8_CACHE_ENV, "").strip().lower() in _TRUE_ENV_VALUES
-        )
+        self._use_indexer_fp8_cache = _indexer_fp8_cache_enabled()
         self._c4_indexer_fp8_page_size = max(page_size // 4, 1)
         self._c4_indexer_fp8_num_pages = div_ceil(self._c4_slots, self._c4_indexer_fp8_page_size)
         if self._use_indexer_fp8_cache and self._c4_layer_count:
@@ -597,7 +604,7 @@ def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) ->
     indexer_bytes = compressed_bytes(c4_layers, index_head_dim, 4)
     indexer_fp8_extra_bytes = (
         div_ceil(c4_layers * page_size * (index_head_dim + 4), 4)
-        if os.environ.get(DSV4_INDEXER_FP8_CACHE_ENV, "").strip().lower() in _TRUE_ENV_VALUES
+        if _indexer_fp8_cache_enabled()
         else 0
     )
     c4_state_bytes = c4_layers * DeepSeekV4KVCache.C4_STATE_RING_SIZE * 4 * head_dim * dtype_size

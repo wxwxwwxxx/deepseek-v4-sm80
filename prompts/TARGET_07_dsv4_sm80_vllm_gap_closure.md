@@ -19,36 +19,40 @@ Primary win condition:
 The promoted default path must remain exact unless a later precision target
 explicitly proves and accepts a quality tradeoff.
 
-## Current Best Exact Result
+## Current Best Milestone Result
 
-Current best exact stack:
+Current best milestone stack:
 
+- variant: `dsv4_sm80_a100_victory`;
+- top-level env: `MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE=1`;
 - Marlin WNA16 MoE backend;
 - global topk/lens;
 - bf16 gather/mask plus split-K sparse decode;
+- FP8 indexer cache backend and fused FP8 activation quant helper;
+- cached BF16 projection stack for `q_wqb`, `wo_b`, `indexer.wq_b`, and
+  `wo_a` grouped BMM;
 - DSV4 decode CUDA graph replay;
-- page size 256, `--num-pages 128`;
+- page size 256;
 - TP8 on 8x A100.
 
-Representative variant:
-
-```text
-v1_moe_vllm_runner_marlin_wna16_globaltopk_splitkbf16_graph_hc_rmsnorm_fwqakvcache_qkvrope_sample_wqb_wob_idxwqb_gatecache_idxstorecache
-```
-
-Best recorded macro from TARGET 07.395:
+Current milestone macro from TARGET 07.62:
 
 | Workload | Output tok/s | Note |
 | --- | ---: | --- |
-| 4096/128/batch4 | `38.94` | `+14.05%` over 07.394 |
-| 4096/1024/batch4 | `68.81` | `+24.99%` over 07.394 |
+| 4096/128/batch4 | `53.5877` | Post-`wo_a` BF16 grouped BMM cache |
+| 4096/1024/batch4 | `116.2553` | First crossing of old `114.07` victory line |
 
 Reference lines:
 
 - old serving victory line: `114.07 output tok/s`;
 - fresh vLLM offline 4096/1024/batch4: `201.99 output tok/s`;
-- vLLM's fast path uses `deepseek_v4_fp8`, packed `fp8_ds_mla` KV cache, and
-  FP8 indexer cache, so it is not precision-neutral.
+- vLLM's fast path uses `deepseek_v4_fp8`, packed `fp8_ds_mla` KV cache, FP8
+  indexer/cache pieces, and additional graph/runtime machinery, so it is not
+  precision-neutral.
+
+This milestone is an opt-in best path, not a declaration that every component
+should become default.  TARGET 07.63 must confirm the bundle after opt-in
+cleanup and rebuild the bottleneck order before more implementation work.
 
 ## New TARGET 07 Organization
 
@@ -77,6 +81,7 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.60 | `prompts/TARGET_07.60_dsv4_sm80_cached_bf16_indexer_wq_b_projection_backend.md` | completed | Extended cached BF16 to `indexer.wq_b`; 4096/128 reached `51.2962 output tok/s`, 4096/1024 reached `105.7645`, and the three cached owners cost exactly `1.0000 GiB/rank`. |
 | TARGET 07.61 | `prompts/TARGET_07.61_dsv4_sm80_post_cached_bf16_vllm_parity_reprofile.md` | completed | Completed post-cached-BF16 parity reprofile. vLLM runtime bucket timing is still unavailable, but mini owner timing plus vLLM source parity select `attn.wo_a` as the next narrow boundary. |
 | TARGET 07.62 | `prompts/TARGET_07.62_dsv4_sm80_wo_a_attention_boundary_parity.md` | completed | Adapted mini's `attn.wo_a` boundary to an opt-in BF16 grouped BMM cache; 4096/1024 reached `116.2553 output tok/s`, crossing the old `114.07` victory line. |
+| TARGET 07.63 | `prompts/TARGET_07.63_dsv4_sm80_post_victory_reprofile_and_next_bottleneck.md` | next todo | Confirm the post-victory `dsv4_sm80_a100_victory` bundle, rerun smoke/macro/profile/memory-ledger checks, rebuild the mini-vs-vLLM top-bucket parity table, and select exactly one next implementation target. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -112,6 +117,8 @@ Broad precision archive:
 - `prompts/archive/target07/TARGET_07.4_dsv4_sm80_precision_lanes.md`
 
 ## Current Sequencing
+
+Run TARGET 07.63 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -397,6 +404,14 @@ The milestone bundle intentionally no longer enables the stale
 paths supersede them in the current best stack.  Keep the individual cache
 toggles for ablation because they have explicit memory tradeoffs.
 
+TARGET 07.63 should now freeze this milestone and reset the bottleneck order.
+Because the victory bundle cleanup changed how the current best path is
+selected, new runs should use `--variants dsv4_sm80_a100_victory`; the old
+`target0762_woabf16bmmcache` name is only a compatibility alias.  The target
+must not implement another optimization.  It should confirm correctness,
+macro throughput, graph replay/eager decode, memory cost, and a fresh owner/nsys
+profile, then choose exactly one next target from evidence.
+
 ## Precision Policy
 
 Default exact path:
@@ -437,8 +452,9 @@ best use of time.
 
 Hard stop conditions:
 
-- official 4096/1024/batch4 output throughput exceeds `114.07 tok/s` and TP8
-  page-size-256 text smoke passes;
+- an implementation subtarget newly clears its stated macro gate and TP8
+  page-size-256 text smoke passes; stop and reprofile instead of continuing
+  local polishing inside the same thread;
 - the target's named bottleneck is no longer in the top two contributors after
   a fresh profile;
 - two consecutive implementation cuts produce less than `5%` macro throughput
@@ -449,6 +465,6 @@ Hard stop conditions:
 
 Every target README should end with:
 
-- current best exact result;
+- current best milestone/exact result as applicable;
 - next target decision;
 - do-not-continue condition.
