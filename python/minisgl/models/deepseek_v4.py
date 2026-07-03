@@ -13,7 +13,13 @@ from minisgl.core import Batch, get_global_ctx
 from minisgl.distributed import DistributedCommunicator, get_tp_info
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.layers import BaseOP, OPList
-from minisgl.utils import div_ceil, div_even, dsv4_direct_copy_nvtx, dsv4_owner_timing
+from minisgl.utils import (
+    div_ceil,
+    div_even,
+    dsv4_direct_copy_nvtx,
+    dsv4_owner_timing,
+    dsv4_prefix_debug,
+)
 
 from .base import BaseLLMModel
 
@@ -27,6 +33,69 @@ def _dsv4_capture_nvtx(name: str):
     if not torch.cuda.is_available():
         return nullcontext()
     return torch.cuda.nvtx.range(f"dsv4.{name}")
+
+
+def _debug_activations_enabled() -> bool:
+    recorder = dsv4_prefix_debug.get_dsv4_prefix_debug_recorder()
+    return recorder is not None and bool(getattr(recorder, "capture_activations", False))
+
+
+def _capture_debug_activation(
+    name: str,
+    tensor: torch.Tensor,
+    row_indices: torch.Tensor | None = None,
+) -> None:
+    try:
+        batch = get_global_ctx().batch
+    except Exception:
+        batch = None
+    dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
+
+
+def _compressed_debug_row_indices(
+    positions: torch.Tensor,
+    ratio: int,
+    batch: Batch,
+) -> torch.Tensor | None:
+    if not _debug_activations_enabled() or positions.numel() == 0 or ratio <= 0:
+        return None
+    if positions.is_cuda:
+        try:
+            if torch.cuda.is_current_stream_capturing():
+                return None
+        except Exception:
+            return None
+    pos = positions.to(dtype=torch.long)
+    end_indices = torch.nonzero((pos + 1) % ratio == 0, as_tuple=False).flatten()
+    if end_indices.numel() == 0:
+        return None
+    offsets = torch.arange(ratio, dtype=torch.long, device=pos.device)
+    gather = end_indices[:, None] - (ratio - 1) + offsets[None, :]
+    valid = gather[:, 0] >= 0
+    if bool(torch.any(valid)):
+        gather_valid = gather[valid]
+        expected = pos[end_indices[valid]][:, None] - (ratio - 1) + offsets[None, :]
+        contiguous = torch.all(pos[gather_valid] == expected, dim=1)
+        valid_rows = torch.nonzero(valid, as_tuple=False).flatten()[contiguous]
+        end_indices = end_indices[valid_rows]
+    else:
+        return None
+    if end_indices.numel() == 0:
+        return None
+
+    output_rows = torch.arange(end_indices.numel(), dtype=torch.long, device=pos.device)
+    selected = []
+    start = 0
+    for req in getattr(batch, "reqs", []):
+        length = int(req.extend_len)
+        end = start + length
+        mask = (end_indices >= start) & (end_indices < end)
+        if bool(torch.any(mask)):
+            selected.append(output_rows[mask][-1])
+        start = end
+    if not selected:
+        return None
+    return torch.stack(selected)
 
 
 def _owner_timing_prefix(owner_label: str) -> str:
@@ -1479,6 +1548,16 @@ class DSV4Attention(BaseOP):
                     apply_norm=not compress_store_fuses_norm,
                     touch_projections=not (indexer_select_bf16 or indexer_select_fp8),
                 )
+                compressed_debug_rows = _compressed_debug_row_indices(
+                    positions,
+                    4,
+                    batch,
+                )
+                _capture_debug_activation(
+                    f"layer{self.layer_id}.indexer_output",
+                    indexer_kv,
+                    row_indices=compressed_debug_rows,
+                )
             if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.indexer_store"):
                     indexer_store_norm_weight = None
@@ -1534,6 +1613,16 @@ class DSV4Attention(BaseOP):
                     x,
                     positions,
                     apply_norm=not compress_store_fuses_norm,
+                )
+                compressed_debug_rows = _compressed_debug_row_indices(
+                    positions,
+                    self.compress_ratio,
+                    batch,
+                )
+                _capture_debug_activation(
+                    f"layer{self.layer_id}.compressor_output",
+                    compressed_kv,
+                    row_indices=compressed_debug_rows,
                 )
             if use_dsv4_backend and hasattr(attn_backend, "store_compressed"):
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.compress_store"):
@@ -2251,14 +2340,18 @@ class DeepseekV4DecoderLayer(BaseOP):
         return dsv4_kernel.hc_post_fallback(x, residual, post, comb)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        layer_id = self.self_attn.layer_id
+        _capture_debug_activation(f"layer{layer_id}.input", x)
         residual = x
         attn_fn = _cached_hc_bf16_weight(self, "_hc_attn_fn_bf16", self.hc_attn_fn)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_pre"):
             y, post, comb = self._hc_pre(x, attn_fn, self.hc_attn_scale, self.hc_attn_base)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.attn_input_norm"):
             y = self.input_layernorm.forward(y)
+            _capture_debug_activation(f"layer{layer_id}.attention_input", y)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.attn"):
             y = self.self_attn.forward(y)
+            _capture_debug_activation(f"layer{layer_id}.attention_output", y)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_post"):
             x = self._hc_post(y, residual, post, comb)
 
@@ -2268,8 +2361,10 @@ class DeepseekV4DecoderLayer(BaseOP):
             y, post, comb = self._hc_pre(x, ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.mlp_input_norm"):
             y = self.post_attention_layernorm.forward(y)
+            _capture_debug_activation(f"layer{layer_id}.moe_input", y)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.mlp"):
             y = self.mlp.forward(y, input_ids)
+            _capture_debug_activation(f"layer{layer_id}.moe_output", y)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_ffn_post"):
             return self._hc_post(y, residual, post, comb)
 
@@ -2565,6 +2660,7 @@ class DeepseekV4Model(BaseOP):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         with _dsv4_capture_nvtx("model.embed"):
             x = self.embed_tokens.forward(input_ids)
+            _capture_debug_activation("embedding", x)
         with _dsv4_capture_nvtx("model.hc_expand"):
             x = x.unsqueeze(1).repeat(1, self.hc_mult, 1)
         for layer in self.layers.op_list:
@@ -2572,7 +2668,9 @@ class DeepseekV4Model(BaseOP):
         with _dsv4_capture_nvtx("model.hc_head"):
             x = self._hc_head(x)
         with _dsv4_capture_nvtx("model.final_norm"):
-            return self.norm.forward(x)
+            x = self.norm.forward(x)
+            _capture_debug_activation("final_norm", x)
+            return x
 
 
 class DeepseekV4ForCausalLM(BaseLLMModel):
@@ -2590,7 +2688,9 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
         if batch.is_prefill:
             output = output[batch.attn_metadata.get_last_indices(batch.size)].contiguous()
         with _dsv4_capture_nvtx("lm_head"):
-            return self.lm_head.linear(output)
+            logits = self.lm_head.linear(output)
+            _capture_debug_activation("lm_head_logits", logits)
+            return logits
 
 
 __all__ = ["DeepseekV4ForCausalLM", "DSV4FallbackAttentionMetadata", "DSV4AttentionMetadata"]

@@ -1416,12 +1416,30 @@ def _compress_forward_vectorized(
     norm,
     apply_norm: bool,
 ) -> torch.Tensor | None:
-    usable_tokens = x.shape[0] // ratio * ratio
-    if usable_tokens == 0:
+    if ratio <= 0:
+        return None
+    positions = positions.to(device=x.device, dtype=torch.long)
+    end_indices = torch.nonzero((positions + 1) % ratio == 0, as_tuple=False).flatten()
+    if end_indices.numel() == 0:
         return x.new_empty((0, head_dim))
-    projected = wkv_gate.forward(x[:usable_tokens]).float()
+    offsets = torch.arange(ratio, dtype=torch.long, device=x.device)
+    gather = end_indices[:, None] - (ratio - 1) + offsets[None, :]
+    valid = gather[:, 0] >= 0
+    if bool(torch.any(valid)):
+        gather_valid = gather[valid]
+        expected = positions[end_indices[valid]][:, None] - (ratio - 1) + offsets[None, :]
+        contiguous = torch.all(positions[gather_valid] == expected, dim=1)
+        valid_indices = torch.nonzero(valid, as_tuple=False).flatten()[contiguous]
+        gather = gather[valid_indices]
+    else:
+        gather = gather[:0]
+    if gather.numel() == 0:
+        return x.new_empty((0, head_dim))
+
+    flat_indices = gather.reshape(-1)
+    projected = wkv_gate.forward(x.index_select(0, flat_indices)).float()
     kv, score = projected.chunk(2, dim=-1)
-    slot = (positions[:usable_tokens].long() % ratio).to(torch.long)
+    slot = (positions.index_select(0, flat_indices) % ratio).to(torch.long)
     score = score + ape[slot].float()
     kv = kv.view(-1, ratio, kv.shape[-1])
     score = score.view(-1, ratio, score.shape[-1])
@@ -1731,14 +1749,16 @@ def compress_forward_fallback(
 ) -> torch.Tensor:
     if x.numel() == 0:
         return x.new_empty((0, head_dim))
+    if _cuda_graph_capture_active(x.device):
+        return x.new_empty((0, head_dim))
+    if positions is None:
+        positions = torch.arange(x.shape[0], device=x.device, dtype=torch.long)
+    else:
+        positions = positions.to(device=x.device, dtype=torch.long)
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS"):
-        if positions is None:
-            fast_positions = torch.arange(x.shape[0], device=x.device, dtype=torch.long)
-        else:
-            fast_positions = positions.to(device=x.device, dtype=torch.long)
         fast = _compress_forward_vectorized(
             x,
-            fast_positions,
+            positions,
             ratio=ratio,
             head_dim=head_dim,
             overlap=overlap,
@@ -1751,16 +1771,21 @@ def compress_forward_fallback(
             return fast
     projected = wkv_gate.forward(x).float()
     kv, score = projected.chunk(2, dim=-1)
-    if positions is None:
-        positions = torch.arange(x.shape[0], device=x.device, dtype=torch.long)
-    positions = positions.long()
 
     rows = []
-    start = 0
-    while start < x.shape[0]:
-        end = min(start + ratio, x.shape[0])
-        if end - start < ratio:
-            break
+    for end_index in torch.nonzero((positions + 1) % ratio == 0, as_tuple=False).flatten().tolist():
+        start = int(end_index) - ratio + 1
+        if start < 0:
+            continue
+        end = int(end_index) + 1
+        expected = torch.arange(
+            int(positions[end_index].item()) - ratio + 1,
+            int(positions[end_index].item()) + 1,
+            dtype=positions.dtype,
+            device=positions.device,
+        )
+        if not bool(torch.equal(positions[start:end], expected)):
+            continue
         slot = (positions[start:end] % ratio).to(torch.long)
         local_score = score[start:end] + ape[slot].float()
         local_kv = kv[start:end]
@@ -1775,7 +1800,6 @@ def compress_forward_fallback(
         pooled = (local_kv * local_score.softmax(dim=0)).sum(dim=0, keepdim=True)
         pooled = pooled.to(x.dtype)
         rows.append(norm.forward(pooled) if apply_norm else pooled)
-        start = end
     if not rows:
         return x.new_empty((0, head_dim))
     return torch.cat(rows, dim=0)

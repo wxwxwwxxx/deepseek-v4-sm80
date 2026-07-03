@@ -1,0 +1,230 @@
+{
+  "activation_summary": {
+    "identical_first_diff": {
+      "name": "none",
+      "scenario": "identical_prompts_batch",
+      "stats": {
+        "allclose": true
+      }
+    },
+    "slot_first_diff": {
+      "name": "none",
+      "scenario": "single_vs_slots",
+      "stats": {
+        "allclose": true
+      }
+    }
+  },
+  "atol": 0.02,
+  "eager_run_dir": "performance_milestones/target08_exact_path_slot_page_invariance/raw/eager_identical_disable_compress_store",
+  "graph_run_dir": null,
+  "graph_vs_eager_logits": {},
+  "identical_logits": {
+    "decode": {
+      "row0_vs_row1": {
+        "allclose": false,
+        "argmax_equal": false,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.8043885231018066,
+        "mean_abs": 0.12960071861743927,
+        "row_max_abs": [
+          0.8043885231018066
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "row0_vs_row2": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 1.2528390884399414,
+        "mean_abs": 0.10381024330854416,
+        "row_max_abs": [
+          1.2528390884399414
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "row0_vs_row3": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.6761107444763184,
+        "mean_abs": 0.10522677004337311,
+        "row_max_abs": [
+          0.6761107444763184
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      }
+    },
+    "prefill": {
+      "row0_vs_row1": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.8281135559082031,
+        "mean_abs": 0.13649718463420868,
+        "row_max_abs": [
+          0.8281135559082031
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "row0_vs_row2": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 1.2466096878051758,
+        "mean_abs": 0.1238027885556221,
+        "row_max_abs": [
+          1.2466096878051758
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "row0_vs_row3": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 1.0146675109863281,
+        "mean_abs": 0.15531545877456665,
+        "row_max_abs": [
+          1.0146675109863281
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      }
+    }
+  },
+  "physical_page_logits": {
+    "decode": {
+      "target_physical_page_mixed_pages": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_physical_page_one_page": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      }
+    },
+    "prefill": {
+      "target_physical_page_mixed_pages": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_physical_page_one_page": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      }
+    }
+  },
+  "primary_run_dir": "performance_milestones/target08_exact_path_slot_page_invariance/raw/eager_identical_disable_compress_store",
+  "rtol": 0.02,
+  "single_vs_slot_logits": {
+    "decode": {
+      "target_in_batch_slot0": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_in_batch_slot1": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_in_batch_slot2": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_in_batch_slot3": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      }
+    },
+    "prefill": {
+      "target_in_batch_slot0": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_in_batch_slot1": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_in_batch_slot2": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_in_batch_slot3": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      }
+    }
+  },
+  "table_row_logits": {
+    "decode": {
+      "target_table_row_after_2_dummy": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_table_row_after_3_dummy": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      }
+    },
+    "prefill": {
+      "target_table_row_after_2_dummy": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      },
+      "target_table_row_after_3_dummy": {
+        "allclose": false,
+        "available": false,
+        "reason": "missing logits"
+      }
+    }
+  }
+}

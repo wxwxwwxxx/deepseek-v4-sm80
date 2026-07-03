@@ -1,0 +1,1155 @@
+{
+  "activation_summary": {
+    "identical_first_diff": {
+      "activation_index": 21,
+      "name": "layer3.attention_output",
+      "phase": "prefill",
+      "scenario": "identical_prompts_batch",
+      "stats": {
+        "allclose": false,
+        "available": true,
+        "max_abs": 0.1015625,
+        "mean_abs": 0.021713562309741974,
+        "row_pair": "row0-row3",
+        "shape": [
+          4096
+        ]
+      }
+    },
+    "slot_first_diff": {
+      "activation_index": 1123,
+      "name": "layer0.attention_output",
+      "phase": "prefill",
+      "scenario": "target_in_batch_slot0",
+      "stats": {
+        "allclose": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.013861611485481262,
+        "shape": [
+          4096
+        ]
+      },
+      "target_row": 0
+    }
+  },
+  "atol": 0.02,
+  "eager_run_dir": "performance_milestones/target08_exact_path_slot_page_invariance/raw/eager",
+  "graph_run_dir": "performance_milestones/target08_exact_path_slot_page_invariance/raw/graph",
+  "graph_vs_eager_logits": {
+    "c4_c128_boundary_lengths": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 8,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 8,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          8,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 8,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 8,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          8,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "identical_prompts_batch": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "page_boundary_255_256_257_258": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "single_target_alone": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "swa_boundary_127_128_129_bs3": {
+      "decode": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 3,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 4,
+        "max_abs": 2.1869688034057617,
+        "mean_abs": 0.1219574585556984,
+        "row_max_abs": [
+          0.3273780345916748,
+          2.1869688034057617,
+          0.25177013874053955
+        ],
+        "rtol": 0.02,
+        "shape": [
+          3,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 3,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 3,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          3,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_in_batch_slot0": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_in_batch_slot1": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_in_batch_slot2": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_in_batch_slot3": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 4,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 4,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          4,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_physical_page_mixed_pages": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_physical_page_none": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_physical_page_one_page": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_table_row_after_0_dummy": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_table_row_after_2_dummy": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "target_table_row_after_3_dummy": {
+      "decode": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "cuda_graph_replay",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "prefill": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "eager_forward_source": "eager",
+        "graph_batch_size": 1,
+        "graph_forward_source": "eager",
+        "graph_padded_size": 1,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    }
+  },
+  "identical_logits": {
+    "decode": {
+      "row0_vs_row1": {
+        "allclose": false,
+        "argmax_equal": false,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.9110321998596191,
+        "mean_abs": 0.15988069772720337,
+        "row_max_abs": [
+          0.9110321998596191
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "row0_vs_row2": {
+        "allclose": false,
+        "argmax_equal": false,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.9407691955566406,
+        "mean_abs": 0.10797954350709915,
+        "row_max_abs": [
+          0.9407691955566406
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "row0_vs_row3": {
+        "allclose": false,
+        "argmax_equal": false,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.7802467346191406,
+        "mean_abs": 0.11280103772878647,
+        "row_max_abs": [
+          0.7802467346191406
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      }
+    },
+    "prefill": {
+      "row0_vs_row1": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.8842525482177734,
+        "mean_abs": 0.12777242064476013,
+        "row_max_abs": [
+          0.8842525482177734
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "row0_vs_row2": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.8832416534423828,
+        "mean_abs": 0.09083099663257599,
+        "row_max_abs": [
+          0.8832416534423828
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "row0_vs_row3": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.8879618644714355,
+        "mean_abs": 0.13648119568824768,
+        "row_max_abs": [
+          0.8879618644714355
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      }
+    }
+  },
+  "physical_page_logits": {
+    "decode": {
+      "target_physical_page_mixed_pages": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "target_physical_page_one_page": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "prefill": {
+      "target_physical_page_mixed_pages": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "target_physical_page_one_page": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    }
+  },
+  "primary_run_dir": "performance_milestones/target08_exact_path_slot_page_invariance/raw/eager",
+  "rtol": 0.02,
+  "single_vs_slot_logits": {
+    "decode": {
+      "target_in_batch_slot0": {
+        "allclose": false,
+        "argmax_equal": false,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.9044308662414551,
+        "mean_abs": 0.14162516593933105,
+        "row_max_abs": [
+          0.9044308662414551
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "target_in_batch_slot1": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.8593082427978516,
+        "mean_abs": 0.12403591722249985,
+        "row_max_abs": [
+          0.8593082427978516
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "target_in_batch_slot2": {
+        "allclose": false,
+        "argmax_equal": false,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 1.3403816223144531,
+        "mean_abs": 0.13529859483242035,
+        "row_max_abs": [
+          1.3403816223144531
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "target_in_batch_slot3": {
+        "allclose": false,
+        "argmax_equal": false,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 1.0416064262390137,
+        "mean_abs": 0.1510794758796692,
+        "row_max_abs": [
+          1.0416064262390137
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      }
+    },
+    "prefill": {
+      "target_in_batch_slot0": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 1.1352882385253906,
+        "mean_abs": 0.193007692694664,
+        "row_max_abs": [
+          1.1352882385253906
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "target_in_batch_slot1": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.9822454452514648,
+        "mean_abs": 0.13847172260284424,
+        "row_max_abs": [
+          0.9822454452514648
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "target_in_batch_slot2": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.9614052772521973,
+        "mean_abs": 0.13667048513889313,
+        "row_max_abs": [
+          0.9614052772521973
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      },
+      "target_in_batch_slot3": {
+        "allclose": false,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.9136557579040527,
+        "mean_abs": 0.1469387263059616,
+        "row_max_abs": [
+          0.9136557579040527
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": false
+      }
+    }
+  },
+  "table_row_logits": {
+    "decode": {
+      "target_table_row_after_2_dummy": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "target_table_row_after_3_dummy": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    },
+    "prefill": {
+      "target_table_row_after_2_dummy": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      },
+      "target_table_row_after_3_dummy": {
+        "allclose": true,
+        "argmax_equal": true,
+        "atol": 0.02,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "row_max_abs": [
+          0.0
+        ],
+        "rtol": 0.02,
+        "shape": [
+          1,
+          129280
+        ],
+        "top10_ids_equal": true
+      }
+    }
+  }
+}

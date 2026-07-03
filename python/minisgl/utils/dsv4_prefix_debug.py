@@ -16,6 +16,9 @@ ENV_DEBUG_TOPK = "MINISGL_DSV4_PREFIX_DEBUG_TOPK"
 ENV_DEBUG_SAVE_FULL_LOGITS = "MINISGL_DSV4_PREFIX_DEBUG_SAVE_FULL_LOGITS"
 ENV_DEBUG_MAX_BATCHES = "MINISGL_DSV4_PREFIX_DEBUG_MAX_BATCHES"
 ENV_DEBUG_ALL_RANKS = "MINISGL_DSV4_PREFIX_DEBUG_ALL_RANKS"
+ENV_DEBUG_ACTIVATIONS = "MINISGL_DSV4_PREFIX_DEBUG_ACTIVATIONS"
+ENV_DEBUG_MAX_ACTIVATION_ROWS = "MINISGL_DSV4_PREFIX_DEBUG_MAX_ACTIVATION_ROWS"
+ENV_DEBUG_SAVE_FULL_ACTIVATIONS = "MINISGL_DSV4_PREFIX_DEBUG_SAVE_FULL_ACTIVATIONS"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _RECORDER: DSV4PrefixDebugRecorder | None = None
@@ -72,6 +75,9 @@ def get_dsv4_prefix_debug_recorder() -> DSV4PrefixDebugRecorder | None:
             topk=max(1, _env_int(ENV_DEBUG_TOPK, 10)),
             save_full_logits=_truthy(os.environ.get(ENV_DEBUG_SAVE_FULL_LOGITS), default=True),
             max_batches=_env_int(ENV_DEBUG_MAX_BATCHES, 0),
+            capture_activations=_truthy(os.environ.get(ENV_DEBUG_ACTIVATIONS)),
+            max_activation_rows=max(1, _env_int(ENV_DEBUG_MAX_ACTIVATION_ROWS, 4)),
+            save_full_activations=_truthy(os.environ.get(ENV_DEBUG_SAVE_FULL_ACTIVATIONS)),
         )
     return _RECORDER
 
@@ -86,6 +92,9 @@ class DSV4PrefixDebugRecorder:
         topk: int,
         save_full_logits: bool,
         max_batches: int,
+        capture_activations: bool,
+        max_activation_rows: int,
+        save_full_activations: bool,
     ) -> None:
         self.root = root
         self.rank = rank
@@ -93,26 +102,100 @@ class DSV4PrefixDebugRecorder:
         self.topk = topk
         self.save_full_logits = save_full_logits
         self.max_batches = max_batches
+        self.capture_activations = capture_activations
+        self.max_activation_rows = max_activation_rows
+        self.save_full_activations = save_full_activations
         self._counter = 0
+        self._activation_counter = 0
         self.batch_dir = root / "batches"
         self.metadata_dir = root / "metadata"
         self.logits_dir = root / "logits"
+        self.activation_dir = root / "activations"
         self.batch_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
         self.logits_dir.mkdir(parents=True, exist_ok=True)
+        if capture_activations:
+            self.activation_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
             "rank": rank,
             "world_size": world_size,
             "topk": topk,
             "save_full_logits": save_full_logits,
             "max_batches": max_batches,
+            "capture_activations": capture_activations,
+            "max_activation_rows": max_activation_rows,
+            "save_full_activations": save_full_activations,
             "env": {
                 ENV_DEBUG_DIR: str(root),
                 ENV_DEBUG_TOPK: str(topk),
                 ENV_DEBUG_SAVE_FULL_LOGITS: str(int(save_full_logits)),
+                ENV_DEBUG_ACTIVATIONS: str(int(capture_activations)),
+                ENV_DEBUG_MAX_ACTIVATION_ROWS: str(max_activation_rows),
+                ENV_DEBUG_SAVE_FULL_ACTIVATIONS: str(int(save_full_activations)),
             },
         }
         self._write_json(root / f"manifest.rank{rank}.json", manifest)
+
+    def capture_activation(
+        self,
+        *,
+        name: str,
+        tensor: torch.Tensor,
+        batch: Any | None = None,
+        row_indices: torch.Tensor | None = None,
+    ) -> None:
+        if not self.capture_activations:
+            return
+        if self._cuda_graph_capture_active(tensor):
+            return
+
+        activation_index = self._activation_counter
+        self._activation_counter += 1
+        safe_name = _safe_name(name)
+        stem = f"rank{self.rank}.act{activation_index:06d}.{safe_name}"
+        selected, row_indices = self._select_activation_rows(tensor, batch, row_indices)
+        selected_cpu = selected.detach().float().cpu()
+        full_path = None
+        if self.save_full_activations:
+            full_tensor = tensor.detach().float().cpu()
+            full_path = self.activation_dir / f"{stem}.full.pt"
+            torch.save({"name": name, "tensor": full_tensor}, full_path)
+
+        tensor_path = self.activation_dir / f"{stem}.pt"
+        torch.save(
+            {
+                "name": name,
+                "tensor": selected_cpu,
+                "row_indices": row_indices.detach().cpu() if row_indices is not None else None,
+            },
+            tensor_path,
+        )
+        payload = {
+            "activation_index": activation_index,
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "mode": os.environ.get(ENV_DEBUG_MODE, ""),
+            "scenario": os.environ.get(ENV_DEBUG_SCENARIO, ""),
+            "stage": os.environ.get(ENV_DEBUG_STAGE, ""),
+            "name": name,
+            "tensor_path": str(tensor_path.relative_to(self.root)),
+            "full_tensor_path": str(full_path.relative_to(self.root)) if full_path else None,
+            "row_indices": (
+                [int(x) for x in row_indices.detach().cpu().reshape(-1).tolist()]
+                if row_indices is not None
+                else None
+            ),
+            "source_shape": list(tensor.shape),
+            "selected": self._tensor_summary(selected_cpu),
+            "batch": self._activation_batch_context(batch),
+        }
+        json_path = self.activation_dir / f"{stem}.json"
+        payload["activation_path"] = str(json_path.relative_to(self.root))
+        self._write_json(json_path, payload)
+        with (self.root / f"activations.rank{self.rank}.jsonl").open(
+            "a", encoding="utf-8"
+        ) as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
 
     def capture_pre_sample(
         self,
@@ -240,6 +323,65 @@ class DSV4PrefixDebugRecorder:
 
         return tensors
 
+    def _select_activation_rows(
+        self,
+        tensor: torch.Tensor,
+        batch: Any | None,
+        row_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if tensor.ndim == 0 or batch is None:
+            return tensor, None
+        rows = tensor.shape[0]
+        if rows <= 0:
+            return tensor, None
+        if row_indices is not None:
+            try:
+                row_indices = row_indices.to(device=tensor.device, dtype=torch.long).reshape(-1)
+                row_indices = row_indices[(row_indices >= 0) & (row_indices < rows)]
+                row_indices = row_indices[: self.max_activation_rows]
+                if row_indices.numel() > 0:
+                    return tensor.index_select(0, row_indices), row_indices
+            except Exception:
+                pass
+        row_indices = None
+        try:
+            batch_size = int(getattr(batch, "size", rows))
+            if getattr(batch, "is_prefill", False) and hasattr(batch, "attn_metadata"):
+                indices = batch.attn_metadata.get_last_indices(batch_size)
+                row_indices = indices[: min(self.max_activation_rows, indices.numel())].to(
+                    device=tensor.device,
+                    dtype=torch.long,
+                )
+            else:
+                count = min(self.max_activation_rows, batch_size, rows)
+                row_indices = torch.arange(count, device=tensor.device, dtype=torch.long)
+            if row_indices.numel() > 0 and int(row_indices.max().item()) < rows:
+                return tensor.index_select(0, row_indices), row_indices
+        except Exception:
+            pass
+        count = min(self.max_activation_rows, rows)
+        row_indices = torch.arange(count, device=tensor.device, dtype=torch.long)
+        return tensor[:count], row_indices
+
+    def _activation_batch_context(self, batch: Any | None) -> dict[str, Any]:
+        if batch is None:
+            return {}
+        return {
+            "phase": getattr(batch, "phase", ""),
+            "batch_size": int(getattr(batch, "size", 0)),
+            "padded_size": int(getattr(batch, "padded_size", getattr(batch, "size", 0))),
+            "reqs": self._req_snapshots(batch),
+            "padded_reqs": self._padded_req_snapshots(batch),
+        }
+
+    def _cuda_graph_capture_active(self, tensor: torch.Tensor) -> bool:
+        if not tensor.is_cuda:
+            return False
+        try:
+            return bool(torch.cuda.is_current_stream_capturing())
+        except Exception:
+            return False
+
     def _batch_tensors(self, batch: Any) -> dict[str, torch.Tensor]:
         tensors: dict[str, torch.Tensor] = {}
         for name in ("input_ids", "positions", "out_loc"):
@@ -332,6 +474,9 @@ class DSV4PrefixDebugRecorder:
                 if finite.numel() > 0:
                     summary["min"] = float(finite.min().item())
                     summary["max"] = float(finite.max().item())
+                    finite_float = finite.float()
+                    summary["mean"] = float(finite_float.mean().item())
+                    summary["l2"] = float(torch.linalg.vector_norm(finite_float).item())
             else:
                 summary["min"] = int(cpu.min().item())
                 summary["max"] = int(cpu.max().item())
@@ -375,10 +520,37 @@ def _jsonable_list(values: list[Any]) -> list[Any]:
     return out
 
 
+def _safe_name(name: str) -> str:
+    out = []
+    for char in name:
+        if char.isalnum() or char in ("-", "_", "."):
+            out.append(char)
+        else:
+            out.append("_")
+    safe = "".join(out).strip("._")
+    return safe or "activation"
+
+
+def capture_dsv4_activation(
+    name: str,
+    tensor: torch.Tensor,
+    batch: Any | None = None,
+    row_indices: torch.Tensor | None = None,
+) -> None:
+    recorder = get_dsv4_prefix_debug_recorder()
+    if recorder is None:
+        return
+    recorder.capture_activation(name=name, tensor=tensor, batch=batch, row_indices=row_indices)
+
+
 __all__ = [
     "ENV_DEBUG_DIR",
     "ENV_DEBUG_MODE",
     "ENV_DEBUG_SCENARIO",
     "ENV_DEBUG_STAGE",
+    "ENV_DEBUG_ACTIVATIONS",
+    "ENV_DEBUG_MAX_ACTIVATION_ROWS",
+    "ENV_DEBUG_SAVE_FULL_ACTIVATIONS",
+    "capture_dsv4_activation",
     "get_dsv4_prefix_debug_recorder",
 ]
