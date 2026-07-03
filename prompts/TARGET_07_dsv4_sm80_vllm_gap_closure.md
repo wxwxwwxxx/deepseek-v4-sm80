@@ -81,9 +81,13 @@ CUDA extension packages.  TARGET 07.75 then built the mini-owned dense FP8
 Marlin extension against mini's default torch ABI and passed the focused owner
 gate.  TARGET 07.76 replaced the vLLM-helper runtime path with the mini-owned
 bridge; TP8 smoke, graph replay, memory lifecycle, and vLLM dependency gates
-passed, but the 4096/1024 macro regressed.  TARGET 07.77 is therefore a
-diagnostic attribution target before any further optimization or owner
-expansion.
+passed, but the first 4096/1024 macro regressed.  TARGET 07.77 attributed that
+regression primarily to measurement fairness/noise rather than dense Marlin
+kernel cost.  TARGET 07.78 then used separate `torchrun` invocations for a fair
+repeat-stable gate and concluded that dense FP8 Marlin projection is speed
+neutral but saves memory.  It remains an explicit opt-in.  TARGET 07.79 is now
+the post-07.78 bottleneck and A100 roofline reset before deciding whether to
+continue TARGET 07 or pivot to TARGET 08.
 
 ## New TARGET 07 Organization
 
@@ -126,7 +130,9 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.74 | `prompts/TARGET_07.74_dsv4_sm80_vllm_fp8_marlin_dense_projection_runtime.md` | completed | Implemented a default-off vLLM-bridge runtime opt-in for `q_wqb`, `wo_b local`, and shared experts down. Focused owner timings stayed strong and the memory ledger was favorable, but TP8 validation stopped at the vLLM/mini ABI bridge gate; do not promote. |
 | TARGET 07.75 | `prompts/TARGET_07.75_dsv4_sm80_mini_owned_dense_fp8_marlin_bridge.md` | completed | Built/imported `minisgl_dense_fp8_marlin` under default mini torch `2.9.1+cu128`; focused real-weight quality passed for `q_wqb`, `wo_b local`, and shared-down, M=4 was about `0.058 ms`, and the bridge was slightly faster than the offline vLLM helper. |
 | TARGET 07.76 | `prompts/TARGET_07.76_dsv4_sm80_mini_owned_fp8_marlin_projection_runtime.md` | completed | Replaced the 07.74 vLLM-helper path with the mini-owned bridge. Smoke/graph/memory passed and 4096/128 improved `+1.02%`, but 4096/1024 regressed `-6.70%`; keep explicit opt-in, do not promote. |
-| TARGET 07.77 | `prompts/TARGET_07.77_dsv4_sm80_dense_fp8_marlin_runtime_regression_attribution.md` | next todo | Diagnose the 07.76 regression with fair/repeated comparison, owner-level q_wqb/wo_b/shared-down timing, prepare/TTFT breakdown, layout/copy attribution, and a next-target decision. |
+| TARGET 07.77 | `prompts/TARGET_07.77_dsv4_sm80_dense_fp8_marlin_runtime_regression_attribution.md` | completed | Diagnosed 07.76 regression. Main bucket is measurement fairness/noise: the large prepare/TTFT regression did not reproduce, second repeat was neutral, pure Marlin GEMM was faster, layout/copy was view-only, and communication bytes/counts were unchanged. |
+| TARGET 07.78 | `prompts/TARGET_07.78_dsv4_sm80_benchmark_lifecycle_repeat_stable_gate.md` | completed | Used separate `torchrun` per variant for fair lifecycle; dense FP8 Marlin projection was speed-neutral on 4096/1024 but saved about `807 MB/rank`, so it remains explicit opt-in and is not promoted. |
+| TARGET 07.79 | `prompts/TARGET_07.79_dsv4_sm80_post_0778_roofline_bottleneck_reset.md` | next todo | Reprofile the promoted path after 07.78 and produce an A100 roofline/MFU/MBU, communication, memory, and max-context capacity ledger before choosing the next major action. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -163,7 +169,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.77 next.
+Run TARGET 07.79 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -762,10 +768,21 @@ However, 07.76 did not meet promotion gates:
 
 The 4096/1024 candidate also had decode tok/s `-2.35%`, TTFT `+1.7223s`, and
 prepare time `+1.7256s`, while communication bytes/counts were unchanged.
-Therefore TARGET 07.77 should diagnose the regression before any Phase B owner
-expansion.  It must attribute the loss across prepare/TTFT, true replay owner
-GEMM time, layout/copy/contiguous overhead, all-reduce ordering, and benchmark
-fairness/repeatability.
+TARGET 07.77 diagnosed the regression.  The main bucket is
+`measurement fairness/noise`: the 07.76 `prepare +1.7s` / `TTFT +1.7s` pattern
+did not reproduce under repeated clean runs, the second repeat was neutral
+(`131.4680 -> 131.5082 output tok/s`), pure dense Marlin GEMM/custom-op timing
+improved for `q_wqb`, `wo_b`, and `shared_down`, all dense Marlin layout
+boundaries were views with `.contiguous()` skipped, and communication
+bytes/counts were unchanged.  The measurable owner-level losses were about
+`0.19s` over `1023` replays, far smaller than the original seconds-scale loss.
+
+TARGET 07.78 fixed the decision by using controlled separate invocations with
+warmup/repeats.  The result was neutral for speed and positive for memory, so
+the dense FP8 Marlin projection path stays opt-in.  TARGET 07.79 should now
+reset the promoted-path bottleneck map and quantify A100 hardware efficiency,
+memory bandwidth utilization, communication efficiency, and maximum context
+capacity.  It should not optimize kernels.
 
 ## Precision Policy
 
