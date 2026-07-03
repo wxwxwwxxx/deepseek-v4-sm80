@@ -1,71 +1,114 @@
-你好，请帮我在这个项目中调研一下应该如何将Deepseek-V4-Flash植入mini-sglang框架，并完成模型在sm80下的适配。相关信息如下：
-1、需要植入的框架是/workspace/mini-sglang，这是一个简单的大模型推理框架，其中实现了sglang的关键功能；
-2、需要植入的模型的位置是：/models/DeepSeek-V4-Flash；
-3、模型推理相关的代码参见/models/DeepSeek-V4-Flash/inference文件夹（官方oracle）和/workspace/sglang-main（sglang仓库）；
-4、要点：
-    a) 我们的目标是在当前的mini-sglang中实现deepseek v4的高性能推理，并完成模型在sm80下的适配工作；
-    b) 我们之前在当前仓库的dsv4分支中做过一些尝试，但是我分析后发现性能较差且植入的工作量太高，因此我放弃了基于原始模型代码的这个方案，并重建了一个新分支，名为dsv4-sglang-based，也就是当前分支；然而，dsv4分支中仍然可能有一些值得参考的内容，比如模型的oracle版本，请按需使用。
-    c) 为了解决上面的问题，我决定不应该直接参考原始模型代码，而是应该参考sglang中已有的高性能实现，并找到sm80不支持选项的操作（比如DeepGEMM等算子），针对性的完成适配。为此，你可以参考sglang代码仓库，本机中的代码位置在/workspace/sglang-main。由于它代码量庞大且依赖了复杂的软件包，因此我没有安装他，辛苦你直接阅读他，并基于他的实现，找到DeepSeek V4相关的设计并移植到本代码仓库。
-5、实现路径：
-    本仓库里存在基础的radix前缀缓存实现。我设想的实现路径如下：
-    a) 完成radix tree到DSV4 kvcache的适配。DSV4模型中涉及到多种不同的KV cache，如C4A attention、C4A indexer和C128A attention，以及SWA。请参考sglang中的设计，将其移植到本仓库。注意在本机sm80的环境下，我们存在两种选择，一是在算子中做低精度适配，并保存在低精度的kvcache中。二是算子中不做低精度适配，直接保存bf16 kvcache。代码中可以留下相应接口；适配可以分两步，第一步可以暂时不支持前缀缓存，待初步性能确认后再来实现SWA相关的前缀缓存。
-    b) 找到sglang中的算子融合方案。并将其移植到本机。第一步我们可以找到sglang在sm90、sm100下如何设计sglang的计算图，调用了哪些大融合算子。你可以将其接口写出来，并标记todo。我会去寻找相关算子的实现，后续我们一起将其移植到sm80。sglang仓库中应当有这些算子的接口，不过如果他们依赖了第三方仓库，本机中可能没有安装，你可以列出来后，我去github下载它的最新代码。
-6、如果存在我没有提到的难点，你可以列出来并单独详细说明！
+你好，请帮我在这个项目中调研并实现 DeepSeek-V4-Flash 在
+mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 
-## 阶段 Matrix
+## Project Context
 
-| Stage | Prompt | Status | Completion Record |
+- Framework: `/workspace/mini-sglang`
+- Model: `/models/DeepSeek-V4-Flash`
+- Official/oracle reference: `/models/DeepSeek-V4-Flash/inference`
+- SGLang reference: `/workspace/sglang-main`
+- vLLM DeepSeek V4 reference: `/workspace/vllm-dsv4-docker`
+- Old abandoned mini branch: `dsv4`
+- Current main route: use SGLang/vLLM design as high-performance references,
+  adapt the parts that are valid on sm80, and avoid re-implementing slow local
+  variants when a proven backend can be ported cleanly.
+
+## Global Principles
+
+- Keep the default path exact unless a dedicated precision target proves and
+  accepts a quality tradeoff.
+- Use page size `256` for DSV4 benchmark and smoke work unless a target says
+  otherwise.
+- Compare against vLLM/SGLang source behavior before writing a local
+  replacement for a major runtime boundary.
+- Use fair TP8 macro runs, source parity, and focused microbench evidence before
+  promoting optimizations.
+- Keep large profiler outputs and raw benchmark data under
+  `performance_milestones/`; symlink large files when appropriate.
+- Archive completed fine-grained prompts so new Codex threads can use the
+  current route files instead of replaying the full history.
+
+## Stage Matrix
+
+| Stage | Prompt | Status | Summary |
 | --- | --- | --- | --- |
-| TARGET 05.5 | `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md` | planned | DSV4 sm80 高性能算子替换研发计划已创建。后续每次替代 kernel 时，需要在该文件的 R&D Completion Matrix 中记录 kernel、mode、toggle、correctness、microbench、E2E perf、decision 和 artifact 路径。 |
-| TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | 已新增 `MINISGL_DSV4_SM80_V0_BF16` 白名单 bundle、语义测试、wrapper bundle smoke、最小离线 E2E smoke 脚本，并验证 `/models/DeepSeek-V4-Flash` fallback/v0_bf16 在 A100 sm80 TP=4 下均生成 4 tokens。Artifact: `/tmp/dsv4_v0_fallback_smoke.json`, `/tmp/dsv4_v0_bf16_smoke.json`。正式性能矩阵交给 TARGET 06。 |
-| TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | 已新增 torchrun-native TP8 benchmark harness `benchmark/offline/deepseek_v4_perf_matrix.py`，默认 page_size=256、PyTorch/NCCL、radix disabled，覆盖 fallback/v0_bf16、prefill/decode/shared-prefix 场景，输出 JSON/JSONL、环境、内存、fallback counters 和瓶颈标签；修复 Engine page table 对 page_size=256 尾页写入的对齐问题；新增正式评测前的文本正确性 smoke `benchmark/offline/deepseek_v4_text_smoke.py`，同样默认 TP8/page_size=256，并记录回复文本、解析结果和乱码/复读/期望答案检查。本轮修复了 TP8 正确性问题：DSV4 TP routed experts 缺失 all-reduce、`attn_sink` 权重未按 local heads 分片、fallback q_norm_rope 未原地写回 query，并补齐 fallback two-source sparse attention 读取压缩 cache。验证：纯逻辑/schema 测试通过，TP8 page_size=256 tiny smoke 通过 fallback/v0_bf16，artifact: `/tmp/dsv4_target06_smoke_variants/summary.json`；decode phase smoke artifact: `/tmp/dsv4_target06_smoke_decode/summary.json`；text smoke artifacts: `/tmp/dsv4_text_smoke_after_qnorm_fix.json`、`/tmp/dsv4_text_smoke_full_after_qnorm_fix.json`，fallback/v0_bf16 在 3 条简单提示上均为 `pass`。正式长 baseline 可用 TARGET 06 suggested command 直接生成，smoke/debug 结果不计入官方 baseline。 |
-| TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | planned | DSV4 sm80 vLLM gap closure 新主路线图。当前 promoted milestone 仍为 `dsv4_sm80_a100_victory` / `MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE=1`。07.78 repeat-stable gate 判定 dense FP8 Marlin projection 为速度中性但节省约 `807 MB/rank`，保留显存 opt-in、不进入默认 speed bundle；下一步运行 TARGET 07.79，重置 post-07.78 bottleneck map，并补齐 A100 roofline/MFU/MBU 与最大上下文容量账本。 |
-| TARGET 07.10 | `prompts/TARGET_07.10_dsv4_sm80_foundation_history.md` | completed history | 合并 07.1/07.2/07.25：公平复测、通信/CUDA graph、subgraph parity。旧细粒度 prompt 保留为 archive。 |
-| TARGET 07.20 | `prompts/TARGET_07.20_dsv4_sm80_moe_history.md` | completed history | 合并 07.3/07.35/07.36/07.37/07.38/07.39/07.391：MoE 从 V2 到 mini-owned Marlin WNA16 的完整结论；MoE 目前不再是 primary bottleneck。 |
-| TARGET 07.30 | `prompts/TARGET_07.30_dsv4_sm80_attention_history.md` | completed history | 合并 07.392/07.393/07.394/07.395：attention/indexer/cache 从 post-Marlin profile 到 global topk/lens，再到 exact bf16 split-K sparse decode；decode sparse boundary 已基本打平 vLLM 对应 probe。 |
-| TARGET 07.40 | `prompts/TARGET_07.40_dsv4_sm80_post_splitk_reprofile.md` | completed | post-splitK reprofile：重新区分 decode split-K、legacy prefill sparse、indexer/cache、runtime/copy；结论是 decode split-K 已不是主瓶颈，下一步进入 exact runtime/indexer/cache。 |
-| TARGET 07.41 | `prompts/TARGET_07.41_dsv4_sm80_indexer_cache_runtime_exact.md` | completed | exact replay metadata-copy cut：microbench 明显变好，但 4096/128 和 4096/1024 macro 基本不变；结论是不要继续局部 metacopy polish，需要重新对齐 vLLM 证据链。 |
-| TARGET 07.42 | `prompts/TARGET_07.42_dsv4_sm80_vllm_metadata_runtime_parity.md` | completed | evidence-first mini-vs-vLLM metadata/runtime/indexer/cache parity：未找到足够支撑 exact runtime PoC 的证据；推荐 precision/cache，但 vLLM per-bucket timing 仍不完整。 |
-| TARGET 07.43 | `prompts/TARGET_07.43_dsv4_sm80_vllm_ablation_before_precision.md` | completed | vLLM 破坏性实验：aux stream off 仅 `-0.54%`，persistent topk off 为 `+0.21%`，eager 大幅掉速但 mini 已有 decode graph；结论是直接进入 vLLM-aligned FP8 cache/indexer lane。 |
-| TARGET 07.50 | `prompts/TARGET_07.50_dsv4_sm80_fp8_cache_indexer_precision.md` | completed | vLLM-aligned opt-in FP8 cache/indexer precision lane：窄 mini-owned FP8 indexer cache/logits slice 质量通过但性能失败，4096/128 从 exact control `37.9237` 降到 `29.6691 output tok/s`，停止该 slice。 |
-| TARGET 07.51 | `prompts/TARGET_07.51_dsv4_sm80_vllm_fp8_backend_parity.md` | completed | 已隔离 vLLM 原生 FP8 indexer 与 `fp8_ds_mla` gather/dequant backend。vLLM FP8 paged decode logits 在 batch16/history4096 为 `0.1529 ms`，明显快于 mini bf16 logits `0.3076 ms` 和 mini FP8 logits `1.3072 ms`；结论是下一步 port/adapt vLLM FP8 indexer backend。完整 `fp8_ds_mla` KV cache 暂缓，且不要照搬 SM80 会卡住的 standalone `quantize_and_insert_k_cache`。 |
-| TARGET 07.52 | `prompts/TARGET_07.52_dsv4_sm80_vllm_fp8_indexer_backend_port.md` | completed | 已将 vLLM-aligned FP8 paged indexer backend 作为 opt-in 路径 port/adapt 到 mini。large-shape paged logits `0.1845 ms`，接近 vLLM `0.1529 ms`；text smoke pass；4096/1024/batch4 达到 `73.67 output tok/s`，比历史 exact `68.81` 约 `+7%`，但仍远低于 `114.07` 和 vLLM `~202`。 |
-| TARGET 07.53 | `prompts/TARGET_07.53_dsv4_sm80_post_fp8_indexer_reprofile.md` | completed | 在 FP8 indexer 成功后重新抓 mini profile，并和 vLLM 对比剩余 top buckets。结论：decode envelope 中 projection/GEMM `1.7973 s`，graph/runtime/copy/cat/index `1.6170 s`，elementwise graph nodes `1.3583 s`；graph/layout cluster 合计 `2.9752 s` / `45.50%`，下一步先做 graph/layout replay deforestation，projection/GEMM 作为 pivot。 |
-| TARGET 07.54 | `prompts/TARGET_07.54_dsv4_sm80_graph_layout_replay_deforestation.md` | completed | fused FP8 activation fake-quant PoC 命中 profile gate：graph/layout cluster 从 `2.9752 s` 降到 `1.8271 s`（`-38.59%`），4096/128 从 `41.66` 到 `43.07 output tok/s`，4096/1024 从 `73.67` 到 `87.08 output tok/s`；剩余 graph/layout 与 projection/GEMM 并列。 |
-| TARGET 07.55 | `prompts/TARGET_07.55_dsv4_sm80_remaining_graph_layout_or_projection_pivot.md` | completed | 对 07.54 后剩余 graph/layout 做重新归因；direct-copy 太分散，BF16 copy 太小，CatArray/index/gather 只有堆叠后才刚过 gate，pow/mean/mul 缺少单一边界；结论是不要继续泛 graph/layout，pivot 到 projection/GEMM backend parity。 |
-| TARGET 07.56 | `prompts/TARGET_07.56_dsv4_sm80_low_cost_graph_layout_compile_preflight.md` | completed | projection/GEMM parity 前的短 preflight：实现 opt-in static scale cache，microbench 消除 scale cast/copy 但 4096/128 只从 `43.0685` 到 `43.2194 output tok/s`（`+0.35%`）；结论是不继续低成本 graph/layout，小修上下文交给 projection/GEMM parity。 |
-| TARGET 07.57 | `prompts/TARGET_07.57_dsv4_sm80_projection_gemm_backend_parity.md` | completed | 已完成 projection/GEMM owner-level attribution。结论：`attn.q_wqb`、`attn.wo_b`、`indexer.wq_b` 共享 `_quantized_linear_fp8_kernel` backend contract，合计约 `1.172645 s` decode-envelope intrinsic time；real-weight microbench 显示 cached-dequant BF16 `F.linear` 明显更快，因此下一步进入 cached BF16 projection backend PoC。 |
-| TARGET 07.58 | `prompts/TARGET_07.58_dsv4_sm80_cached_bf16_projection_backend.md` | completed | opt-in cached BF16 `attn.q_wqb` backend 已通过：4096/128 从 `43.0685` 到 `47.9464 output tok/s`，4096/1024 从 `87.0831` 到 `92.5170`；额外 cache `0.3359 GiB/rank`，约 `4744` KV tokens 或 `18.53` pages。 |
-| TARGET 07.59 | `prompts/TARGET_07.59_dsv4_sm80_cached_bf16_wo_b_projection_backend.md` | completed | 已在 07.58 基础上扩展 cached BF16 到 row-parallel `attn.wo_b`，新增 opt-in `MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE=1`。Focused `wo_b` local projection 降幅约 `38-42%`，text smoke pass 且 graph replay/eager decode 为 `9/0`；4096/128/batch4 达到 `49.6585 output tok/s`，4096/1024/batch4 达到 `98.6953 output tok/s`。显存增量 `0.3359 GiB/rank`，combined q_wqb+wo_b 为 `0.6719 GiB/rank`。Profile 显示 `wo_b` local compute 已降到 `0.070595s`，row-parallel all-reduce 为 `0.161865s`，但最大剩余同类 projection owner 是 `indexer.wq_b` `0.364997s`；下一步继续 cached BF16 到 `indexer.wq_b`。 |
-| TARGET 07.60 | `prompts/TARGET_07.60_dsv4_sm80_cached_bf16_indexer_wq_b_projection_backend.md` | completed | 已在 q_wqb+wo_b cached BF16 基础上扩展到 `indexer.wq_b`。4096/128/batch4 达到 `51.2962 output tok/s`，4096/1024/batch4 达到 `105.7645`；三大 cached owner 合计 `1.0000 GiB/rank`，约 `14121.79` KV tokens 或 `55.16` pages。Fresh profile 显示不应继续惯性扩展 cached weight，下一步进入 vLLM parity reprofile。 |
-| TARGET 07.61 | `prompts/TARGET_07.61_dsv4_sm80_post_cached_bf16_vllm_parity_reprofile.md` | completed | 已完成 post-cached-BF16 vLLM parity reprofile。vLLM runtime bucket timing 仍不可用，但 mini owner profile + vLLM source parity 指向 `attn.wo_a`：owner `0.481377s`，copy/layout `0.290148s`，elementwise `0.137695s`。下一步做窄 `wo_a` attention boundary。 |
-| TARGET 07.62 | `prompts/TARGET_07.62_dsv4_sm80_wo_a_attention_boundary_parity.md` | completed | 已实现 opt-in `wo_a` BF16 grouped BMM cache：`attn.wo_a` owner 从 `0.481377s` 降到 `0.068948s`，4096/1024/batch4 从 `105.7645` 到 `116.2553 output tok/s`（`+9.92%`），graph replay 保持且 eager decode 为 `0`。当前 best 已整理成 `dsv4_sm80_a100_victory` bundle，旧 `target0762_woabf16bmmcache` 保留为兼容别名。 |
-| TARGET 07.63 | `prompts/TARGET_07.63_dsv4_sm80_post_victory_reprofile_and_next_bottleneck.md` | completed | post-victory 确认完成：`dsv4_sm80_a100_victory` text smoke pass，4096/128/batch4 `59.5264 output tok/s`，4096/1024/batch4 `119.4153 output tok/s`，graph replay 保持且 eager decode 为 `0`；fresh profile 选出下一瓶颈 `graph_runtime_copy_cat_index`（`0.846795s` / `21.48%`）。 |
-| TARGET 07.64 | `prompts/TARGET_07.64_dsv4_sm80_decode_metadata_deforestation.md` | completed | Decode metadata deforestation 完成：新增 opt-in `dsv4_sm80_a100_victory_metadatadeforest` / `MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST=1`，microbench `6.8x-8.5x` 且 smoke pass，但 `graph_runtime_copy_cat_index` 仅 `0.846795s -> 0.834792s`，4096/1024 仅 `119.4153 -> 122.9414`（`+2.95%`），未达 promote gate；保留 opt-in，不进 victory bundle。 |
-| TARGET 07.65 | `prompts/TARGET_07.65_dsv4_sm80_direct_copy_owner_attribution.md` | completed | Measurement-only direct-copy owner attribution 完成：新增默认关闭的 profiling NVTX 和 classifier，4096/128/batch4 rank0 `direct_copy` 总计 `0.737039s`，命名 owner 覆盖 `99.97%`；最大组为 MoE/shared expert staging `0.379204s` / `51.45%`，graph/replay metadata 仅 `0.000290s`。 |
-| TARGET 07.66 | `prompts/TARGET_07.66_dsv4_sm80_moe_shared_expert_staging_cleanup.md` | completed | MoE/shared-expert staging cleanup 完成并 promote：新增 `MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE=1` 并纳入 `dsv4_sm80_a100_victory`；shared expert gate/up/down projection owners 从 direct-copy 表消失，MoE/shared staging `0.379204s -> 0.097361s`，4096/1024/batch4 `119.4153 -> 131.7707 output tok/s`。 |
-| TARGET 07.67 | `prompts/TARGET_07.67_dsv4_sm80_post_shared_expert_reprofile.md` | completed | Post-shared-expert reprofile 完成：promoted `dsv4_sm80_a100_victory` 复现 07.66 audit variant，4096/1024/batch4 `131.6263 output tok/s`，shared expert projection owners 仍为 0；fresh profile 显示 projection/GEMM 最大但偏 backend/precision，选择 exact-path `HC/elementwise` 作为下一实现目标。 |
-| TARGET 07.68 | `prompts/TARGET_07.68_dsv4_sm80_hc_elementwise_graph_cleanup.md` | completed | HC / elementwise graph boundary cleanup 完成：新增 opt-in `MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP=1` / `dsv4_sm80_a100_victory_hccleanup`，focused `hc_pre` 从 `0.247450ms` 降到 `0.196063ms` 且 correctness/smoke 通过；但 4096/1024 仅 `+0.73%`，HC+HC-owned layout 仅降约 `0.0533s`，未达 promote gate，保留 opt-in。 |
-| TARGET 07.69 | `prompts/TARGET_07.69_dsv4_sm80_projection_gemm_backend_owner_reattribution.md` | completed | Projection/GEMM backend and owner re-attribution 完成：07.67 profile 已足够，projection/GEMM `0.778887s` 中命名覆盖 `98.94%`；旧 `_quantized_linear_fp8_kernel` 残留为 `0`，无单 owner 过 `0.20s`，但 BF16 small-GEMM + splitK/reduce cluster 为 `0.521619s` / `66.97%`，选择 07.70。 |
-| TARGET 07.70 | `prompts/TARGET_07.70_dsv4_sm80_bf16_small_gemm_backend_cluster.md` | completed | BF16 Small-GEMM Backend Cluster 完成：新增 opt-in `MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE=1` / `dsv4_sm80_a100_victory_bf16smallgemm`，focused microbench 多 owner 达 `15%+`，text smoke/graph replay 通过；但 projection/GEMM 仅 `0.778887s -> 0.778170s`，BF16 cluster `0.521619s -> 0.521012s`，4096/1024 仅 `+0.09%`，且额外 `1.7559 GiB/rank`，不推广。 |
-| TARGET 07.71 | `prompts/TARGET_07.71_dsv4_sm80_precision_boundary_pivot.md` | completed | Precision / Boundary Pivot 完成：TF32 HC/router 无 decode-small speedup；BF16-like router 在 M=1024 上 top-k set overlap `0.992350`、order match `0.854492`，质量风险太高；选择 `TARGET 07.72` vLLM-aligned FP8/custom projection-cache cluster，目标 surface 约 `0.521s`，预期 profile gain `0.12s-0.20s`。 |
-| TARGET 07.72 | `prompts/TARGET_07.72_dsv4_sm80_vllm_aligned_fp8_custom_projection_cache_boundary.md` | completed | vLLM-Aligned FP8 / Custom Projection-Cache Boundary：source parity 和 real-weight focused microbench 完成，没有改 runtime。direct FP8/custom candidates 数值接近但全部慢于 promoted cached BF16，M=4 代表 owner 从 `-169%` 到 `-683%`，因此停止，不做 runtime opt-in。 |
-| TARGET 07.73 | `prompts/TARGET_07.73_dsv4_sm80_vllm_quantized_linear_backend_feasibility.md` | completed | vLLM Quantized-Linear Backend Feasibility：standalone backend gate 通过，首选 `vllm_fp8_marlin_w8a16_block`，在 `q_wqb`、`wo_b local`、shared experts down 上 M=`1,4,8,16` 全部 `>=15%`；拒绝 `wo_a` 两 launch、A100 `torch._scaled_mm` FP8、INT8 W8A8 silent runtime 和 FBGEMM-derived 首选路线。 |
-| TARGET 07.74 | `prompts/TARGET_07.74_dsv4_sm80_vllm_fp8_marlin_dense_projection_runtime.md` | completed | vLLM FP8 Marlin Dense Projection Runtime Opt-In：已实现默认关闭 opt-in `MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION=1`，Phase A owners 为 `q_wqb`、`wo_b local`、shared experts down。Focused Marlin 约 `0.064 ms` 且显存账优于 cached BF16，但 TP8 smoke/profile/macro 未通过 runtime bridge gate：默认 mini 环境无 vLLM 且 vLLM `_C` ABI 不匹配，vLLM venv 又暴露 `sgl_kernel`/mini WNA16 ABI 问题。 |
-| TARGET 07.75 | `prompts/TARGET_07.75_dsv4_sm80_mini_owned_dense_fp8_marlin_bridge.md` | completed | Mini-Owned Dense FP8 Marlin Extension Bridge：已在默认 mini torch `2.9.1+cu128` ABI 下 build/import `minisgl_dense_fp8_marlin`，不依赖 vLLM/`sgl_kernel`；`q_wqb`、`wo_b local`、shared experts down 的 focused correctness 全过，M=4 约 `0.058 ms`，平均比 vLLM helper 快 `7.47%`，显存账优于 cached BF16。 |
-| TARGET 07.76 | `prompts/TARGET_07.76_dsv4_sm80_mini_owned_fp8_marlin_projection_runtime.md` | completed | Mini-Owned FP8 Marlin Projection Runtime：runtime 已改用 `minisgl.kernel.dense_fp8_marlin`，TP8 text smoke pass、graph replay 保持、eager decode 为 0、显存峰值下降约 `807 MB/rank` 且无 BF16+Marlin 双份缓存；但 4096/1024 从 `127.4409` 回退到 `118.9051 output tok/s`（`-6.70%`），不 promote。 |
-| TARGET 07.77 | `prompts/TARGET_07.77_dsv4_sm80_dense_fp8_marlin_runtime_regression_attribution.md` | completed | Dense FP8 Marlin Runtime Regression Attribution：诊断完成，主分类为 measurement fairness/noise。07.76 的 `prepare +1.7s` / `TTFT +1.7s` 不稳定复现，第二轮 4096/1024 基本持平 `131.4680 -> 131.5082`；dense Marlin 纯 GEMM 对 `q_wqb`/`wo_b`/`shared_down` 均更快，layout/copy 和通信不是主因。 |
-| TARGET 07.78 | `prompts/TARGET_07.78_dsv4_sm80_benchmark_lifecycle_repeat_stable_gate.md` | completed | Benchmark Lifecycle And Repeat-Stable Gate 完成：采用 separate `torchrun` per variant 绕过同进程 CUDA/Engine 生命周期限制；`dsv4_sm80_a100_victory_densefp8marlinproj` 4096/1024 median `+0.0121%`、mean `-0.0291%`，速度中性但峰值显存约 `-807 MB/rank`，因此保留 explicit opt-in，不 promote。 |
-| TARGET 07.79 | `prompts/TARGET_07.79_dsv4_sm80_post_0778_roofline_bottleneck_reset.md` | next todo | Post-07.78 Roofline And Bottleneck Reset：对当前默认 `dsv4_sm80_a100_victory` 做公平稳定复测，输出剩余瓶颈、A100 MFU/HFU-like、HBM bandwidth utilization、roofline bound 分类、通信效率和最大上下文/KV token 容量账本，用证据决定继续 TARGET 07 还是转 TARGET 08 radix prefix cache。 |
-| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | planned | DSV4 radix prefix cache v2，等 TARGET 07 的非前缀高性能路径稳定后再推进。目标是 shared-prefix 请求跳过 cached-prefix prefill，且 DSV4 多组件 KV cache/SWA/压缩状态引用和 eviction 正确。 |
+| TARGET 01 | `prompts/TARGET_01_config_registry_weight.md` | completed | DSV4 config/registry/weight-loading groundwork. |
+| TARGET 02 | `prompts/TARGET_02_model_forward_fallback.md` | completed | Basic model forward/fallback path. |
+| TARGET 03 | `prompts/TARGET_03_dsv4_kvcache_no_radix.md` | completed | DSV4 KV/cache pool without radix prefix cache. |
+| TARGET 04 | `prompts/TARGET_04_attention_backend_metadata.md` | completed | DSV4 attention metadata/backend integration. |
+| TARGET 05.5 | `prompts/TARGET_05.5_dsv4_sm80_kernel_rd.md` | completed history | Initial sm80 kernel R&D matrix and operator replacement plan. |
+| TARGET 05.6 | `prompts/TARGET_05.6_hard_kernel_plans/` | completed history | Early hard-kernel plan set; use as historical reference only. |
+| TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | Added v0 BF16 E2E smoke and basic correctness gates. |
+| TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | Added TP8 benchmark harness and text smoke; fixed early correctness issues. |
+| TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
+| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | active next | Implement DSV4-aware radix/SWA prefix cache, aligned with vLLM/SGLang state ownership and protected by correctness tests. |
+| TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned | Low-precision research after TARGET 08: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
+| TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | future optional | Attention, PyNCCL, communication overlap, and graph/runtime experiments if fresh profiles justify them. |
 
-## 长期工程原则：统一 Cache / Workspace
+## Current Milestone
 
-后续当 DSV4 路径基本稳定后，应逐步把各类持久 cache、临时 workspace、预反量化权重、CUDA graph capture 输入/输出缓冲统一到清晰的管理入口中。原则是：模型加载或 graph capture 前完成容量规划和预分配，decode graph replay 中不发生新的大块分配或隐式 rebuild；每个 cache/workspace 都能报告 owner、shape、dtype、bytes、生命周期和等价 KV-cache token 成本。早期 target 可以先用局部实现验证收益，但最终应收敛到统一的 cache/workspace manager，避免性能优化散落在各个 module 中难以审计。
+TARGET 07 final promoted path:
 
-Target 6 baseline命令
+```text
+dsv4_sm80_a100_victory
+MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE=1
+```
 
-```python
+Post-07.78 stable retest:
+
+- 4096/1024/batch4: `131.7561 output tok/s` mean;
+- 4096/128/batch4: `62.3925 output tok/s` mean;
+- graph replay active;
+- eager decode `0`;
+- old serving baseline crossed: `114.07 output tok/s`.
+
+Decision from TARGET 07.79:
+
+```text
+start TARGET 08 radix prefix cache
+```
+
+Reason: remaining exact non-prefix speed surfaces are fragmented, while
+shared-prefix workloads can skip multi-second prefill work.
+
+## Archive Policy
+
+Completed TARGET 07 execution prompts live in:
+
+```text
+prompts/archive/target07/
+```
+
+For new child threads, start from:
+
+1. `prompts/target.md`
+2. the active target prompt, currently
+   `prompts/TARGET_08_radix_prefix_dsv4.md`
+3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for milestone history
+
+Do not ask new threads to read every archived prompt unless they need exact
+historical commands or stop conditions.
+
+## Long-Term Cache / Workspace Principle
+
+As DSV4 stabilizes, converge persistent cache, temporary workspace,
+pre-dequantized weights, CUDA graph capture buffers, and low-precision cache
+state into clear management entry points.
+
+The desired direction is:
+
+- capacity planning before model prepare and graph capture;
+- no repeated large `cudaMalloc` or hidden rebuild during decode graph replay;
+- every cache/workspace reports owner, shape, dtype, bytes, lifecycle, and
+  equivalent KV-token cost;
+- local optimization experiments may start as opt-ins, but promoted paths should
+  be auditable through unified cache/workspace ownership.
+
+## Useful Commands
+
+TARGET 06 baseline example:
+
+```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 torchrun --standalone --nproc_per_node=8 \
   benchmark/offline/deepseek_v4_perf_matrix.py \
@@ -74,15 +117,15 @@ torchrun --standalone --nproc_per_node=8 \
   --page-size 256 \
   --output-dir /tmp/dsv4_sm80_target06_tp8 \
   --keep-going
-  ```
+```
 
-Target 6 text correctness smoke命令
+TARGET 06 text correctness smoke example:
 
-```python
+```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 torchrun --standalone --nproc_per_node=8 \
   benchmark/offline/deepseek_v4_text_smoke.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variants fallback v0_bf16 \
   --output /tmp/dsv4_text_smoke.json
-  ```
+```
