@@ -54,6 +54,7 @@ DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
 )
 DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
+DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION"
 DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION"
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
@@ -173,6 +174,7 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,
     DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE,
     DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE,
+    DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE,
     DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE,
 )
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
@@ -807,6 +809,12 @@ def dsv4_sm80_triton_enabled(toggle: str) -> bool:
         return False
     cap = detect_dsv4_kernel_capabilities()
     return bool(cap.is_sm80 and cap.triton_available)
+
+
+def dense_fp8_marlin_projection_enabled() -> bool:
+    return dsv4_env_flag(DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE) or dsv4_env_flag(
+        DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE
+    )
 
 
 def warmup_indexer_fp8_backend(device: torch.device) -> None:
@@ -3899,6 +3907,7 @@ __all__ = [
     "DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST",
     "DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE",
     "DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE",
+    "DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE",
     "DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE",
     "DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE",
     "DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE",
@@ -3942,6 +3951,7 @@ __all__ = [
     "copy_masked_compressed_locs",
     "copy_decode_metadata_for_replay",
     "decode_metadata_deforest_fallback",
+    "dense_fp8_marlin_projection_enabled",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
     "compressor_plan_fallback",

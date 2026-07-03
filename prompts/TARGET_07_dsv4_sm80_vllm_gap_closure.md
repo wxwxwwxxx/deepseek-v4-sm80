@@ -79,9 +79,11 @@ Marlin signal, but it stopped at the runtime bridge gate: default mini Python
 cannot safely import vLLM custom ops, and the vLLM venv mixes incompatible mini
 CUDA extension packages.  TARGET 07.75 then built the mini-owned dense FP8
 Marlin extension against mini's default torch ABI and passed the focused owner
-gate.  TARGET 07.76 is therefore the next step: replace the vLLM-helper runtime
-path with the mini-owned bridge and run TP8 smoke/profile/macro before deciding
-promotion.
+gate.  TARGET 07.76 replaced the vLLM-helper runtime path with the mini-owned
+bridge; TP8 smoke, graph replay, memory lifecycle, and vLLM dependency gates
+passed, but the 4096/1024 macro regressed.  TARGET 07.77 is therefore a
+diagnostic attribution target before any further optimization or owner
+expansion.
 
 ## New TARGET 07 Organization
 
@@ -123,7 +125,8 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.73 | `prompts/TARGET_07.73_dsv4_sm80_vllm_quantized_linear_backend_feasibility.md` | completed | Standalone feasibility passed for vLLM FP8 Marlin W8A16 block linear on `q_wqb`, `wo_b local`, and shared experts down; rejected `wo_a` two-launch, A100 `torch._scaled_mm` FP8, INT8 W8A8 silent runtime, and FBGEMM-derived first integration. |
 | TARGET 07.74 | `prompts/TARGET_07.74_dsv4_sm80_vllm_fp8_marlin_dense_projection_runtime.md` | completed | Implemented a default-off vLLM-bridge runtime opt-in for `q_wqb`, `wo_b local`, and shared experts down. Focused owner timings stayed strong and the memory ledger was favorable, but TP8 validation stopped at the vLLM/mini ABI bridge gate; do not promote. |
 | TARGET 07.75 | `prompts/TARGET_07.75_dsv4_sm80_mini_owned_dense_fp8_marlin_bridge.md` | completed | Built/imported `minisgl_dense_fp8_marlin` under default mini torch `2.9.1+cu128`; focused real-weight quality passed for `q_wqb`, `wo_b local`, and shared-down, M=4 was about `0.058 ms`, and the bridge was slightly faster than the offline vLLM helper. |
-| TARGET 07.76 | `prompts/TARGET_07.76_dsv4_sm80_mini_owned_fp8_marlin_projection_runtime.md` | next todo | Replace the 07.74 vLLM-helper runtime path with the 07.75 mini-owned dense FP8 Marlin bridge, then run TP8 text smoke, graph replay, 4096/128 profile, 4096/1024 macro, and memory-lifecycle gates. |
+| TARGET 07.76 | `prompts/TARGET_07.76_dsv4_sm80_mini_owned_fp8_marlin_projection_runtime.md` | completed | Replaced the 07.74 vLLM-helper path with the mini-owned bridge. Smoke/graph/memory passed and 4096/128 improved `+1.02%`, but 4096/1024 regressed `-6.70%`; keep explicit opt-in, do not promote. |
+| TARGET 07.77 | `prompts/TARGET_07.77_dsv4_sm80_dense_fp8_marlin_runtime_regression_attribution.md` | next todo | Diagnose the 07.76 regression with fair/repeated comparison, owner-level q_wqb/wo_b/shared-down timing, prepare/TTFT breakdown, layout/copy attribution, and a next-target decision. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -160,7 +163,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.76 next.
+Run TARGET 07.77 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -743,12 +746,26 @@ M=`4` mini-owned Marlin latency was about `0.058 ms` for all three owner
 families, quality was effectively exact against BF16-dequantized reference,
 and the bridge was on average `7.47%` faster than the offline vLLM helper.
 
-TARGET 07.76 should therefore revise the 07.74 runtime opt-in to use
+TARGET 07.76 revised the 07.74 runtime opt-in to use
 `minisgl.kernel.dense_fp8_marlin` instead of `minisgl.kernel.vllm_fp8_marlin`.
-The target must keep the path default-off, run TP8 page-size-256 text smoke,
-verify graph replay/eager decode behavior, measure 4096/128 and 4096/1024
-macro, and record whether the switched owners actually reduce the model-level
-projection/GEMM bucket before deciding whether to promote.
+The path now runs in the default mini environment and remains an explicit
+opt-in.  TP8 text smoke passed, graph replay stayed active, eager decode stayed
+`0`, no duplicate BF16+Marlin owner memory was retained, and peak allocated
+memory fell by about `806,961,152 bytes/rank`.
+
+However, 07.76 did not meet promotion gates:
+
+| Workload | Baseline output tok/s | Candidate output tok/s | Delta |
+| --- | ---: | ---: | ---: |
+| 4096/128/batch4 `np128` | `55.3472` | `55.9099` | `+1.02%` |
+| 4096/1024/batch4 `np128` | `127.4409` | `118.9051` | `-6.70%` |
+
+The 4096/1024 candidate also had decode tok/s `-2.35%`, TTFT `+1.7223s`, and
+prepare time `+1.7256s`, while communication bytes/counts were unchanged.
+Therefore TARGET 07.77 should diagnose the regression before any Phase B owner
+expansion.  It must attribute the loss across prepare/TTFT, true replay owner
+GEMM time, layout/copy/contiguous overhead, all-reduce ordering, and benchmark
+fairness/repeatability.
 
 ## Precision Policy
 

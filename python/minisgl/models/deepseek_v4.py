@@ -184,13 +184,13 @@ def _prepare_fp8_marlin_weight(
     owner_label: str,
     release_original: bool,
 ) -> dict[str, object]:
-    from minisgl.kernel import vllm_fp8_marlin
+    from minisgl.kernel import dense_fp8_marlin
 
     meta_name = f"{cache_name}_meta"
     meta = _fp8_bf16_weight_cache_meta(weight, scale, torch.bfloat16)
     cached = getattr(owner, cache_name, None)
     if cached is None or getattr(owner, meta_name, None) != meta:
-        cached = vllm_fp8_marlin.prepare_linear(
+        cached = dense_fp8_marlin.prepare_dense_fp8_marlin_weight(
             weight,
             scale,
             owner_label=owner_label,
@@ -206,7 +206,7 @@ def _prepare_fp8_marlin_weight(
                     "attribute": "weight",
                     "shape": list(weight.shape),
                     "dtype": str(weight.dtype),
-                    "bytes": int(vllm_fp8_marlin.tensor_bytes(weight)),
+                    "bytes": int(dense_fp8_marlin.tensor_bytes(weight)),
                 }
             )
             delattr(owner, "weight")
@@ -216,25 +216,15 @@ def _prepare_fp8_marlin_weight(
                     "attribute": "weight_scale_inv",
                     "shape": list(scale.shape),
                     "dtype": str(scale.dtype),
-                    "bytes": int(vllm_fp8_marlin.tensor_bytes(scale)),
+                    "bytes": int(dense_fp8_marlin.tensor_bytes(scale)),
                 }
             )
             delattr(owner, "weight_scale_inv")
 
-    return {
-        "owner": owner_label,
-        "shape": [int(cached.size_n), int(cached.size_k)],
-        "dtype": "vllm_fp8_marlin_w8a16_block",
-        "device": str(cached.weight.device),
-        "prepared_weight_bytes": int(cached.prepared_weight_bytes),
-        "prepared_scale_bytes": int(cached.prepared_scale_bytes),
-        "workspace_bytes": int(cached.workspace_bytes),
-        "persistent_bytes": int(cached.persistent_bytes),
-        "original_weight_bytes": int(cached.original_weight_bytes),
-        "original_scale_bytes": int(cached.original_scale_bytes),
-        "released_original": bool(released),
-        "released": released,
-    }
+    report = dense_fp8_marlin.prepare_dense_fp8_marlin_report(cached, owner_label=owner_label)
+    report["released_original"] = bool(released)
+    report["released"] = released
+    return report
 
 
 def _forward_fp8_marlin_weight(
@@ -244,16 +234,16 @@ def _forward_fp8_marlin_weight(
     *,
     owner_label: str,
 ) -> torch.Tensor:
-    from minisgl.kernel import vllm_fp8_marlin
+    from minisgl.kernel import dense_fp8_marlin
 
     cached = getattr(owner, cache_name, None)
     if cached is None:
         raise RuntimeError(
-            f"{owner_label} vLLM FP8 Marlin weight is missing. Call "
+            f"{owner_label} dense FP8 Marlin weight is missing. Call "
             "prepare_for_cuda_graph_capture() after weights are loaded and before "
             "decode CUDA graph capture/replay; rebuilding inside forward is disabled."
         )
-    return vllm_fp8_marlin.apply_linear(x, cached)
+    return dense_fp8_marlin.apply_dense_fp8_marlin_linear(x, cached)
 
 
 def _cached_bf16_pretransposed_weight(
@@ -979,7 +969,7 @@ class DSV4Attention(BaseOP):
 
     @property
     def _q_wqb_marlin_weight_cache_name(self) -> str:
-        return "_dsv4_q_wqb_vllm_fp8_marlin_weight_cache"
+        return "_dsv4_q_wqb_dense_fp8_marlin_weight_cache"
 
     @property
     def _q_wqb_owner_label(self) -> str:
@@ -991,7 +981,7 @@ class DSV4Attention(BaseOP):
 
     @property
     def _wo_b_marlin_weight_cache_name(self) -> str:
-        return "_dsv4_wo_b_vllm_fp8_marlin_weight_cache"
+        return "_dsv4_wo_b_dense_fp8_marlin_weight_cache"
 
     @property
     def _wo_b_owner_label(self) -> str:
@@ -1009,7 +999,7 @@ class DSV4Attention(BaseOP):
         return self.num_local_heads * self.head_dim // self.num_local_groups
 
     def prepare_q_wqb_bf16_weight_cache(self) -> dict[str, object] | None:
-        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+        if dsv4_kernel.dense_fp8_marlin_projection_enabled():
             return None
         if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
             return None
@@ -1019,7 +1009,7 @@ class DSV4Attention(BaseOP):
         )
 
     def prepare_q_wqb_marlin_weight_cache(self) -> dict[str, object] | None:
-        if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+        if not dsv4_kernel.dense_fp8_marlin_projection_enabled():
             return None
         return self.wq_b.prepare_fp8_marlin_weight_cache(
             self._q_wqb_marlin_weight_cache_name,
@@ -1027,7 +1017,7 @@ class DSV4Attention(BaseOP):
         )
 
     def prepare_wo_b_bf16_weight_cache(self) -> dict[str, object] | None:
-        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+        if dsv4_kernel.dense_fp8_marlin_projection_enabled():
             return None
         if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE):
             return None
@@ -1037,7 +1027,7 @@ class DSV4Attention(BaseOP):
         )
 
     def prepare_wo_b_marlin_weight_cache(self) -> dict[str, object] | None:
-        if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+        if not dsv4_kernel.dense_fp8_marlin_projection_enabled():
             return None
         return self.wo_b.prepare_fp8_marlin_weight_cache(
             self._wo_b_marlin_weight_cache_name,
@@ -1226,7 +1216,7 @@ class DSV4Attention(BaseOP):
                     eps=self.rms_norm_eps,
                 )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_wqb"):
-            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+            if dsv4_kernel.dense_fp8_marlin_projection_enabled():
                 q = self.wq_b.forward_fp8_marlin_weight(
                     q_lora,
                     cache_name=self._q_wqb_marlin_weight_cache_name,
@@ -1522,7 +1512,7 @@ class DSV4Attention(BaseOP):
                     o_lora_rank=self.o_lora_rank,
                 )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_b"):
-            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+            if dsv4_kernel.dense_fp8_marlin_projection_enabled():
                 return self.wo_b.forward_fp8_marlin_weight(
                     o,
                     cache_name=self._wo_b_marlin_weight_cache_name,
@@ -1779,7 +1769,7 @@ class DSV4SharedExperts(BaseOP):
 
     @property
     def _down_marlin_weight_cache_name(self) -> str:
-        return "_dsv4_shared_down_vllm_fp8_marlin_weight_cache"
+        return "_dsv4_shared_down_dense_fp8_marlin_weight_cache"
 
     @property
     def _gate_up_owner_label(self) -> str:
@@ -1804,7 +1794,7 @@ class DSV4SharedExperts(BaseOP):
                 owner_label=self._gate_up_owner_label,
             ),
         ]
-        if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+        if not dsv4_kernel.dense_fp8_marlin_projection_enabled():
             reports.append(
                 self.down_proj.prepare_fp8_bf16_weight_cache(
                     self._down_bf16_weight_cache_name,
@@ -1814,7 +1804,7 @@ class DSV4SharedExperts(BaseOP):
         return reports
 
     def prepare_down_marlin_weight_cache(self) -> dict[str, object] | None:
-        if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+        if not dsv4_kernel.dense_fp8_marlin_projection_enabled():
             return None
         return self.down_proj.prepare_fp8_marlin_weight_cache(
             self._down_marlin_weight_cache_name,
@@ -1856,7 +1846,7 @@ class DSV4SharedExperts(BaseOP):
                 hidden=hidden,
             ):
                 hidden_for_down = hidden.to(up.dtype)
-            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+            if dsv4_kernel.dense_fp8_marlin_projection_enabled():
                 return self.down_proj.forward_fp8_marlin_weight(
                     hidden_for_down,
                     cache_name=self._down_marlin_weight_cache_name,
@@ -2210,7 +2200,7 @@ class DeepseekV4Model(BaseOP):
                 if report is not None:
                     q_wqb_reports.append(report)
         q_wqb_marlin_reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+        if dsv4_kernel.dense_fp8_marlin_projection_enabled():
             for layer in self.layers.op_list:
                 report = layer.self_attn.prepare_q_wqb_marlin_weight_cache()
                 if report is not None:
@@ -2222,7 +2212,7 @@ class DeepseekV4Model(BaseOP):
                 if report is not None:
                     wo_b_reports.append(report)
         wo_b_marlin_reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+        if dsv4_kernel.dense_fp8_marlin_projection_enabled():
             for layer in self.layers.op_list:
                 report = layer.self_attn.prepare_wo_b_marlin_weight_cache()
                 if report is not None:
@@ -2246,7 +2236,7 @@ class DeepseekV4Model(BaseOP):
                 if shared_experts is not None:
                     shared_expert_reports.extend(shared_experts.prepare_bf16_weight_cache())
         shared_down_marlin_reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE):
+        if dsv4_kernel.dense_fp8_marlin_projection_enabled():
             for layer in self.layers.op_list:
                 shared_experts = getattr(layer.mlp, "shared_experts", None)
                 if shared_experts is not None:
@@ -2392,9 +2382,11 @@ class DeepseekV4Model(BaseOP):
                 ),
                 "owners": projection_cache_owners,
             },
-            "vllm_fp8_marlin_projection_cache": {
+            "dense_fp8_marlin_projection_cache": {
                 "enabled": bool(marlin_reports),
-                "toggle": dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE,
+                "backend": "mini_dense_fp8_marlin_w8a16_block",
+                "toggle": dsv4_kernel.DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE,
+                "legacy_alias_toggle": dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE,
                 "owners": ["attn.q_wqb", "attn.wo_b", "shared_experts.down_proj"],
                 "layers_cached": max(
                     len(q_wqb_marlin_reports),
@@ -2408,6 +2400,14 @@ class DeepseekV4Model(BaseOP):
                 ),
                 "total_workspace_bytes": total_marlin_workspace_bytes,
                 "total_original_released_bytes": total_marlin_original_released_bytes,
+                "duplicate_bf16_cache_for_switched_owners": bool(
+                    q_wqb_reports
+                    or wo_b_reports
+                    or any(
+                        str(report["owner"]).endswith("down_proj")
+                        for report in shared_expert_reports
+                    )
+                ),
                 "q_wqb": {
                     "layers_cached": len(q_wqb_marlin_reports),
                     "total_persistent_bytes": total_q_wqb_marlin_bytes,

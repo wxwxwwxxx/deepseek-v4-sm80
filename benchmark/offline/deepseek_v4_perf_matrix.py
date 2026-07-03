@@ -65,6 +65,7 @@ DSV4_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
 DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
 DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
 DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
+DSV4_DENSE_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION"
 DSV4_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION"
 
 
@@ -877,9 +878,24 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
             DSV4_VLLM_FP8_MARLIN_PROJECTION_TOGGLE: "1",
         },
         description=(
-            "TARGET 07.74 opt-in: dsv4_sm80_a100_victory with vLLM FP8 "
-            "Marlin W8A16 block linear for attention q_wqb, attention wo_b "
-            "local projection, and shared experts down."
+            "Legacy TARGET 07.74 alias: dsv4_sm80_a100_victory with the "
+            "mini-owned dense FP8 Marlin W8A16 block projection runtime for "
+            "attention q_wqb, attention wo_b local projection, and shared "
+            "experts down."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name="dsv4_sm80_a100_victory_densefp8marlinproj",
+        env={
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_DENSE_FP8_MARLIN_PROJECTION_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 07.76 opt-in: dsv4_sm80_a100_victory with mini-owned "
+            "dense FP8 Marlin W8A16 block linear for attention q_wqb, "
+            "attention wo_b local projection, and shared experts down."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,

@@ -10,8 +10,8 @@ import torch.nn.functional as F
 from minisgl.attention import create_attention_backend
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
+from minisgl.kernel import dense_fp8_marlin
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
-from minisgl.kernel import vllm_fp8_marlin
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
 from minisgl.models.deepseek_v4 import (
@@ -753,14 +753,14 @@ def test_shared_experts_marlin_down_skips_bf16_down_cache_and_releases_original(
             original_scale_bytes=weight_scale_inv.numel() * weight_scale_inv.element_size(),
         )
 
-    monkeypatch.setattr(vllm_fp8_marlin, "prepare_linear", fake_prepare)
+    monkeypatch.setattr(dense_fp8_marlin, "prepare_dense_fp8_marlin_weight", fake_prepare)
     monkeypatch.setattr(
-        vllm_fp8_marlin,
-        "apply_linear",
+        dense_fp8_marlin,
+        "apply_dense_fp8_marlin_linear",
         lambda x, prepared: F.linear(x, prepared.weight),
     )
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE, "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE, "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE, "1")
 
     bf16_reports = shared.prepare_bf16_weight_cache()
     marlin_report = shared.prepare_down_marlin_weight_cache()
