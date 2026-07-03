@@ -43,6 +43,9 @@ DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
 DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE = "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE"
 DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
+DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV = (
+    "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES"
+)
 DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE = "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
 DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
 DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE = "MINISGL_DSV4_SM80_FUSED_TOPK_SWA_INDICES"
@@ -183,6 +186,7 @@ DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_MOE_V2_TOGGLE,
     DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE,
     DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
+    DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
     *DSV4_SM80_V0_BF16_WHITELIST,
     *DSV4_SM80_EXPERIMENTAL_TOGGLES,
 )
@@ -771,8 +775,73 @@ def unsupported_kernel(name: str, detail: str) -> None:
     raise NotImplementedError(f"{name} is not available for {sm}: {detail}")
 
 
+def _dsv4_disable_aliases() -> dict[str, tuple[str, ...]]:
+    projection_caches = (
+        DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE,
+        DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,
+        DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,
+        DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,
+        DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,
+    )
+    shared_expert = (DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE,)
+    return {
+        "q_wqb": (DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
+        "attn_q_wqb": (DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
+        "q_wqb_bf16": (DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
+        "q_wqb_bf16_weight_cache": (DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
+        "wo_b": (DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,),
+        "attn_wo_b": (DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,),
+        "wo_b_bf16": (DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,),
+        "wo_b_bf16_weight_cache": (DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,),
+        "wo_a": (DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,),
+        "attn_wo_a": (DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,),
+        "wo_a_bf16": (DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,),
+        "wo_a_bf16_bmm_cache": (DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,),
+        "indexer_wq_b": (DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
+        "indexer_wqb": (DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
+        "indexer_wq_b_bf16": (DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
+        "indexer_wqb_bf16": (DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
+        "shared_expert": shared_expert,
+        "shared_experts": shared_expert,
+        "shared_expert_bf16": shared_expert,
+        "shared_experts_bf16": shared_expert,
+        "shared_expert_bf16_weight_cache": shared_expert,
+        "shared_experts_bf16_weight_cache": shared_expert,
+        "projection": projection_caches,
+        "projection_bf16": projection_caches,
+        "projection_bf16_caches": projection_caches,
+        "projection_bf16_weight_cache": projection_caches,
+        "all_tested_bf16_caches": (*projection_caches, *shared_expert),
+        "all_bf16_caches": (*projection_caches, *shared_expert),
+    }
+
+
+def dsv4_env_disabled_toggles() -> tuple[str, ...]:
+    raw = os.environ.get(DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, "")
+    if not raw.strip():
+        return ()
+    disabled: set[str] = set()
+    aliases = _dsv4_disable_aliases()
+    for item in raw.replace(";", ",").split(","):
+        token = item.strip()
+        if not token:
+            continue
+        normalized = token.lower().replace("-", "_").replace(".", "_")
+        if token.startswith("MINISGL_DSV4_SM80_"):
+            disabled.add(token)
+        elif normalized in aliases:
+            disabled.update(aliases[normalized])
+        else:
+            disabled.add(token)
+    return tuple(sorted(disabled))
+
+
 def dsv4_env_flag(name: str) -> bool:
     if name == DSV4_SM80_MOE_EXPERT_BACKEND_ENV:
+        return False
+    if name == DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV:
+        return False
+    if name in dsv4_env_disabled_toggles():
         return False
     if os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES:
         return True
@@ -3901,6 +3970,7 @@ __all__ = [
     "DSV4IndexerFP8Query",
     "DSV4IndexerSelectOutput",
     "DSV4_LINEAR_BF16_FP32_TOGGLE",
+    "DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV",
     "DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE",
     "DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST",
     "DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE",
@@ -3965,6 +4035,7 @@ __all__ = [
     "dequantize_indexer_fp8_cache_ref",
     "dequantize_indexer_fp8_paged_cache_ref",
     "detect_dsv4_kernel_capabilities",
+    "dsv4_env_disabled_toggles",
     "dsv4_env_flag",
     "dsv4_moe_expert_backend",
     "dsv4_kernel_inventory_by_wrapper",

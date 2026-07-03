@@ -519,6 +519,53 @@ def test_configure_variant_records_wo_a_bf16_bmm_cache(monkeypatch):
     assert "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE" in result["active_dsv4_toggles"]
 
 
+def test_configure_variant_preserves_victory_disable_toggles(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES"
+        )
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES",
+            "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES":
+                return False
+            if (
+                name == "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
+                and os.environ.get("MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES")
+                == "q_wqb"
+            ):
+                return False
+            if (
+                name == "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
+                and os.environ.get("MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE") == "1"
+            ):
+                return True
+            return os.environ.get(name) in {"1", "true"}
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES", "q_wqb")
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()["dsv4_sm80_a100_victory"],
+    )
+
+    assert result["preserved_dsv4_sm80_env"] == {
+        "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES": "q_wqb"
+    }
+    assert (
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES"]
+        == "q_wqb"
+    )
+    assert "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE" not in result["active_dsv4_toggles"]
+
+
 def test_configure_variant_records_shared_expert_bf16_cache(monkeypatch):
     bench = _load_module()
 

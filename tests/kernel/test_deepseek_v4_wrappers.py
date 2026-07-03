@@ -411,6 +411,10 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
     assert dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    assert (
+        dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV
+        in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    )
     assert dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert (
         dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
@@ -462,6 +466,46 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
     assert dsv4_kernel.dsv4_env_flag(
         dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
     )
+    monkeypatch.setenv(
+        dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
+        "q_wqb,shared_expert,MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE",
+    )
+    assert dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE in (
+        dsv4_kernel.dsv4_env_disabled_toggles()
+    )
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
+    )
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+    )
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE
+    )
+    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE)
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE, "1")
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
+    )
+    monkeypatch.setenv(
+        dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
+        "projection_bf16_caches",
+    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE)
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
+    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE)
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE
+    )
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE
+    )
+    assert dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+    )
+    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, raising=False)
     assert not dsv4_kernel.dsv4_env_flag(
         dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
     )

@@ -1260,14 +1260,32 @@ def _all_dsv4_sm80_env_names(dsv4_kernel) -> list[str]:
     return sorted(names)
 
 
+def _preserved_dsv4_sm80_env_names(dsv4_kernel) -> tuple[str, ...]:
+    return (
+        getattr(
+            dsv4_kernel,
+            "DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV",
+            "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES",
+        ),
+    )
+
+
 def configure_variant(dsv4_kernel, variant: Variant) -> dict[str, Any]:
+    preserved = {
+        name: os.environ[name]
+        for name in _preserved_dsv4_sm80_env_names(dsv4_kernel)
+        if name in os.environ
+    }
     cleared = _all_dsv4_sm80_env_names(dsv4_kernel)
     for name in cleared:
         os.environ.pop(name, None)
     for name, value in variant.env.items():
         os.environ[name] = value
+    for name, value in preserved.items():
+        os.environ[name] = value
     return {
         "cleared_dsv4_sm80_env": cleared,
+        "preserved_dsv4_sm80_env": preserved,
         "active_dsv4_toggles": active_dsv4_toggles(dsv4_kernel),
         "raw_dsv4_sm80_env": raw_dsv4_env(),
     }

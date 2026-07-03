@@ -1,0 +1,1250 @@
+{
+  "material_phase2_candidates": [],
+  "milestone_dir": "performance_milestones/target08_bf16_cache_graph_memory_attribution",
+  "phase2_threshold_bytes": 1073741824,
+  "runs": [
+    {
+      "bf16_small_gemm_pretranspose_total_bytes": 0,
+      "bucket_set": [
+        16
+      ],
+      "capture_by_batch_size": {
+        "16": {
+          "elapsed_s": 11.297863090410829,
+          "free_memory_after_bytes": 39360331776,
+          "free_memory_before_bytes": 59576877056,
+          "memory_allocated_after_bytes": 44089594880,
+          "memory_allocated_before_bytes": 24963425792,
+          "memory_allocated_delta_bytes": 19126169088,
+          "memory_delta_bytes": 20216545280,
+          "memory_reserved_after_bytes": 44505759744,
+          "memory_reserved_before_bytes": 24972886016,
+          "memory_reserved_delta_bytes": 19532873728
+        }
+      },
+      "capture_delta_vs_kind_baseline_bytes": 0,
+      "capture_delta_vs_single_baseline_bytes": 0,
+      "capture_elapsed_s": 11.299006206914783,
+      "capture_free_memory_after_bytes_rank0": 39360331776,
+      "capture_free_memory_before_bytes_rank0": 59576877056,
+      "capture_graph_pool_reuse_anchor_bs": 16,
+      "capture_graph_pool_reuse_enabled": false,
+      "capture_memory_allocated_after_bytes": 44089594880,
+      "capture_memory_allocated_before_bytes": 24955150848,
+      "capture_memory_allocated_delta_bytes": 19134444032,
+      "capture_memory_delta_bytes_rank0": 20216545280,
+      "capture_memory_delta_bytes_rank_stats": {
+        "max": 20216545280,
+        "mean": 20216545280,
+        "min": 20216545280,
+        "rank0": 20216545280
+      },
+      "capture_memory_reserved_after_bytes": 44505759744,
+      "capture_memory_reserved_before_bytes": 24972886016,
+      "capture_memory_reserved_delta_bytes": 19532873728,
+      "capture_peak_memory_allocated_bytes": 44355787776,
+      "capture_peak_memory_reserved_bytes": 44746932224,
+      "captured_bs": [
+        16
+      ],
+      "decode_tokens_per_s": 231.87242971008652,
+      "dense_fp8_marlin_projection_cache": {
+        "backend": "mini_dense_fp8_marlin_w8a16_block",
+        "duplicate_bf16_cache_for_switched_owners": true,
+        "enabled": false,
+        "layers_cached": 0,
+        "legacy_alias_toggle": "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION",
+        "owners": [
+          "attn.q_wqb",
+          "attn.wo_b",
+          "shared_experts.down_proj"
+        ],
+        "q_wqb": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "shared_down": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "toggle": "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION",
+        "total_original_released_bytes": 0,
+        "total_persistent_bytes": 0,
+        "total_workspace_bytes": 0,
+        "wo_b": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        }
+      },
+      "disable_toggles_raw": "",
+      "disabled_toggles": [],
+      "eager_decode_count": 0,
+      "enabled_bf16_cache_owners": [
+        "attn.q_wqb",
+        "attn.wo_b",
+        "indexer.wq_b",
+        "attn.wo_a",
+        "shared_experts.gate_up_proj",
+        "shared_experts.down_proj"
+      ],
+      "greedy_sample_replay_count": 63,
+      "kind": "single_bs16",
+      "max_seq_len": 2048,
+      "name": "single_full_victory",
+      "num_pages": 128,
+      "output_tokens_per_s": 73.74866218393002,
+      "owner_caches": {
+        "indexer_wq_b": {
+          "enabled": true,
+          "layers_cached": 21,
+          "total_bytes": 352321536,
+          "total_pretransposed_bytes": 0
+        },
+        "q_wqb": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "shared_expert": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 270532608,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_a": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_b": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        }
+      },
+      "page_size": 256,
+      "persistent_tested_bf16_cache_total_bytes": 1704984576,
+      "replay_count": 63,
+      "report_path": "/workspace/mini-sglang/performance_milestones/target08_bf16_cache_graph_memory_attribution/raw/single_full_victory/reports/000_decode_ladder_bs16__dsv4_sm80_a100_victory.json",
+      "status": "pass"
+    },
+    {
+      "bf16_small_gemm_pretranspose_total_bytes": 0,
+      "bucket_set": [
+        16
+      ],
+      "capture_by_batch_size": {
+        "16": {
+          "elapsed_s": 13.679250882938504,
+          "free_memory_after_bytes": 40740257792,
+          "free_memory_before_bytes": 61011329024,
+          "memory_allocated_after_bytes": 42655781888,
+          "memory_allocated_before_bytes": 23528973824,
+          "memory_allocated_delta_bytes": 19126808064,
+          "memory_delta_bytes": 20271071232,
+          "memory_reserved_after_bytes": 43117445120,
+          "memory_reserved_before_bytes": 23538434048,
+          "memory_reserved_delta_bytes": 19579011072
+        }
+      },
+      "capture_delta_vs_kind_baseline_bytes": 54525952,
+      "capture_delta_vs_single_baseline_bytes": 54525952,
+      "capture_elapsed_s": 13.680436465889215,
+      "capture_free_memory_after_bytes_rank0": 40740257792,
+      "capture_free_memory_before_bytes_rank0": 61011329024,
+      "capture_graph_pool_reuse_anchor_bs": 16,
+      "capture_graph_pool_reuse_enabled": false,
+      "capture_memory_allocated_after_bytes": 42655781888,
+      "capture_memory_allocated_before_bytes": 23520698880,
+      "capture_memory_allocated_delta_bytes": 19135083008,
+      "capture_memory_delta_bytes_rank0": 20271071232,
+      "capture_memory_delta_bytes_rank_stats": {
+        "max": 20271071232,
+        "mean": 20271071232,
+        "min": 20271071232,
+        "rank0": 20271071232
+      },
+      "capture_memory_reserved_after_bytes": 43117445120,
+      "capture_memory_reserved_before_bytes": 23538434048,
+      "capture_memory_reserved_delta_bytes": 19579011072,
+      "capture_peak_memory_allocated_bytes": 42921974784,
+      "capture_peak_memory_reserved_bytes": 43308285952,
+      "captured_bs": [
+        16
+      ],
+      "decode_tokens_per_s": 153.84826443116273,
+      "dense_fp8_marlin_projection_cache": {
+        "backend": "mini_dense_fp8_marlin_w8a16_block",
+        "duplicate_bf16_cache_for_switched_owners": true,
+        "enabled": false,
+        "layers_cached": 0,
+        "legacy_alias_toggle": "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION",
+        "owners": [
+          "attn.q_wqb",
+          "attn.wo_b",
+          "shared_experts.down_proj"
+        ],
+        "q_wqb": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "shared_down": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "toggle": "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION",
+        "total_original_released_bytes": 0,
+        "total_persistent_bytes": 0,
+        "total_workspace_bytes": 0,
+        "wo_b": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        }
+      },
+      "disable_toggles_raw": "projection_bf16_caches",
+      "disabled_toggles": [
+        "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE",
+        "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE",
+        "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE",
+        "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE",
+        "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
+      ],
+      "eager_decode_count": 0,
+      "enabled_bf16_cache_owners": [
+        "shared_experts.gate_up_proj",
+        "shared_experts.down_proj"
+      ],
+      "greedy_sample_replay_count": 63,
+      "kind": "single_bs16",
+      "max_seq_len": 2048,
+      "name": "single_no_projection_bf16_caches",
+      "num_pages": 128,
+      "output_tokens_per_s": 98.07641466448604,
+      "owner_caches": {
+        "indexer_wq_b": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "q_wqb": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "shared_expert": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 270532608,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_a": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_b": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        }
+      },
+      "page_size": 256,
+      "persistent_tested_bf16_cache_total_bytes": 270532608,
+      "replay_count": 63,
+      "report_path": "/workspace/mini-sglang/performance_milestones/target08_bf16_cache_graph_memory_attribution/raw/single_no_projection_bf16_caches/reports/000_decode_ladder_bs16__dsv4_sm80_a100_victory.json",
+      "status": "pass"
+    },
+    {
+      "bf16_small_gemm_pretranspose_total_bytes": 0,
+      "bucket_set": [
+        16
+      ],
+      "capture_by_batch_size": {
+        "16": {
+          "elapsed_s": 11.619970260187984,
+          "free_memory_after_bytes": 39742013440,
+          "free_memory_before_bytes": 59929198592,
+          "memory_allocated_after_bytes": 43728098304,
+          "memory_allocated_before_bytes": 24601929216,
+          "memory_allocated_delta_bytes": 19126169088,
+          "memory_delta_bytes": 20187185152,
+          "memory_reserved_after_bytes": 44119883776,
+          "memory_reserved_before_bytes": 24620564480,
+          "memory_reserved_delta_bytes": 19499319296
+        }
+      },
+      "capture_delta_vs_kind_baseline_bytes": -8388608,
+      "capture_delta_vs_single_baseline_bytes": -8388608,
+      "capture_elapsed_s": 11.623400310054421,
+      "capture_free_memory_after_bytes_rank0": 39742013440,
+      "capture_free_memory_before_bytes_rank0": 59950170112,
+      "capture_graph_pool_reuse_anchor_bs": 16,
+      "capture_graph_pool_reuse_enabled": false,
+      "capture_memory_allocated_after_bytes": 43728098304,
+      "capture_memory_allocated_before_bytes": 24593654272,
+      "capture_memory_allocated_delta_bytes": 19134444032,
+      "capture_memory_delta_bytes_rank0": 20208156672,
+      "capture_memory_delta_bytes_rank_stats": {
+        "max": 20208156672,
+        "mean": 20208156672,
+        "min": 20208156672,
+        "rank0": 20208156672
+      },
+      "capture_memory_reserved_after_bytes": 44119883776,
+      "capture_memory_reserved_before_bytes": 24599592960,
+      "capture_memory_reserved_delta_bytes": 19520290816,
+      "capture_peak_memory_allocated_bytes": 43994291200,
+      "capture_peak_memory_reserved_bytes": 44344279040,
+      "captured_bs": [
+        16
+      ],
+      "decode_tokens_per_s": 205.3517581906464,
+      "dense_fp8_marlin_projection_cache": {
+        "backend": "mini_dense_fp8_marlin_w8a16_block",
+        "duplicate_bf16_cache_for_switched_owners": true,
+        "enabled": false,
+        "layers_cached": 0,
+        "legacy_alias_toggle": "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION",
+        "owners": [
+          "attn.q_wqb",
+          "attn.wo_b",
+          "shared_experts.down_proj"
+        ],
+        "q_wqb": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "shared_down": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "toggle": "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION",
+        "total_original_released_bytes": 0,
+        "total_persistent_bytes": 0,
+        "total_workspace_bytes": 0,
+        "wo_b": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        }
+      },
+      "disable_toggles_raw": "q_wqb",
+      "disabled_toggles": [
+        "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
+      ],
+      "eager_decode_count": 0,
+      "enabled_bf16_cache_owners": [
+        "attn.wo_b",
+        "indexer.wq_b",
+        "attn.wo_a",
+        "shared_experts.gate_up_proj",
+        "shared_experts.down_proj"
+      ],
+      "greedy_sample_replay_count": 63,
+      "kind": "single_bs16",
+      "max_seq_len": 2048,
+      "name": "single_no_q_wqb_bf16_cache",
+      "num_pages": 128,
+      "output_tokens_per_s": 72.03492198567602,
+      "owner_caches": {
+        "indexer_wq_b": {
+          "enabled": true,
+          "layers_cached": 21,
+          "total_bytes": 352321536,
+          "total_pretransposed_bytes": 0
+        },
+        "q_wqb": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "shared_expert": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 270532608,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_a": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_b": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        }
+      },
+      "page_size": 256,
+      "persistent_tested_bf16_cache_total_bytes": 1344274432,
+      "replay_count": 63,
+      "report_path": "/workspace/mini-sglang/performance_milestones/target08_bf16_cache_graph_memory_attribution/raw/single_no_q_wqb_bf16_cache/reports/000_decode_ladder_bs16__dsv4_sm80_a100_victory.json",
+      "status": "pass"
+    },
+    {
+      "bf16_small_gemm_pretranspose_total_bytes": 0,
+      "bucket_set": [
+        16
+      ],
+      "capture_by_batch_size": {
+        "16": {
+          "elapsed_s": 13.59537765569985,
+          "free_memory_after_bytes": 39737819136,
+          "free_memory_before_bytes": 59929198592,
+          "memory_allocated_after_bytes": 43728098304,
+          "memory_allocated_before_bytes": 24601929216,
+          "memory_allocated_delta_bytes": 19126169088,
+          "memory_delta_bytes": 20191379456,
+          "memory_reserved_after_bytes": 44124078080,
+          "memory_reserved_before_bytes": 24620564480,
+          "memory_reserved_delta_bytes": 19503513600
+        }
+      },
+      "capture_delta_vs_kind_baseline_bytes": -4194304,
+      "capture_delta_vs_single_baseline_bytes": -4194304,
+      "capture_elapsed_s": 13.5977864228189,
+      "capture_free_memory_after_bytes_rank0": 39737819136,
+      "capture_free_memory_before_bytes_rank0": 59950170112,
+      "capture_graph_pool_reuse_anchor_bs": 16,
+      "capture_graph_pool_reuse_enabled": false,
+      "capture_memory_allocated_after_bytes": 43728098304,
+      "capture_memory_allocated_before_bytes": 24593654272,
+      "capture_memory_allocated_delta_bytes": 19134444032,
+      "capture_memory_delta_bytes_rank0": 20212350976,
+      "capture_memory_delta_bytes_rank_stats": {
+        "max": 20212350976,
+        "mean": 20212350976,
+        "min": 20212350976,
+        "rank0": 20212350976
+      },
+      "capture_memory_reserved_after_bytes": 44124078080,
+      "capture_memory_reserved_before_bytes": 24599592960,
+      "capture_memory_reserved_delta_bytes": 19524485120,
+      "capture_peak_memory_allocated_bytes": 43994291200,
+      "capture_peak_memory_reserved_bytes": 44344279040,
+      "captured_bs": [
+        16
+      ],
+      "decode_tokens_per_s": 204.50623781014355,
+      "dense_fp8_marlin_projection_cache": {
+        "backend": "mini_dense_fp8_marlin_w8a16_block",
+        "duplicate_bf16_cache_for_switched_owners": true,
+        "enabled": false,
+        "layers_cached": 0,
+        "legacy_alias_toggle": "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION",
+        "owners": [
+          "attn.q_wqb",
+          "attn.wo_b",
+          "shared_experts.down_proj"
+        ],
+        "q_wqb": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "shared_down": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "toggle": "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION",
+        "total_original_released_bytes": 0,
+        "total_persistent_bytes": 0,
+        "total_workspace_bytes": 0,
+        "wo_b": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        }
+      },
+      "disable_toggles_raw": "wo_b",
+      "disabled_toggles": [
+        "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
+      ],
+      "eager_decode_count": 0,
+      "enabled_bf16_cache_owners": [
+        "attn.q_wqb",
+        "indexer.wq_b",
+        "attn.wo_a",
+        "shared_experts.gate_up_proj",
+        "shared_experts.down_proj"
+      ],
+      "greedy_sample_replay_count": 63,
+      "kind": "single_bs16",
+      "max_seq_len": 2048,
+      "name": "single_no_wo_b_bf16_cache",
+      "num_pages": 128,
+      "output_tokens_per_s": 73.87087572901027,
+      "owner_caches": {
+        "indexer_wq_b": {
+          "enabled": true,
+          "layers_cached": 21,
+          "total_bytes": 352321536,
+          "total_pretransposed_bytes": 0
+        },
+        "q_wqb": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "shared_expert": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 270532608,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_a": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_b": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        }
+      },
+      "page_size": 256,
+      "persistent_tested_bf16_cache_total_bytes": 1344274432,
+      "replay_count": 63,
+      "report_path": "/workspace/mini-sglang/performance_milestones/target08_bf16_cache_graph_memory_attribution/raw/single_no_wo_b_bf16_cache/reports/000_decode_ladder_bs16__dsv4_sm80_a100_victory.json",
+      "status": "pass"
+    },
+    {
+      "bf16_small_gemm_pretranspose_total_bytes": 0,
+      "bucket_set": [
+        16
+      ],
+      "capture_by_batch_size": {
+        "16": {
+          "elapsed_s": 13.67652983777225,
+          "free_memory_after_bytes": 39733624832,
+          "free_memory_before_bytes": 59925004288,
+          "memory_allocated_after_bytes": 43728360448,
+          "memory_allocated_before_bytes": 24602191360,
+          "memory_allocated_delta_bytes": 19126169088,
+          "memory_delta_bytes": 20191379456,
+          "memory_reserved_after_bytes": 44128272384,
+          "memory_reserved_before_bytes": 24624758784,
+          "memory_reserved_delta_bytes": 19503513600
+        }
+      },
+      "capture_delta_vs_kind_baseline_bytes": -4194304,
+      "capture_delta_vs_single_baseline_bytes": -4194304,
+      "capture_elapsed_s": 13.678924430161715,
+      "capture_free_memory_after_bytes_rank0": 39733624832,
+      "capture_free_memory_before_bytes_rank0": 59945975808,
+      "capture_graph_pool_reuse_anchor_bs": 16,
+      "capture_graph_pool_reuse_enabled": false,
+      "capture_memory_allocated_after_bytes": 43728360448,
+      "capture_memory_allocated_before_bytes": 24593916416,
+      "capture_memory_allocated_delta_bytes": 19134444032,
+      "capture_memory_delta_bytes_rank0": 20212350976,
+      "capture_memory_delta_bytes_rank_stats": {
+        "max": 20212350976,
+        "mean": 20212350976,
+        "min": 20212350976,
+        "rank0": 20212350976
+      },
+      "capture_memory_reserved_after_bytes": 44128272384,
+      "capture_memory_reserved_before_bytes": 24603787264,
+      "capture_memory_reserved_delta_bytes": 19524485120,
+      "capture_peak_memory_allocated_bytes": 43994553344,
+      "capture_peak_memory_reserved_bytes": 44348473344,
+      "captured_bs": [
+        16
+      ],
+      "decode_tokens_per_s": 207.6492356440012,
+      "dense_fp8_marlin_projection_cache": {
+        "backend": "mini_dense_fp8_marlin_w8a16_block",
+        "duplicate_bf16_cache_for_switched_owners": true,
+        "enabled": false,
+        "layers_cached": 0,
+        "legacy_alias_toggle": "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION",
+        "owners": [
+          "attn.q_wqb",
+          "attn.wo_b",
+          "shared_experts.down_proj"
+        ],
+        "q_wqb": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "shared_down": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "toggle": "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION",
+        "total_original_released_bytes": 0,
+        "total_persistent_bytes": 0,
+        "total_workspace_bytes": 0,
+        "wo_b": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        }
+      },
+      "disable_toggles_raw": "wo_a",
+      "disabled_toggles": [
+        "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
+      ],
+      "eager_decode_count": 0,
+      "enabled_bf16_cache_owners": [
+        "attn.q_wqb",
+        "attn.wo_b",
+        "indexer.wq_b",
+        "shared_experts.gate_up_proj",
+        "shared_experts.down_proj"
+      ],
+      "greedy_sample_replay_count": 63,
+      "kind": "single_bs16",
+      "max_seq_len": 2048,
+      "name": "single_no_wo_a_bf16_bmm_cache",
+      "num_pages": 128,
+      "output_tokens_per_s": 74.27760760072792,
+      "owner_caches": {
+        "indexer_wq_b": {
+          "enabled": true,
+          "layers_cached": 21,
+          "total_bytes": 352321536,
+          "total_pretransposed_bytes": 0
+        },
+        "q_wqb": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "shared_expert": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 270532608,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_a": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_b": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        }
+      },
+      "page_size": 256,
+      "persistent_tested_bf16_cache_total_bytes": 1344274432,
+      "replay_count": 63,
+      "report_path": "/workspace/mini-sglang/performance_milestones/target08_bf16_cache_graph_memory_attribution/raw/single_no_wo_a_bf16_bmm_cache/reports/000_decode_ladder_bs16__dsv4_sm80_a100_victory.json",
+      "status": "pass"
+    },
+    {
+      "bf16_small_gemm_pretranspose_total_bytes": 0,
+      "bucket_set": [
+        16
+      ],
+      "capture_by_batch_size": {
+        "16": {
+          "elapsed_s": 13.330383192747831,
+          "free_memory_after_bytes": 39716847616,
+          "free_memory_before_bytes": 59933392896,
+          "memory_allocated_after_bytes": 43737912320,
+          "memory_allocated_before_bytes": 24611743232,
+          "memory_allocated_delta_bytes": 19126169088,
+          "memory_delta_bytes": 20216545280,
+          "memory_reserved_after_bytes": 44145049600,
+          "memory_reserved_before_bytes": 24616370176,
+          "memory_reserved_delta_bytes": 19528679424
+        }
+      },
+      "capture_delta_vs_kind_baseline_bytes": 0,
+      "capture_delta_vs_single_baseline_bytes": 0,
+      "capture_elapsed_s": 13.33147799782455,
+      "capture_free_memory_after_bytes_rank0": 39716847616,
+      "capture_free_memory_before_bytes_rank0": 59933392896,
+      "capture_graph_pool_reuse_anchor_bs": 16,
+      "capture_graph_pool_reuse_enabled": false,
+      "capture_memory_allocated_after_bytes": 43737912320,
+      "capture_memory_allocated_before_bytes": 24602567168,
+      "capture_memory_allocated_delta_bytes": 19135345152,
+      "capture_memory_delta_bytes_rank0": 20216545280,
+      "capture_memory_delta_bytes_rank_stats": {
+        "max": 20216545280,
+        "mean": 20216545280,
+        "min": 20216545280,
+        "rank0": 20216545280
+      },
+      "capture_memory_reserved_after_bytes": 44145049600,
+      "capture_memory_reserved_before_bytes": 24616370176,
+      "capture_memory_reserved_delta_bytes": 19528679424,
+      "capture_peak_memory_allocated_bytes": 44004105216,
+      "capture_peak_memory_reserved_bytes": 44386222080,
+      "captured_bs": [
+        16
+      ],
+      "decode_tokens_per_s": 204.1928099822321,
+      "dense_fp8_marlin_projection_cache": {
+        "backend": "mini_dense_fp8_marlin_w8a16_block",
+        "duplicate_bf16_cache_for_switched_owners": true,
+        "enabled": false,
+        "layers_cached": 0,
+        "legacy_alias_toggle": "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION",
+        "owners": [
+          "attn.q_wqb",
+          "attn.wo_b",
+          "shared_experts.down_proj"
+        ],
+        "q_wqb": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "shared_down": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "toggle": "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION",
+        "total_original_released_bytes": 0,
+        "total_persistent_bytes": 0,
+        "total_workspace_bytes": 0,
+        "wo_b": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        }
+      },
+      "disable_toggles_raw": "indexer_wq_b",
+      "disabled_toggles": [
+        "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
+      ],
+      "eager_decode_count": 0,
+      "enabled_bf16_cache_owners": [
+        "attn.q_wqb",
+        "attn.wo_b",
+        "attn.wo_a",
+        "shared_experts.gate_up_proj",
+        "shared_experts.down_proj"
+      ],
+      "greedy_sample_replay_count": 63,
+      "kind": "single_bs16",
+      "max_seq_len": 2048,
+      "name": "single_no_indexer_wq_b_bf16_cache",
+      "num_pages": 128,
+      "output_tokens_per_s": 73.37980966242964,
+      "owner_caches": {
+        "indexer_wq_b": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "q_wqb": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "shared_expert": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 270532608,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_a": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_b": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        }
+      },
+      "page_size": 256,
+      "persistent_tested_bf16_cache_total_bytes": 1352663040,
+      "replay_count": 63,
+      "report_path": "/workspace/mini-sglang/performance_milestones/target08_bf16_cache_graph_memory_attribution/raw/single_no_indexer_wq_b_bf16_cache/reports/000_decode_ladder_bs16__dsv4_sm80_a100_victory.json",
+      "status": "pass"
+    },
+    {
+      "bf16_small_gemm_pretranspose_total_bytes": 0,
+      "bucket_set": [
+        16
+      ],
+      "capture_by_batch_size": {
+        "16": {
+          "elapsed_s": 13.628413645550609,
+          "free_memory_after_bytes": 39458897920,
+          "free_memory_before_bytes": 59677540352,
+          "memory_allocated_after_bytes": 43818800128,
+          "memory_allocated_before_bytes": 24692631040,
+          "memory_allocated_delta_bytes": 19126169088,
+          "memory_delta_bytes": 20218642432,
+          "memory_reserved_after_bytes": 44400902144,
+          "memory_reserved_before_bytes": 24872222720,
+          "memory_reserved_delta_bytes": 19528679424
+        }
+      },
+      "capture_delta_vs_kind_baseline_bytes": 23068672,
+      "capture_delta_vs_single_baseline_bytes": 23068672,
+      "capture_elapsed_s": 13.631685107946396,
+      "capture_free_memory_after_bytes_rank0": 39458897920,
+      "capture_free_memory_before_bytes_rank0": 59698511872,
+      "capture_graph_pool_reuse_anchor_bs": 16,
+      "capture_graph_pool_reuse_enabled": false,
+      "capture_memory_allocated_after_bytes": 43818800128,
+      "capture_memory_allocated_before_bytes": 24684356096,
+      "capture_memory_allocated_delta_bytes": 19134444032,
+      "capture_memory_delta_bytes_rank0": 20239613952,
+      "capture_memory_delta_bytes_rank_stats": {
+        "max": 20239613952,
+        "mean": 20239613952,
+        "min": 20239613952,
+        "rank0": 20239613952
+      },
+      "capture_memory_reserved_after_bytes": 44400902144,
+      "capture_memory_reserved_before_bytes": 24851251200,
+      "capture_memory_reserved_delta_bytes": 19549650944,
+      "capture_peak_memory_allocated_bytes": 44084993024,
+      "capture_peak_memory_reserved_bytes": 44654657536,
+      "captured_bs": [
+        16
+      ],
+      "decode_tokens_per_s": 210.1620547600242,
+      "dense_fp8_marlin_projection_cache": {
+        "backend": "mini_dense_fp8_marlin_w8a16_block",
+        "duplicate_bf16_cache_for_switched_owners": true,
+        "enabled": false,
+        "layers_cached": 0,
+        "legacy_alias_toggle": "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION",
+        "owners": [
+          "attn.q_wqb",
+          "attn.wo_b",
+          "shared_experts.down_proj"
+        ],
+        "q_wqb": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "shared_down": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "toggle": "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION",
+        "total_original_released_bytes": 0,
+        "total_persistent_bytes": 0,
+        "total_workspace_bytes": 0,
+        "wo_b": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        }
+      },
+      "disable_toggles_raw": "shared_expert",
+      "disabled_toggles": [
+        "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
+      ],
+      "eager_decode_count": 0,
+      "enabled_bf16_cache_owners": [
+        "attn.q_wqb",
+        "attn.wo_b",
+        "indexer.wq_b",
+        "attn.wo_a"
+      ],
+      "greedy_sample_replay_count": 63,
+      "kind": "single_bs16",
+      "max_seq_len": 2048,
+      "name": "single_no_shared_expert_bf16_cache",
+      "num_pages": 128,
+      "output_tokens_per_s": 73.37078178306798,
+      "owner_caches": {
+        "indexer_wq_b": {
+          "enabled": true,
+          "layers_cached": 21,
+          "total_bytes": 352321536,
+          "total_pretransposed_bytes": 0
+        },
+        "q_wqb": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "shared_expert": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_a": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_b": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        }
+      },
+      "page_size": 256,
+      "persistent_tested_bf16_cache_total_bytes": 1434451968,
+      "replay_count": 63,
+      "report_path": "/workspace/mini-sglang/performance_milestones/target08_bf16_cache_graph_memory_attribution/raw/single_no_shared_expert_bf16_cache/reports/000_decode_ladder_bs16__dsv4_sm80_a100_victory.json",
+      "status": "pass"
+    },
+    {
+      "bf16_small_gemm_pretranspose_total_bytes": 0,
+      "bucket_set": [
+        16
+      ],
+      "capture_by_batch_size": {
+        "16": {
+          "elapsed_s": 14.014692272990942,
+          "free_memory_after_bytes": 41008693248,
+          "free_memory_before_bytes": 61286055936,
+          "memory_allocated_after_bytes": 42381726720,
+          "memory_allocated_before_bytes": 23255557632,
+          "memory_allocated_delta_bytes": 19126169088,
+          "memory_delta_bytes": 20277362688,
+          "memory_reserved_after_bytes": 42842718208,
+          "memory_reserved_before_bytes": 23263707136,
+          "memory_reserved_delta_bytes": 19579011072
+        }
+      },
+      "capture_delta_vs_kind_baseline_bytes": 60817408,
+      "capture_delta_vs_single_baseline_bytes": 60817408,
+      "capture_elapsed_s": 14.015893444418907,
+      "capture_free_memory_after_bytes_rank0": 41008693248,
+      "capture_free_memory_before_bytes_rank0": 61286055936,
+      "capture_graph_pool_reuse_anchor_bs": 16,
+      "capture_graph_pool_reuse_enabled": false,
+      "capture_memory_allocated_after_bytes": 42381726720,
+      "capture_memory_allocated_before_bytes": 23247282688,
+      "capture_memory_allocated_delta_bytes": 19134444032,
+      "capture_memory_delta_bytes_rank0": 20277362688,
+      "capture_memory_delta_bytes_rank_stats": {
+        "max": 20277362688,
+        "mean": 20277362688,
+        "min": 20277362688,
+        "rank0": 20277362688
+      },
+      "capture_memory_reserved_after_bytes": 42842718208,
+      "capture_memory_reserved_before_bytes": 23263707136,
+      "capture_memory_reserved_delta_bytes": 19579011072,
+      "capture_peak_memory_allocated_bytes": 42647919616,
+      "capture_peak_memory_reserved_bytes": 43033559040,
+      "captured_bs": [
+        16
+      ],
+      "decode_tokens_per_s": 143.80697611934653,
+      "dense_fp8_marlin_projection_cache": {
+        "backend": "mini_dense_fp8_marlin_w8a16_block",
+        "duplicate_bf16_cache_for_switched_owners": false,
+        "enabled": false,
+        "layers_cached": 0,
+        "legacy_alias_toggle": "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION",
+        "owners": [
+          "attn.q_wqb",
+          "attn.wo_b",
+          "shared_experts.down_proj"
+        ],
+        "q_wqb": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "shared_down": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "toggle": "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION",
+        "total_original_released_bytes": 0,
+        "total_persistent_bytes": 0,
+        "total_workspace_bytes": 0,
+        "wo_b": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        }
+      },
+      "disable_toggles_raw": "all_tested_bf16_caches",
+      "disabled_toggles": [
+        "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE",
+        "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE",
+        "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE",
+        "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE",
+        "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE",
+        "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
+      ],
+      "eager_decode_count": 0,
+      "enabled_bf16_cache_owners": [],
+      "greedy_sample_replay_count": 63,
+      "kind": "single_bs16",
+      "max_seq_len": 2048,
+      "name": "single_no_all_tested_bf16_caches",
+      "num_pages": 128,
+      "output_tokens_per_s": 92.32642104711528,
+      "owner_caches": {
+        "indexer_wq_b": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "q_wqb": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "shared_expert": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_a": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_b": {
+          "enabled": false,
+          "layers_cached": 0,
+          "total_bytes": 0,
+          "total_pretransposed_bytes": 0
+        }
+      },
+      "page_size": 256,
+      "persistent_tested_bf16_cache_total_bytes": 0,
+      "replay_count": 63,
+      "report_path": "/workspace/mini-sglang/performance_milestones/target08_bf16_cache_graph_memory_attribution/raw/single_no_all_tested_bf16_caches/reports/000_decode_ladder_bs16__dsv4_sm80_a100_victory.json",
+      "status": "pass"
+    },
+    {
+      "bf16_small_gemm_pretranspose_total_bytes": 0,
+      "bucket_set": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "capture_by_batch_size": {
+        "1": {
+          "elapsed_s": 0.4350607842206955,
+          "free_memory_after_bytes": 39135936512,
+          "free_memory_before_bytes": 39186268160,
+          "memory_allocated_after_bytes": 44089594880,
+          "memory_allocated_before_bytes": 44089594880,
+          "memory_allocated_delta_bytes": 0,
+          "memory_delta_bytes": 50331648,
+          "memory_reserved_after_bytes": 44505759744,
+          "memory_reserved_before_bytes": 44505759744,
+          "memory_reserved_delta_bytes": 0
+        },
+        "16": {
+          "elapsed_s": 13.460588732734323,
+          "free_memory_after_bytes": 39360331776,
+          "free_memory_before_bytes": 59576877056,
+          "memory_allocated_after_bytes": 44089594880,
+          "memory_allocated_before_bytes": 24963425792,
+          "memory_allocated_delta_bytes": 19126169088,
+          "memory_delta_bytes": 20216545280,
+          "memory_reserved_after_bytes": 44505759744,
+          "memory_reserved_before_bytes": 24972886016,
+          "memory_reserved_delta_bytes": 19532873728
+        },
+        "2": {
+          "elapsed_s": 2.2372962310910225,
+          "free_memory_after_bytes": 39186268160,
+          "free_memory_before_bytes": 39238696960,
+          "memory_allocated_after_bytes": 44089594880,
+          "memory_allocated_before_bytes": 44089594880,
+          "memory_allocated_delta_bytes": 0,
+          "memory_delta_bytes": 52428800,
+          "memory_reserved_after_bytes": 44505759744,
+          "memory_reserved_before_bytes": 44505759744,
+          "memory_reserved_delta_bytes": 0
+        },
+        "4": {
+          "elapsed_s": 0.4684305675327778,
+          "free_memory_after_bytes": 39238696960,
+          "free_memory_before_bytes": 39299514368,
+          "memory_allocated_after_bytes": 44089594880,
+          "memory_allocated_before_bytes": 44089594880,
+          "memory_allocated_delta_bytes": 0,
+          "memory_delta_bytes": 60817408,
+          "memory_reserved_after_bytes": 44505759744,
+          "memory_reserved_before_bytes": 44505759744,
+          "memory_reserved_delta_bytes": 0
+        },
+        "8": {
+          "elapsed_s": 0.6868208665400743,
+          "free_memory_after_bytes": 39299514368,
+          "free_memory_before_bytes": 39360331776,
+          "memory_allocated_after_bytes": 44089594880,
+          "memory_allocated_before_bytes": 44089594880,
+          "memory_allocated_delta_bytes": 0,
+          "memory_delta_bytes": 60817408,
+          "memory_reserved_after_bytes": 44505759744,
+          "memory_reserved_before_bytes": 44505759744,
+          "memory_reserved_delta_bytes": 0
+        }
+      },
+      "capture_delta_vs_kind_baseline_bytes": 0,
+      "capture_delta_vs_single_baseline_bytes": 224395264,
+      "capture_elapsed_s": 17.290539989247918,
+      "capture_free_memory_after_bytes_rank0": 39135936512,
+      "capture_free_memory_before_bytes_rank0": 59576877056,
+      "capture_graph_pool_reuse_anchor_bs": 16,
+      "capture_graph_pool_reuse_enabled": true,
+      "capture_memory_allocated_after_bytes": 44089594880,
+      "capture_memory_allocated_before_bytes": 24955150848,
+      "capture_memory_allocated_delta_bytes": 19134444032,
+      "capture_memory_delta_bytes_rank0": 20440940544,
+      "capture_memory_delta_bytes_rank_stats": {
+        "max": 20440940544,
+        "mean": 20440940544,
+        "min": 20440940544,
+        "rank0": 20440940544
+      },
+      "capture_memory_reserved_after_bytes": 44505759744,
+      "capture_memory_reserved_before_bytes": 24972886016,
+      "capture_memory_reserved_delta_bytes": 19532873728,
+      "capture_peak_memory_allocated_bytes": 44355787776,
+      "capture_peak_memory_reserved_bytes": 44772098048,
+      "captured_bs": [
+        16,
+        8,
+        4,
+        2,
+        1
+      ],
+      "decode_tokens_per_s": 273.30980288235463,
+      "dense_fp8_marlin_projection_cache": {
+        "backend": "mini_dense_fp8_marlin_w8a16_block",
+        "duplicate_bf16_cache_for_switched_owners": true,
+        "enabled": false,
+        "layers_cached": 0,
+        "legacy_alias_toggle": "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION",
+        "owners": [
+          "attn.q_wqb",
+          "attn.wo_b",
+          "shared_experts.down_proj"
+        ],
+        "q_wqb": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "shared_down": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        },
+        "toggle": "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION",
+        "total_original_released_bytes": 0,
+        "total_persistent_bytes": 0,
+        "total_workspace_bytes": 0,
+        "wo_b": {
+          "entries": [],
+          "layers_cached": 0,
+          "total_persistent_bytes": 0
+        }
+      },
+      "disable_toggles_raw": "",
+      "disabled_toggles": [],
+      "eager_decode_count": 0,
+      "enabled_bf16_cache_owners": [
+        "attn.q_wqb",
+        "attn.wo_b",
+        "indexer.wq_b",
+        "attn.wo_a",
+        "shared_experts.gate_up_proj",
+        "shared_experts.down_proj"
+      ],
+      "greedy_sample_replay_count": 63,
+      "kind": "full_buckets",
+      "max_seq_len": 2048,
+      "name": "full_full_victory",
+      "num_pages": 128,
+      "output_tokens_per_s": 136.18372027537475,
+      "owner_caches": {
+        "indexer_wq_b": {
+          "enabled": true,
+          "layers_cached": 21,
+          "total_bytes": 352321536,
+          "total_pretransposed_bytes": 0
+        },
+        "q_wqb": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "shared_expert": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 270532608,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_a": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        },
+        "wo_b": {
+          "enabled": true,
+          "layers_cached": 43,
+          "total_bytes": 360710144,
+          "total_pretransposed_bytes": 0
+        }
+      },
+      "page_size": 256,
+      "persistent_tested_bf16_cache_total_bytes": 1704984576,
+      "replay_count": 63,
+      "report_path": "/workspace/mini-sglang/performance_milestones/target08_bf16_cache_graph_memory_attribution/raw/full_full_victory/reports/000_decode_ladder_bs16__dsv4_sm80_a100_victory.json",
+      "status": "pass"
+    }
+  ],
+  "small_fix_candidates": [],
+  "small_fix_threshold_bytes": 2147483648
+}

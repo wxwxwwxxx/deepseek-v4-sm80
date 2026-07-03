@@ -24,11 +24,40 @@ Read:
 - `performance_milestones/target08_radix_prefix_dsv4/README.md`
 - TARGET 08.05 result README;
 - TARGET 08.06 result README;
+- TARGET 08.07 result README;
 - TARGET 08.10 result README;
 - `python/minisgl/kvcache/deepseek_v4_pool.py`
 - `/workspace/sglang-main/python/sglang/srt/mem_cache/deepseek_v4_memory_pool.py`
 - `/workspace/sglang-main/python/sglang/srt/mem_cache/unified_cache_components/swa_component.py`
 - `/workspace/sglang-main/python/sglang/srt/mem_cache/allocator/swa.py`
+
+## Fixed Memory Inputs From TARGET 08.06 And 08.07
+
+Carry these costs into the ledger unless a later target reruns the same
+configuration and proves they changed:
+
+| Item | Value | Source / interpretation |
+| --- | ---: | --- |
+| CUDA graph private-pool capture cost | `~19.04 GiB/rank` | TARGET 08.06/08.07 full bucket `[1,2,4,8,16]`; this is a real first-graph dominated private-pool capacity cost. |
+| First captured graph cost | `~18.83 GiB/rank` | TARGET 08.06/08.07 single bucket `[16]`; later buckets add only tens of MiB because graph pool reuse works. |
+| Promoted tested BF16 cache persistent baseline | `1.588 GiB/rank` | TARGET 08.07 model prepare; visible before graph capture, not the cause of graph private-pool delta. |
+| Fixed KV/page capacity at `--num-pages 128`, page size `256` | `~2.320 GiB/rank` | TARGET 08.06-compatible run shape; use as the capped-page baseline for prefix-cache serving tests. |
+
+TARGET 08.07 specifically ruled out the promoted BF16 projection/shared-expert
+cache paths as a material owner of the `~19 GiB/rank` graph delta:
+
+- disabling all tested BF16 caches removed the `1.588 GiB/rank` persistent
+  baseline from `model_prepare_report`;
+- the `[16]` graph delta changed only from `18.828 GiB/rank` to
+  `18.885 GiB/rank`;
+- individual cache-owner A/B rows moved graph delta by at most
+  `~0.057 GiB/rank`;
+- graph replay stayed active.
+
+Therefore this target should treat BF16 caches and graph private-pool memory as
+separate capacity ledger lines.  Do not spend this target trying to identify the
+internal CUDA graph node/workspace owner unless the capacity ledger shows that
+the graph pool cost blocks prefix-cache promotion.
 
 ## Required Analysis
 
@@ -50,7 +79,11 @@ For each case, estimate or measure:
 - retained C4-indexer slots;
 - retained compression-state slots;
 - retained bytes/rank;
-- graph capture private-pool or capture delta bytes from TARGET 08.06;
+- graph capture private-pool or capture delta bytes from TARGET 08.06/08.07;
+- promoted BF16 cache persistent baseline bytes from TARGET 08.07;
+- fixed KV/page bytes under the selected `--num-pages` policy;
+- remaining free-memory margin after weights, prepared caches, KV pages, graph
+  private pool, and retained prefix pages;
 - equivalent KV pages;
 - equivalent KV tokens;
 - equivalent number of 4096-token prompts;

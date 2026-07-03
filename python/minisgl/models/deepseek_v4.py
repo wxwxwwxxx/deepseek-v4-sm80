@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -2400,6 +2401,13 @@ class DeepseekV4Model(BaseOP):
             if any(str(report["owner"]).endswith("down_proj") for report in shared_expert_reports):
                 projection_cache_owners.append("shared_experts.down_proj")
         return {
+            "attribution_disable_toggles": {
+                "env": dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
+                "raw": os.environ.get(
+                    dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, ""
+                ),
+                "disabled_toggles": list(dsv4_kernel.dsv4_env_disabled_toggles()),
+            },
             "fused_wqa_wkv_bf16_pretranspose_cache": {
                 "enabled": bool(fused_wqa_wkv_reports),
                 "toggle": dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE,
