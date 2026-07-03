@@ -43,8 +43,9 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
 | TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | phase 1 complete | Conservative DSV4 radix prefix cache exists as explicit opt-in; continue with TARGET 08 subtargets. |
 | TARGET 08.05 | `prompts/TARGET_08.05_dsv4_sm80_serving_workload_cuda_graph_bucket_policy.md` | completed | Established serving workload suite and selected `[1,2,4,8,16]` as the smallest measured zero-eager bucket set. |
-| TARGET 08.06 | `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md` | active next | Attribute the large CUDA graph capture memory delta before prefix-cache promotion testing. |
-| TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | planned | Validate prefix cache under serving-like sustained workloads using the 08.05 bucket policy and 08.06 memory conclusion. |
+| TARGET 08.06 | `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md` | completed | Confirmed the large capture delta is a real first-graph/private-pool cost, not bucket count, metadata, greedy sample, `max_seq_len`, `num_pages`, or missing pool reuse. |
+| TARGET 08.07 | `prompts/TARGET_08.07_dsv4_sm80_bf16_cache_graph_memory_attribution.md` | active next | Test whether promoted BF16 cache runtime paths indirectly inflate the CUDA graph private pool. |
+| TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | planned | Validate prefix cache under serving-like sustained workloads using the 08.05 bucket policy and 08.06/08.07 memory conclusions. |
 | TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | planned | Compute full-page-owner prefix-cache memory/capacity cost and decide whether 08.20 is worth doing. |
 | TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | optional | If justified by 08.18, evaluate SGLang-style independent SWA/component retention. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix/graph policy, then choose TARGET 09 low precision or TARGET 10 attention/communication. |
@@ -68,16 +69,18 @@ Post-07.78 stable retest:
 - eager decode `0`;
 - old serving baseline crossed: `114.07 output tok/s`.
 
-Decision from TARGET 07.79, TARGET 08 phase 1, and TARGET 08.05:
+Decision from TARGET 07.79, TARGET 08 phase 1, TARGET 08.05, and TARGET 08.06:
 
 ```text
-continue with TARGET 08.06 CUDA graph memory attribution
+continue with TARGET 08.07 BF16 cache graph memory attribution
 ```
 
 Reason: DSV4 radix prefix cache works as an explicit opt-in, and TARGET 08.05
-selected `[1,2,4,8,16]` as the recommended serving graph bucket set.  Before
-TARGET 08.10 promotion testing, the observed `~19 GiB/rank` graph capture memory
-delta should be attributed so capacity and promotion decisions are credible.
+selected `[1,2,4,8,16]` as the recommended serving graph bucket set.  TARGET
+08.06 showed the observed `~19 GiB/rank` graph capture memory delta is a stable
+first-graph/private-pool cost, but it did not A/B the promoted BF16 cache
+runtime paths.  Before TARGET 08.10 promotion testing, run the narrow 08.07
+attribution check so capacity and promotion decisions are credible.
 
 ## Archive Policy
 
@@ -91,7 +94,7 @@ For new child threads, start from:
 
 1. `prompts/target.md`
 2. the active target prompt, currently
-   `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md`
+   `prompts/TARGET_08.07_dsv4_sm80_bf16_cache_graph_memory_attribution.md`
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache phase-1 context
 

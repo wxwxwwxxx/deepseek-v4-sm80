@@ -54,6 +54,17 @@ class GraphCaptureBuffer:
         batch.out_loc = self.out_loc[_slice]
         batch.positions = self.positions[_slice]
 
+    def nbytes(self) -> int:
+        total = (
+            self.input_ids.numel() * self.input_ids.element_size()
+            + self.out_loc.numel() * self.out_loc.element_size()
+            + self.positions.numel() * self.positions.element_size()
+            + self.logits.numel() * self.logits.element_size()
+        )
+        if self.next_tokens is not None:
+            total += self.next_tokens.numel() * self.next_tokens.element_size()
+        return int(total)
+
     def copy_from(self, batch: Batch) -> int:
         _slice = slice(batch.padded_size)
         with dsv4_direct_copy_nvtx(
@@ -149,8 +160,15 @@ class GraphRunner:
             "capture_free_memory_before_bytes": None,
             "capture_free_memory_after_bytes": None,
             "capture_memory_delta_bytes": None,
+            "capture_memory_allocated_before_bytes": None,
+            "capture_memory_allocated_after_bytes": None,
+            "capture_memory_reserved_before_bytes": None,
+            "capture_memory_reserved_after_bytes": None,
             "capture_peak_memory_allocated_bytes": None,
             "capture_peak_memory_reserved_bytes": None,
+            "capture_buffer_bytes": None,
+            "capture_graph_pool_reuse_enabled": False,
+            "capture_graph_pool_reuse_anchor_bs": None,
             "capture_by_batch_size": {},
             "replay_count": 0,
             "replay_count_by_batch_size": {},
@@ -197,6 +215,12 @@ class GraphRunner:
         capture_start_free_memory = free_memory
         capture_start_s = time.perf_counter()
         self.capture_status["capture_free_memory_before_bytes"] = int(free_memory)
+        self.capture_status["capture_memory_allocated_before_bytes"] = int(
+            torch.cuda.memory_allocated(self.device)
+        )
+        self.capture_status["capture_memory_reserved_before_bytes"] = int(
+            torch.cuda.memory_reserved(self.device)
+        )
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
 
         self.buffer = GraphCaptureBuffer.init(
@@ -205,6 +229,7 @@ class GraphRunner:
             self.device,
             capture_greedy_sample=self.capture_greedy_sample,
         )
+        self.capture_status["capture_buffer_bytes"] = self.buffer.nbytes()
         bind_capture_graph_inputs = getattr(
             self.attn_backend, "bind_capture_graph_inputs", None
         )
@@ -220,6 +245,9 @@ class GraphRunner:
         self.capture_status["capture_compressed_locs_in_graph"] = bool(
             getattr(self.attn_backend, "capture_compressed_locs_in_graph", False)
         )
+        self.capture_status["capture_compressed_locs_in_graph_disabled_by_env"] = bool(
+            getattr(self.attn_backend, "capture_compressed_locs_in_graph_disabled_by_env", False)
+        )
 
         pbar = tqdm(
             sorted(self.graph_bs_list, reverse=True),
@@ -234,6 +262,8 @@ class GraphRunner:
             pbar.refresh()
             bs_start_free_memory = free_memory
             bs_start_s = time.perf_counter()
+            bs_start_allocated = torch.cuda.memory_allocated(self.device)
+            bs_start_reserved = torch.cuda.memory_reserved(self.device)
             graph = torch.cuda.CUDAGraph()
             batch = Batch(reqs=[self.dummy_req] * bs, phase="decode")
             batch.padded_reqs = batch.reqs
@@ -259,15 +289,26 @@ class GraphRunner:
                         ).to(torch.int32)
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
+                self.capture_status["capture_graph_pool_reuse_anchor_bs"] = int(bs)
+            else:
+                self.capture_status["capture_graph_pool_reuse_enabled"] = True
             self.graph_map[bs] = graph
             self.capture_status["captured_bs"].append(bs)
             torch.cuda.synchronize(self.device)
             bs_end_free_memory = get_free_memory(self.device)
+            bs_end_allocated = torch.cuda.memory_allocated(self.device)
+            bs_end_reserved = torch.cuda.memory_reserved(self.device)
             self.capture_status["capture_by_batch_size"][str(bs)] = {
                 "elapsed_s": time.perf_counter() - bs_start_s,
                 "free_memory_before_bytes": int(bs_start_free_memory),
                 "free_memory_after_bytes": int(bs_end_free_memory),
                 "memory_delta_bytes": int(bs_start_free_memory - bs_end_free_memory),
+                "memory_allocated_before_bytes": int(bs_start_allocated),
+                "memory_allocated_after_bytes": int(bs_end_allocated),
+                "memory_allocated_delta_bytes": int(bs_end_allocated - bs_start_allocated),
+                "memory_reserved_before_bytes": int(bs_start_reserved),
+                "memory_reserved_after_bytes": int(bs_end_reserved),
+                "memory_reserved_delta_bytes": int(bs_end_reserved - bs_start_reserved),
             }
 
         free_memory = get_free_memory(self.device)
@@ -275,6 +316,12 @@ class GraphRunner:
         self.capture_status["capture_free_memory_after_bytes"] = int(free_memory)
         self.capture_status["capture_memory_delta_bytes"] = int(
             capture_start_free_memory - free_memory
+        )
+        self.capture_status["capture_memory_allocated_after_bytes"] = int(
+            torch.cuda.memory_allocated(self.device)
+        )
+        self.capture_status["capture_memory_reserved_after_bytes"] = int(
+            torch.cuda.memory_reserved(self.device)
         )
         self.capture_status["capture_peak_memory_allocated_bytes"] = int(
             torch.cuda.max_memory_allocated(self.device)

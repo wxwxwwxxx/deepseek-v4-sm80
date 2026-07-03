@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Literal
 
@@ -18,6 +19,10 @@ if TYPE_CHECKING:
 
 DSV4CompressRatio = Literal[0, 4, 128]
 _PAGE_INDEX_ALIGNMENT = 64
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH_ENV = (
+    "MINISGL_DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH"
+)
 
 
 def _pad_last_dim(
@@ -134,11 +139,16 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self.max_graph_bs = 0
         self._capture_graph_inputs_bound = False
         self._capture_compressed_locs_in_graph = False
+        self._capture_compressed_locs_in_graph_disabled_by_env = False
         dsv4_kernel.warmup_indexer_fp8_backend(self.device)
 
     @property
     def capture_compressed_locs_in_graph(self) -> bool:
         return self._capture_compressed_locs_in_graph
+
+    @property
+    def capture_compressed_locs_in_graph_disabled_by_env(self) -> bool:
+        return self._capture_compressed_locs_in_graph_disabled_by_env
 
     def get_layer_compress_ratio(self, layer_id: int) -> DSV4CompressRatio:
         return self.kvcache.get_layer_mapping(layer_id).compress_ratio
@@ -442,6 +452,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self.max_graph_bs = max(bs_list) if bs_list else 0
         self._capture_graph_inputs_bound = False
         self._capture_compressed_locs_in_graph = False
+        self._capture_compressed_locs_in_graph_disabled_by_env = False
         if self.max_graph_bs == 0:
             return
         self.capture = self._empty_decode_metadata(self.max_graph_bs, max_seq_len)
@@ -461,6 +472,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
         del input_ids
         if self.capture is None:
             return
+        disable_capture_locs = (
+            os.environ.get(DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH_ENV, "")
+            .strip()
+            .lower()
+            in _TRUE_ENV_VALUES
+        )
+        self._capture_compressed_locs_in_graph_disabled_by_env = disable_capture_locs
         core = self.capture.core_metadata
         if out_loc.shape != core.raw_out_loc.shape or positions.shape != core.positions.shape:
             self._capture_graph_inputs_bound = False
@@ -473,8 +491,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if self.capture.c128_compress_metadata is not None:
             self.capture.c128_compress_metadata.positions = positions
         self._capture_graph_inputs_bound = True
-        self._capture_compressed_locs_in_graph = dsv4_kernel.dsv4_sm80_triton_enabled(
-            "MINISGL_DSV4_SM80_COMPRESS_STORE"
+        self._capture_compressed_locs_in_graph = (
+            not disable_capture_locs
+            and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE")
         )
 
     def stage_capture_metadata_for_graph(self, batch: Batch) -> None:

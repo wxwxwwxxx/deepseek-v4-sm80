@@ -2,7 +2,7 @@
 
 ## Status
 
-Phase 1 complete as an explicit opt-in path.  Continue with TARGET 08.06.
+Phase 1 complete as an explicit opt-in path.  Continue with TARGET 08.07.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -65,8 +65,9 @@ Run in this order:
 | --- | --- | --- | --- |
 | TARGET 08 phase 1 | this file + `performance_milestones/target08_radix_prefix_dsv4/` | complete opt-in | Implemented conservative page-aligned/full-page-owner DSV4 radix prefix cache. |
 | TARGET 08.05 | `prompts/TARGET_08.05_dsv4_sm80_serving_workload_cuda_graph_bucket_policy.md` | complete | Built serving workload suite and selected `[1,2,4,8,16]` as the smallest measured zero-eager bucket set. |
-| TARGET 08.06 | `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md` | active next | Attribute the large CUDA graph capture memory delta before promotion testing. |
-| TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | planned | Use the 08.05 bucket policy plus 08.06 memory conclusion to test sustained prefix-cache serving stability and promotion readiness. |
+| TARGET 08.06 | `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md` | complete | Confirmed the large capture delta is a real first-graph/private-pool cost, not bucket count, metadata, greedy sample, `max_seq_len`, `num_pages`, or missing pool reuse. |
+| TARGET 08.07 | `prompts/TARGET_08.07_dsv4_sm80_bf16_cache_graph_memory_attribution.md` | active next | Test whether promoted BF16 cache runtime paths indirectly inflate the CUDA graph private pool. |
+| TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | planned | Use the 08.05 bucket policy plus 08.06/08.07 memory conclusions to test sustained prefix-cache serving stability and promotion readiness. |
 | TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | planned | Compute full-page-owner memory/capacity cost and decide whether 08.20 is worth doing. |
 | TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | optional | If 08.18 says go, study SGLang-style independent SWA/component retention. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix/graph policy, then decide whether to move to TARGET 09 or TARGET 10. |
@@ -78,6 +79,10 @@ Rationale:
 - TARGET 08.06 comes before TARGET 08.10 because the selected `[1,2,4,8,16]`
   graph policy has a large observed capture memory delta that must be explained
   before a promotion gate can make a credible capacity decision.
+- TARGET 08.07 comes before TARGET 08.10 because TARGET 08.06 ruled out many
+  small graph-policy causes but did not A/B the promoted BF16 cache runtime
+  paths.  This keeps the promotion gate from carrying a plausible untested
+  `~19 GiB/rank` memory hypothesis.
 - TARGET 08.18 comes before TARGET 08.20 because independent SWA/component
   retention is more complex and should only be implemented after a memory ledger
   proves it is valuable.

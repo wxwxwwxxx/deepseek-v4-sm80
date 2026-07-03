@@ -2,12 +2,12 @@
 
 ## Status
 
-Planned after TARGET 08.05 and TARGET 08.06.
+Planned after TARGET 08.05, TARGET 08.06, and TARGET 08.07.
 
 This target uses the serving workload and CUDA graph bucket policy selected by
-TARGET 08.05, plus the graph memory conclusion from TARGET 08.06, to decide
-whether the DSV4 radix prefix cache can move from phase-1 experimental opt-in
-to a controlled/promotable path.
+TARGET 08.05, plus the graph memory conclusions from TARGET 08.06 and
+TARGET 08.07, to decide whether the DSV4 radix prefix cache can move from
+phase-1 experimental opt-in to a controlled/promotable path.
 
 ## Goal
 
@@ -30,10 +30,12 @@ Read:
 - `prompts/TARGET_08_radix_prefix_dsv4.md`
 - `prompts/TARGET_08.05_dsv4_sm80_serving_workload_cuda_graph_bucket_policy.md`
 - `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md`
+- `prompts/TARGET_08.07_dsv4_sm80_bf16_cache_graph_memory_attribution.md`
 - `performance_milestones/target08_radix_prefix_dsv4/README.md`
 - `performance_milestones/target08_radix_prefix_dsv4/DESIGN.md`
 - TARGET 08.05 result README after it exists.
 - TARGET 08.06 result README after it exists.
+- TARGET 08.07 result README after it exists.
 
 Use:
 
@@ -51,8 +53,8 @@ the target finds a stronger vLLM/SGLang-aligned safe alignment rule.
 ## Workloads
 
 Use the TARGET 08.05 recommended graph bucket policy.
-Carry forward the TARGET 08.06 graph memory conclusion when deciding whether
-the feature is promotable or should remain controlled opt-in.
+Carry forward the TARGET 08.06 and 08.07 graph memory conclusions when deciding
+whether the feature is promotable or should remain controlled opt-in.
 
 At minimum test:
 

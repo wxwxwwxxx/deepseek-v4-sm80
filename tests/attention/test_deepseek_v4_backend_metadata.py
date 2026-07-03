@@ -343,6 +343,28 @@ def test_dsv4_capture_replay_can_defer_compressed_locs_to_graph_hook(monkeypatch
     assert capture.c128_out_loc.tolist() == [-1, -1, (1024 + 127) // 128, -1]
 
 
+def test_dsv4_capture_compressed_locs_graph_hook_can_be_disabled(monkeypatch):
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=260)
+    backend = ctx.attn_backend
+    monkeypatch.setenv("MINISGL_DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH", "1")
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "dsv4_sm80_triton_enabled",
+        lambda toggle: toggle == "MINISGL_DSV4_SM80_COMPRESS_STORE",
+    )
+
+    backend.init_capture_graph(max_seq_len=260, bs_list=[4])
+    backend.bind_capture_graph_inputs(
+        input_ids=torch.empty(4, dtype=torch.int32),
+        out_loc=torch.full((4,), -1, dtype=torch.int32),
+        positions=torch.full((4,), -1, dtype=torch.int32),
+    )
+
+    assert backend.capture_compressed_locs_in_graph_disabled_by_env
+    assert not backend.capture_compressed_locs_in_graph
+
+
 def test_dsv4_masked_compressed_store_ignores_negative_locs():
     cfg = _tiny_dsv4_config([4])
     ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=16)

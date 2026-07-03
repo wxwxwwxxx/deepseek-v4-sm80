@@ -1802,11 +1802,15 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
     cuda_graph_bs = args.cuda_graph_bs
     if allow_dsv4_cuda_graph and cuda_graph_bs is None:
         cuda_graph_bs = [1, 2, 4]
+    if args.cuda_graph_capture_greedy_sample is None:
+        cuda_graph_capture_greedy_sample = variant_graph_greedy_sample
+    else:
+        cuda_graph_capture_greedy_sample = bool(args.cuda_graph_capture_greedy_sample)
     return {
         "use_pynccl": bool(args.use_pynccl or variant_pynccl),
         "allow_dsv4_cuda_graph": allow_dsv4_cuda_graph,
         "cuda_graph_bs": cuda_graph_bs,
-        "cuda_graph_capture_greedy_sample": variant_graph_greedy_sample,
+        "cuda_graph_capture_greedy_sample": cuda_graph_capture_greedy_sample,
     }
 
 
@@ -3023,6 +3027,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Explicit CUDA graph decode batch sizes for opt-in graph runs.",
     )
+    parser.add_argument(
+        "--cuda-graph-capture-greedy-sample",
+        dest="cuda_graph_capture_greedy_sample",
+        action="store_true",
+        default=None,
+        help="Force graph capture of greedy argmax sampling.",
+    )
+    parser.add_argument(
+        "--no-cuda-graph-capture-greedy-sample",
+        dest="cuda_graph_capture_greedy_sample",
+        action="store_false",
+        help="Force greedy sampling outside the captured CUDA graph.",
+    )
+    parser.set_defaults(cuda_graph_capture_greedy_sample=None)
     parser.add_argument("--prompt-len", type=int, default=None)
     parser.add_argument("--decode-len", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
