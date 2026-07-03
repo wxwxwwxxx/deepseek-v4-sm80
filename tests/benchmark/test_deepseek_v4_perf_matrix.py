@@ -72,6 +72,45 @@ def test_smoke_or_page_size_one_is_not_reported_as_baseline():
     assert bench.run_classification(tp_size=1, page_size=256, smoke=False) == "smoke_debug"
 
 
+def test_target0810_prefix_scenarios_have_stable_prompt_shapes():
+    bench = _load_module()
+
+    names = {
+        "prefix_full_hit_257_bs4",
+        "prefix_partial_hit_769_bs8",
+        "prefix_mixed_hit_miss_bs16",
+        "prefix_multi_112req_wave16",
+        "prefix_eviction_pressure_96req_wave16",
+    }
+    assert names <= set(bench._scenario_map())
+
+    partial = bench._scenario_map()["prefix_partial_hit_769_bs8"]
+    prompts, params = bench.build_workload(
+        partial,
+        vocab_size=4096,
+        seed=123,
+        token_id_range=1024,
+    )
+    parts = bench._generation_parts(partial, prompts, params)
+    assert [len(part[0]) for part in parts] == [1, 7]
+    assert len(prompts[0]) == 257
+    assert all(len(prompt) == 769 for prompt in prompts[1:])
+    assert all(prompt[:257] == prompts[0] for prompt in prompts[1:])
+
+    sustained = bench._scenario_map()["prefix_multi_112req_wave16"]
+    prompts, params = bench.build_workload(
+        sustained,
+        vocab_size=4096,
+        seed=123,
+        token_id_range=1024,
+    )
+    parts = bench._generation_parts(sustained, prompts, params)
+    assert len(prompts) == 112
+    assert all(len(part[0]) == 16 for part in parts)
+    assert prompts[0][:512] == prompts[8][:512]
+    assert prompts[0][:512] == prompts[16][:512]
+
+
 def test_configure_variant_clears_existing_sm80_env_and_sets_v0(monkeypatch):
     bench = _load_module()
 

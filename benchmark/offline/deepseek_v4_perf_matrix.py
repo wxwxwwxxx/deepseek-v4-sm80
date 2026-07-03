@@ -91,6 +91,12 @@ class Scenario:
     def max_input_len(self) -> int:
         if self.kind in {"shared_prefix", "shared_prefix_reuse"}:
             return self.shared_prefix_len + self.suffix_len
+        if self.kind in {
+            "prefix_partial_hit_reuse",
+            "prefix_multi_sustained",
+            "prefix_eviction_pressure",
+        }:
+            return max(self.prompt_len, self.shared_prefix_len + self.suffix_len)
         if self.prompt_len_cycle:
             return max(self.prompt_len_cycle)
         if self.kind == "mixed_prefill_decode":
@@ -227,6 +233,82 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
             "Offline serving-style substitute: 112 total requests issued as seven "
             "same-process waves of 16, with mixed prompt and output lengths. "
             "The current offline scheduler does not model timed arrivals or RPS."
+        ),
+    ),
+    Scenario(
+        name="prefix_full_hit_257_bs4",
+        kind="prefix_full_hit_reuse",
+        batch_size=4,
+        prompt_len=257,
+        decode_len=4,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET08.10 boundary full-hit workload: one 257-token warm request, "
+            "then three identical requests hit the retained 256-token page."
+        ),
+    ),
+    Scenario(
+        name="prefix_partial_hit_769_bs8",
+        kind="prefix_partial_hit_reuse",
+        batch_size=8,
+        prompt_len=769,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        shared_prefix_len=257,
+        suffix_len=512,
+        description=(
+            "TARGET08.10 partial-hit workload: one 257-token warm request retains "
+            "one page, then seven 769-token requests reuse that page and prefill "
+            "the remaining suffix."
+        ),
+    ),
+    Scenario(
+        name="prefix_mixed_hit_miss_bs16",
+        kind="prefix_mixed_hit_miss",
+        batch_size=16,
+        prompt_len=769,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET08.10 mixed workload: one warm request followed by a batch with "
+            "full hits and unrelated misses."
+        ),
+    ),
+    Scenario(
+        name="prefix_multi_112req_wave16",
+        kind="prefix_multi_sustained",
+        batch_size=16,
+        prompt_len=576,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        shared_prefix_len=512,
+        suffix_len=64,
+        total_requests=112,
+        wave_size=16,
+        description=(
+            "TARGET08.10 sustained multi-prefix workload: 112 requests in seven "
+            "waves of 16 cycling across eight 512-token shared prefixes."
+        ),
+    ),
+    Scenario(
+        name="prefix_eviction_pressure_96req_wave16",
+        kind="prefix_eviction_pressure",
+        batch_size=16,
+        prompt_len=513,
+        decode_len=2,
+        repeats=1,
+        warmup_repeats=0,
+        shared_prefix_len=512,
+        suffix_len=1,
+        total_requests=96,
+        wave_size=16,
+        description=(
+            "TARGET08.10 eviction-pressure workload: 96 distinct two-page prefixes "
+            "under --num-pages 128, forcing safe radix eviction."
         ),
     ),
 )
@@ -1374,6 +1456,20 @@ def _random_tokens(
     return [low + rng.randrange(usable) for _ in range(length)]
 
 
+def _random_token_bank(
+    rng: random.Random,
+    count: int,
+    length: int,
+    vocab_size: int,
+    *,
+    token_id_range: int,
+) -> list[list[int]]:
+    return [
+        _random_tokens(rng, length, vocab_size, token_id_range=token_id_range)
+        for _ in range(count)
+    ]
+
+
 def build_workload(
     scenario: Scenario,
     *,
@@ -1401,6 +1497,112 @@ def build_workload(
                 vocab_size,
                 token_id_range=token_id_range,
             )
+            prompts.append(prefix + suffix)
+            output_lens.append(scenario.decode_len)
+    elif scenario.kind == "prefix_full_hit_reuse":
+        prompt = _random_tokens(
+            rng,
+            scenario.prompt_len,
+            vocab_size,
+            token_id_range=token_id_range,
+        )
+        for _ in range(scenario.batch_size):
+            prompts.append(list(prompt))
+            output_lens.append(scenario.decode_len)
+    elif scenario.kind == "prefix_partial_hit_reuse":
+        warm_len = scenario.shared_prefix_len or max(1, scenario.prompt_len // 3)
+        if warm_len >= scenario.prompt_len:
+            warm_len = max(1, scenario.prompt_len - 1)
+        warm_prefix = _random_tokens(
+            rng,
+            warm_len,
+            vocab_size,
+            token_id_range=token_id_range,
+        )
+        prompts.append(list(warm_prefix))
+        output_lens.append(scenario.decode_len)
+        for _ in range(max(0, scenario.batch_size - 1)):
+            suffix_len = scenario.prompt_len - warm_len
+            suffix = _random_tokens(
+                rng,
+                suffix_len,
+                vocab_size,
+                token_id_range=token_id_range,
+            )
+            prompts.append(warm_prefix + suffix)
+            output_lens.append(scenario.decode_len)
+    elif scenario.kind == "prefix_mixed_hit_miss":
+        warm_prompt = _random_tokens(
+            rng,
+            scenario.prompt_len,
+            vocab_size,
+            token_id_range=token_id_range,
+        )
+        prompts.append(list(warm_prompt))
+        output_lens.append(scenario.decode_len)
+        remaining = max(0, scenario.batch_size - 1)
+        hit_count = (remaining + 1) // 2
+        miss_count = remaining - hit_count
+        mixed_prompts: list[list[int]] = [list(warm_prompt) for _ in range(hit_count)]
+        mixed_prompts.extend(
+            _random_token_bank(
+                rng,
+                miss_count,
+                scenario.prompt_len,
+                vocab_size,
+                token_id_range=token_id_range,
+            )
+        )
+        for idx, prompt in enumerate(mixed_prompts):
+            # Interleave hits and misses instead of grouping them in the batch.
+            target_idx = idx // 2 if idx % 2 == 0 else hit_count + idx // 2
+            if 0 <= target_idx < len(mixed_prompts):
+                prompts.append(mixed_prompts[target_idx])
+            else:
+                prompts.append(prompt)
+            output_lens.append(scenario.decode_len)
+    elif scenario.kind == "prefix_multi_sustained":
+        request_count = scenario.total_requests or scenario.batch_size
+        prefix_count = 8
+        prefix_len = scenario.shared_prefix_len or max(1, scenario.prompt_len - scenario.suffix_len)
+        suffix_len = scenario.suffix_len or max(1, scenario.prompt_len - prefix_len)
+        prefixes = _random_token_bank(
+            rng,
+            prefix_count,
+            prefix_len,
+            vocab_size,
+            token_id_range=token_id_range,
+        )
+        for idx in range(request_count):
+            suffix = _random_tokens(
+                rng,
+                suffix_len,
+                vocab_size,
+                token_id_range=token_id_range,
+            )
+            prompts.append(prefixes[idx % prefix_count] + suffix)
+            output_lens.append(scenario.decode_len)
+    elif scenario.kind == "prefix_eviction_pressure":
+        request_count = scenario.total_requests or scenario.batch_size
+        prefix_len = scenario.shared_prefix_len or max(1, scenario.prompt_len - scenario.suffix_len)
+        suffix_len = scenario.suffix_len or max(1, scenario.prompt_len - prefix_len)
+        prefixes = _random_token_bank(
+            rng,
+            request_count,
+            prefix_len,
+            vocab_size,
+            token_id_range=token_id_range,
+        )
+        for idx, prefix in enumerate(prefixes):
+            suffix = _random_tokens(
+                rng,
+                suffix_len,
+                vocab_size,
+                token_id_range=token_id_range,
+            )
+            # Make distinct prefixes very unlikely to share the first page.
+            if prefix:
+                prefix[0] = 10 + (idx % max(1, min(token_id_range, vocab_size - 10)))
             prompts.append(prefix + suffix)
             output_lens.append(scenario.decode_len)
     elif scenario.kind == "mixed_prefill_decode":
@@ -1627,6 +1829,7 @@ def make_benchmark_llm_class():
                         "uid": uid,
                         "input_tokens": len(status.input_ids),
                         "output_tokens": len(status.output_ids),
+                        "output_token_ids": list(status.output_ids),
                         "ttft_s": (
                             None
                             if started_at is None or status.first_token_at is None
@@ -2080,6 +2283,36 @@ def _estimate_kv_cache_bytes_from_config(llm, *, page_size: int, dtype, tp_size:
     )
 
 
+def _generation_parts(
+    scenario: Scenario,
+    prompts: list[list[int]],
+    sampling_params: list[Any],
+) -> tuple[tuple[list[list[int]], list[Any]], ...]:
+    if scenario.kind in {
+        "shared_prefix_reuse",
+        "prefix_full_hit_reuse",
+        "prefix_partial_hit_reuse",
+        "prefix_mixed_hit_miss",
+    } and len(prompts) > 1:
+        return (
+            (prompts[:1], sampling_params[:1]),
+            (prompts[1:], sampling_params[1:]),
+        )
+    if scenario.kind in {
+        "serving_mixed",
+        "prefix_multi_sustained",
+        "prefix_eviction_pressure",
+    } and scenario.wave_size > 0:
+        return tuple(
+            (
+                prompts[start : start + scenario.wave_size],
+                sampling_params[start : start + scenario.wave_size],
+            )
+            for start in range(0, len(prompts), scenario.wave_size)
+        )
+    return ((prompts, sampling_params),)
+
+
 def _run_one_repeat(
     *,
     llm,
@@ -2107,19 +2340,7 @@ def _run_one_repeat(
     request_metrics: list[dict[str, Any]] = []
     with nvtx_context:
         tic = time.perf_counter()
-        if scenario.kind == "shared_prefix_reuse" and len(prompts) > 1:
-            generation_parts = (
-                (prompts[:1], sampling_params[:1]),
-                (prompts[1:], sampling_params[1:]),
-            )
-        elif scenario.kind == "serving_mixed" and scenario.wave_size > 0:
-            generation_parts = tuple(
-                (prompts[start : start + scenario.wave_size],
-                 sampling_params[start : start + scenario.wave_size])
-                for start in range(0, len(prompts), scenario.wave_size)
-            )
-        else:
-            generation_parts = ((prompts, sampling_params),)
+        generation_parts = _generation_parts(scenario, prompts, sampling_params)
         for part_prompts, part_sampling_params in generation_parts:
             if not part_prompts:
                 continue
@@ -2138,6 +2359,7 @@ def _run_one_repeat(
         "actual_output_tokens": int(sum(output_lens)),
         "output_lens": output_lens,
         "sample_output_token_ids": [output["token_ids"][:16] for output in outputs[:2]],
+        "all_output_token_ids": [output["token_ids"] for output in outputs],
         "requests": request_metrics,
         "schedule_trace": trace,
         "prefix_cache_metrics": prefix_metrics_after,
