@@ -68,15 +68,10 @@ DSV4_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
 DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
 DSV4_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
-DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = (
-    "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
-)
-DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = (
-    "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
-)
-DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = (
-    "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
-)
+DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
+DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
+DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
+DSV4_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION"
 BASELINE_TP_SIZE = 8
 
 
@@ -732,6 +727,20 @@ VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        "dsv4_sm80_a100_victory_fp8marlinproj",
+        {
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_VLLM_FP8_MARLIN_PROJECTION_TOGGLE: "1",
+        },
+        (
+            "TARGET 07.74 smoke opt-in: dsv4_sm80_a100_victory with vLLM "
+            "FP8 Marlin W8A16 block linear for attention q_wqb, attention "
+            "wo_b local projection, and shared experts down."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         "dsv4_sm80_a100_victory_hccleanup",
         {
             DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
@@ -787,10 +796,7 @@ VARIANTS: tuple[Variant, ...] = (
     Variant(
         "target0762_woabf16bmmcache",
         {DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1"},
-        (
-            "Legacy alias for dsv4_sm80_a100_victory kept for TARGET 07.62 "
-            "artifacts and scripts."
-        ),
+        ("Legacy alias for dsv4_sm80_a100_victory kept for TARGET 07.62 " "artifacts and scripts."),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
     ),
@@ -822,10 +828,7 @@ VARIANTS: tuple[Variant, ...] = (
             DSV4_FP8_ACT_QUANT_TRITON_TOGGLE: "1",
             DSV4_STATIC_SCALE_CACHE_TOGGLE: "1",
         },
-        (
-            "TARGET 07.56 low-cost preflight smoke path with static FP32 "
-            "projection scale cache."
-        ),
+        ("TARGET 07.56 low-cost preflight smoke path with static FP32 " "projection scale cache."),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
     ),
@@ -1237,8 +1240,8 @@ def run_variant(
 
 def run_text_smoke(args: argparse.Namespace) -> int:
     from minisgl.distributed import DistributedInfo
-    from minisgl.llm import LLM
     from minisgl.kernel import deepseek_v4 as dsv4_kernel
+    from minisgl.llm import LLM
 
     rank, tp_size, env_world_size = _tp_rank_size(args)
     if env_world_size != tp_size:

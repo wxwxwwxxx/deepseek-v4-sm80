@@ -68,7 +68,20 @@ BF16 small-GEMM backend cluster as the next implementation surface.  TARGET
 microbench signal but no meaningful profile or macro gain, so the active next
 step is a short precision/boundary pivot.  TARGET 07.71 rejected HC/router
 exact-ish precision as the next lane and selected a bounded vLLM-aligned
-FP8/custom projection-cache boundary target.
+FP8/custom projection-cache boundary target.  TARGET 07.72 then proved that
+mini-owned direct FP8/custom projection kernels are numerically close but much
+slower than promoted cached BF16 on A100, so the active next step is a bounded
+standalone feasibility pass over vLLM-aligned quantized-linear backends.
+TARGET 07.73 found a positive standalone signal: vLLM FP8 Marlin W8A16 block
+linear passed the gate on `q_wqb`, `wo_b local`, and shared experts down.
+TARGET 07.74 implemented a default-off runtime opt-in and preserved the focused
+Marlin signal, but it stopped at the runtime bridge gate: default mini Python
+cannot safely import vLLM custom ops, and the vLLM venv mixes incompatible mini
+CUDA extension packages.  TARGET 07.75 then built the mini-owned dense FP8
+Marlin extension against mini's default torch ABI and passed the focused owner
+gate.  TARGET 07.76 is therefore the next step: replace the vLLM-helper runtime
+path with the mini-owned bridge and run TP8 smoke/profile/macro before deciding
+promotion.
 
 ## New TARGET 07 Organization
 
@@ -106,7 +119,11 @@ split into small executable target files for separate Codex threads.
 | TARGET 07.69 | `prompts/TARGET_07.69_dsv4_sm80_projection_gemm_backend_owner_reattribution.md` | completed | Re-attributed the current promoted projection/GEMM bucket with `98.94%` named coverage. No single owner clears `0.20s`; the selected next surface is the BF16 small-GEMM + splitK/reduce cluster at `0.521619s`. |
 | TARGET 07.70 | `prompts/TARGET_07.70_dsv4_sm80_bf16_small_gemm_backend_cluster.md` | completed | Tested exact-route BF16 pretranspose small-GEMM path. Microbench passed, text smoke passed, but profile and macro gates failed; keep audit opt-in only, do not promote. |
 | TARGET 07.71 | `prompts/TARGET_07.71_dsv4_sm80_precision_boundary_pivot.md` | completed | Rejected HC/router TF32 and BF16-like precision lanes; selected vLLM-aligned FP8/custom projection-cache cluster as the next bounded implementation target. |
-| TARGET 07.72 | `prompts/TARGET_07.72_dsv4_sm80_vllm_aligned_fp8_custom_projection_cache_boundary.md` | next todo | Opt-in implementation target for a vLLM-aligned FP8/custom projection-cache boundary across the coherent projection cluster; excludes full FP8 KV-cache E2E and HC/router precision changes. |
+| TARGET 07.72 | `prompts/TARGET_07.72_dsv4_sm80_vllm_aligned_fp8_custom_projection_cache_boundary.md` | completed | Source parity and focused real-weight direct FP8/custom projection probes completed; all tested direct FP8 candidates were slower than promoted cached BF16, so no runtime opt-in was implemented. |
+| TARGET 07.73 | `prompts/TARGET_07.73_dsv4_sm80_vllm_quantized_linear_backend_feasibility.md` | completed | Standalone feasibility passed for vLLM FP8 Marlin W8A16 block linear on `q_wqb`, `wo_b local`, and shared experts down; rejected `wo_a` two-launch, A100 `torch._scaled_mm` FP8, INT8 W8A8 silent runtime, and FBGEMM-derived first integration. |
+| TARGET 07.74 | `prompts/TARGET_07.74_dsv4_sm80_vllm_fp8_marlin_dense_projection_runtime.md` | completed | Implemented a default-off vLLM-bridge runtime opt-in for `q_wqb`, `wo_b local`, and shared experts down. Focused owner timings stayed strong and the memory ledger was favorable, but TP8 validation stopped at the vLLM/mini ABI bridge gate; do not promote. |
+| TARGET 07.75 | `prompts/TARGET_07.75_dsv4_sm80_mini_owned_dense_fp8_marlin_bridge.md` | completed | Built/imported `minisgl_dense_fp8_marlin` under default mini torch `2.9.1+cu128`; focused real-weight quality passed for `q_wqb`, `wo_b local`, and shared-down, M=4 was about `0.058 ms`, and the bridge was slightly faster than the offline vLLM helper. |
+| TARGET 07.76 | `prompts/TARGET_07.76_dsv4_sm80_mini_owned_fp8_marlin_projection_runtime.md` | next todo | Replace the 07.74 vLLM-helper runtime path with the 07.75 mini-owned dense FP8 Marlin bridge, then run TP8 text smoke, graph replay, 4096/128 profile, 4096/1024 macro, and memory-lifecycle gates. |
 
 The old fine-grained TARGET 07 prompt files remain as archival references.  Do
 not use them as the main project map unless a thread needs exact historical
@@ -143,7 +160,7 @@ Broad precision archive:
 
 ## Current Sequencing
 
-Run TARGET 07.72 next.
+Run TARGET 07.76 next.
 
 Current milestone: `dsv4_sm80_a100_victory`.
 
@@ -641,6 +658,97 @@ difference.  Because current text smokes and performance runs do not indicate a
 severe correctness problem, do not change HC in TARGET 07.72.  Defer large HC
 contract evaluation and broader correctness smoke until after the current
 performance route stabilizes.
+
+TARGET 07.72 completed without changing runtime code.  It compared the
+promoted cached BF16 projection path against direct FP8/custom projection
+candidates using real DSV4 weights and representative M=`1,4,8,16` shapes.
+The tested direct FP8 candidates were numerically close to cached BF16, but
+they failed the latency gate on every measured owner.  Representative M=4
+results:
+
+| Owner | Cached BF16 ms | Direct FP8 ms | Result |
+| --- | ---: | ---: | --- |
+| WQA/WKV/compress | `0.044003` | `0.344534` | fail |
+| `q_wqb` | `0.037778` | `0.151194` | fail |
+| `wo_b` local | `0.038232` | `0.150913` | fail |
+| shared expert gate/up | `0.043902` | `0.342883` | fail |
+| shared expert down | `0.038083` | `0.102496` | fail |
+| `wo_a` | `0.062519` | `0.342240` | fail |
+
+Decision: do not implement `MINISGL_DSV4_SM80_FP8_CUSTOM_PROJECTION_CACHE`.
+Do not continue mini-owned software-FP8 wrappers without stronger evidence.
+The next target is TARGET 07.73, a standalone backend feasibility pass over
+vLLM-aligned quantized-linear implementations.  It must treat vLLM's
+quant/dequant boundary as the baseline contract: if vLLM uses weight-only
+Marlin on SM80 and keeps activations BF16, mini must not insert a slow
+activation quant step and then blame the backend.  If no available backend
+beats cached BF16, the target must use A100 roofline analysis to decide whether
+a custom kernel is worth a separate R&D target.
+
+TARGET 07.73 completed without changing mini runtime source.  It tested
+standalone vLLM-aligned quantized-linear backends under the vLLM venv and
+selected:
+
+```text
+vLLM FP8 Marlin W8A16 block linear
+```
+
+Representative M=`4` results:
+
+| Owner | Promoted cached BF16 ms | vLLM block Marlin ms | Speedup |
+| --- | ---: | ---: | ---: |
+| WQA/WKV/compress | `0.100167` | `0.077816` | `22.31%` |
+| `q_wqb` | `0.092440` | `0.066223` | `28.36%` |
+| `wo_b` local | `0.091272` | `0.064005` | `29.87%` |
+| shared experts gate/up | `0.098032` | `0.079082` | `19.33%` |
+| shared experts down | `0.092495` | `0.064094` | `30.70%` |
+| `wo_a` grouped two-launch | `0.057180` | `0.189748` | reject |
+
+All-M gate passed for `q_wqb`, `wo_b local`, and shared experts down.  Lane A
+is preferred because it keeps the native DeepSeek V4 block FP8
+`weight_scale_inv` contract and follows vLLM's SM80 W8A16 Marlin behavior:
+one-time weight/scale repack, BF16 activations, and no replay-time activation
+quantization.  FBGEMM-derived Marlin is diagnostic only because it requires an
+extra block-FP8 -> BF16 -> per-channel-FP8 conversion.  INT8 W8A8 failed the
+standalone performance gate and needs a separate precision target if revisited.
+
+TARGET 07.74 implemented that bounded runtime opt-in as
+`MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION=1` /
+`dsv4_sm80_a100_victory_fp8marlinproj`.  Focused owner calls through the vLLM
+helper path remained strong, around `0.064 ms` for the Phase A owners, and the
+memory ledger showed that Marlin packed weights can be smaller than the
+promoted cached BF16 replacement for those owners.  However, the target did
+not pass TP8 smoke/profile/macro because the only environment that could call
+the vLLM Marlin helpers was not a coherent mini runtime:
+
+- default mini Python uses torch `2.9.1+cu128` and has no vLLM package;
+- importing vLLM source into default mini Python hits a vLLM `_C` torch ABI
+  mismatch;
+- the vLLM venv uses torch `2.11.0+cu128`, can call vLLM helpers, but inherits
+  global mini packages and exposed `sgl_kernel` plus mini Marlin WNA16 ABI
+  mismatches.
+
+The preflight after 07.74 showed that mini's default extension toolchain is
+healthy: `nvcc` CUDA `12.8`, `gcc/g++` `13.3.0`, `ninja`, torch
+`2.9.1+cu128`, `_GLIBCXX_USE_CXX11_ABI=True`, and tiny C++/CUDA extension
+probes passed.  `cmake` is not installed, but mini's existing extension style
+uses `torch.utils.cpp_extension.load`, so that is acceptable.
+
+TARGET 07.75 completed that mini-owned bridge and stopped before TP8 runtime
+integration as intended.  It built/imported `minisgl_dense_fp8_marlin` under
+default mini torch `2.9.1+cu128`, registered only `gptq_marlin_repack` and
+`marlin_gemm`, avoided vLLM and `sgl_kernel` runtime dependencies, and passed
+focused real-weight probes for `q_wqb`, `wo_b local`, and shared experts down.
+M=`4` mini-owned Marlin latency was about `0.058 ms` for all three owner
+families, quality was effectively exact against BF16-dequantized reference,
+and the bridge was on average `7.47%` faster than the offline vLLM helper.
+
+TARGET 07.76 should therefore revise the 07.74 runtime opt-in to use
+`minisgl.kernel.dense_fp8_marlin` instead of `minisgl.kernel.vllm_fp8_marlin`.
+The target must keep the path default-off, run TP8 page-size-256 text smoke,
+verify graph replay/eager decode behavior, measure 4096/128 and 4096/1024
+macro, and record whether the switched owners actually reduce the model-level
+projection/GEMM bucket before deciding whether to promote.
 
 ## Precision Policy
 

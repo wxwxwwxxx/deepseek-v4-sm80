@@ -43,25 +43,18 @@ DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
 DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE = "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE"
 DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
-DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE = (
-    "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
-)
+DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE = "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
 DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
-DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE = (
-    "MINISGL_DSV4_SM80_FUSED_TOPK_SWA_INDICES"
-)
+DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE = "MINISGL_DSV4_SM80_FUSED_TOPK_SWA_INDICES"
 DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
 DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
-DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = (
-    "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
-)
+DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
 DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
 )
-DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = (
-    "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
-)
+DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
+DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION"
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
     DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
@@ -180,6 +173,7 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,
     DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE,
     DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE,
+    DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE,
 )
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_V0_BF16_TOGGLE,
@@ -679,7 +673,11 @@ class DSV4MoEWorkspace:
 
 
 def _module_available(name: str) -> tuple[bool, str | None]:
-    if importlib.util.find_spec(name) is None:
+    try:
+        spec = importlib.util.find_spec(name)
+    except Exception as exc:  # pragma: no cover - optional packages can fail in __init__.
+        return False, f"{type(exc).__name__}: {exc}"
+    if spec is None:
         return False, "module not installed"
     try:
         __import__(name)
@@ -777,8 +775,7 @@ def dsv4_env_flag(name: str) -> bool:
     if os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES:
         return True
     a100_victory_bundle = (
-        os.environ.get(DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, "").strip().lower()
-        in _TRUE_ENV_VALUES
+        os.environ.get(DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
     )
     if name in DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST and a100_victory_bundle:
         return True
@@ -827,8 +824,10 @@ def dsv4_moe_expert_backend() -> str:
     if raw_env is None and dsv4_env_flag(DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE):
         return DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
     raw = (
-        raw_env if raw_env is not None else DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4
-    ).strip().lower()
+        (raw_env if raw_env is not None else DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4)
+        .strip()
+        .lower()
+    )
     if raw in {"", "default", "current", "grouped"}:
         return DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4
     if raw not in DSV4_SM80_MOE_EXPERT_BACKENDS:
@@ -1021,7 +1020,9 @@ def quantize_fp8_activation_ref(x: torch.Tensor, *, block_size: int = 128) -> to
                 return y
         except Exception as exc:
             if _cuda_graph_capture_active(x.device):
-                raise RuntimeError("DSV4 CUDA graph capture failed in Triton FP8 activation quant.") from exc
+                raise RuntimeError(
+                    "DSV4 CUDA graph capture failed in Triton FP8 activation quant."
+                ) from exc
     dtype = x.dtype
     flat = x.contiguous().view(-1, x.shape[-1]).float()
     groups = flat.view(flat.shape[0], flat.shape[1] // block_size, block_size)
@@ -3927,6 +3928,7 @@ __all__ = [
     "DSV4_SM80_V0_BF16_WHITELIST",
     "DSV4_SM80_V1_MOE_TOGGLE",
     "DSV4_SM80_V1_MOE_WHITELIST",
+    "DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE",
     "DSV4DecodeMetadataDeforestOutput",
     "DSV4MoEExecutionPlan",
     "DSV4MoERoutePlan",

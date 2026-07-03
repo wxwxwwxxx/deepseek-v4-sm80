@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import replace
-
-import torch
-import torch.nn.functional as F
+from types import SimpleNamespace
 
 import minisgl.core as core
 import minisgl.distributed.info as dist_info
+import torch
+import torch.nn.functional as F
 from minisgl.attention import create_attention_backend
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
+from minisgl.kernel import deepseek_v4 as dsv4_kernel
+from minisgl.kernel import vllm_fp8_marlin
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
-from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.models.deepseek_v4 import (
     DSV4FusedRoutedExperts,
     DSV4MoE,
@@ -72,7 +73,6 @@ def _reset_globals(*, tp_rank: int = 0, tp_size: int = 1) -> None:
 def _clear_dsv4_sm80_env(monkeypatch) -> None:
     for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES:
         monkeypatch.delenv(name, raising=False)
-
 
 
 def _install_dsv4_context(cfg: ModelConfig, *, max_len: int) -> Context:
@@ -666,14 +666,14 @@ def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
 
     with torch.no_grad():
         shared.gate_up_proj.weight.copy_(
-            torch.randn_like(shared.gate_up_proj.weight.float()).clamp(-2, 2).to(
-                dsv4_kernel.fp8_dtype()
-            )
+            torch.randn_like(shared.gate_up_proj.weight.float())
+            .clamp(-2, 2)
+            .to(dsv4_kernel.fp8_dtype())
         )
         shared.down_proj.weight.copy_(
-            torch.randn_like(shared.down_proj.weight.float()).clamp(-2, 2).to(
-                dsv4_kernel.fp8_dtype()
-            )
+            torch.randn_like(shared.down_proj.weight.float())
+            .clamp(-2, 2)
+            .to(dsv4_kernel.fp8_dtype())
         )
         shared.gate_up_proj.weight_scale_inv.copy_(
             torch.ones_like(shared.gate_up_proj.weight_scale_inv.float()).to(
@@ -681,9 +681,7 @@ def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
             )
         )
         shared.down_proj.weight_scale_inv.copy_(
-            torch.ones_like(shared.down_proj.weight_scale_inv.float()).to(
-                dsv4_kernel.e8m0_dtype()
-            )
+            torch.ones_like(shared.down_proj.weight_scale_inv.float()).to(dsv4_kernel.e8m0_dtype())
         )
 
     hidden = torch.randn(3, cfg.hidden_size, dtype=torch.bfloat16)
@@ -698,7 +696,91 @@ def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
         "layer0.shared_experts.gate_up_proj",
         "layer0.shared_experts.down_proj",
     }
-    assert sum(int(report["bytes"]) for report in reports) == (
-        shared.gate_up_proj.weight.numel() + shared.down_proj.weight.numel()
-    ) * torch.tensor([], dtype=torch.bfloat16).element_size()
+    assert (
+        sum(int(report["bytes"]) for report in reports)
+        == (shared.gate_up_proj.weight.numel() + shared.down_proj.weight.numel())
+        * torch.tensor([], dtype=torch.bfloat16).element_size()
+    )
     assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+def test_shared_experts_marlin_down_skips_bf16_down_cache_and_releases_original(
+    monkeypatch,
+):
+    _reset_globals()
+    _clear_dsv4_sm80_env(monkeypatch)
+    cfg = _tiny_dsv4_config()
+    shared = DSV4SharedExperts(cfg, layer_id=0)
+    torch.manual_seed(774)
+
+    with torch.no_grad():
+        shared.gate_up_proj.weight.copy_(
+            torch.randn_like(shared.gate_up_proj.weight.float())
+            .clamp(-2, 2)
+            .to(dsv4_kernel.fp8_dtype())
+        )
+        shared.down_proj.weight.copy_(
+            torch.randn_like(shared.down_proj.weight.float())
+            .clamp(-2, 2)
+            .to(dsv4_kernel.fp8_dtype())
+        )
+        shared.gate_up_proj.weight_scale_inv.copy_(
+            torch.ones_like(shared.gate_up_proj.weight_scale_inv.float()).to(
+                dsv4_kernel.e8m0_dtype()
+            )
+        )
+        shared.down_proj.weight_scale_inv.copy_(
+            torch.ones_like(shared.down_proj.weight_scale_inv.float()).to(dsv4_kernel.e8m0_dtype())
+        )
+
+    def fake_prepare(weight, weight_scale_inv, *, owner_label):
+        dequant = dsv4_kernel.dequant_fp8_weight(
+            weight,
+            weight_scale_inv,
+            out_dtype=torch.bfloat16,
+        ).contiguous()
+        return SimpleNamespace(
+            weight=dequant,
+            weight_scale=torch.empty(0),
+            workspace=torch.empty(0),
+            size_n=weight.shape[0],
+            size_k=weight.shape[1],
+            prepared_weight_bytes=dequant.numel() * dequant.element_size(),
+            prepared_scale_bytes=0,
+            workspace_bytes=0,
+            persistent_bytes=dequant.numel() * dequant.element_size(),
+            original_weight_bytes=weight.numel() * weight.element_size(),
+            original_scale_bytes=weight_scale_inv.numel() * weight_scale_inv.element_size(),
+        )
+
+    monkeypatch.setattr(vllm_fp8_marlin, "prepare_linear", fake_prepare)
+    monkeypatch.setattr(
+        vllm_fp8_marlin,
+        "apply_linear",
+        lambda x, prepared: F.linear(x, prepared.weight),
+    )
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE, "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE, "1")
+
+    bf16_reports = shared.prepare_bf16_weight_cache()
+    marlin_report = shared.prepare_down_marlin_weight_cache()
+
+    assert {report["owner"] for report in bf16_reports} == {
+        "layer0.shared_experts.gate_up_proj",
+    }
+    assert marlin_report is not None
+    assert marlin_report["owner"] == "layer0.shared_experts.down_proj"
+    assert marlin_report["released_original"] is True
+    assert {entry["attribute"] for entry in marlin_report["released"]} == {
+        "weight",
+        "weight_scale_inv",
+    }
+    assert not hasattr(shared.down_proj, "weight")
+    assert not hasattr(shared.down_proj, "weight_scale_inv")
+    assert not hasattr(shared.down_proj, shared._down_bf16_weight_cache_name)
+
+    hidden = torch.randn(3, cfg.hidden_size, dtype=torch.bfloat16)
+    actual = shared.forward(hidden, reduce=False)
+
+    assert actual.shape == (3, cfg.hidden_size)
+    assert actual.dtype is torch.bfloat16

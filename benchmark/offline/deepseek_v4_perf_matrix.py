@@ -62,15 +62,10 @@ DSV4_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
 DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
 DSV4_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
-DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = (
-    "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
-)
-DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = (
-    "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
-)
-DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = (
-    "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
-)
+DSV4_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
+DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
+DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
+DSV4_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION"
 
 
 @dataclass(frozen=True)
@@ -871,6 +866,20 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
             "Marlin WNA16 MoE, graph replay, FP8 indexer cache, split-K sparse "
             "decode, four attention/indexer BF16 projection caches, and shared "
             "expert BF16 projection caches."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name="dsv4_sm80_a100_victory_fp8marlinproj",
+        env={
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_VLLM_FP8_MARLIN_PROJECTION_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 07.74 opt-in: dsv4_sm80_a100_victory with vLLM FP8 "
+            "Marlin W8A16 block linear for attention q_wqb, attention wo_b "
+            "local projection, and shared experts down."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
@@ -2407,7 +2416,9 @@ def run_matrix(args: argparse.Namespace) -> int:
     from minisgl.kernel import deepseek_v4 as dsv4_kernel
 
     init_variant = (
-        _graph_init_variant(variants) if runtime_options["allow_dsv4_cuda_graph"] else DEFAULT_VARIANTS[0]
+        _graph_init_variant(variants)
+        if runtime_options["allow_dsv4_cuda_graph"]
+        else DEFAULT_VARIANTS[0]
     )
     configure_variant(dsv4_kernel, init_variant)
     tracer = KernelCallTracer(dsv4_kernel)
@@ -2462,7 +2473,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                             smoke=args.smoke,
                         ),
                         "token_id_range": args.token_id_range,
-                        "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
+                        "model_prepare_report_rank0": getattr(
+                            llm.engine, "model_prepare_report", {}
+                        ),
                     },
                     "load_init": load_init,
                     "runtime_environment_rank0": runtime_environment,
