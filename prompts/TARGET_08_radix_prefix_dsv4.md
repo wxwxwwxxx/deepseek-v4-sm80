@@ -2,7 +2,9 @@
 
 ## Status
 
-Phase 1 complete as an explicit opt-in path.  Continue with TARGET 08.07.
+Phase 1, serving graph bucket policy, CUDA graph memory attribution, prefix
+stability, and memory ledger are complete.  Continue with TARGET 08.19 before
+starting component-retention work.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -38,8 +40,9 @@ Phase-1 result:
 - do not promote by default yet.
 
 The next work is no longer "implement the first prefix cache".  It is to make
-the feature serving-credible through graph-bucket policy, sustained stability,
-memory/capacity accounting, and post-prefix profiling.
+the feature serving-credible by resolving the phase-1 correctness boundary, then
+reducing SWA/compressed-state memory pressure with a conservative,
+SGLang-aligned component-retention design.
 
 ## Goal
 
@@ -66,26 +69,30 @@ Run in this order:
 | TARGET 08 phase 1 | this file + `performance_milestones/target08_radix_prefix_dsv4/` | complete opt-in | Implemented conservative page-aligned/full-page-owner DSV4 radix prefix cache. |
 | TARGET 08.05 | `prompts/TARGET_08.05_dsv4_sm80_serving_workload_cuda_graph_bucket_policy.md` | complete | Built serving workload suite and selected `[1,2,4,8,16]` as the smallest measured zero-eager bucket set. |
 | TARGET 08.06 | `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md` | complete | Confirmed the large capture delta is a real first-graph/private-pool cost, not bucket count, metadata, greedy sample, `max_seq_len`, `num_pages`, or missing pool reuse. |
-| TARGET 08.07 | `prompts/TARGET_08.07_dsv4_sm80_bf16_cache_graph_memory_attribution.md` | active next | Test whether promoted BF16 cache runtime paths indirectly inflate the CUDA graph private pool. |
-| TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | planned | Use the 08.05 bucket policy plus 08.06/08.07 memory conclusions to test sustained prefix-cache serving stability and promotion readiness. |
-| TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | planned | Compute full-page-owner memory/capacity cost and decide whether 08.20 is worth doing. |
-| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | optional | If 08.18 says go, study SGLang-style independent SWA/component retention. |
-| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix/graph policy, then decide whether to move to TARGET 09 or TARGET 10. |
+| TARGET 08.07 | `prompts/TARGET_08.07_dsv4_sm80_bf16_cache_graph_memory_attribution.md` | complete | Ruled out promoted BF16 caches as the material cause of the large CUDA graph private-pool delta. |
+| TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | complete controlled opt-in | Showed strong shared-prefix wins and stable graph replay, but kept prefix cache opt-in because generated-token correctness was not clean enough for default promotion. |
+| TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | complete | Quantified full-page-owner memory/capacity cost and recommended guarded component-retention work. |
+| TARGET 08.19 | `prompts/TARGET_08.19_dsv4_sm80_prefix_cache_logit_metadata_correctness.md` | active next | Use deterministic logits and metadata checks to resolve the phase-1 correctness boundary before changing retention ownership. |
+| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | planned | Implement a conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in, if 08.19 clears or isolates correctness risk. |
+| TARGET 08.21 | `prompts/TARGET_08.21_dsv4_sm80_sglang_aligned_component_retention_v2.md` | planned if V1 succeeds | Move from the conservative V1 slice to a more complete SGLang-aligned component-retention model without long-distance SWA replay. |
+| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after correctness and component-retention decisions, then decide whether to move to TARGET 09 or TARGET 10. |
 
 Rationale:
 
-- TARGET 08.05 comes before TARGET 08.10 because promotion testing should not
-  be polluted by missing graph buckets, such as the phase-1 bs7 eager decode.
-- TARGET 08.06 comes before TARGET 08.10 because the selected `[1,2,4,8,16]`
-  graph policy has a large observed capture memory delta that must be explained
-  before a promotion gate can make a credible capacity decision.
-- TARGET 08.07 comes before TARGET 08.10 because TARGET 08.06 ruled out many
-  small graph-policy causes but did not A/B the promoted BF16 cache runtime
-  paths.  This keeps the promotion gate from carrying a plausible untested
-  `~19 GiB/rank` memory hypothesis.
-- TARGET 08.18 comes before TARGET 08.20 because independent SWA/component
-  retention is more complex and should only be implemented after a memory ledger
-  proves it is valuable.
+- TARGET 08.05, 08.06, and 08.07 established the graph-bucket and graph-memory
+  context needed for credible serving tests.
+- TARGET 08.10 showed the prefix path is useful and operationally stable, but
+  synthetic generated-token mismatches mean promotion needs a more deterministic
+  correctness boundary.
+- TARGET 08.18 proved full-page-owner retention has material logical capacity
+  cost, so component retention is worth planning.
+- TARGET 08.19 comes before TARGET 08.20 because component-retention code should
+  not inherit an ambiguous logits/metadata boundary from phase 1.
+- TARGET 08.20 is a conservative first implementation slice: it should align
+  with SGLang's SWA tombstone/tail-retention direction without replaying
+  thousands of tokens just to rebuild SWA.
+- TARGET 08.21 only follows if 08.20 proves the split is correct and useful; it
+  can then move closer to SGLang's mature component model.
 - TARGET 09 remains reserved for low-precision research.  Do not rename
   SGLang-style SWA retention to TARGET 09.
 
