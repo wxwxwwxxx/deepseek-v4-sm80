@@ -13,7 +13,7 @@ from minisgl.message import (
     ExitMsg,
     UserMsg,
 )
-from minisgl.utils import dsv4_direct_copy_nvtx, init_logger, load_tokenizer
+from minisgl.utils import dsv4_direct_copy_nvtx, dsv4_owner_timing, init_logger, load_tokenizer
 
 from .cache import CacheManager
 from .config import SchedulerConfig
@@ -212,35 +212,113 @@ class Scheduler(SchedulerIOMixin):
         self.cache_manager.cache_req(req, finished=True)
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
-        self.engine.graph_runner.pad_batch(batch)
-        self.cache_manager.allocate_paged(batch.reqs)
+        if not dsv4_owner_timing.enabled():
+            self.engine.graph_runner.pad_batch(batch)
+            self.cache_manager.allocate_paged(batch.reqs)
+            with dsv4_direct_copy_nvtx(
+                f"batch_forward_bridge.prepare_positions.{batch.phase}.bs{batch.size}"
+            ):
+                batch.positions = _make_positions(batch, self.device)
+            with dsv4_direct_copy_nvtx(
+                f"batch_forward_bridge.prepare_input_tuple.{batch.phase}.bs{batch.size}",
+                positions=batch.positions,
+            ):
+                input_mapping = _make_input_tuple(batch, self.device)
+            with dsv4_direct_copy_nvtx(
+                f"batch_forward_bridge.prepare_write_tuple.{batch.phase}.bs{batch.size}"
+            ):
+                write_mapping = _make_write_tuple(batch, self.device)
+            with dsv4_direct_copy_nvtx(
+                f"batch_forward_bridge.out_loc_gather.{batch.phase}.bs{batch.size}",
+                page_table=self.engine.page_table,
+                token_mapping=input_mapping[0],
+                positions=input_mapping[1],
+            ):
+                batch.out_loc = self.engine.page_table[input_mapping]
+            with dsv4_direct_copy_nvtx(
+                f"batch_forward_bridge.prepare_metadata.{batch.phase}.bs{batch.size}"
+            ):
+                self.engine.attn_backend.prepare_metadata(batch)
+            return ForwardInput(
+                batch=batch,
+                sample_args=self.engine.sampler.prepare(batch),
+                input_tuple=input_mapping,
+                write_tuple=write_mapping,
+            )
+
+        timing_metadata = {
+            "phase": batch.phase,
+            "batch_size": int(batch.size),
+            "padded_size": int(getattr(batch, "padded_size", batch.size)),
+        }
+        with dsv4_owner_timing.maybe_host_range(
+            f"dsv4.prepare.{batch.phase}.pad_batch",
+            timing_metadata,
+        ):
+            self.engine.graph_runner.pad_batch(batch)
+        timing_metadata["padded_size"] = int(batch.padded_size)
+        with dsv4_owner_timing.maybe_host_range(
+            f"dsv4.prepare.{batch.phase}.allocate_paged",
+            timing_metadata,
+        ):
+            self.cache_manager.allocate_paged(batch.reqs)
         with dsv4_direct_copy_nvtx(
             f"batch_forward_bridge.prepare_positions.{batch.phase}.bs{batch.size}"
         ):
-            batch.positions = _make_positions(batch, self.device)
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.prepare.{batch.phase}.positions",
+                timing_metadata,
+            ):
+                batch.positions = _make_positions(batch, self.device)
         with dsv4_direct_copy_nvtx(
             f"batch_forward_bridge.prepare_input_tuple.{batch.phase}.bs{batch.size}",
             positions=batch.positions,
         ):
-            input_mapping = _make_input_tuple(batch, self.device)
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.prepare.{batch.phase}.input_tuple",
+                {**timing_metadata, "positions": dsv4_owner_timing.tensor_metadata(batch.positions)},
+            ):
+                input_mapping = _make_input_tuple(batch, self.device)
         with dsv4_direct_copy_nvtx(
             f"batch_forward_bridge.prepare_write_tuple.{batch.phase}.bs{batch.size}"
         ):
-            write_mapping = _make_write_tuple(batch, self.device)
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.prepare.{batch.phase}.write_tuple",
+                timing_metadata,
+            ):
+                write_mapping = _make_write_tuple(batch, self.device)
         with dsv4_direct_copy_nvtx(
             f"batch_forward_bridge.out_loc_gather.{batch.phase}.bs{batch.size}",
             page_table=self.engine.page_table,
             token_mapping=input_mapping[0],
             positions=input_mapping[1],
         ):
-            batch.out_loc = self.engine.page_table[input_mapping]
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.prepare.{batch.phase}.out_loc_gather",
+                {
+                    **timing_metadata,
+                    "page_table": dsv4_owner_timing.tensor_metadata(self.engine.page_table),
+                    "token_mapping": dsv4_owner_timing.tensor_metadata(input_mapping[0]),
+                    "positions": dsv4_owner_timing.tensor_metadata(input_mapping[1]),
+                },
+            ):
+                batch.out_loc = self.engine.page_table[input_mapping]
         with dsv4_direct_copy_nvtx(
             f"batch_forward_bridge.prepare_metadata.{batch.phase}.bs{batch.size}"
         ):
-            self.engine.attn_backend.prepare_metadata(batch)
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.prepare.{batch.phase}.attention_metadata",
+                {**timing_metadata, "out_loc": dsv4_owner_timing.tensor_metadata(batch.out_loc)},
+            ):
+                self.engine.attn_backend.prepare_metadata(batch)
+        with dsv4_owner_timing.maybe_host_range(
+            f"dsv4.prepare.{batch.phase}.sampler_prepare",
+            timing_metadata,
+        ):
+            sample_args = self.engine.sampler.prepare(batch)
         return ForwardInput(
             batch=batch,
-            sample_args=self.engine.sampler.prepare(batch),
+            sample_args=sample_args,
             input_tuple=input_mapping,
             write_tuple=write_mapping,
         )

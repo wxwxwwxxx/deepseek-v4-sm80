@@ -12,7 +12,7 @@ from minisgl.core import Batch, get_global_ctx
 from minisgl.distributed import DistributedCommunicator, get_tp_info
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.layers import BaseOP, OPList
-from minisgl.utils import div_ceil, div_even, dsv4_direct_copy_nvtx
+from minisgl.utils import div_ceil, div_even, dsv4_direct_copy_nvtx, dsv4_owner_timing
 
 from .base import BaseLLMModel
 
@@ -26,6 +26,16 @@ def _dsv4_capture_nvtx(name: str):
     if not torch.cuda.is_available():
         return nullcontext()
     return torch.cuda.nvtx.range(f"dsv4.{name}")
+
+
+def _owner_timing_prefix(owner_label: str) -> str:
+    if owner_label.endswith(".attn.q_wqb") or ".attn.q_wqb" in owner_label:
+        return "dsv4.owner.attn.q_wqb"
+    if owner_label.endswith(".attn.wo_b") or ".attn.wo_b" in owner_label:
+        return "dsv4.owner.attn.wo_b"
+    if owner_label.endswith(".shared_experts.down_proj") or ".shared_experts.down_proj" in owner_label:
+        return "dsv4.owner.shared_down"
+    return f"dsv4.owner.{owner_label}"
 
 
 def _cached_hc_bf16_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
@@ -243,7 +253,24 @@ def _forward_fp8_marlin_weight(
             "prepare_for_cuda_graph_capture() after weights are loaded and before "
             "decode CUDA graph capture/replay; rebuilding inside forward is disabled."
         )
-    return dense_fp8_marlin.apply_dense_fp8_marlin_linear(x, cached)
+    if not dsv4_owner_timing.enabled():
+        return dense_fp8_marlin.apply_dense_fp8_marlin_linear(
+            x,
+            cached,
+            owner_label=owner_label,
+        )
+    with dsv4_owner_timing.maybe_cuda_range(
+        f"{_owner_timing_prefix(owner_label)}.dense_fp8_marlin_local_total",
+        {
+            "owner_label": owner_label,
+            "input": dsv4_owner_timing.tensor_metadata(x),
+        },
+    ):
+        return dense_fp8_marlin.apply_dense_fp8_marlin_linear(
+            x,
+            cached,
+            owner_label=owner_label,
+        )
 
 
 def _cached_bf16_pretransposed_weight(
@@ -284,11 +311,44 @@ def _linear_cached_bf16_weight(
     cache_name: str,
     owner_label: str,
 ) -> torch.Tensor:
+    if not dsv4_owner_timing.enabled():
+        if not dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
+        ):
+            return F.linear(x, weight)
+        rows = x.numel() // x.shape[-1]
+        if rows > 16:
+            return F.linear(x, weight)
+        weight_t = _cached_bf16_pretransposed_weight(
+            owner,
+            f"{cache_name}_pretransposed",
+            weight,
+            allow_build=False,
+            owner_label=owner_label,
+        )
+        x_2d = x.reshape(rows, x.shape[-1])
+        y = torch.mm(x_2d, weight_t)
+        return y.reshape(*x.shape[:-1], weight_t.shape[-1])
+
+    prefix = _owner_timing_prefix(owner_label)
+    metadata = {
+        "owner_label": owner_label,
+        "input": dsv4_owner_timing.tensor_metadata(x),
+        "weight": dsv4_owner_timing.tensor_metadata(weight),
+    }
     if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE):
-        return F.linear(x, weight)
+        with dsv4_owner_timing.maybe_cuda_range(
+            f"{prefix}.bf16_cache_linear",
+            {**metadata, "pretransposed": False},
+        ):
+            return F.linear(x, weight)
     rows = x.numel() // x.shape[-1]
     if rows > 16:
-        return F.linear(x, weight)
+        with dsv4_owner_timing.maybe_cuda_range(
+            f"{prefix}.bf16_cache_linear",
+            {**metadata, "pretransposed": False, "rows": int(rows)},
+        ):
+            return F.linear(x, weight)
     weight_t = _cached_bf16_pretransposed_weight(
         owner,
         f"{cache_name}_pretransposed",
@@ -296,9 +356,27 @@ def _linear_cached_bf16_weight(
         allow_build=False,
         owner_label=owner_label,
     )
-    x_2d = x.reshape(rows, x.shape[-1])
-    y = torch.mm(x_2d, weight_t)
-    return y.reshape(*x.shape[:-1], weight_t.shape[-1])
+    with dsv4_owner_timing.maybe_cuda_range(
+        f"{prefix}.bf16_cache_input_reshape",
+        {**metadata, "rows": int(rows)},
+    ):
+        x_2d = x.reshape(rows, x.shape[-1])
+    with dsv4_owner_timing.maybe_cuda_range(
+        f"{prefix}.bf16_cache_linear",
+        {
+            **metadata,
+            "pretransposed": True,
+            "rows": int(rows),
+            "reshaped": dsv4_owner_timing.tensor_metadata(x_2d),
+            "weight_t": dsv4_owner_timing.tensor_metadata(weight_t),
+        },
+    ):
+        y = torch.mm(x_2d, weight_t)
+    with dsv4_owner_timing.maybe_cuda_range(
+        f"{prefix}.bf16_cache_output_reshape",
+        {**metadata, "output": dsv4_owner_timing.tensor_metadata(y)},
+    ):
+        return y.reshape(*x.shape[:-1], weight_t.shape[-1])
 
 
 def _prepare_bf16_pretransposed_report(
@@ -718,14 +796,40 @@ class DSV4Linear(BaseOP):
             allow_build=False,
             owner_label=owner_label,
         )
-        x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
-        y = _linear_cached_bf16_weight(
-            x_quant,
-            cached_weight,
-            owner=self,
-            cache_name=cache_name,
-            owner_label=owner_label,
-        )
+        if not dsv4_owner_timing.enabled():
+            x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+            y = _linear_cached_bf16_weight(
+                x_quant,
+                cached_weight,
+                owner=self,
+                cache_name=cache_name,
+                owner_label=owner_label,
+            )
+            if reduce and self.row_parallel and self._tp_size > 1:
+                y = self._comm.all_reduce(
+                    y,
+                    label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
+                )
+            return y
+        prefix = _owner_timing_prefix(owner_label)
+        metadata = {
+            "owner_label": owner_label,
+            "input": dsv4_owner_timing.tensor_metadata(x),
+            "weight": dsv4_owner_timing.tensor_metadata(cached_weight),
+        }
+        with dsv4_owner_timing.maybe_cuda_range(f"{prefix}.bf16_cache_local_total", metadata):
+            with dsv4_owner_timing.maybe_cuda_range(
+                f"{prefix}.bf16_cache_activation_quantize",
+                metadata,
+            ):
+                x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+            y = _linear_cached_bf16_weight(
+                x_quant,
+                cached_weight,
+                owner=self,
+                cache_name=cache_name,
+                owner_label=owner_label,
+            )
         if reduce and self.row_parallel and self._tp_size > 1:
             y = self._comm.all_reduce(
                 y,

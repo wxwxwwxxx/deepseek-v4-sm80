@@ -757,7 +757,7 @@ def test_shared_experts_marlin_down_skips_bf16_down_cache_and_releases_original(
     monkeypatch.setattr(
         dense_fp8_marlin,
         "apply_dense_fp8_marlin_linear",
-        lambda x, prepared: F.linear(x, prepared.weight),
+        lambda x, prepared, **_: F.linear(x, prepared.weight),
     )
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE, "1")
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE, "1")

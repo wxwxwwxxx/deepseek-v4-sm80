@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from minisgl.utils import dsv4_owner_timing
 
 EXTENSION_NAME = "minisgl_dense_fp8_marlin"
 SOURCE_ROOT = Path(__file__).resolve().parent / "csrc/vendor/vllm_dense_fp8_marlin"
@@ -234,34 +235,83 @@ def prepare_dense_fp8_marlin_weight(
             f"size_n % 64 == 0, got N={size_n} K={size_k}."
         )
 
-    ops = load_ops()
-    original_weight_bytes = tensor_bytes(weight)
-    original_scale_bytes = tensor_bytes(weight_scale_inv)
-    perm = torch.empty(0, dtype=torch.int, device=weight.device)
-
-    qweight = pack_fp8_to_int32(weight, size_k_first=False).T.contiguous()
-    marlin_qweight = ops.gptq_marlin_repack(
-        qweight,
-        perm,
-        size_k,
-        size_n,
-        8,
-        False,
+    timing_enabled = dsv4_owner_timing.enabled()
+    metadata = (
+        {
+            "owner_label": owner_label,
+            "weight": dsv4_owner_timing.tensor_metadata(weight),
+            "scale": dsv4_owner_timing.tensor_metadata(weight_scale_inv),
+            "size_n": size_n,
+            "size_k": size_k,
+        }
+        if timing_enabled
+        else {}
     )
+    with dsv4_owner_timing.maybe_host_range(
+        "dsv4.prepare.dense_fp8_marlin.total",
+        metadata,
+        sync_cuda=True,
+    ):
+        ops = load_ops()
+        original_weight_bytes = tensor_bytes(weight)
+        original_scale_bytes = tensor_bytes(weight_scale_inv)
+        perm = torch.empty(0, dtype=torch.int, device=weight.device)
 
-    scales = weight_scale_inv.to(params_dtype)
-    scales = scales.T.contiguous()
-    scales = scales.repeat_interleave(block_n, dim=1)
-    scales = scales[:, :size_n]
-    marlin_scales = marlin_permute_scales(
-        scales,
-        size_k=size_k,
-        size_n=size_n,
-        group_size=block_k,
-    )
-    marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.prepare.dense_fp8_marlin.pack_fp8_to_int32",
+            metadata,
+        ):
+            qweight = pack_fp8_to_int32(weight, size_k_first=False).T.contiguous()
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.prepare.dense_fp8_marlin.gptq_marlin_repack",
+            {**metadata, "qweight": dsv4_owner_timing.tensor_metadata(qweight)},
+        ):
+            marlin_qweight = ops.gptq_marlin_repack(
+                qweight,
+                perm,
+                size_k,
+                size_n,
+                8,
+                False,
+            )
 
-    workspace = marlin_make_workspace(weight.device)
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.prepare.dense_fp8_marlin.scale_cast",
+            metadata,
+        ):
+            scales = weight_scale_inv.to(params_dtype)
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.prepare.dense_fp8_marlin.scale_transpose_contiguous",
+            metadata,
+        ):
+            scales = scales.T.contiguous()
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.prepare.dense_fp8_marlin.scale_repeat_interleave",
+            metadata,
+        ):
+            scales = scales.repeat_interleave(block_n, dim=1)
+        scales = scales[:, :size_n]
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.prepare.dense_fp8_marlin.scale_permute",
+            {**metadata, "expanded_scale": dsv4_owner_timing.tensor_metadata(scales)},
+        ):
+            marlin_scales = marlin_permute_scales(
+                scales,
+                size_k=size_k,
+                size_n=size_n,
+                group_size=block_k,
+            )
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.prepare.dense_fp8_marlin.scale_exponent_bias_fusion",
+            {**metadata, "marlin_scale": dsv4_owner_timing.tensor_metadata(marlin_scales)},
+        ):
+            marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
+
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.prepare.dense_fp8_marlin.workspace_alloc_zero",
+            metadata,
+        ):
+            workspace = marlin_make_workspace(weight.device)
     return DenseFP8MarlinLinearWeight(
         weight=marlin_qweight,
         weight_scale=marlin_scales,
@@ -282,6 +332,7 @@ def apply_dense_fp8_marlin_linear(
     prepared: DenseFP8MarlinLinearWeight,
     *,
     bias: torch.Tensor | None = None,
+    owner_label: str | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
 ) -> torch.Tensor:
     if x.dtype not in (torch.float16, torch.bfloat16):
@@ -291,9 +342,89 @@ def apply_dense_fp8_marlin_linear(
     if bias is not None:
         bias = marlin_permute_bias(bias.contiguous())
 
-    reshaped_x = x.reshape(-1, x.shape[-1])
+    timing_enabled = dsv4_owner_timing.enabled()
+    if not timing_enabled:
+        reshaped_x = x.reshape(-1, x.shape[-1])
+        if reshaped_x.stride(-1) != 1 or reshaped_x.stride(0) % 8 != 0:
+            reshaped_x = reshaped_x.contiguous()
+        out_shape = x.shape[:-1] + (prepared.size_n,)
+        use_atomic_add = should_use_atomic_add_reduce(
+            m=reshaped_x.size(0),
+            n=prepared.size_n,
+            k=prepared.size_k,
+            device=x.device,
+            dtype=x.dtype,
+        )
+        ops = load_ops()
+        output = ops.marlin_gemm(
+            reshaped_x,
+            None,
+            prepared.weight,
+            bias,
+            prepared.weight_scale,
+            None,
+            None,
+            None,
+            None,
+            None,
+            prepared.workspace,
+            FLOAT8_E4M3FN_ID,
+            reshaped_x.size(0),
+            prepared.size_n,
+            prepared.size_k,
+            True,
+            use_atomic_add,
+            use_fp32_reduce,
+            False,
+        )
+        return output.reshape(out_shape)
+
+    timing_label_prefix = _owner_timing_prefix(owner_label) if timing_enabled else ""
+    metadata = (
+        {
+            "owner_label": owner_label,
+            "input": dsv4_owner_timing.tensor_metadata(x),
+            "prepared_shape": [int(prepared.size_n), int(prepared.size_k)],
+        }
+        if timing_enabled
+        else {}
+    )
+    with dsv4_owner_timing.maybe_cuda_range(
+        f"{timing_label_prefix}.dense_fp8_marlin_input_reshape",
+        metadata,
+    ):
+        reshaped_x = x.reshape(-1, x.shape[-1])
+    if timing_enabled:
+        reshape_is_view = reshaped_x.data_ptr() == x.data_ptr()
+        dsv4_owner_timing.record_counter(
+            (
+                f"{timing_label_prefix}.dense_fp8_marlin_input_reshape_view"
+                if reshape_is_view
+                else f"{timing_label_prefix}.dense_fp8_marlin_input_reshape_copy"
+            ),
+            metadata,
+        )
     if reshaped_x.stride(-1) != 1 or reshaped_x.stride(0) % 8 != 0:
-        reshaped_x = reshaped_x.contiguous()
+        contiguous_metadata = (
+            {**metadata, "reshaped": dsv4_owner_timing.tensor_metadata(reshaped_x)}
+            if timing_enabled
+            else {}
+        )
+        if timing_enabled:
+            dsv4_owner_timing.record_counter(
+                f"{timing_label_prefix}.dense_fp8_marlin_contiguous_taken",
+                contiguous_metadata,
+            )
+        with dsv4_owner_timing.maybe_cuda_range(
+            f"{timing_label_prefix}.dense_fp8_marlin_contiguous",
+            contiguous_metadata,
+        ):
+            reshaped_x = reshaped_x.contiguous()
+    elif timing_enabled:
+        dsv4_owner_timing.record_counter(
+            f"{timing_label_prefix}.dense_fp8_marlin_contiguous_skipped",
+            {**metadata, "reshaped": dsv4_owner_timing.tensor_metadata(reshaped_x)},
+        )
     out_shape = x.shape[:-1] + (prepared.size_n,)
     use_atomic_add = should_use_atomic_add_reduce(
         m=reshaped_x.size(0),
@@ -304,28 +435,66 @@ def apply_dense_fp8_marlin_linear(
     )
 
     ops = load_ops()
-    output = ops.marlin_gemm(
-        reshaped_x,
-        None,
-        prepared.weight,
-        bias,
-        prepared.weight_scale,
-        None,
-        None,
-        None,
-        None,
-        None,
-        prepared.workspace,
-        FLOAT8_E4M3FN_ID,
-        reshaped_x.size(0),
-        prepared.size_n,
-        prepared.size_k,
-        True,
-        use_atomic_add,
-        use_fp32_reduce,
-        False,
+    with dsv4_owner_timing.maybe_cuda_range(
+        f"{timing_label_prefix}.dense_fp8_marlin_apply",
+        {
+            **metadata,
+            "reshaped": dsv4_owner_timing.tensor_metadata(reshaped_x) if timing_enabled else {},
+            "use_atomic_add": bool(use_atomic_add),
+            "use_fp32_reduce": bool(use_fp32_reduce),
+        },
+    ):
+        output = ops.marlin_gemm(
+            reshaped_x,
+            None,
+            prepared.weight,
+            bias,
+            prepared.weight_scale,
+            None,
+            None,
+            None,
+            None,
+            None,
+            prepared.workspace,
+            FLOAT8_E4M3FN_ID,
+            reshaped_x.size(0),
+            prepared.size_n,
+            prepared.size_k,
+            True,
+            use_atomic_add,
+            use_fp32_reduce,
+            False,
+        )
+    if not timing_enabled:
+        return output.reshape(out_shape)
+    output_metadata = {**metadata, "output": dsv4_owner_timing.tensor_metadata(output)}
+    with dsv4_owner_timing.maybe_cuda_range(
+        f"{timing_label_prefix}.dense_fp8_marlin_output_reshape",
+        output_metadata,
+    ):
+        reshaped_output = output.reshape(out_shape)
+    output_reshape_is_view = reshaped_output.data_ptr() == output.data_ptr()
+    dsv4_owner_timing.record_counter(
+        (
+            f"{timing_label_prefix}.dense_fp8_marlin_output_reshape_view"
+            if output_reshape_is_view
+            else f"{timing_label_prefix}.dense_fp8_marlin_output_reshape_copy"
+        ),
+        output_metadata,
     )
-    return output.reshape(out_shape)
+    return reshaped_output
+
+
+def _owner_timing_prefix(owner_label: str | None) -> str:
+    if owner_label is None:
+        return "dsv4.owner.unknown"
+    if owner_label.endswith(".attn.q_wqb") or ".attn.q_wqb" in owner_label:
+        return "dsv4.owner.attn.q_wqb"
+    if owner_label.endswith(".attn.wo_b") or ".attn.wo_b" in owner_label:
+        return "dsv4.owner.attn.wo_b"
+    if owner_label.endswith(".shared_experts.down_proj") or ".shared_experts.down_proj" in owner_label:
+        return "dsv4.owner.shared_down"
+    return f"dsv4.owner.{owner_label}"
 
 
 def prepare_dense_fp8_marlin_report(

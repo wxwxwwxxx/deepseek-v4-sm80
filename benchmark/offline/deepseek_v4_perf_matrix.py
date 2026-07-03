@@ -1964,6 +1964,92 @@ def _aggregate_communication_counters(
     }
 
 
+def _aggregate_owner_timing(rank_payloads: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    def empty_bucket() -> dict[str, Any]:
+        return {
+            "count": 0,
+            "timed_count": 0,
+            "captured_count": 0,
+            "sum_rank_total_ms": 0.0,
+            "max_rank_total_ms": 0.0,
+            "sum_rank_captured_total_ms": 0.0,
+            "max_rank_captured_total_ms": 0.0,
+            "rank_totals_ms": {},
+            "rank_captured_totals_ms": {},
+            "metadata_examples": [],
+        }
+
+    def accumulate_stats(
+        target: dict[str, dict[str, Any]],
+        *,
+        rank: int,
+        label: str,
+        stats: dict[str, Any],
+    ) -> None:
+        bucket = target.setdefault(label, empty_bucket())
+        total_ms = float(stats.get("total_ms") or 0.0)
+        captured_total_ms = float(stats.get("captured_total_ms") or 0.0)
+        bucket["count"] = int(bucket["count"]) + int(stats.get("count") or 0)
+        bucket["timed_count"] = int(bucket["timed_count"]) + int(stats.get("timed_count") or 0)
+        bucket["captured_count"] = int(bucket["captured_count"]) + int(
+            stats.get("captured_count") or 0
+        )
+        bucket["sum_rank_total_ms"] = float(bucket["sum_rank_total_ms"]) + total_ms
+        bucket["max_rank_total_ms"] = max(float(bucket["max_rank_total_ms"]), total_ms)
+        bucket["sum_rank_captured_total_ms"] = (
+            float(bucket["sum_rank_captured_total_ms"]) + captured_total_ms
+        )
+        bucket["max_rank_captured_total_ms"] = max(
+            float(bucket["max_rank_captured_total_ms"]),
+            captured_total_ms,
+        )
+        bucket["rank_totals_ms"][str(rank)] = total_ms
+        bucket["rank_captured_totals_ms"][str(rank)] = captured_total_ms
+        examples = bucket["metadata_examples"]
+        for example in stats.get("metadata_examples", []):
+            if len(examples) >= 4:
+                break
+            if example not in examples:
+                examples.append(example)
+
+    def accumulate_section(section_name: str) -> dict[str, Any]:
+        labels: dict[str, dict[str, Any]] = {}
+        label_shapes: dict[str, dict[str, Any]] = {}
+        for payload in rank_payloads:
+            rank = int(payload.get("rank", -1))
+            timing = payload.get("owner_timing", {})
+            for source, target in (
+                (timing.get(f"{section_name}_by_label", {}), labels),
+                (timing.get(f"{section_name}_by_label_shape", {}), label_shapes),
+            ):
+                for label, stats in source.items():
+                    accumulate_stats(target, rank=rank, label=label, stats=stats)
+        return {
+            "by_label": dict(sorted(labels.items())),
+            "by_label_shape": dict(sorted(label_shapes.items())),
+        }
+
+    def accumulate_host() -> dict[str, Any]:
+        labels: dict[str, dict[str, Any]] = {}
+        for payload in rank_payloads:
+            rank = int(payload.get("rank", -1))
+            for label, stats in payload.get("owner_timing", {}).get("host_by_label", {}).items():
+                accumulate_stats(labels, rank=rank, label=label, stats=stats)
+        return {"by_label": dict(sorted(labels.items()))}
+
+    rank0 = next(
+        (payload.get("owner_timing", {}) for payload in rank_payloads if payload.get("rank") == 0),
+        {},
+    )
+    enabled = any(payload.get("owner_timing", {}).get("enabled") for payload in rank_payloads)
+    return {
+        "enabled": bool(enabled),
+        "cuda": accumulate_section("cuda"),
+        "host": accumulate_host(),
+        "rank0": rank0,
+    }
+
+
 def _label_bottlenecks(
     *,
     metrics: dict[str, Any],
@@ -2103,6 +2189,7 @@ def _aggregate_case_report(
         "rank0": rank0.get("kernel_counters", {}),
     }
     communication_counters = _aggregate_communication_counters(rank_payloads)
+    owner_timing = _aggregate_owner_timing(rank_payloads)
     peak_allocated = max(
         repeat["memory"]["max_memory_allocated_bytes"]
         for payload in rank_payloads
@@ -2154,6 +2241,7 @@ def _aggregate_case_report(
         "schedule_summary": _schedule_summary(repeats0),
         "kernel_counters": kernel_counters,
         "communication_counters": communication_counters,
+        "owner_timing": owner_timing,
         "bottlenecks": _label_bottlenecks(metrics=metrics, counters=kernel_counters),
         "requests": all_requests,
         "repeats": repeats0,
@@ -2239,6 +2327,7 @@ def run_case(
     variant_env = configure_variant(dsv4_kernel, variant)
     llm.sync_all_ranks()
     from minisgl.distributed import reset_communication_stats, snapshot_communication_stats
+    from minisgl.utils import dsv4_owner_timing
 
     tracer.reset()
     reset_communication_stats()
@@ -2281,6 +2370,13 @@ def run_case(
         dtype=dtype,
         tp_size=tp_size,
     )
+    replayed_padded_sizes = [
+        int(size)
+        for size, count in getattr(llm.engine.graph_runner, "capture_status", {})
+        .get("replay_count_by_padded_size", {})
+        .items()
+        if int(count) > 0
+    ]
     rank_payload = {
         "rank": rank,
         "is_primary_rank": rank == 0,
@@ -2288,6 +2384,9 @@ def run_case(
         "repeats": repeats,
         "kernel_counters": tracer.snapshot(),
         "communication_counters": snapshot_communication_stats(),
+        "owner_timing": dsv4_owner_timing.snapshot(
+            captured_shape_filter=replayed_padded_sizes,
+        ),
         "memory_after_case": _rank_memory_report(torch, llm),
         "kv_cache_memory_bytes": kv_cache_memory_bytes,
         "runtime_environment": runtime_environment,
@@ -2370,6 +2469,7 @@ def _init_llm(
 ):
     import torch
     from minisgl.distributed import DistributedInfo
+    from minisgl.utils import dsv4_owner_timing
 
     BenchmarkLLM = make_benchmark_llm_class()
     dtype = _dtype_from_name(args.dtype)
@@ -2407,6 +2507,7 @@ def _init_llm(
             "rank": rank,
             "memory": _rank_memory_report(torch, llm),
             "model_prepare_report": getattr(llm.engine, "model_prepare_report", {}),
+            "owner_timing": dsv4_owner_timing.snapshot(resolve_cuda=False),
         },
     )
 

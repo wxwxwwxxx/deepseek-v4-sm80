@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, List
 
 import torch
 import torch.distributed as dist
+from minisgl.utils import dsv4_owner_timing
 
 if TYPE_CHECKING:
     from minisgl.distributed import DistributedInfo
@@ -66,13 +67,32 @@ class DistributedCommunicator:
 
     def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
         self._record("all_reduce", x, x.shape, label)
-        return self.plugins[-1].all_reduce(x)
+        if not dsv4_owner_timing.enabled():
+            return self.plugins[-1].all_reduce(x)
+        with dsv4_owner_timing.maybe_cuda_range(
+            _owner_all_reduce_timing_label(label),
+            {
+                "comm_label": label or "unlabeled",
+                "tensor": dsv4_owner_timing.tensor_metadata(x),
+            },
+        ):
+            return self.plugins[-1].all_reduce(x)
 
     def all_gather(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
         output_shape = list(x.shape)
         output_shape[0] *= _world_size()
         self._record("all_gather", x, output_shape, label)
-        return self.plugins[-1].all_gather(x)
+        if not dsv4_owner_timing.enabled():
+            return self.plugins[-1].all_gather(x)
+        with dsv4_owner_timing.maybe_cuda_range(
+            _owner_all_gather_timing_label(label),
+            {
+                "comm_label": label or "unlabeled",
+                "tensor": dsv4_owner_timing.tensor_metadata(x),
+                "output_shape": [int(dim) for dim in output_shape],
+            },
+        ):
+            return self.plugins[-1].all_gather(x)
 
     @classmethod
     def reset_stats(cls) -> None:
@@ -142,6 +162,26 @@ def _world_size() -> int:
     if torch.distributed.is_initialized():
         return torch.distributed.get_world_size()
     return 1
+
+
+def _owner_all_reduce_timing_label(label: str | None) -> str:
+    if label == "dsv4.attn.wo_b.row_parallel_projection_all_reduce":
+        return "dsv4.owner.attn.wo_b.row_parallel_all_reduce"
+    if label == "dsv4.shared_expert_all_reduce":
+        return "dsv4.owner.shared_down.shared_expert_all_reduce"
+    if label == "dsv4.v1_moe_reduce_once_all_reduce":
+        return "dsv4.owner.moe.reduce_once_all_reduce"
+    if label == "dsv4.routed_expert_all_reduce":
+        return "dsv4.owner.moe.routed_expert_all_reduce"
+    if label:
+        return f"dsv4.owner.comm.{label}"
+    return "dsv4.owner.comm.unlabeled_all_reduce"
+
+
+def _owner_all_gather_timing_label(label: str | None) -> str:
+    if label:
+        return f"dsv4.owner.comm.{label}"
+    return "dsv4.owner.comm.unlabeled_all_gather"
 
 
 def _accumulate_comm_summary(
