@@ -47,8 +47,9 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08.07 | `prompts/TARGET_08.07_dsv4_sm80_bf16_cache_graph_memory_attribution.md` | completed | Ruled out promoted BF16 caches as the material cause of the large CUDA graph private-pool delta. |
 | TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | completed controlled opt-in | Validated prefix cache under serving-like sustained workloads, but kept it opt-in because generated-token correctness was not yet a clean promotion oracle. |
 | TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | completed | Computed full-page-owner prefix-cache memory/capacity cost and recommended guarded component-retention work. |
-| TARGET 08.19 | `prompts/TARGET_08.19_dsv4_sm80_prefix_cache_logit_metadata_correctness.md` | active next | Resolve the phase-1 prefix-cache logits/metadata correctness boundary before changing retention ownership. |
-| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | planned | Conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in. |
+| TARGET 08.19 | `prompts/TARGET_08.19_dsv4_sm80_prefix_cache_logit_metadata_correctness.md` | completed blocked | Prefix metadata was clean, but logits exposed a DSV4 exact-path slot/page-location blocker. |
+| TARGET 08.195 | `prompts/TARGET_08.195_dsv4_sm80_exact_path_slot_page_invariance.md` | active next | Isolate and fix or guard the DSV4 exact-path slot/page invariance issue before component retention. |
+| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | planned after 08.195 | Conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in. |
 | TARGET 08.21 | `prompts/TARGET_08.21_dsv4_sm80_sglang_aligned_component_retention_v2.md` | planned if V1 succeeds | More complete SGLang-aligned component-retention model without long-distance SWA replay. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix correctness/component-retention decisions, then choose TARGET 09 low precision or TARGET 10 attention/communication. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned after TARGET 08 | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
@@ -72,10 +73,10 @@ Post-07.78 stable retest:
 - old serving baseline crossed: `114.07 output tok/s`.
 
 Decision from TARGET 07.79, TARGET 08 phase 1, TARGET 08.05, TARGET 08.06,
-TARGET 08.07, TARGET 08.10, and TARGET 08.18:
+TARGET 08.07, TARGET 08.10, TARGET 08.18, and TARGET 08.19:
 
 ```text
-continue with TARGET 08.19 prefix-cache logits/metadata correctness
+continue with TARGET 08.195 DSV4 exact-path slot/page invariance
 ```
 
 Reason: DSV4 radix prefix cache works as an explicit opt-in, and TARGET 08.05
@@ -84,8 +85,10 @@ selected `[1,2,4,8,16]` as the recommended serving graph bucket set.  TARGET
 a stable first-graph/private-pool cost, not a BF16-cache-specific regression.
 TARGET 08.10 showed strong shared-prefix wins and stable graph replay, but did
 not provide a clean generated-token promotion oracle.  TARGET 08.18 showed
-full-page-owner retention has material logical capacity cost, so component
-retention is worthwhile after the correctness boundary is resolved.
+full-page-owner retention has material logical capacity cost.  TARGET 08.19
+showed prefix-cache metadata is clean, but deterministic logits exposed a
+prefix-disabled DSV4 exact-path slot/page-location blocker, so component
+retention should wait until TARGET 08.195 fixes it or creates a stable oracle.
 
 ## Archive Policy
 
@@ -99,7 +102,7 @@ For new child threads, start from:
 
 1. `prompts/target.md`
 2. the active target prompt, currently
-   `prompts/TARGET_08.19_dsv4_sm80_prefix_cache_logit_metadata_correctness.md`
+   `prompts/TARGET_08.195_dsv4_sm80_exact_path_slot_page_invariance.md`
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache phase-1 context
 

@@ -2,11 +2,14 @@
 
 ## Status
 
-Planned after TARGET 08.19.
+Planned after TARGET 08.195.
 
 TARGET 08.18 recommends GO for component retention with guardrails.  This target
-is the first conservative implementation slice.  It should remain behind a new
-opt-in and must not replace phase-1 full-page-owner prefix cache by default.
+is the first conservative implementation slice, but TARGET 08.19 found a DSV4
+exact-path slot/page-location blocker.  Start this target only after TARGET
+08.195 fixes that blocker or provides a stable slot-pinned/page-normalized
+oracle.  This target should remain behind a new opt-in and must not replace
+phase-1 full-page-owner prefix cache by default.
 
 ## Motivation
 

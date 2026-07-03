@@ -3,8 +3,8 @@
 ## Status
 
 Phase 1, serving graph bucket policy, CUDA graph memory attribution, prefix
-stability, and memory ledger are complete.  Continue with TARGET 08.19 before
-starting component-retention work.
+stability, memory ledger, and TARGET 08.19 correctness probing are complete.
+Continue with TARGET 08.195 before starting component-retention work.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -40,9 +40,9 @@ Phase-1 result:
 - do not promote by default yet.
 
 The next work is no longer "implement the first prefix cache".  It is to make
-the feature serving-credible by resolving the phase-1 correctness boundary, then
-reducing SWA/compressed-state memory pressure with a conservative,
-SGLang-aligned component-retention design.
+the feature serving-credible by resolving the DSV4 exact-path slot/page
+invariance blocker, then reducing SWA/compressed-state memory pressure with a
+conservative, SGLang-aligned component-retention design.
 
 ## Goal
 
@@ -72,8 +72,9 @@ Run in this order:
 | TARGET 08.07 | `prompts/TARGET_08.07_dsv4_sm80_bf16_cache_graph_memory_attribution.md` | complete | Ruled out promoted BF16 caches as the material cause of the large CUDA graph private-pool delta. |
 | TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | complete controlled opt-in | Showed strong shared-prefix wins and stable graph replay, but kept prefix cache opt-in because generated-token correctness was not clean enough for default promotion. |
 | TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | complete | Quantified full-page-owner memory/capacity cost and recommended guarded component-retention work. |
-| TARGET 08.19 | `prompts/TARGET_08.19_dsv4_sm80_prefix_cache_logit_metadata_correctness.md` | active next | Use deterministic logits and metadata checks to resolve the phase-1 correctness boundary before changing retention ownership. |
-| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | planned | Implement a conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in, if 08.19 clears or isolates correctness risk. |
+| TARGET 08.19 | `prompts/TARGET_08.19_dsv4_sm80_prefix_cache_logit_metadata_correctness.md` | complete blocked | Metadata boundary was clean, but logits exposed a DSV4 exact-path slot/page-location blocker. |
+| TARGET 08.195 | `prompts/TARGET_08.195_dsv4_sm80_exact_path_slot_page_invariance.md` | active next | Isolate and fix or guard the DSV4 exact-path slot/page invariance issue before component retention. |
+| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | planned after 08.195 | Implement a conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in, if 08.195 clears or guards correctness risk. |
 | TARGET 08.21 | `prompts/TARGET_08.21_dsv4_sm80_sglang_aligned_component_retention_v2.md` | planned if V1 succeeds | Move from the conservative V1 slice to a more complete SGLang-aligned component-retention model without long-distance SWA replay. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after correctness and component-retention decisions, then decide whether to move to TARGET 09 or TARGET 10. |
 
@@ -86,8 +87,11 @@ Rationale:
   correctness boundary.
 - TARGET 08.18 proved full-page-owner retention has material logical capacity
   cost, so component retention is worth planning.
-- TARGET 08.19 comes before TARGET 08.20 because component-retention code should
-  not inherit an ambiguous logits/metadata boundary from phase 1.
+- TARGET 08.19 showed phase-1 prefix metadata is clean, but also showed the
+  prefix-disabled exact path is not a clean oracle because identical prompts can
+  differ across slots/page locations.
+- TARGET 08.195 comes before TARGET 08.20 because component-retention code
+  should not inherit a DSV4 exact-path slot/page invariance blocker.
 - TARGET 08.20 is a conservative first implementation slice: it should align
   with SGLang's SWA tombstone/tail-retention direction without replaying
   thousands of tokens just to rebuild SWA.

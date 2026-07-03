@@ -13,6 +13,7 @@ from minisgl.models import create_model, load_weight
 from minisgl.moe import create_moe_backend
 from minisgl.utils import (
     dsv4_direct_copy_nvtx,
+    dsv4_prefix_debug,
     init_logger,
     is_sm90_supported,
     is_sm100_supported,
@@ -207,17 +208,33 @@ class Engine:
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
         next_tokens_gpu: torch.Tensor | None = None
+        logits: torch.Tensor | None = None
+        forward_source = "unknown"
         with self.ctx.forward_batch(batch):
             if (
                 args.temperatures is None
                 and self.graph_runner.can_replay_greedy_sample(batch)
             ):
+                forward_source = "cuda_graph_greedy_sample"
                 next_tokens_gpu = self.graph_runner.replay_greedy_sample(batch)
             elif self.graph_runner.can_use_cuda_graph(batch):
+                forward_source = "cuda_graph_replay"
                 logits = self.graph_runner.replay(batch)
             else:
+                forward_source = "eager"
                 self.graph_runner.record_eager_decode(batch)
                 logits = self.model.forward()
+
+        debug_recorder = dsv4_prefix_debug.get_dsv4_prefix_debug_recorder()
+        debug_snapshot = (
+            debug_recorder.capture_pre_sample(
+                batch=batch,
+                logits=logits[: batch.size] if logits is not None else None,
+                forward_source=forward_source,
+            )
+            if debug_recorder is not None
+            else None
+        )
 
         for req in batch.reqs:
             req.complete_one()
@@ -227,7 +244,14 @@ class Engine:
                 f"sampler_logits_staging.sample_to_int32.bs{batch.size}",
                 logits=logits[: batch.size],
             ):
+                assert logits is not None
                 next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
+        if debug_recorder is not None:
+            debug_recorder.finish(
+                debug_snapshot,
+                next_tokens=next_tokens_gpu,
+                graph_runner=getattr(self.graph_runner, "capture_status", {}),
+            )
         with dsv4_direct_copy_nvtx(
             f"sampler_logits_staging.next_tokens_to_cpu.bs{batch.size}",
             next_tokens=next_tokens_gpu,
