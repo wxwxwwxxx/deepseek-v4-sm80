@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from minisgl.kernel import test_tensor
+from minisgl.kernel import test_tensor as run_test_tensor
 from minisgl.utils import call_if_main
 import torch
 
@@ -9,4 +9,4 @@ import torch
 def main():
     x = torch.empty((12, 2048), dtype=torch.int32, device="cpu")[:, :1024]
     y = torch.empty((12, 1024), dtype=torch.int64, device="cuda:1")
-    test_tensor(x, y)
+    run_test_tensor(x, y)

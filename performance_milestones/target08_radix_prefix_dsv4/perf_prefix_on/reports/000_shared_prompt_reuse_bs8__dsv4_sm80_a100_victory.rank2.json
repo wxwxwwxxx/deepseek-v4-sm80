@@ -1,0 +1,2343 @@
+{
+  "communication_counters": {
+    "by_label": {
+      "dsv4.attn.wo_b.row_parallel_projection_all_reduce": {
+        "bytes": 578052096,
+        "count": 860
+      },
+      "dsv4.embedding_all_reduce": {
+        "bytes": 13443072,
+        "count": 20
+      },
+      "dsv4.lm_head_all_gather": {
+        "bytes": 58434560,
+        "count": 20
+      },
+      "dsv4.v1_moe_reduce_once_all_reduce": {
+        "bytes": 1156104192,
+        "count": 860
+      }
+    },
+    "by_op": {
+      "all_gather": {
+        "bytes": 58434560,
+        "count": 20
+      },
+      "all_reduce": {
+        "bytes": 1747599360,
+        "count": 1740
+      }
+    },
+    "entries": [
+      {
+        "bytes": 36986880,
+        "count": 645,
+        "dtype": "bfloat16",
+        "input_bytes": 57344,
+        "label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 57344,
+        "output_shape": [
+          7,
+          4096
+        ],
+        "shape": [
+          7,
+          4096
+        ]
+      },
+      {
+        "bytes": 22544384,
+        "count": 43,
+        "dtype": "bfloat16",
+        "input_bytes": 524288,
+        "label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 524288,
+        "output_shape": [
+          64,
+          4096
+        ],
+        "shape": [
+          64,
+          4096
+        ]
+      },
+      {
+        "bytes": 135266304,
+        "count": 129,
+        "dtype": "bfloat16",
+        "input_bytes": 1048576,
+        "label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 1048576,
+        "output_shape": [
+          128,
+          4096
+        ],
+        "shape": [
+          128,
+          4096
+        ]
+      },
+      {
+        "bytes": 383254528,
+        "count": 43,
+        "dtype": "bfloat16",
+        "input_bytes": 8912896,
+        "label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 8912896,
+        "output_shape": [
+          1088,
+          4096
+        ],
+        "shape": [
+          1088,
+          4096
+        ]
+      },
+      {
+        "bytes": 860160,
+        "count": 15,
+        "dtype": "bfloat16",
+        "input_bytes": 57344,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 57344,
+        "output_shape": [
+          7,
+          4096
+        ],
+        "shape": [
+          7,
+          4096
+        ]
+      },
+      {
+        "bytes": 524288,
+        "count": 1,
+        "dtype": "bfloat16",
+        "input_bytes": 524288,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 524288,
+        "output_shape": [
+          64,
+          4096
+        ],
+        "shape": [
+          64,
+          4096
+        ]
+      },
+      {
+        "bytes": 3145728,
+        "count": 3,
+        "dtype": "bfloat16",
+        "input_bytes": 1048576,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 1048576,
+        "output_shape": [
+          128,
+          4096
+        ],
+        "shape": [
+          128,
+          4096
+        ]
+      },
+      {
+        "bytes": 8912896,
+        "count": 1,
+        "dtype": "bfloat16",
+        "input_bytes": 8912896,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 8912896,
+        "output_shape": [
+          1088,
+          4096
+        ],
+        "shape": [
+          1088,
+          4096
+        ]
+      },
+      {
+        "bytes": 1034240,
+        "count": 2,
+        "dtype": "float32",
+        "input_bytes": 64640,
+        "label": "dsv4.lm_head_all_gather",
+        "op": "all_gather",
+        "output_bytes": 517120,
+        "output_shape": [
+          8,
+          16160
+        ],
+        "shape": [
+          1,
+          16160
+        ]
+      },
+      {
+        "bytes": 3102720,
+        "count": 3,
+        "dtype": "float32",
+        "input_bytes": 129280,
+        "label": "dsv4.lm_head_all_gather",
+        "op": "all_gather",
+        "output_bytes": 1034240,
+        "output_shape": [
+          16,
+          16160
+        ],
+        "shape": [
+          2,
+          16160
+        ]
+      },
+      {
+        "bytes": 54297600,
+        "count": 15,
+        "dtype": "float32",
+        "input_bytes": 452480,
+        "label": "dsv4.lm_head_all_gather",
+        "op": "all_gather",
+        "output_bytes": 3619840,
+        "output_shape": [
+          56,
+          16160
+        ],
+        "shape": [
+          7,
+          16160
+        ]
+      },
+      {
+        "bytes": 73973760,
+        "count": 645,
+        "dtype": "float32",
+        "input_bytes": 114688,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 114688,
+        "output_shape": [
+          7,
+          4096
+        ],
+        "shape": [
+          7,
+          4096
+        ]
+      },
+      {
+        "bytes": 45088768,
+        "count": 43,
+        "dtype": "float32",
+        "input_bytes": 1048576,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 1048576,
+        "output_shape": [
+          64,
+          4096
+        ],
+        "shape": [
+          64,
+          4096
+        ]
+      },
+      {
+        "bytes": 270532608,
+        "count": 129,
+        "dtype": "float32",
+        "input_bytes": 2097152,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 2097152,
+        "output_shape": [
+          128,
+          4096
+        ],
+        "shape": [
+          128,
+          4096
+        ]
+      },
+      {
+        "bytes": 766509056,
+        "count": 43,
+        "dtype": "float32",
+        "input_bytes": 17825792,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 17825792,
+        "output_shape": [
+          1088,
+          4096
+        ],
+        "shape": [
+          1088,
+          4096
+        ]
+      }
+    ],
+    "total_bytes": 1806033920,
+    "total_count": 1760
+  },
+  "error": null,
+  "is_primary_rank": false,
+  "kernel_counters": {
+    "fallback_wrapper_calls": {
+      "apply_rotary_tail": 1448,
+      "compress_forward_fallback": 1240,
+      "compress_norm_rope_store_fallback": 356,
+      "dsv4_sparse_attention_two_source_bf16": 215,
+      "hash_topk_fallback": 60,
+      "hc_head_fallback": 20,
+      "hc_post_fallback": 1720,
+      "hc_pre_fallback": 1720,
+      "linear_bf16_fp32_fallback": 1740,
+      "moe_gate_fallback": 860,
+      "silu_and_mul_clamp_fallback": 860,
+      "topk_transform_512_full_fallback": 420
+    },
+    "fallback_wrapper_calls_total": 10659,
+    "optional_kernel_none_skips": {},
+    "optional_kernel_none_skips_total": 0,
+    "unsupported_kernel_skips": {},
+    "unsupported_kernel_skips_total": 0,
+    "wrapper_exceptions": {}
+  },
+  "kv_cache_memory_bytes": 2491495680,
+  "memory_after_case": {
+    "max_memory_allocated_bytes": 44357194752,
+    "max_memory_reserved_bytes": 45027950592,
+    "memory_allocated_bytes": 44083257856,
+    "memory_reserved_bytes": 45027950592
+  },
+  "owner_timing": {
+    "counter_count": 0,
+    "counters": [],
+    "cuda_by_label": {},
+    "cuda_by_label_shape": {},
+    "cuda_sample_count": 0,
+    "cuda_samples": [],
+    "enabled": false,
+    "host_by_label": {},
+    "host_sample_count": 0,
+    "host_samples": [],
+    "seq": 0,
+    "sync_host": false,
+    "truncated": false
+  },
+  "prefix_cache_metrics": {
+    "avg_hit_tokens": 1024.0,
+    "dsv4_retention": {
+      "c128_bytes": 163840,
+      "c128_slots": 8,
+      "c128_state_bytes": 20971520,
+      "c128_state_slots": 512,
+      "c4_bytes": 5505024,
+      "c4_indexer_bytes": 1376256,
+      "c4_indexer_fp8_bytes": 709632,
+      "c4_indexer_slots": 256,
+      "c4_indexer_state_bytes": 688128,
+      "c4_indexer_state_slots": 32,
+      "c4_slots": 256,
+      "c4_state_bytes": 2752512,
+      "c4_state_slots": 32,
+      "full_slots": 1024,
+      "page_size_c128_aligned": true,
+      "retained_memory_bytes": 77255680,
+      "retained_pages": 4,
+      "swa_bytes": 45088768
+    },
+    "evictable_prefix_pages": 4,
+    "evictable_prefix_tokens": 1024,
+    "evicted_pages": 0,
+    "evicted_tokens": 0,
+    "evictions": 0,
+    "full_hit_requests": 7,
+    "hit_rate": 0.875,
+    "hit_requests": 7,
+    "inserted_tokens": 1024,
+    "match_requests": 8,
+    "max_hit_tokens": 1024,
+    "miss_requests": 1,
+    "partial_hit_requests": 0,
+    "protected_prefix_pages": 0,
+    "protected_prefix_tokens": 0,
+    "retained_prefix_pages": 4,
+    "retained_prefix_tokens": 1024,
+    "saved_prefill_tokens": 7168,
+    "suffix_prefill_tokens_after_hit": 448,
+    "total_hit_tokens": 7168
+  },
+  "rank": 2,
+  "repeats": [
+    {
+      "actual_output_tokens": 128,
+      "elapsed_s": 10.42605378292501,
+      "memory": {
+        "max_memory_allocated_bytes": 44357194752,
+        "max_memory_reserved_bytes": 45027950592,
+        "memory_allocated_bytes": 44083257856,
+        "memory_reserved_bytes": 45027950592
+      },
+      "output_lens": [
+        16,
+        16,
+        16,
+        16,
+        16,
+        16,
+        16,
+        16
+      ],
+      "phase_totals": {
+        "decode_forward_enqueue_s": 3.08532702550292,
+        "decode_forward_s": 3.8109063487499952,
+        "decode_prepare_s": 0.05922088213264942,
+        "decode_tokens": 120,
+        "prefill_forward_enqueue_s": 5.219546223059297,
+        "prefill_forward_s": 5.226142328232527,
+        "prefill_input_tokens": 1536,
+        "prefill_prepare_s": 0.7847384605556726
+      },
+      "prefix_cache_metrics": {
+        "avg_hit_tokens": 1024.0,
+        "dsv4_retention": {
+          "c128_bytes": 163840,
+          "c128_slots": 8,
+          "c128_state_bytes": 20971520,
+          "c128_state_slots": 512,
+          "c4_bytes": 5505024,
+          "c4_indexer_bytes": 1376256,
+          "c4_indexer_fp8_bytes": 709632,
+          "c4_indexer_slots": 256,
+          "c4_indexer_state_bytes": 688128,
+          "c4_indexer_state_slots": 32,
+          "c4_slots": 256,
+          "c4_state_bytes": 2752512,
+          "c4_state_slots": 32,
+          "full_slots": 1024,
+          "page_size_c128_aligned": true,
+          "retained_memory_bytes": 77255680,
+          "retained_pages": 4,
+          "swa_bytes": 45088768
+        },
+        "evictable_prefix_pages": 4,
+        "evictable_prefix_tokens": 1024,
+        "evicted_pages": 0,
+        "evicted_tokens": 0,
+        "evictions": 0,
+        "full_hit_requests": 7,
+        "hit_rate": 0.875,
+        "hit_requests": 7,
+        "inserted_tokens": 1024,
+        "match_requests": 8,
+        "max_hit_tokens": 1024,
+        "miss_requests": 1,
+        "partial_hit_requests": 0,
+        "protected_prefix_pages": 0,
+        "protected_prefix_tokens": 0,
+        "retained_prefix_pages": 4,
+        "retained_prefix_tokens": 1024,
+        "saved_prefill_tokens": 7168,
+        "suffix_prefill_tokens_after_hit": 448,
+        "total_hit_tokens": 7168
+      },
+      "prefix_cache_metrics_delta": {
+        "avg_hit_tokens": 1024.0,
+        "evictable_prefix_pages": 4,
+        "evictable_prefix_tokens": 1024,
+        "evicted_pages": 0,
+        "evicted_tokens": 0,
+        "evictions": 0,
+        "full_hit_requests": 7,
+        "hit_rate": 0.875,
+        "hit_requests": 7,
+        "inserted_tokens": 1024,
+        "match_requests": 8,
+        "max_hit_tokens": 1024,
+        "miss_requests": 1,
+        "partial_hit_requests": 0,
+        "protected_prefix_pages": 0,
+        "protected_prefix_tokens": 0,
+        "retained_prefix_pages": 4,
+        "retained_prefix_tokens": 1024,
+        "saved_prefill_tokens": 7168,
+        "suffix_prefill_tokens_after_hit": 448,
+        "total_hit_tokens": 7168
+      },
+      "prompt_tokens": 8704,
+      "repeat_index": 0,
+      "requests": [
+        {
+          "input_tokens": 1088,
+          "latency_s": 3.969754185527563,
+          "output_tokens": 16,
+          "token_times_s": [
+            3.1562283765524626,
+            3.1764584742486477,
+            3.1958984956145287,
+            3.215002277866006,
+            3.2345469668507576,
+            3.253621255978942,
+            3.272831477224827,
+            3.291890185326338,
+            3.3110635988414288,
+            3.3301021605730057,
+            3.3498965464532375,
+            3.368987876921892,
+            3.3881592378020287,
+            3.408464713022113,
+            3.4275603517889977,
+            3.969754185527563
+          ],
+          "topt_s": 0.05423505393167337,
+          "ttft_s": 3.1562283765524626,
+          "uid": 0
+        },
+        {
+          "input_tokens": 1088,
+          "latency_s": 6.454794993624091,
+          "output_tokens": 16,
+          "token_times_s": [
+            2.255649246275425,
+            3.922405330464244,
+            4.106351461261511,
+            4.280300162732601,
+            4.4696815349161625,
+            4.644207933917642,
+            4.817786995321512,
+            4.992802377790213,
+            5.180809363722801,
+            5.3594214506447315,
+            5.541089309379458,
+            5.7225950956344604,
+            5.920230312272906,
+            6.098126819357276,
+            6.275100575760007,
+            6.454794993624091
+          ],
+          "topt_s": 0.2799430498232444,
+          "ttft_s": 2.255649246275425,
+          "uid": 0
+        },
+        {
+          "input_tokens": 1088,
+          "latency_s": 6.454794993624091,
+          "output_tokens": 16,
+          "token_times_s": [
+            2.255649246275425,
+            3.922405330464244,
+            4.106351461261511,
+            4.280300162732601,
+            4.4696815349161625,
+            4.644207933917642,
+            4.817786995321512,
+            4.992802377790213,
+            5.180809363722801,
+            5.3594214506447315,
+            5.541089309379458,
+            5.7225950956344604,
+            5.920230312272906,
+            6.098126819357276,
+            6.275100575760007,
+            6.454794993624091
+          ],
+          "topt_s": 0.2799430498232444,
+          "ttft_s": 2.255649246275425,
+          "uid": 1
+        },
+        {
+          "input_tokens": 1088,
+          "latency_s": 6.454794993624091,
+          "output_tokens": 16,
+          "token_times_s": [
+            2.4458851628005505,
+            3.922405330464244,
+            4.106351461261511,
+            4.280300162732601,
+            4.4696815349161625,
+            4.644207933917642,
+            4.817786995321512,
+            4.992802377790213,
+            5.180809363722801,
+            5.3594214506447315,
+            5.541089309379458,
+            5.7225950956344604,
+            5.920230312272906,
+            6.098126819357276,
+            6.275100575760007,
+            6.454794993624091
+          ],
+          "topt_s": 0.26726065538823607,
+          "ttft_s": 2.4458851628005505,
+          "uid": 2
+        },
+        {
+          "input_tokens": 1088,
+          "latency_s": 6.454794993624091,
+          "output_tokens": 16,
+          "token_times_s": [
+            2.4458851628005505,
+            3.922405330464244,
+            4.106351461261511,
+            4.280300162732601,
+            4.4696815349161625,
+            4.644207933917642,
+            4.817786995321512,
+            4.992802377790213,
+            5.180809363722801,
+            5.3594214506447315,
+            5.541089309379458,
+            5.7225950956344604,
+            5.920230312272906,
+            6.098126819357276,
+            6.275100575760007,
+            6.454794993624091
+          ],
+          "topt_s": 0.26726065538823607,
+          "ttft_s": 2.4458851628005505,
+          "uid": 3
+        },
+        {
+          "input_tokens": 1088,
+          "latency_s": 6.454794993624091,
+          "output_tokens": 16,
+          "token_times_s": [
+            2.6376361697912216,
+            3.922405330464244,
+            4.106351461261511,
+            4.280300162732601,
+            4.4696815349161625,
+            4.644207933917642,
+            4.817786995321512,
+            4.992802377790213,
+            5.180809363722801,
+            5.3594214506447315,
+            5.541089309379458,
+            5.7225950956344604,
+            5.920230312272906,
+            6.098126819357276,
+            6.275100575760007,
+            6.454794993624091
+          ],
+          "topt_s": 0.2544772549221913,
+          "ttft_s": 2.6376361697912216,
+          "uid": 4
+        },
+        {
+          "input_tokens": 1088,
+          "latency_s": 6.454794993624091,
+          "output_tokens": 16,
+          "token_times_s": [
+            2.6376361697912216,
+            3.922405330464244,
+            4.106351461261511,
+            4.280300162732601,
+            4.4696815349161625,
+            4.644207933917642,
+            4.817786995321512,
+            4.992802377790213,
+            5.180809363722801,
+            5.3594214506447315,
+            5.541089309379458,
+            5.7225950956344604,
+            5.920230312272906,
+            6.098126819357276,
+            6.275100575760007,
+            6.454794993624091
+          ],
+          "topt_s": 0.2544772549221913,
+          "ttft_s": 2.6376361697912216,
+          "uid": 5
+        },
+        {
+          "input_tokens": 1088,
+          "latency_s": 6.454794993624091,
+          "output_tokens": 16,
+          "token_times_s": [
+            2.8611656557768583,
+            3.922405330464244,
+            4.106351461261511,
+            4.280300162732601,
+            4.4696815349161625,
+            4.644207933917642,
+            4.817786995321512,
+            4.992802377790213,
+            5.180809363722801,
+            5.3594214506447315,
+            5.541089309379458,
+            5.7225950956344604,
+            5.920230312272906,
+            6.098126819357276,
+            6.275100575760007,
+            6.454794993624091
+          ],
+          "topt_s": 0.23957528918981552,
+          "ttft_s": 2.8611656557768583,
+          "uid": 6
+        }
+      ],
+      "sample_output_token_ids": [
+        [
+          440,
+          316,
+          573,
+          99,
+          436,
+          440,
+          316,
+          573,
+          99,
+          436,
+          440,
+          316,
+          573,
+          99,
+          436,
+          440
+        ],
+        [
+          968,
+          435,
+          74,
+          662,
+          435,
+          802,
+          169,
+          98,
+          225,
+          987,
+          41,
+          820,
+          111,
+          451,
+          257,
+          712
+        ]
+      ],
+      "schedule_trace": [
+        {
+          "batch_size": 1,
+          "decode_tokens": 0,
+          "forward_enqueue_s": 2.3997315857559443,
+          "forward_s": 2.4002134278416634,
+          "input_tokens": 1088,
+          "max_device_len": 1088,
+          "max_extend_len": 1088,
+          "padded_size": 1,
+          "phase": "prefill",
+          "prepare_s": 0.7540882956236601,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 0,
+              "device_len": 1088,
+              "extend_len": 1088,
+              "is_chunked": false,
+              "remain_len": 16,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0046968478709459305,
+          "forward_s": 0.01785024255514145,
+          "input_tokens": 1,
+          "max_device_len": 1089,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0020077545195817947,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1088,
+              "device_len": 1089,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 15,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0008960012346506119,
+          "forward_s": 0.017390312626957893,
+          "input_tokens": 1,
+          "max_device_len": 1090,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0018475539982318878,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1089,
+              "device_len": 1090,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 14,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007653441280126572,
+          "forward_s": 0.01734250783920288,
+          "input_tokens": 1,
+          "max_device_len": 1091,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.001608487218618393,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1090,
+              "device_len": 1091,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 13,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.000794360414147377,
+          "forward_s": 0.017353272065520287,
+          "input_tokens": 1,
+          "max_device_len": 1092,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.002037379890680313,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1091,
+              "device_len": 1092,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 12,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007766466587781906,
+          "forward_s": 0.017343109473586082,
+          "input_tokens": 1,
+          "max_device_len": 1093,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0015782508999109268,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1092,
+              "device_len": 1093,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 11,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007659550756216049,
+          "forward_s": 0.01748809404671192,
+          "input_tokens": 1,
+          "max_device_len": 1094,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0015784408897161484,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1093,
+              "device_len": 1094,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 10,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007745213806629181,
+          "forward_s": 0.017322512343525887,
+          "input_tokens": 1,
+          "max_device_len": 1095,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0015914514660835266,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1094,
+              "device_len": 1095,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 9,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.000774875283241272,
+          "forward_s": 0.017360825091600418,
+          "input_tokens": 1,
+          "max_device_len": 1096,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0016688406467437744,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1095,
+              "device_len": 1096,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 8,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007852930575609207,
+          "forward_s": 0.01729784533381462,
+          "input_tokens": 1,
+          "max_device_len": 1097,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0015938710421323776,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1096,
+              "device_len": 1097,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 7,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007768366485834122,
+          "forward_s": 0.01803961768746376,
+          "input_tokens": 1,
+          "max_device_len": 1098,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.001607762649655342,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1097,
+              "device_len": 1098,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 6,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007704347372055054,
+          "forward_s": 0.0173488799482584,
+          "input_tokens": 1,
+          "max_device_len": 1099,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.001596987247467041,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1098,
+              "device_len": 1099,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 5,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007803011685609818,
+          "forward_s": 0.017353281378746033,
+          "input_tokens": 1,
+          "max_device_len": 1100,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0016744714230298996,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1099,
+              "device_len": 1100,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 4,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007781777530908585,
+          "forward_s": 0.018569590523838997,
+          "input_tokens": 1,
+          "max_device_len": 1101,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0015904642641544342,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1100,
+              "device_len": 1101,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 3,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.0007733907550573349,
+          "forward_s": 0.017351467162370682,
+          "input_tokens": 1,
+          "max_device_len": 1102,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0015966743230819702,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1101,
+              "device_len": 1102,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 2,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 1,
+          "forward_enqueue_s": 0.000806191936135292,
+          "forward_s": 0.01736479252576828,
+          "input_tokens": 1,
+          "max_device_len": 1103,
+          "max_extend_len": 1,
+          "padded_size": 1,
+          "phase": "decode",
+          "prepare_s": 0.0016484446823596954,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1102,
+              "device_len": 1103,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 1,
+              "uid": 0
+            }
+          ]
+        },
+        {
+          "batch_size": 2,
+          "decode_tokens": 0,
+          "forward_enqueue_s": 2.243636593222618,
+          "forward_s": 2.2449962608516216,
+          "input_tokens": 128,
+          "max_device_len": 1088,
+          "max_extend_len": 64,
+          "padded_size": 2,
+          "phase": "prefill",
+          "prepare_s": 0.008857980370521545,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1024,
+              "device_len": 1088,
+              "extend_len": 64,
+              "is_chunked": false,
+              "remain_len": 16,
+              "uid": 0
+            },
+            {
+              "cached_len": 1024,
+              "device_len": 1088,
+              "extend_len": 64,
+              "is_chunked": false,
+              "remain_len": 16,
+              "uid": 1
+            }
+          ]
+        },
+        {
+          "batch_size": 2,
+          "decode_tokens": 0,
+          "forward_enqueue_s": 0.17885392345488071,
+          "forward_s": 0.1805818434804678,
+          "input_tokens": 128,
+          "max_device_len": 1088,
+          "max_extend_len": 64,
+          "padded_size": 2,
+          "phase": "prefill",
+          "prepare_s": 0.008487045764923096,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1024,
+              "device_len": 1088,
+              "extend_len": 64,
+              "is_chunked": false,
+              "remain_len": 16,
+              "uid": 2
+            },
+            {
+              "cached_len": 1024,
+              "device_len": 1088,
+              "extend_len": 64,
+              "is_chunked": false,
+              "remain_len": 16,
+              "uid": 3
+            }
+          ]
+        },
+        {
+          "batch_size": 2,
+          "decode_tokens": 0,
+          "forward_enqueue_s": 0.18123668991029263,
+          "forward_s": 0.18276636861264706,
+          "input_tokens": 128,
+          "max_device_len": 1088,
+          "max_extend_len": 64,
+          "padded_size": 2,
+          "phase": "prefill",
+          "prepare_s": 0.00804218091070652,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1024,
+              "device_len": 1088,
+              "extend_len": 64,
+              "is_chunked": false,
+              "remain_len": 16,
+              "uid": 4
+            },
+            {
+              "cached_len": 1024,
+              "device_len": 1088,
+              "extend_len": 64,
+              "is_chunked": false,
+              "remain_len": 16,
+              "uid": 5
+            }
+          ]
+        },
+        {
+          "batch_size": 1,
+          "decode_tokens": 0,
+          "forward_enqueue_s": 0.2160874307155609,
+          "forward_s": 0.21758442744612694,
+          "input_tokens": 64,
+          "max_device_len": 1088,
+          "max_extend_len": 64,
+          "padded_size": 1,
+          "phase": "prefill",
+          "prepare_s": 0.005262957885861397,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1024,
+              "device_len": 1088,
+              "extend_len": 64,
+              "is_chunked": false,
+              "remain_len": 16,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.5978970769792795,
+          "forward_s": 1.0579271111637354,
+          "input_tokens": 7,
+          "max_device_len": 1089,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0024430491030216217,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1088,
+              "device_len": 1089,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 15,
+              "uid": 0
+            },
+            {
+              "cached_len": 1088,
+              "device_len": 1089,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 15,
+              "uid": 1
+            },
+            {
+              "cached_len": 1088,
+              "device_len": 1089,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 15,
+              "uid": 2
+            },
+            {
+              "cached_len": 1088,
+              "device_len": 1089,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 15,
+              "uid": 3
+            },
+            {
+              "cached_len": 1088,
+              "device_len": 1089,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 15,
+              "uid": 4
+            },
+            {
+              "cached_len": 1088,
+              "device_len": 1089,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 15,
+              "uid": 5
+            },
+            {
+              "cached_len": 1088,
+              "device_len": 1089,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 15,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.1790503915399313,
+          "forward_s": 0.17969442717731,
+          "input_tokens": 7,
+          "max_device_len": 1090,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0033344440162181854,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1089,
+              "device_len": 1090,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 14,
+              "uid": 0
+            },
+            {
+              "cached_len": 1089,
+              "device_len": 1090,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 14,
+              "uid": 1
+            },
+            {
+              "cached_len": 1089,
+              "device_len": 1090,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 14,
+              "uid": 2
+            },
+            {
+              "cached_len": 1089,
+              "device_len": 1090,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 14,
+              "uid": 3
+            },
+            {
+              "cached_len": 1089,
+              "device_len": 1090,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 14,
+              "uid": 4
+            },
+            {
+              "cached_len": 1089,
+              "device_len": 1090,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 14,
+              "uid": 5
+            },
+            {
+              "cached_len": 1089,
+              "device_len": 1090,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 14,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.17024553939700127,
+          "forward_s": 0.1715240366756916,
+          "input_tokens": 7,
+          "max_device_len": 1091,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.002160772681236267,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1090,
+              "device_len": 1091,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 13,
+              "uid": 0
+            },
+            {
+              "cached_len": 1090,
+              "device_len": 1091,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 13,
+              "uid": 1
+            },
+            {
+              "cached_len": 1090,
+              "device_len": 1091,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 13,
+              "uid": 2
+            },
+            {
+              "cached_len": 1090,
+              "device_len": 1091,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 13,
+              "uid": 3
+            },
+            {
+              "cached_len": 1090,
+              "device_len": 1091,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 13,
+              "uid": 4
+            },
+            {
+              "cached_len": 1090,
+              "device_len": 1091,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 13,
+              "uid": 5
+            },
+            {
+              "cached_len": 1090,
+              "device_len": 1091,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 13,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.18534287251532078,
+          "forward_s": 0.18689800798892975,
+          "input_tokens": 7,
+          "max_device_len": 1092,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0022135507315397263,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1091,
+              "device_len": 1092,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 12,
+              "uid": 0
+            },
+            {
+              "cached_len": 1091,
+              "device_len": 1092,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 12,
+              "uid": 1
+            },
+            {
+              "cached_len": 1091,
+              "device_len": 1092,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 12,
+              "uid": 2
+            },
+            {
+              "cached_len": 1091,
+              "device_len": 1092,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 12,
+              "uid": 3
+            },
+            {
+              "cached_len": 1091,
+              "device_len": 1092,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 12,
+              "uid": 4
+            },
+            {
+              "cached_len": 1091,
+              "device_len": 1092,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 12,
+              "uid": 5
+            },
+            {
+              "cached_len": 1091,
+              "device_len": 1092,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 12,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.17020669765770435,
+          "forward_s": 0.17208370938897133,
+          "input_tokens": 7,
+          "max_device_len": 1093,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0021693166345357895,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1092,
+              "device_len": 1093,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 11,
+              "uid": 0
+            },
+            {
+              "cached_len": 1092,
+              "device_len": 1093,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 11,
+              "uid": 1
+            },
+            {
+              "cached_len": 1092,
+              "device_len": 1093,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 11,
+              "uid": 2
+            },
+            {
+              "cached_len": 1092,
+              "device_len": 1093,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 11,
+              "uid": 3
+            },
+            {
+              "cached_len": 1092,
+              "device_len": 1093,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 11,
+              "uid": 4
+            },
+            {
+              "cached_len": 1092,
+              "device_len": 1093,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 11,
+              "uid": 5
+            },
+            {
+              "cached_len": 1092,
+              "device_len": 1093,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 11,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.17056435532867908,
+          "forward_s": 0.1712813302874565,
+          "input_tokens": 7,
+          "max_device_len": 1094,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0020331833511590958,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1093,
+              "device_len": 1094,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 10,
+              "uid": 0
+            },
+            {
+              "cached_len": 1093,
+              "device_len": 1094,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 10,
+              "uid": 1
+            },
+            {
+              "cached_len": 1093,
+              "device_len": 1094,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 10,
+              "uid": 2
+            },
+            {
+              "cached_len": 1093,
+              "device_len": 1094,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 10,
+              "uid": 3
+            },
+            {
+              "cached_len": 1093,
+              "device_len": 1094,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 10,
+              "uid": 4
+            },
+            {
+              "cached_len": 1093,
+              "device_len": 1094,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 10,
+              "uid": 5
+            },
+            {
+              "cached_len": 1093,
+              "device_len": 1094,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 10,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.1708467062562704,
+          "forward_s": 0.17269469238817692,
+          "input_tokens": 7,
+          "max_device_len": 1095,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0020732376724481583,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1094,
+              "device_len": 1095,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 9,
+              "uid": 0
+            },
+            {
+              "cached_len": 1094,
+              "device_len": 1095,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 9,
+              "uid": 1
+            },
+            {
+              "cached_len": 1094,
+              "device_len": 1095,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 9,
+              "uid": 2
+            },
+            {
+              "cached_len": 1094,
+              "device_len": 1095,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 9,
+              "uid": 3
+            },
+            {
+              "cached_len": 1094,
+              "device_len": 1095,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 9,
+              "uid": 4
+            },
+            {
+              "cached_len": 1094,
+              "device_len": 1095,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 9,
+              "uid": 5
+            },
+            {
+              "cached_len": 1094,
+              "device_len": 1095,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 9,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.1834544874727726,
+          "forward_s": 0.1855571921914816,
+          "input_tokens": 7,
+          "max_device_len": 1096,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0021669846028089523,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1095,
+              "device_len": 1096,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 8,
+              "uid": 0
+            },
+            {
+              "cached_len": 1095,
+              "device_len": 1096,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 8,
+              "uid": 1
+            },
+            {
+              "cached_len": 1095,
+              "device_len": 1096,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 8,
+              "uid": 2
+            },
+            {
+              "cached_len": 1095,
+              "device_len": 1096,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 8,
+              "uid": 3
+            },
+            {
+              "cached_len": 1095,
+              "device_len": 1096,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 8,
+              "uid": 4
+            },
+            {
+              "cached_len": 1095,
+              "device_len": 1096,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 8,
+              "uid": 5
+            },
+            {
+              "cached_len": 1095,
+              "device_len": 1096,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 8,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.17563893273472786,
+          "forward_s": 0.17604698054492474,
+          "input_tokens": 7,
+          "max_device_len": 1097,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.002199355512857437,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1096,
+              "device_len": 1097,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 7,
+              "uid": 0
+            },
+            {
+              "cached_len": 1096,
+              "device_len": 1097,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 7,
+              "uid": 1
+            },
+            {
+              "cached_len": 1096,
+              "device_len": 1097,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 7,
+              "uid": 2
+            },
+            {
+              "cached_len": 1096,
+              "device_len": 1097,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 7,
+              "uid": 3
+            },
+            {
+              "cached_len": 1096,
+              "device_len": 1097,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 7,
+              "uid": 4
+            },
+            {
+              "cached_len": 1096,
+              "device_len": 1097,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 7,
+              "uid": 5
+            },
+            {
+              "cached_len": 1096,
+              "device_len": 1097,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 7,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.17709132470190525,
+          "forward_s": 0.1789728831499815,
+          "input_tokens": 7,
+          "max_device_len": 1098,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.002336772158741951,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1097,
+              "device_len": 1098,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 6,
+              "uid": 0
+            },
+            {
+              "cached_len": 1097,
+              "device_len": 1098,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 6,
+              "uid": 1
+            },
+            {
+              "cached_len": 1097,
+              "device_len": 1098,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 6,
+              "uid": 2
+            },
+            {
+              "cached_len": 1097,
+              "device_len": 1098,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 6,
+              "uid": 3
+            },
+            {
+              "cached_len": 1097,
+              "device_len": 1098,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 6,
+              "uid": 4
+            },
+            {
+              "cached_len": 1097,
+              "device_len": 1098,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 6,
+              "uid": 5
+            },
+            {
+              "cached_len": 1097,
+              "device_len": 1098,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 6,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.1772833652794361,
+          "forward_s": 0.1789581347256899,
+          "input_tokens": 7,
+          "max_device_len": 1099,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.00210423581302166,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1098,
+              "device_len": 1099,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 5,
+              "uid": 0
+            },
+            {
+              "cached_len": 1098,
+              "device_len": 1099,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 5,
+              "uid": 1
+            },
+            {
+              "cached_len": 1098,
+              "device_len": 1099,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 5,
+              "uid": 2
+            },
+            {
+              "cached_len": 1098,
+              "device_len": 1099,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 5,
+              "uid": 3
+            },
+            {
+              "cached_len": 1098,
+              "device_len": 1099,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 5,
+              "uid": 4
+            },
+            {
+              "cached_len": 1098,
+              "device_len": 1099,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 5,
+              "uid": 5
+            },
+            {
+              "cached_len": 1098,
+              "device_len": 1099,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 5,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.19455967284739017,
+          "forward_s": 0.19492672011256218,
+          "input_tokens": 7,
+          "max_device_len": 1100,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0023857131600379944,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1099,
+              "device_len": 1100,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 4,
+              "uid": 0
+            },
+            {
+              "cached_len": 1099,
+              "device_len": 1100,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 4,
+              "uid": 1
+            },
+            {
+              "cached_len": 1099,
+              "device_len": 1100,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 4,
+              "uid": 2
+            },
+            {
+              "cached_len": 1099,
+              "device_len": 1100,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 4,
+              "uid": 3
+            },
+            {
+              "cached_len": 1099,
+              "device_len": 1100,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 4,
+              "uid": 4
+            },
+            {
+              "cached_len": 1099,
+              "device_len": 1100,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 4,
+              "uid": 5
+            },
+            {
+              "cached_len": 1099,
+              "device_len": 1100,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 4,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.175103310495615,
+          "forward_s": 0.17541887983679771,
+          "input_tokens": 7,
+          "max_device_len": 1101,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0021478980779647827,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1100,
+              "device_len": 1101,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 3,
+              "uid": 0
+            },
+            {
+              "cached_len": 1100,
+              "device_len": 1101,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 3,
+              "uid": 1
+            },
+            {
+              "cached_len": 1100,
+              "device_len": 1101,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 3,
+              "uid": 2
+            },
+            {
+              "cached_len": 1100,
+              "device_len": 1101,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 3,
+              "uid": 3
+            },
+            {
+              "cached_len": 1100,
+              "device_len": 1101,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 3,
+              "uid": 4
+            },
+            {
+              "cached_len": 1100,
+              "device_len": 1101,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 3,
+              "uid": 5
+            },
+            {
+              "cached_len": 1100,
+              "device_len": 1101,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 3,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.17262102477252483,
+          "forward_s": 0.17449193261563778,
+          "input_tokens": 7,
+          "max_device_len": 1102,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.002190537750720978,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1101,
+              "device_len": 1102,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 2,
+              "uid": 0
+            },
+            {
+              "cached_len": 1101,
+              "device_len": 1102,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 2,
+              "uid": 1
+            },
+            {
+              "cached_len": 1101,
+              "device_len": 1102,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 2,
+              "uid": 2
+            },
+            {
+              "cached_len": 1101,
+              "device_len": 1102,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 2,
+              "uid": 3
+            },
+            {
+              "cached_len": 1101,
+              "device_len": 1102,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 2,
+              "uid": 4
+            },
+            {
+              "cached_len": 1101,
+              "device_len": 1102,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 2,
+              "uid": 5
+            },
+            {
+              "cached_len": 1101,
+              "device_len": 1102,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 2,
+              "uid": 6
+            }
+          ]
+        },
+        {
+          "batch_size": 7,
+          "decode_tokens": 7,
+          "forward_enqueue_s": 0.16970608942210674,
+          "forward_s": 0.17165395990014076,
+          "input_tokens": 7,
+          "max_device_len": 1103,
+          "max_extend_len": 1,
+          "padded_size": 7,
+          "phase": "decode",
+          "prepare_s": 0.0020349957048892975,
+          "prepare_sync_profile": false,
+          "reqs": [
+            {
+              "cached_len": 1102,
+              "device_len": 1103,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 1,
+              "uid": 0
+            },
+            {
+              "cached_len": 1102,
+              "device_len": 1103,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 1,
+              "uid": 1
+            },
+            {
+              "cached_len": 1102,
+              "device_len": 1103,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 1,
+              "uid": 2
+            },
+            {
+              "cached_len": 1102,
+              "device_len": 1103,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 1,
+              "uid": 3
+            },
+            {
+              "cached_len": 1102,
+              "device_len": 1103,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 1,
+              "uid": 4
+            },
+            {
+              "cached_len": 1102,
+              "device_len": 1103,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 1,
+              "uid": 5
+            },
+            {
+              "cached_len": 1102,
+              "device_len": 1103,
+              "extend_len": 1,
+              "is_chunked": false,
+              "remain_len": 1,
+              "uid": 6
+            }
+          ]
+        }
+      ],
+      "target_output_tokens": 128
+    }
+  ],
+  "runtime_environment": {
+    "cuda": {
+      "available": true,
+      "capability": [
+        8,
+        0
+      ],
+      "capability_name": "sm80",
+      "current_device": 2,
+      "device_count": 8,
+      "device_name": "NVIDIA A100-SXM4-80GB",
+      "rank": 2,
+      "runtime": "12.8"
+    },
+    "dsv4_kernel_capabilities": {
+      "cuda_available": true,
+      "cuda_capability": [
+        8,
+        0
+      ],
+      "deep_gemm_available": false,
+      "deep_gemm_error": "RuntimeError: Check failed: (lib_handle_ != nullptr) is false: Failed to load dynamic shared library /usr/local/lib/python3.12/dist-packages/deep_gemm/_C.so libcudart.so.13: cannot open shared object file: No such file or directory",
+      "deep_gemm_usable": false,
+      "flash_mla_available": true,
+      "flash_mla_error": null,
+      "flashinfer_available": true,
+      "flashinfer_error": null,
+      "is_sm80": true,
+      "marlin_available": false,
+      "marlin_error": "module not installed",
+      "sgl_kernel_available": true,
+      "sgl_kernel_dsv4_ops": {
+        "deepseek_v4_topk_transform_512": false,
+        "dsv4_fused_q_indexer_rope_hadamard_fp4_quant": false,
+        "dsv4_fused_q_indexer_rope_hadamard_quant": false
+      },
+      "sgl_kernel_error": null,
+      "sgl_kernel_sm80_common_ops": false,
+      "tilelang_available": true,
+      "tilelang_error": null,
+      "triton_available": true,
+      "triton_error": null
+    },
+    "nccl": {
+      "version": "2.27.5"
+    },
+    "packages": {
+      "deep_gemm": null,
+      "flashinfer": "0.6.12",
+      "sgl_kernel": "0.3.21",
+      "tilelang": "0.1.11+cu128.gita417b38a",
+      "torch": "2.9.1+cu128",
+      "triton": "3.5.1",
+      "tvm_ffi": "0.1.11"
+    },
+    "python": "3.12.3"
+  },
+  "warmup": {
+    "elapsed_s": [],
+    "repeats": 0,
+    "total_elapsed_s": 0.0
+  }
+}

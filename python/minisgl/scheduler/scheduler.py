@@ -58,9 +58,23 @@ class Scheduler(SchedulerIOMixin):
         self.table_manager = TableManager(config.max_running_req, self.engine.page_table)
         cache_type = config.cache_type
         if config.model_config.is_deepseek_v4:
-            if cache_type != "naive":
-                logger.info_rank0("Disabling radix prefix cache for DeepSeek V4 KV cache v1.")
-            cache_type = "naive"
+            if config.enable_dsv4_radix_prefix_cache:
+                if config.page_size % 128 != 0:
+                    raise ValueError(
+                        "DeepSeek V4 radix prefix cache requires a page size divisible "
+                        f"by 128, got page_size={config.page_size}. Use --page-size 256 "
+                        "for TARGET 08 runs."
+                    )
+                if cache_type != "radix":
+                    raise ValueError(
+                        "DeepSeek V4 radix prefix cache opt-in requires "
+                        f"cache_type='radix', got {cache_type!r}."
+                    )
+                logger.info_rank0("Opting in to DeepSeek V4 radix prefix cache.")
+            else:
+                if cache_type != "naive":
+                    logger.info_rank0("Disabling radix prefix cache for DeepSeek V4 KV cache v1.")
+                cache_type = "naive"
         self.cache_manager = CacheManager(
             self.engine.num_pages,
             config.page_size,

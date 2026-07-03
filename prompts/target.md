@@ -41,8 +41,14 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | Added v0 BF16 E2E smoke and basic correctness gates. |
 | TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | Added TP8 benchmark harness and text smoke; fixed early correctness issues. |
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
-| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | active next | Implement DSV4-aware radix/SWA prefix cache, aligned with vLLM/SGLang state ownership and protected by correctness tests. |
-| TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned | Low-precision research after TARGET 08: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
+| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | phase 1 complete | Conservative DSV4 radix prefix cache exists as explicit opt-in; continue with TARGET 08 subtargets. |
+| TARGET 08.05 | `prompts/TARGET_08.05_dsv4_sm80_serving_workload_cuda_graph_bucket_policy.md` | completed | Established serving workload suite and selected `[1,2,4,8,16]` as the smallest measured zero-eager bucket set. |
+| TARGET 08.06 | `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md` | active next | Attribute the large CUDA graph capture memory delta before prefix-cache promotion testing. |
+| TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | planned | Validate prefix cache under serving-like sustained workloads using the 08.05 bucket policy and 08.06 memory conclusion. |
+| TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | planned | Compute full-page-owner prefix-cache memory/capacity cost and decide whether 08.20 is worth doing. |
+| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | optional | If justified by 08.18, evaluate SGLang-style independent SWA/component retention. |
+| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix/graph policy, then choose TARGET 09 low precision or TARGET 10 attention/communication. |
+| TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned after TARGET 08 | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | future optional | Attention, PyNCCL, communication overlap, and graph/runtime experiments if fresh profiles justify them. |
 
 ## Current Milestone
@@ -62,14 +68,16 @@ Post-07.78 stable retest:
 - eager decode `0`;
 - old serving baseline crossed: `114.07 output tok/s`.
 
-Decision from TARGET 07.79:
+Decision from TARGET 07.79, TARGET 08 phase 1, and TARGET 08.05:
 
 ```text
-start TARGET 08 radix prefix cache
+continue with TARGET 08.06 CUDA graph memory attribution
 ```
 
-Reason: remaining exact non-prefix speed surfaces are fragmented, while
-shared-prefix workloads can skip multi-second prefill work.
+Reason: DSV4 radix prefix cache works as an explicit opt-in, and TARGET 08.05
+selected `[1,2,4,8,16]` as the recommended serving graph bucket set.  Before
+TARGET 08.10 promotion testing, the observed `~19 GiB/rank` graph capture memory
+delta should be attributed so capacity and promotion decisions are credible.
 
 ## Archive Policy
 
@@ -83,8 +91,9 @@ For new child threads, start from:
 
 1. `prompts/target.md`
 2. the active target prompt, currently
-   `prompts/TARGET_08_radix_prefix_dsv4.md`
+   `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md`
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for milestone history
+4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache phase-1 context
 
 Do not ask new threads to read every archived prompt unless they need exact
 historical commands or stop conditions.
@@ -129,3 +138,19 @@ torchrun --standalone --nproc_per_node=8 \
   --variants fallback v0_bf16 \
   --output /tmp/dsv4_text_smoke.json
 ```
+
+## Release-Style Serving Benchmark Direction
+
+Before declaring the serving path broadly usable, run a more complete serving
+benchmark pass.  TARGET 08.05 and TARGET 08.30 should use this as guidance:
+
+- `requests >= 100` when runtime allows;
+- multiple request-rate or arrival-pattern settings, for example RPS
+  `0.2, 0.5, 1, 2, 4, 8`;
+- fixed max concurrency settings;
+- short-output and long-output workloads;
+- shared-prefix and non-shared-prefix mixes;
+- GPU utilization;
+- KV cache usage;
+- active batch-size distribution;
+- queueing latency, TTFT, ITL/TPOT, and output throughput.

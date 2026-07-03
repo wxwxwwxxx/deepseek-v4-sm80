@@ -1241,6 +1241,8 @@ def run_variant(
             "use_pynccl": runtime_options["use_pynccl"],
             "allow_dsv4_cuda_graph": runtime_options["allow_dsv4_cuda_graph"],
             "cuda_graph_bs": runtime_options["cuda_graph_bs"],
+            "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
+            "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
             "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
             "distributed_init_method": _distributed_init_method(args, tp_size),
@@ -1301,6 +1303,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             allow_dsv4_cuda_graph=runtime_options["allow_dsv4_cuda_graph"],
             cuda_graph_bs=runtime_options["cuda_graph_bs"],
             cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
+            enable_dsv4_radix_prefix_cache=args.enable_dsv4_radix_prefix_cache,
             **llm_kwargs,
         )
         for variant in variants:
@@ -1350,6 +1353,8 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 "cuda_graph_capture_greedy_sample": runtime_options[
                     "cuda_graph_capture_greedy_sample"
                 ],
+                "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
+                "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
                 "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
                 "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
                 "distributed_init_method": distributed_init_method,
@@ -1401,6 +1406,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--allow-dsv4-cuda-graph",
         action="store_true",
         help="Opt in to DeepSeek V4 decode CUDA graph capture. Defaults to sizes 1,2,4.",
+    )
+    parser.add_argument(
+        "--enable-dsv4-radix-prefix-cache",
+        action="store_true",
+        help="Explicitly opt in to DeepSeek V4 radix prefix cache.",
     )
     parser.add_argument(
         "--cuda-graph-bs",

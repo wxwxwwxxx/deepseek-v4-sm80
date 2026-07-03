@@ -15,6 +15,7 @@ def _get_pid_suffix() -> str:
 class SchedulerConfig(EngineConfig):
     max_extend_tokens: int = 8192
     cache_type: str = "radix"
+    enable_dsv4_radix_prefix_cache: bool = False
     offline_mode: bool = False
 
     # networking config

@@ -1,15 +1,55 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, List, Tuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, List, Tuple
 
 import torch
 from minisgl.core import Req
 from minisgl.kvcache import BaseCacheHandle, BaseKVCachePool, MatchResult, create_prefix_cache
-from minisgl.utils import div_ceil
+from minisgl.utils import align_down, div_ceil
 
 if TYPE_CHECKING:
     from .utils import PendingReq
+
+
+@dataclass
+class PrefixCacheMetrics:
+    match_requests: int = 0
+    hit_requests: int = 0
+    miss_requests: int = 0
+    full_hit_requests: int = 0
+    partial_hit_requests: int = 0
+    total_hit_tokens: int = 0
+    max_hit_tokens: int = 0
+    saved_prefill_tokens: int = 0
+    suffix_prefill_tokens_after_hit: int = 0
+    inserted_tokens: int = 0
+    evictions: int = 0
+    evicted_tokens: int = 0
+
+    def snapshot(self, page_size: int) -> dict[str, Any]:
+        hit_rate = (
+            0.0 if self.match_requests == 0 else self.hit_requests / self.match_requests
+        )
+        avg_hit = 0.0 if self.hit_requests == 0 else self.total_hit_tokens / self.hit_requests
+        return {
+            "match_requests": self.match_requests,
+            "hit_requests": self.hit_requests,
+            "miss_requests": self.miss_requests,
+            "full_hit_requests": self.full_hit_requests,
+            "partial_hit_requests": self.partial_hit_requests,
+            "hit_rate": hit_rate,
+            "total_hit_tokens": self.total_hit_tokens,
+            "avg_hit_tokens": avg_hit,
+            "max_hit_tokens": self.max_hit_tokens,
+            "saved_prefill_tokens": self.saved_prefill_tokens,
+            "suffix_prefill_tokens_after_hit": self.suffix_prefill_tokens_after_hit,
+            "inserted_tokens": self.inserted_tokens,
+            "evictions": self.evictions,
+            "evicted_tokens": self.evicted_tokens,
+            "evicted_pages": self.evicted_tokens // page_size,
+        }
 
 
 class CacheManager:
@@ -31,11 +71,14 @@ class CacheManager:
         self.page_table = page_table
         self.page_size = page_size
         self.kv_cache = kv_cache
+        self.metrics = PrefixCacheMetrics()
 
     def match_req(self, req: PendingReq) -> MatchResult:
         input_len = req.input_len
         assert input_len > 0, "Input length must be greater than 0."
-        return self.prefix_cache.match_prefix(req.input_ids[: input_len - 1])
+        result = self.prefix_cache.match_prefix(req.input_ids[: input_len - 1])
+        self._record_prefix_match(result.cuda_handle.cached_len, input_len)
+        return result
 
     @property
     def available_size(self) -> int:
@@ -76,6 +119,7 @@ class CacheManager:
         page_indices = self.page_table[req.table_idx, : req.cached_len]
         old_handle = req.cache_handle
         cached_len, new_handle = self.prefix_cache.insert_prefix(insert_ids, page_indices)
+        self.metrics.inserted_tokens += max(0, new_handle.cached_len - cached_len)
         # unlock until all operations on handle is done
         self.unlock(old_handle)
         # this part is already in the prefix cache, free it
@@ -89,9 +133,9 @@ class CacheManager:
     def check_integrity(self) -> None:
         self.prefix_cache.check_integrity()
         cache_pages = self.prefix_cache.size_info.total_size // self.page_size
-        allocated_pages = self.num_pages - len(self.free_slots) - cache_pages
+        live_pages = self.num_pages - len(self.free_slots)
         if self.kv_cache is not None:
-            self.kv_cache.check_allocation_integrity(allocated_pages, self.page_size)
+            self.kv_cache.check_allocation_integrity(live_pages, self.page_size)
         if len(self.free_slots) + cache_pages != self.num_pages:
             raise RuntimeError(
                 "CacheManager integrity check failed:"
@@ -119,6 +163,7 @@ class CacheManager:
     def _allocate(self, needed_pages: int) -> torch.Tensor:
         if needed_pages > (free_pages := len(self.free_slots)):
             evicted = self.prefix_cache.evict((needed_pages - free_pages) * self.page_size)
+            self._record_prefix_eviction(evicted)
             if self.kv_cache is not None:
                 self.kv_cache.on_token_indices_freed(evicted, self.page_size)
             self.free_slots = torch.cat([self.free_slots, evicted[:: self.page_size]])
@@ -141,6 +186,49 @@ class CacheManager:
         # [X * page_size] -> [X * page_size, ..., X * page_size + page_size - 1]
         offsets = torch.arange(self.page_size, device=self.device, dtype=torch.int32)
         return (pages.unsqueeze(1) + offsets).flatten()
+
+    def prefix_metrics_snapshot(self) -> dict[str, Any]:
+        size_info = self.prefix_cache.size_info
+        retained_tokens = size_info.total_size
+        snapshot = self.metrics.snapshot(self.page_size)
+        snapshot.update(
+            {
+                "retained_prefix_tokens": retained_tokens,
+                "retained_prefix_pages": retained_tokens // self.page_size,
+                "evictable_prefix_tokens": size_info.evictable_size,
+                "protected_prefix_tokens": size_info.protected_size,
+                "evictable_prefix_pages": size_info.evictable_size // self.page_size,
+                "protected_prefix_pages": size_info.protected_size // self.page_size,
+            }
+        )
+        retention_estimator = getattr(self.kv_cache, "estimate_prefix_retention", None)
+        if callable(retention_estimator):
+            snapshot["dsv4_retention"] = retention_estimator(retained_tokens, self.page_size)
+        return snapshot
+
+    def _record_prefix_match(self, cached_len: int, input_len: int) -> None:
+        self.metrics.match_requests += 1
+        safe_matchable_len = align_down(max(input_len - 1, 0), self.page_size)
+        if cached_len <= 0:
+            self.metrics.miss_requests += 1
+            return
+
+        self.metrics.hit_requests += 1
+        self.metrics.total_hit_tokens += cached_len
+        self.metrics.max_hit_tokens = max(self.metrics.max_hit_tokens, cached_len)
+        self.metrics.saved_prefill_tokens += cached_len
+        self.metrics.suffix_prefill_tokens_after_hit += max(input_len - cached_len, 0)
+        if safe_matchable_len > 0 and cached_len >= safe_matchable_len:
+            self.metrics.full_hit_requests += 1
+        else:
+            self.metrics.partial_hit_requests += 1
+
+    def _record_prefix_eviction(self, evicted: torch.Tensor) -> None:
+        evicted_tokens = int(evicted.numel())
+        if evicted_tokens == 0:
+            return
+        self.metrics.evictions += 1
+        self.metrics.evicted_tokens += evicted_tokens
 
 
 def _write_page_table(

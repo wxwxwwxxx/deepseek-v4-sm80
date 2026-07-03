@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import time
 import traceback
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List
@@ -144,6 +145,13 @@ class GraphRunner:
             "requested_bs": list(self.graph_bs_list),
             "captured_bs": [],
             "capture_greedy_sample": bool(capture_greedy_sample),
+            "capture_elapsed_s": None,
+            "capture_free_memory_before_bytes": None,
+            "capture_free_memory_after_bytes": None,
+            "capture_memory_delta_bytes": None,
+            "capture_peak_memory_allocated_bytes": None,
+            "capture_peak_memory_reserved_bytes": None,
+            "capture_by_batch_size": {},
             "replay_count": 0,
             "replay_count_by_batch_size": {},
             "replay_count_by_padded_size": {},
@@ -186,6 +194,9 @@ class GraphRunner:
 
         logger.info_rank0(f"Start capturing CUDA graphs with sizes: {self.graph_bs_list}")
         free_memory = get_free_memory(self.device)
+        capture_start_free_memory = free_memory
+        capture_start_s = time.perf_counter()
+        self.capture_status["capture_free_memory_before_bytes"] = int(free_memory)
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
 
         self.buffer = GraphCaptureBuffer.init(
@@ -221,6 +232,8 @@ class GraphRunner:
             free_memory = get_free_memory(self.device)
             pbar.desc = f"Capturing graphs: bs = {bs:<3} | avail_mem = {mem_GB(free_memory)}"
             pbar.refresh()
+            bs_start_free_memory = free_memory
+            bs_start_s = time.perf_counter()
             graph = torch.cuda.CUDAGraph()
             batch = Batch(reqs=[self.dummy_req] * bs, phase="decode")
             batch.padded_reqs = batch.reqs
@@ -248,8 +261,27 @@ class GraphRunner:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
             self.graph_map[bs] = graph
             self.capture_status["captured_bs"].append(bs)
+            torch.cuda.synchronize(self.device)
+            bs_end_free_memory = get_free_memory(self.device)
+            self.capture_status["capture_by_batch_size"][str(bs)] = {
+                "elapsed_s": time.perf_counter() - bs_start_s,
+                "free_memory_before_bytes": int(bs_start_free_memory),
+                "free_memory_after_bytes": int(bs_end_free_memory),
+                "memory_delta_bytes": int(bs_start_free_memory - bs_end_free_memory),
+            }
 
         free_memory = get_free_memory(self.device)
+        self.capture_status["capture_elapsed_s"] = time.perf_counter() - capture_start_s
+        self.capture_status["capture_free_memory_after_bytes"] = int(free_memory)
+        self.capture_status["capture_memory_delta_bytes"] = int(
+            capture_start_free_memory - free_memory
+        )
+        self.capture_status["capture_peak_memory_allocated_bytes"] = int(
+            torch.cuda.max_memory_allocated(self.device)
+        )
+        self.capture_status["capture_peak_memory_reserved_bytes"] = int(
+            torch.cuda.max_memory_reserved(self.device)
+        )
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:

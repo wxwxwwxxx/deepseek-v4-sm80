@@ -49,6 +49,10 @@ def test_text_smoke_defaults_match_target06_baseline_shape():
     assert args.variants is None
     assert args.max_tokens == 64
     assert args.fail_on_warning is False
+    assert args.enable_dsv4_radix_prefix_cache is False
+
+    enabled_args = smoke.parse_args(["--enable-dsv4-radix-prefix-cache"])
+    assert enabled_args.enable_dsv4_radix_prefix_cache is True
 
 
 def test_text_sanity_accepts_readable_text_and_flags_garbage():

@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
+import minisgl.core as core
 from minisgl.core import Req, SamplingParams
 from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
 from minisgl.kvcache.deepseek_v4_pool import DSV4_INDEXER_FP8_CACHE_ENV, DeepSeekV4KVCache
 from minisgl.models.config import ModelConfig, RotaryConfig
 from minisgl.scheduler.cache import CacheManager
 from minisgl.scheduler.utils import PendingReq
+
+
+@pytest.fixture(autouse=True)
+def reset_global_ctx():
+    old_ctx = core._GLOBAL_CTX
+    core._GLOBAL_CTX = None
+    yield
+    core._GLOBAL_CTX = old_ctx
 
 
 def _tiny_dsv4_config(compress_ratios: list[int]) -> ModelConfig:
@@ -68,20 +78,38 @@ def _make_dsv4_pool(
     return pool
 
 
-def _make_cache_manager(pool: DeepSeekV4KVCache, num_pages: int, page_size: int) -> CacheManager:
-    page_table = torch.empty((2, num_pages * page_size), dtype=torch.int32)
-    return CacheManager(num_pages, page_size, page_table, type="naive", kv_cache=pool)
+def _make_cache_manager(
+    pool: DeepSeekV4KVCache,
+    num_pages: int,
+    page_size: int,
+    *,
+    cache_type: str = "naive",
+) -> CacheManager:
+    page_table = torch.empty((4, num_pages * page_size), dtype=torch.int32)
+    if cache_type == "radix":
+        ctx = core.Context(page_size=page_size)
+        ctx.page_table = page_table
+        ctx.kv_cache = pool
+        core.set_global_ctx(ctx)
+    return CacheManager(num_pages, page_size, page_table, type=cache_type, kv_cache=pool)
 
 
 def _allocate_req(cm: CacheManager, uid: int, input_len: int) -> Req:
     input_ids = torch.arange(input_len, dtype=torch.int32) + uid * 100
+    return _allocate_req_with_ids(cm, uid, input_ids)
+
+
+def _allocate_req_with_ids(cm: CacheManager, uid: int, input_ids: torch.Tensor) -> Req:
     sampling_params = SamplingParams(max_tokens=1)
     pending = PendingReq(uid=uid, input_ids=input_ids, sampling_params=sampling_params)
     handle = cm.match_req(pending).cuda_handle
     cm.lock(handle)
+    table_idx = uid % 4
+    if handle.cached_len > 0:
+        cm.page_table[table_idx, : handle.cached_len].copy_(handle.get_matched_indices())
     req = Req(
         input_ids=input_ids,
-        table_idx=uid % 2,
+        table_idx=table_idx,
         cached_len=handle.cached_len,
         output_len=1,
         uid=uid,
@@ -95,6 +123,24 @@ def _allocate_req(cm: CacheManager, uid: int, input_len: int) -> Req:
 def _finish_req(cm: CacheManager, req: Req) -> None:
     req.cached_len = req.device_len
     cm.cache_req(req, finished=True)
+
+
+def _cache_finished_prompt(cm: CacheManager, uid: int, input_ids: torch.Tensor) -> Req:
+    req = _allocate_req_with_ids(cm, uid, input_ids)
+    _finish_req(cm, req)
+    cm.check_integrity()
+    return req
+
+
+def _evict_all_prefix(cm: CacheManager, pool: DeepSeekV4KVCache, page_size: int) -> None:
+    size = cm.prefix_cache.size_info.evictable_size
+    if size == 0:
+        return
+    evicted = cm.prefix_cache.evict(size)
+    cm._record_prefix_eviction(evicted)
+    pool.on_token_indices_freed(evicted, page_size)
+    cm.free_slots = torch.cat([cm.free_slots, evicted[::page_size]])
+    cm.check_integrity()
 
 
 def test_deepseek_v4_pool_factory_defaults_to_bf16_and_maps_layers():
@@ -225,3 +271,100 @@ def test_deepseek_v4_compressed_location_mapping_uses_full_token_namespace():
         pool.compressed_locs_from_full_locs(full_locs, 128, positions),
         torch.tensor([0, 1]),
     )
+
+
+def test_deepseek_v4_radix_prefix_cache_tracks_full_partial_miss_and_components():
+    page_size = 128
+    num_pages = 8
+    pool = _make_dsv4_pool([0, 4, 128], num_pages=num_pages, page_size=page_size)
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    base = torch.arange(450, dtype=torch.int32)
+    _cache_finished_prompt(cm, 0, base)
+    assert cm.prefix_metrics_snapshot()["retained_prefix_tokens"] == 384
+
+    shared_two_pages = torch.cat(
+        [base[: 2 * page_size], torch.arange(450 - 2 * page_size, dtype=torch.int32) + 10_000]
+    )
+    _cache_finished_prompt(cm, 1, shared_two_pages)
+
+    repeat_base = _cache_finished_prompt(cm, 2, base)
+    assert repeat_base.cache_handle.cached_len == 384
+
+    miss_ids = torch.arange(260, dtype=torch.int32) + 20_000
+    miss_handle = cm.match_req(
+        PendingReq(3, miss_ids, SamplingParams(max_tokens=1))
+    ).cuda_handle
+    assert miss_handle.cached_len == 0
+
+    snapshot = cm.prefix_metrics_snapshot()
+    assert snapshot["hit_requests"] >= 2
+    assert snapshot["partial_hit_requests"] >= 1
+    assert snapshot["full_hit_requests"] >= 1
+    assert snapshot["miss_requests"] >= 2
+    assert snapshot["saved_prefill_tokens"] >= 640
+    assert snapshot["retained_prefix_pages"] == 4
+    assert snapshot["dsv4_retention"]["full_slots"] == 512
+    assert snapshot["dsv4_retention"]["c4_slots"] == 128
+    assert snapshot["dsv4_retention"]["c128_slots"] == 4
+    assert snapshot["dsv4_retention"]["c4_indexer_slots"] == 128
+    assert snapshot["dsv4_retention"]["page_size_c128_aligned"]
+    assert pool.allocation_counts.full_slots == 512
+
+
+def test_deepseek_v4_radix_prefix_swa_window_128_boundary_is_page_safe():
+    page_size = 128
+    num_pages = 4
+    pool = _make_dsv4_pool([0, 4, 128], num_pages=num_pages, page_size=page_size)
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    prompt_at_boundary = torch.arange(129, dtype=torch.int32)
+    _cache_finished_prompt(cm, 0, prompt_at_boundary)
+
+    below = torch.arange(127, dtype=torch.int32)
+    below_handle = cm.match_req(
+        PendingReq(1, below, SamplingParams(max_tokens=1))
+    ).cuda_handle
+    assert below_handle.cached_len == 0
+
+    at_handle = cm.match_req(
+        PendingReq(2, prompt_at_boundary, SamplingParams(max_tokens=1))
+    ).cuda_handle
+    assert at_handle.cached_len == 128
+    cm.lock(at_handle)
+    cm.unlock(at_handle)
+
+    above = torch.arange(130, dtype=torch.int32)
+    above_handle = cm.match_req(
+        PendingReq(3, above, SamplingParams(max_tokens=1))
+    ).cuda_handle
+    assert above_handle.cached_len == 128
+    cm.lock(above_handle)
+    cm.unlock(above_handle)
+
+    snapshot = cm.prefix_metrics_snapshot()
+    assert snapshot["dsv4_retention"]["c4_slots"] == 32
+    assert snapshot["dsv4_retention"]["c128_slots"] == 1
+    assert snapshot["dsv4_retention"]["c4_state_slots"] == pool.C4_STATE_RING_SIZE
+    assert snapshot["dsv4_retention"]["c128_state_slots"] == pool.C128_STATE_RING_SIZE
+
+
+def test_deepseek_v4_radix_prefix_repeated_hit_evict_cycle_has_no_leak():
+    page_size = 128
+    num_pages = 4
+    pool = _make_dsv4_pool([4, 128, 0], num_pages=num_pages, page_size=page_size)
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    prompt = torch.arange(260, dtype=torch.int32)
+    for cycle in range(3):
+        _cache_finished_prompt(cm, cycle * 2, prompt + cycle * 10_000)
+        hit_req = _cache_finished_prompt(cm, cycle * 2 + 1, prompt + cycle * 10_000)
+        assert hit_req.cache_handle.cached_len == 256
+        assert pool.allocation_counts.full_slots == 256
+        _evict_all_prefix(cm, pool, page_size)
+        assert cm.prefix_cache.size_info.total_size == 0
+        pool.assert_no_leak()
+
+    snapshot = cm.prefix_metrics_snapshot()
+    assert snapshot["evictions"] == 3
+    assert snapshot["evicted_tokens"] == 3 * 2 * page_size

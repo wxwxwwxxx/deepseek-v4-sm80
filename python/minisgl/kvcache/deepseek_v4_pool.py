@@ -480,6 +480,98 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         if counts.any_allocated:
             raise RuntimeError(f"DSV4 KV cache slot leak: {counts}")
 
+    def estimate_prefix_retention(
+        self,
+        retained_full_tokens: int,
+        page_size: int | None = None,
+    ) -> dict[str, int | bool]:
+        """Estimate DSV4 component residency for retained prefix pages.
+
+        The scheduler/radix cache owns full-token pages. DSV4 compressed and
+        indexer slots are derived from those full-token pages, so metrics can
+        report component residency without introducing a second owner path.
+        """
+
+        page_size = self._page_size if page_size is None else int(page_size)
+        retained_full_tokens = int(retained_full_tokens)
+        retained_pages = div_ceil(retained_full_tokens, page_size) if retained_full_tokens else 0
+        c4_slots = retained_pages * div_ceil(page_size, 4) if self._c4_layer_count else 0
+        c128_slots = retained_pages * div_ceil(page_size, 128) if self._c128_layer_count else 0
+        c4_indexer_slots = c4_slots if self._c4_layer_count else 0
+        c4_state_slots = retained_pages * self.C4_STATE_RING_SIZE if self._c4_layer_count else 0
+        c128_state_slots = (
+            retained_pages * self.C128_STATE_RING_SIZE if self._c128_layer_count else 0
+        )
+        c4_indexer_state_slots = c4_state_slots if self._c4_layer_count else 0
+
+        dtype_size = self._dtype.itemsize
+        state_dtype_size = self._policy.compress_state_dtype.itemsize
+        swa_bytes = self._num_layers * retained_full_tokens * self._head_dim * dtype_size
+        c4_bytes = self._c4_layer_count * c4_slots * self._head_dim * dtype_size
+        c128_bytes = self._c128_layer_count * c128_slots * self._head_dim * dtype_size
+        c4_indexer_bytes = (
+            self._c4_layer_count * c4_indexer_slots * self._index_head_dim * dtype_size
+        )
+        c4_indexer_fp8_bytes = (
+            self._c4_layer_count * c4_indexer_slots * (self._index_head_dim + 4)
+            if self._use_indexer_fp8_cache
+            else 0
+        )
+        c4_state_bytes = (
+            self._c4_layer_count
+            * retained_pages
+            * self.C4_STATE_RING_SIZE
+            * 4
+            * self._head_dim
+            * state_dtype_size
+        )
+        c4_indexer_state_bytes = (
+            self._c4_layer_count
+            * retained_pages
+            * self.C4_STATE_RING_SIZE
+            * 4
+            * self._index_head_dim
+            * state_dtype_size
+        )
+        c128_state_bytes = (
+            self._c128_layer_count
+            * retained_pages
+            * self.C128_STATE_RING_SIZE
+            * 2
+            * self._head_dim
+            * state_dtype_size
+        )
+        retained_memory_bytes = (
+            swa_bytes
+            + c4_bytes
+            + c128_bytes
+            + c4_indexer_bytes
+            + c4_indexer_fp8_bytes
+            + c4_state_bytes
+            + c4_indexer_state_bytes
+            + c128_state_bytes
+        )
+        return {
+            "retained_pages": retained_pages,
+            "full_slots": retained_full_tokens,
+            "c4_slots": c4_slots,
+            "c128_slots": c128_slots,
+            "c4_indexer_slots": c4_indexer_slots,
+            "c4_state_slots": c4_state_slots,
+            "c128_state_slots": c128_state_slots,
+            "c4_indexer_state_slots": c4_indexer_state_slots,
+            "swa_bytes": swa_bytes,
+            "c4_bytes": c4_bytes,
+            "c128_bytes": c128_bytes,
+            "c4_indexer_bytes": c4_indexer_bytes,
+            "c4_indexer_fp8_bytes": c4_indexer_fp8_bytes,
+            "c4_state_bytes": c4_state_bytes,
+            "c4_indexer_state_bytes": c4_indexer_state_bytes,
+            "c128_state_bytes": c128_state_bytes,
+            "retained_memory_bytes": retained_memory_bytes,
+            "page_size_c128_aligned": page_size % 128 == 0,
+        }
+
     def _expand_page_starts(self, page_starts: torch.Tensor, page_size: int) -> torch.Tensor:
         if page_starts.numel() == 0:
             return torch.empty(0, dtype=torch.long, device=self.device)

@@ -185,7 +185,44 @@ class RadixPrefixCache(BasePrefixCache):
         )
 
     def check_integrity(self) -> None:
-        pass
+        evictable_size = 0
+        protected_size = 0
+        stack: List[RadixTreeNode] = [self.root_node]
+        visited: set[int] = set()
+
+        while stack:
+            node = stack.pop()
+            if node.uuid in visited:
+                raise RuntimeError(f"Radix cache cycle detected at node {node.uuid}")
+            visited.add(node.uuid)
+            if node.is_root():
+                if node.ref_count <= 0:
+                    raise RuntimeError("Radix cache root must stay protected")
+            else:
+                if node.length != len(node.value):
+                    raise RuntimeError(
+                        f"Radix cache node {node.uuid} length mismatch: "
+                        f"length={node.length}, value={len(node.value)}"
+                    )
+                if node.ref_count < 0:
+                    raise RuntimeError(f"Radix cache node {node.uuid} has negative ref_count")
+                if node.ref_count == 0:
+                    evictable_size += node.length
+                else:
+                    protected_size += node.length
+            for child in node.children.values():
+                if child._parent is not node:
+                    raise RuntimeError(
+                        f"Radix cache child {child.uuid} has wrong parent for node {node.uuid}"
+                    )
+                stack.append(child)
+
+        if evictable_size != self.evictable_size or protected_size != self.protected_size:
+            raise RuntimeError(
+                "Radix cache size accounting mismatch: "
+                f"evictable={self.evictable_size}/{evictable_size}, "
+                f"protected={self.protected_size}/{protected_size}"
+            )
 
     def _collect_leave_nodes_for_evict(self) -> List[RadixTreeNode]:
         nodes: List[RadixTreeNode] = [self.root_node]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import importlib
 import importlib.metadata
@@ -81,18 +82,25 @@ class Scenario:
     warmup_repeats: int = 1
     shared_prefix_len: int = 0
     suffix_len: int = 0
+    total_requests: int = 0
+    wave_size: int = 0
+    prompt_len_cycle: tuple[int, ...] = ()
+    decode_len_cycle: tuple[int, ...] = ()
 
     @property
     def max_input_len(self) -> int:
-        if self.kind == "shared_prefix":
+        if self.kind in {"shared_prefix", "shared_prefix_reuse"}:
             return self.shared_prefix_len + self.suffix_len
+        if self.prompt_len_cycle:
+            return max(self.prompt_len_cycle)
         if self.kind == "mixed_prefill_decode":
             return self.prompt_len
         return self.prompt_len
 
     @property
     def max_seq_len(self) -> int:
-        return self.max_input_len + self.decode_len
+        decode_len = max(self.decode_len_cycle) if self.decode_len_cycle else self.decode_len
+        return self.max_input_len + decode_len
 
 
 @dataclass(frozen=True)
@@ -150,6 +158,76 @@ DEFAULT_SCENARIOS: tuple[Scenario, ...] = (
         shared_prefix_len=1024,
         suffix_len=64,
         description="Repeated shared prompt with DeepSeek V4 radix prefix cache disabled.",
+    ),
+    Scenario(
+        name="shared_prompt_reuse_bs8",
+        kind="shared_prefix_reuse",
+        batch_size=8,
+        prompt_len=1088,
+        decode_len=16,
+        shared_prefix_len=1024,
+        suffix_len=64,
+        description=(
+            "Sequential shared-prefix reuse: one warm request fills the prefix cache, "
+            "then the remaining requests reuse the shared prefix."
+        ),
+    ),
+)
+
+
+TARGET08_SCENARIOS: tuple[Scenario, ...] = (
+    Scenario(
+        name="historical_4096_1024_bs4",
+        kind="random",
+        batch_size=4,
+        prompt_len=4096,
+        decode_len=1024,
+        repeats=1,
+        warmup_repeats=0,
+        description="TARGET07 historical fixed benchmark: prompt 4096, decode 1024, batch 4.",
+    ),
+    Scenario(
+        name="historical_4096_128_bs4",
+        kind="random",
+        batch_size=4,
+        prompt_len=4096,
+        decode_len=128,
+        repeats=1,
+        warmup_repeats=0,
+        description="TARGET07 historical fixed benchmark: prompt 4096, decode 128, batch 4.",
+    ),
+    Scenario(
+        name="decode_ladder_bs16",
+        kind="decode_ladder",
+        batch_size=16,
+        prompt_len=128,
+        decode_len=64,
+        repeats=1,
+        warmup_repeats=0,
+        decode_len_cycle=(16, 16, 16, 16, 16, 16, 16, 16, 24, 24, 24, 24, 32, 32, 48, 64),
+        description=(
+            "Single-wave decode ladder. Sixteen requests start together and mixed "
+            "output lengths naturally step active decode batch sizes through "
+            "16, 8, 4, 2, and 1."
+        ),
+    ),
+    Scenario(
+        name="serving_mixed_112req_wave16",
+        kind="serving_mixed",
+        batch_size=16,
+        prompt_len=128,
+        decode_len=64,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=112,
+        wave_size=16,
+        prompt_len_cycle=(64, 96, 128, 160, 192, 224, 256, 128),
+        decode_len_cycle=(16, 16, 16, 16, 16, 16, 16, 16, 24, 24, 24, 24, 32, 32, 48, 64),
+        description=(
+            "Offline serving-style substitute: 112 total requests issued as seven "
+            "same-process waves of 16, with mixed prompt and output lengths. "
+            "The current offline scheduler does not model timed arrivals or RPS."
+        ),
     ),
 )
 
@@ -1039,6 +1117,9 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
 )
 
 
+ALL_SCENARIOS: tuple[Scenario, ...] = (*DEFAULT_SCENARIOS, *TARGET08_SCENARIOS)
+
+
 ALL_VARIANTS: tuple[Variant, ...] = (*DEFAULT_VARIANTS, *RUNTIME_VARIANTS)
 
 
@@ -1128,7 +1209,7 @@ BOTTLENECK_COUNTER_GROUPS: dict[str, tuple[str, ...]] = {
 
 
 def _scenario_map() -> dict[str, Scenario]:
-    return {scenario.name: scenario for scenario in DEFAULT_SCENARIOS}
+    return {scenario.name: scenario for scenario in ALL_SCENARIOS}
 
 
 def _variant_map() -> dict[str, Variant]:
@@ -1288,7 +1369,7 @@ def build_workload(
     prompts: list[list[int]] = []
     output_lens: list[int] = []
 
-    if scenario.kind == "shared_prefix":
+    if scenario.kind in {"shared_prefix", "shared_prefix_reuse"}:
         prefix = _random_tokens(
             rng,
             scenario.shared_prefix_len,
@@ -1320,6 +1401,22 @@ def build_workload(
                 )
             )
             output_lens.append(max(1, decode_len))
+    elif scenario.kind in {"decode_ladder", "serving_mixed"}:
+        request_count = scenario.total_requests or scenario.batch_size
+        prompt_cycle = scenario.prompt_len_cycle or (scenario.prompt_len,)
+        decode_cycle = scenario.decode_len_cycle or (scenario.decode_len,)
+        for idx in range(request_count):
+            prompt_len = int(prompt_cycle[idx % len(prompt_cycle)])
+            output_len = int(decode_cycle[idx % len(decode_cycle)])
+            prompts.append(
+                _random_tokens(
+                    rng,
+                    prompt_len,
+                    vocab_size,
+                    token_id_range=token_id_range,
+                )
+            )
+            output_lens.append(max(1, output_len))
     else:
         for _ in range(scenario.batch_size):
             prompts.append(
@@ -1456,6 +1553,9 @@ def make_benchmark_llm_class():
             enqueue_range_name = (
                 f"batch_forward_enqueue:{batch.phase}:" f"bs{batch.size}:padded{batch.padded_size}"
             )
+            graph_before = copy.deepcopy(
+                getattr(self.engine.graph_runner, "capture_status", {})
+            )
             torch.cuda.synchronize(self.device)
             with torch.cuda.nvtx.range(range_name):
                 tic = time.perf_counter()
@@ -1465,12 +1565,23 @@ def make_benchmark_llm_class():
                 enqueue_toc = time.perf_counter()
                 torch.cuda.synchronize(self.device)
                 toc = time.perf_counter()
+            graph_after = getattr(self.engine.graph_runner, "capture_status", {})
             info = self._bench_batch_info.pop(batch_id, {})
+            replay_delta = int(graph_after.get("replay_count") or 0) - int(
+                graph_before.get("replay_count") or 0
+            )
+            eager_delta = int(graph_after.get("eager_decode_count") or 0) - int(
+                graph_before.get("eager_decode_count") or 0
+            )
             info.update(
                 {
                     "prepare_s": self._bench_prepare_s.pop(batch_id, 0.0),
                     "forward_s": toc - tic,
                     "forward_enqueue_s": enqueue_toc - enqueue_tic,
+                    "graph_replay": bool(batch.is_decode and replay_delta > 0),
+                    "graph_eager": bool(batch.is_decode and eager_delta > 0),
+                    "graph_replay_delta": replay_delta,
+                    "graph_eager_delta": eager_delta,
                 }
             )
             self.bench_batch_trace.append(info)
@@ -1783,6 +1894,145 @@ def _schedule_summary(repeats: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _snapshot_graph_status(llm) -> dict[str, Any]:
+    return copy.deepcopy(getattr(llm.engine.graph_runner, "capture_status", {}))
+
+
+def _counter_delta(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    key: str,
+) -> int:
+    return int(after.get(key) or 0) - int(before.get(key) or 0)
+
+
+def _dict_counter_delta(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    key: str,
+) -> dict[str, int]:
+    before_counter = before.get(key, {}) or {}
+    after_counter = after.get(key, {}) or {}
+    keys = set(before_counter) | set(after_counter)
+    delta: dict[str, int] = {}
+    for item_key in keys:
+        value = int(after_counter.get(item_key, 0)) - int(before_counter.get(item_key, 0))
+        if value:
+            delta[str(item_key)] = value
+    return dict(sorted(delta.items(), key=lambda item: int(item[0])))
+
+
+def _graph_status_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    status = copy.deepcopy(after)
+    for key in (
+        "replay_count",
+        "greedy_sample_replay_count",
+        "replay_input_copy_bytes",
+        "eager_decode_count",
+    ):
+        status[key] = _counter_delta(before, after, key)
+    for key in (
+        "replay_count_by_batch_size",
+        "replay_count_by_padded_size",
+        "greedy_sample_replay_count_by_batch_size",
+        "eager_decode_count_by_batch_size",
+    ):
+        status[key] = _dict_counter_delta(before, after, key)
+    return status
+
+
+def _decode_row_used_replay(row: dict[str, Any], graph_status: dict[str, Any]) -> bool:
+    if "graph_replay" in row:
+        return bool(row.get("graph_replay"))
+    captured = {int(value) for value in graph_status.get("captured_bs", [])}
+    return bool(graph_status.get("enabled")) and int(row.get("padded_size", 0)) in captured
+
+
+def _bucket_coverage_table(
+    repeats: Sequence[dict[str, Any]],
+    graph_status: dict[str, Any],
+) -> list[dict[str, Any]]:
+    buckets: dict[int, dict[str, Any]] = {}
+    total_decode_wall_s = 0.0
+    for repeat in repeats:
+        for row in repeat.get("schedule_trace", []):
+            if row.get("phase") != "decode":
+                continue
+            batch_size = int(row.get("batch_size", 0))
+            if batch_size <= 0:
+                continue
+            wall_s = float(row.get("forward_s") or 0.0)
+            tokens = int(row.get("decode_tokens") or batch_size)
+            total_decode_wall_s += wall_s
+            bucket = buckets.setdefault(
+                batch_size,
+                {
+                    "actual_decode_bs": batch_size,
+                    "replay_count": 0,
+                    "eager_count": 0,
+                    "tokens": 0,
+                    "wall_s": 0.0,
+                    "padded_size_counts": {},
+                },
+            )
+            replay = _decode_row_used_replay(row, graph_status)
+            eager = bool(row.get("graph_eager")) if "graph_eager" in row else not replay
+            if replay:
+                bucket["replay_count"] += 1
+            if eager:
+                bucket["eager_count"] += 1
+            bucket["tokens"] += tokens
+            bucket["wall_s"] += wall_s
+            padded_key = str(int(row.get("padded_size", batch_size)))
+            padded_counts = bucket["padded_size_counts"]
+            padded_counts[padded_key] = int(padded_counts.get(padded_key, 0)) + 1
+
+    replay_by_bs = graph_status.get("replay_count_by_batch_size", {}) or {}
+    eager_by_bs = graph_status.get("eager_decode_count_by_batch_size", {}) or {}
+    for key, value in replay_by_bs.items():
+        batch_size = int(key)
+        bucket = buckets.setdefault(
+            batch_size,
+            {
+                "actual_decode_bs": batch_size,
+                "replay_count": 0,
+                "eager_count": 0,
+                "tokens": 0,
+                "wall_s": 0.0,
+                "padded_size_counts": {},
+            },
+        )
+        bucket["replay_count"] = int(value)
+    for key, value in eager_by_bs.items():
+        batch_size = int(key)
+        bucket = buckets.setdefault(
+            batch_size,
+            {
+                "actual_decode_bs": batch_size,
+                "replay_count": 0,
+                "eager_count": 0,
+                "tokens": 0,
+                "wall_s": 0.0,
+                "padded_size_counts": {},
+            },
+        )
+        bucket["eager_count"] = int(value)
+
+    rows = []
+    for batch_size, bucket in sorted(buckets.items()):
+        wall_s = float(bucket["wall_s"])
+        rows.append(
+            {
+                **bucket,
+                "wall_s": wall_s,
+                "wall_share": None
+                if total_decode_wall_s <= 0
+                else wall_s / total_decode_wall_s,
+            }
+        )
+    return rows
+
+
 def _rank_memory_report(torch, llm) -> dict[str, int]:
     return {
         "memory_allocated_bytes": int(torch.cuda.memory_allocated(llm.device)),
@@ -1828,15 +2078,37 @@ def _run_one_repeat(
     prompt_tokens = int(sum(len(prompt) for prompt in prompts))
     torch.cuda.synchronize(llm.device)
     torch.cuda.reset_peak_memory_stats(llm.device)
+    prefix_metrics_before = llm.cache_manager.prefix_metrics_snapshot()
     nvtx_context = torch.cuda.nvtx.range(nvtx_name) if nvtx_name else contextlib.nullcontext()
+    outputs = []
+    trace: list[dict[str, Any]] = []
+    request_metrics: list[dict[str, Any]] = []
     with nvtx_context:
         tic = time.perf_counter()
-        outputs = llm.generate(prompts, sampling_params)
+        if scenario.kind == "shared_prefix_reuse" and len(prompts) > 1:
+            generation_parts = (
+                (prompts[:1], sampling_params[:1]),
+                (prompts[1:], sampling_params[1:]),
+            )
+        elif scenario.kind == "serving_mixed" and scenario.wave_size > 0:
+            generation_parts = tuple(
+                (prompts[start : start + scenario.wave_size],
+                 sampling_params[start : start + scenario.wave_size])
+                for start in range(0, len(prompts), scenario.wave_size)
+            )
+        else:
+            generation_parts = ((prompts, sampling_params),)
+        for part_prompts, part_sampling_params in generation_parts:
+            if not part_prompts:
+                continue
+            part_outputs = llm.generate(part_prompts, part_sampling_params)
+            outputs.extend(part_outputs)
+            trace.extend(llm.bench_batch_trace)
+            request_metrics.extend(llm.request_metrics())
         torch.cuda.synchronize(llm.device)
         elapsed_s = time.perf_counter() - tic
+    prefix_metrics_after = llm.cache_manager.prefix_metrics_snapshot()
     output_lens = [len(output["token_ids"]) for output in outputs]
-    trace = list(llm.bench_batch_trace)
-    request_metrics = llm.request_metrics()
     return {
         "elapsed_s": elapsed_s,
         "prompt_tokens": prompt_tokens,
@@ -1846,6 +2118,10 @@ def _run_one_repeat(
         "sample_output_token_ids": [output["token_ids"][:16] for output in outputs[:2]],
         "requests": request_metrics,
         "schedule_trace": trace,
+        "prefix_cache_metrics": prefix_metrics_after,
+        "prefix_cache_metrics_delta": _prefix_metrics_delta(
+            prefix_metrics_before, prefix_metrics_after
+        ),
         "phase_totals": {
             "prefill_forward_s": _sum_phase(trace, "prefill", "forward_s"),
             "decode_forward_s": _sum_phase(trace, "decode", "forward_s"),
@@ -1858,6 +2134,17 @@ def _run_one_repeat(
         },
         "memory": _rank_memory_report(torch, llm),
     }
+
+
+def _prefix_metrics_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    delta: dict[str, Any] = {}
+    for key, value in after.items():
+        old_value = before.get(key)
+        if isinstance(value, bool) or isinstance(old_value, bool):
+            continue
+        if isinstance(value, (int, float)) and isinstance(old_value, (int, float)):
+            delta[key] = value - old_value
+    return delta
 
 
 def _run_warmups(
@@ -2201,6 +2488,15 @@ def _aggregate_case_report(
         for repeat in payload["repeats"]
     )
     kv_cache_per_rank = [int(payload["kv_cache_memory_bytes"]) for payload in rank_payloads]
+    prefix_delta_rank0: dict[str, float | int] = {}
+    for repeat in repeats0:
+        for key, value in repeat.get("prefix_cache_metrics_delta", {}).items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                prefix_delta_rank0[key] = int(prefix_delta_rank0.get(key, 0)) + value
+            elif isinstance(value, float):
+                prefix_delta_rank0[key] = float(prefix_delta_rank0.get(key, 0.0)) + value
     metrics = {
         "elapsed_s": elapsed_s,
         "prompt_tokens": prompt_tokens,
@@ -2233,12 +2529,22 @@ def _aggregate_case_report(
         "kv_cache_memory_bytes_per_rank_max": max(kv_cache_per_rank),
         "kv_cache_memory_bytes_per_rank": kv_cache_per_rank,
         "kv_cache_memory_bytes_total_tp": int(sum(kv_cache_per_rank)),
+        "prefix_cache": {
+            "rank0_final": rank0.get("prefix_cache_metrics", {}),
+            "rank0_repeat_delta": prefix_delta_rank0,
+        },
     }
+    graph_status_case = (
+        base.get("config", {}).get("graph_runner_case")
+        or base.get("config", {}).get("graph_runner", {})
+        or {}
+    )
     report = {
         **base,
         "status": "pass",
         "metrics": metrics,
         "schedule_summary": _schedule_summary(repeats0),
+        "bucket_coverage": _bucket_coverage_table(repeats0, graph_status_case),
         "kernel_counters": kernel_counters,
         "communication_counters": communication_counters,
         "owner_timing": owner_timing,
@@ -2252,6 +2558,8 @@ def _aggregate_case_report(
 
 def _summary_row(report: dict[str, Any]) -> dict[str, Any]:
     metrics = report.get("metrics", {})
+    prefix_metrics = metrics.get("prefix_cache", {}).get("rank0_final", {})
+    config = report.get("config", {})
     return {
         "status": report.get("status"),
         "classification": report.get("classification"),
@@ -2263,6 +2571,10 @@ def _summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "prefill_tokens_per_s": metrics.get("prefill_tokens_per_s"),
         "decode_tokens_per_s": metrics.get("decode_tokens_per_s"),
         "end_to_end_output_tokens_per_s": metrics.get("end_to_end_output_tokens_per_s"),
+        "prefix_hit_rate": prefix_metrics.get("hit_rate"),
+        "prefix_saved_prefill_tokens": prefix_metrics.get("saved_prefill_tokens"),
+        "prefix_retained_pages": prefix_metrics.get("retained_prefix_pages"),
+        "prefix_evictions": prefix_metrics.get("evictions"),
         "peak_gpu_memory_allocated_bytes": metrics.get("peak_gpu_memory_allocated_bytes"),
         "kv_cache_memory_bytes_per_rank_max": metrics.get("kv_cache_memory_bytes_per_rank_max"),
         "fallback_wrapper_calls_total": report.get("kernel_counters", {}).get(
@@ -2274,7 +2586,9 @@ def _summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "communication_total_count": report.get("communication_counters", {}).get("total_count"),
         "communication_total_bytes": report.get("communication_counters", {}).get("total_bytes"),
         "communication_by_label": report.get("communication_counters", {}).get("by_label", {}),
-        "graph_runner": report.get("config", {}).get("graph_runner", {}),
+        "graph_runner": config.get("graph_runner_case") or config.get("graph_runner", {}),
+        "graph_runner_cumulative": config.get("graph_runner", {}),
+        "bucket_coverage": report.get("bucket_coverage", []),
         "schedule_summary": report.get("schedule_summary", {}),
         "bottleneck_labels": [row["label"] for row in report.get("bottlenecks", [])],
     }
@@ -2334,6 +2648,9 @@ def run_case(
     warmup = None
     repeats = []
     error: dict[str, Any] | None = None
+    graph_status_before = _snapshot_graph_status(llm)
+    graph_status_after_warmup = graph_status_before
+    graph_status_after = graph_status_before
     try:
         warmup = _run_warmups(
             llm=llm,
@@ -2344,6 +2661,7 @@ def run_case(
             token_id_range=args.token_id_range,
         )
         llm.sync_all_ranks()
+        graph_status_after_warmup = _snapshot_graph_status(llm)
         for repeat_idx in range(scenario.repeats):
             repeat_payload = _run_one_repeat(
                 llm=llm,
@@ -2357,12 +2675,16 @@ def run_case(
             repeat_payload["repeat_index"] = repeat_idx
             repeats.append(repeat_payload)
             llm.sync_all_ranks()
+        graph_status_after = _snapshot_graph_status(llm)
     except BaseException as exc:
+        graph_status_after = _snapshot_graph_status(llm)
         error = {
             "exception_type": type(exc).__name__,
             "exception_message": str(exc),
             "traceback": traceback.format_exc(limit=20),
         }
+    graph_status_case = _graph_status_delta(graph_status_after_warmup, graph_status_after)
+    graph_status_case_with_warmup = _graph_status_delta(graph_status_before, graph_status_after)
 
     kv_cache_memory_bytes = _estimate_kv_cache_bytes_from_config(
         llm,
@@ -2372,7 +2694,7 @@ def run_case(
     )
     replayed_padded_sizes = [
         int(size)
-        for size, count in getattr(llm.engine.graph_runner, "capture_status", {})
+        for size, count in graph_status_case
         .get("replay_count_by_padded_size", {})
         .items()
         if int(count) > 0
@@ -2387,6 +2709,12 @@ def run_case(
         "owner_timing": dsv4_owner_timing.snapshot(
             captured_shape_filter=replayed_padded_sizes,
         ),
+        "graph_runner_before_case": graph_status_before,
+        "graph_runner_after_warmup": graph_status_after_warmup,
+        "graph_runner_after_case": graph_status_after,
+        "graph_runner_case": graph_status_case,
+        "graph_runner_case_with_warmup": graph_status_case_with_warmup,
+        "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
         "memory_after_case": _rank_memory_report(torch, llm),
         "kv_cache_memory_bytes": kv_cache_memory_bytes,
         "runtime_environment": runtime_environment,
@@ -2412,7 +2740,7 @@ def run_case(
         "scenario": {
             **asdict(scenario),
             "scheduler_supports_interleaved_arrivals": False,
-            "radix_prefix_enabled": False,
+            "radix_prefix_enabled": bool(args.enable_dsv4_radix_prefix_cache),
         },
         "classification": run_classification(
             tp_size=tp_size,
@@ -2429,6 +2757,8 @@ def run_case(
             "cuda_graph_bs": runtime_options["cuda_graph_bs"],
             "cuda_graph_capture_greedy_sample": runtime_options["cuda_graph_capture_greedy_sample"],
             "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
+            "graph_runner_case": graph_status_case,
+            "graph_runner_case_with_warmup": graph_status_case_with_warmup,
             "page_size": args.page_size,
             "num_pages": args.num_pages,
             "memory_ratio": args.memory_ratio,
@@ -2437,7 +2767,8 @@ def run_case(
             "max_extend_tokens": args.max_extend_tokens,
             "max_running_req": args.max_running_req,
             "token_id_range": args.token_id_range,
-            "radix_prefix_enabled": False,
+            "radix_prefix_enabled": bool(args.enable_dsv4_radix_prefix_cache),
+            "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
         },
         "load_init": load_init,
@@ -2494,6 +2825,7 @@ def _init_llm(
         allow_dsv4_cuda_graph=runtime_options["allow_dsv4_cuda_graph"],
         cuda_graph_bs=runtime_options["cuda_graph_bs"],
         cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
+        enable_dsv4_radix_prefix_cache=args.enable_dsv4_radix_prefix_cache,
         **kwargs,
     )
     torch.cuda.synchronize(llm.device)
@@ -2584,6 +2916,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                         ],
                         "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
                         "page_size": args.page_size,
+                        "num_pages": args.num_pages,
+                        "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
+                        "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
                         "classification": run_classification(
                             tp_size=tp_size,
                             page_size=args.page_size,
@@ -2677,6 +3012,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Opt in to DeepSeek V4 decode CUDA graph capture. Defaults to sizes 1,2,4.",
     )
     parser.add_argument(
+        "--enable-dsv4-radix-prefix-cache",
+        action="store_true",
+        help="Explicitly opt in to DeepSeek V4 radix prefix cache.",
+    )
+    parser.add_argument(
         "--cuda-graph-bs",
         nargs="*",
         type=int,
@@ -2724,7 +3064,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     if args.list_scenarios:
-        for scenario in DEFAULT_SCENARIOS:
+        for scenario in ALL_SCENARIOS:
             print(f"{scenario.name}\t{scenario.kind}\t{scenario.description}")
         return
     if args.list_variants:

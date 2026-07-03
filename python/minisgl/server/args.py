@@ -211,6 +211,16 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
+        "--enable-dsv4-radix-prefix-cache",
+        action="store_true",
+        dest="enable_dsv4_radix_prefix_cache",
+        help=(
+            "Explicitly enable DeepSeek V4 radix prefix cache. Requires a "
+            "DSV4-safe 128-aligned page size such as --page-size 256."
+        ),
+    )
+
+    parser.add_argument(
         "--moe-backend",
         default=ServerArgs.moe_backend,
         choices=["auto"] + SUPPORTED_MOE_BACKENDS.supported_names(),

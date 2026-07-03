@@ -2,7 +2,7 @@
 
 ## Status
 
-Active next target.
+Phase 1 complete as an explicit opt-in path.  Continue with TARGET 08.06.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -17,6 +17,29 @@ Start with fixed or capped page counts such as `--num-pages 128`.  Do not treat
 automatic `memory_ratio=0.9` graph-mode capacity as a serving default yet:
 TARGET 07.79 showed that it can choose a very large KV pool and OOM during graph
 capture.
+
+Phase-1 artifact:
+
+```text
+performance_milestones/target08_radix_prefix_dsv4/
+```
+
+Phase-1 result:
+
+- added `--enable-dsv4-radix-prefix-cache`;
+- default DSV4 path still uses the previous naive cache unless explicitly
+  enabled;
+- requires `page_size % 128 == 0`, with target runs using page size `256`;
+- full-token pages remain the canonical owner;
+- C4/C128/C4-indexer/compression-state retention is derived from full-token
+  pages through the existing DSV4 KV pool refcount path;
+- correctness tests and TP8 text smoke passed;
+- shared-prefix A/B showed TTFT and prefill-forward reductions;
+- do not promote by default yet.
+
+The next work is no longer "implement the first prefix cache".  It is to make
+the feature serving-credible through graph-bucket policy, sustained stability,
+memory/capacity accounting, and post-prefix profiling.
 
 ## Goal
 
@@ -33,6 +56,33 @@ Primary value:
 - preserve decode graph replay and the promoted TARGET 07 path;
 - establish a DSV4-aware cache ownership model before future low-precision or
   capacity work.
+
+## TARGET 08 Subtarget Roadmap
+
+Run in this order:
+
+| Stage | Prompt | Status | Purpose |
+| --- | --- | --- | --- |
+| TARGET 08 phase 1 | this file + `performance_milestones/target08_radix_prefix_dsv4/` | complete opt-in | Implemented conservative page-aligned/full-page-owner DSV4 radix prefix cache. |
+| TARGET 08.05 | `prompts/TARGET_08.05_dsv4_sm80_serving_workload_cuda_graph_bucket_policy.md` | complete | Built serving workload suite and selected `[1,2,4,8,16]` as the smallest measured zero-eager bucket set. |
+| TARGET 08.06 | `prompts/TARGET_08.06_dsv4_sm80_cuda_graph_memory_attribution.md` | active next | Attribute the large CUDA graph capture memory delta before promotion testing. |
+| TARGET 08.10 | `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md` | planned | Use the 08.05 bucket policy plus 08.06 memory conclusion to test sustained prefix-cache serving stability and promotion readiness. |
+| TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | planned | Compute full-page-owner memory/capacity cost and decide whether 08.20 is worth doing. |
+| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | optional | If 08.18 says go, study SGLang-style independent SWA/component retention. |
+| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix/graph policy, then decide whether to move to TARGET 09 or TARGET 10. |
+
+Rationale:
+
+- TARGET 08.05 comes before TARGET 08.10 because promotion testing should not
+  be polluted by missing graph buckets, such as the phase-1 bs7 eager decode.
+- TARGET 08.06 comes before TARGET 08.10 because the selected `[1,2,4,8,16]`
+  graph policy has a large observed capture memory delta that must be explained
+  before a promotion gate can make a credible capacity decision.
+- TARGET 08.18 comes before TARGET 08.20 because independent SWA/component
+  retention is more complex and should only be implemented after a memory ledger
+  proves it is valuable.
+- TARGET 09 remains reserved for low-precision research.  Do not rename
+  SGLang-style SWA retention to TARGET 09.
 
 ## Required vLLM/SGLang Alignment
 
@@ -109,7 +159,7 @@ reconstruction around the prefix boundary, for example by recomputing the small
 ring/warmup state from cached tokens, instead of persisting every internal state
 object in the radix tree.
 
-## Plan
+## Phase-1 Plan Already Completed
 
 ### Phase 0: Source Parity And Design Note
 
@@ -187,6 +237,19 @@ Run a shared-prefix benchmark that includes:
 
 Do not expect single-token decode throughput to improve.  The target is prefill
 reuse and TTFT reduction on shared-prefix workloads.
+
+## Current Phase-1 Caveats
+
+- The implementation is intentionally conservative: retaining a prefix retains
+  full-token pages as canonical owner.  This is correct and simple but less
+  memory-efficient than SGLang-style independent SWA/component retention.
+- Runtime opt-in requires `page_size % 128 == 0`.  Keep this requirement unless
+  a later target proves a stronger safe hybrid-alignment rule from vLLM/SGLang.
+- The first shared-prefix benchmark used a second-stage batch size 7 while
+  graph capture covered `[1,2,4]`; this caused eager decode for bs7.  TARGET
+  08.05 must establish a serving graph bucket policy before 08.10 promotion
+  testing.
+- Automatic KV sizing is not yet a safe graph-mode serving default.
 
 ## Done Criteria
 

@@ -46,14 +46,19 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
     variants = bench._select_variants(args)
 
     assert args.page_size == 256
+    assert args.enable_dsv4_radix_prefix_cache is False
     assert [variant.name for variant in variants] == ["fallback", "v0_bf16", "v1_moe"]
     assert {scenario.name for scenario in scenarios} >= {
         "long_prefill_bs1",
         "batch_prefill_bs8",
         "decode_throughput_bs8",
         "shared_prompt_no_radix_bs8",
+        "shared_prompt_reuse_bs8",
     }
     assert bench.run_classification(tp_size=8, page_size=256, smoke=False) == "baseline"
+
+    enabled_args = bench.parse_args(["--enable-dsv4-radix-prefix-cache"])
+    assert enabled_args.enable_dsv4_radix_prefix_cache is True
 
 
 def test_smoke_or_page_size_one_is_not_reported_as_baseline():
@@ -613,20 +618,101 @@ def test_configure_variant_records_hc_graph_cleanup(monkeypatch):
 
 def test_shared_prefix_workload_repeats_prefix_and_disables_radix_in_scenario():
     bench = _load_module()
-    scenario = bench._scenario_map()["shared_prompt_no_radix_bs8"]
+    scenario_map = bench._scenario_map()
 
-    prompts, sampling_params = bench.build_workload(scenario, vocab_size=1000, seed=7)
+    for scenario_name in ("shared_prompt_no_radix_bs8", "shared_prompt_reuse_bs8"):
+        scenario = scenario_map[scenario_name]
+        prompts, sampling_params = bench.build_workload(scenario, vocab_size=1000, seed=7)
 
-    assert len(prompts) == scenario.batch_size
-    assert all(
-        len(prompt) == scenario.shared_prefix_len + scenario.suffix_len for prompt in prompts
-    )
-    assert all(
-        prompt[: scenario.shared_prefix_len] == prompts[0][: scenario.shared_prefix_len]
-        for prompt in prompts
-    )
-    assert all(param.max_tokens == scenario.decode_len for param in sampling_params)
-    assert scenario.kind == "shared_prefix"
+        assert len(prompts) == scenario.batch_size
+        assert all(
+            len(prompt) == scenario.shared_prefix_len + scenario.suffix_len
+            for prompt in prompts
+        )
+        assert all(
+            prompt[: scenario.shared_prefix_len] == prompts[0][: scenario.shared_prefix_len]
+            for prompt in prompts
+        )
+        assert all(param.max_tokens == scenario.decode_len for param in sampling_params)
+    assert scenario_map["shared_prompt_no_radix_bs8"].kind == "shared_prefix"
+    assert scenario_map["shared_prompt_reuse_bs8"].kind == "shared_prefix_reuse"
+
+
+def test_target08_serving_scenarios_are_selectable_without_changing_defaults():
+    bench = _load_module()
+
+    default_args = bench.parse_args([])
+    default_names = [scenario.name for scenario in bench._select_scenarios(default_args)]
+    assert "serving_mixed_112req_wave16" not in default_names
+
+    args = bench.parse_args(["--scenarios", "decode_ladder_bs16", "serving_mixed_112req_wave16"])
+    scenarios = bench._select_scenarios(args)
+    assert [scenario.name for scenario in scenarios] == [
+        "decode_ladder_bs16",
+        "serving_mixed_112req_wave16",
+    ]
+
+    serving = scenarios[1]
+    prompts, sampling_params = bench.build_workload(serving, vocab_size=1000, seed=11)
+    assert len(prompts) == 112
+    assert len(sampling_params) == 112
+    assert serving.batch_size == 16
+    assert serving.wave_size == 16
+    assert {param.max_tokens for param in sampling_params} == {16, 24, 32, 48, 64}
+    assert max(len(prompt) for prompt in prompts) == 256
+
+
+def test_bucket_coverage_table_counts_replay_eager_tokens_and_wall_share():
+    bench = _load_module()
+    repeats = [
+        {
+            "schedule_trace": [
+                {
+                    "phase": "decode",
+                    "batch_size": 7,
+                    "padded_size": 8,
+                    "decode_tokens": 7,
+                    "forward_s": 0.2,
+                    "graph_replay": True,
+                    "graph_eager": False,
+                },
+                {
+                    "phase": "decode",
+                    "batch_size": 16,
+                    "padded_size": 16,
+                    "decode_tokens": 16,
+                    "forward_s": 0.8,
+                    "graph_replay": False,
+                    "graph_eager": True,
+                },
+                {
+                    "phase": "prefill",
+                    "batch_size": 16,
+                    "padded_size": 16,
+                    "decode_tokens": 0,
+                    "forward_s": 1.0,
+                },
+            ]
+        }
+    ]
+    graph_status = {
+        "enabled": True,
+        "captured_bs": [8],
+        "replay_count_by_batch_size": {"7": 1},
+        "eager_decode_count_by_batch_size": {"16": 1},
+    }
+
+    table = bench._bucket_coverage_table(repeats, graph_status)
+    by_bs = {row["actual_decode_bs"]: row for row in table}
+
+    assert by_bs[7]["replay_count"] == 1
+    assert by_bs[7]["eager_count"] == 0
+    assert by_bs[7]["tokens"] == 7
+    assert by_bs[7]["wall_share"] == pytest.approx(0.2)
+    assert by_bs[16]["replay_count"] == 0
+    assert by_bs[16]["eager_count"] == 1
+    assert by_bs[16]["tokens"] == 16
+    assert by_bs[16]["wall_share"] == pytest.approx(0.8)
 
 
 def test_aggregate_case_report_has_required_schema_and_bottleneck_labels():
