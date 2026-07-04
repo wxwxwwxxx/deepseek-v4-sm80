@@ -542,6 +542,67 @@ def test_dsv4_component_loc_ownership_capture_replay_copies_direct_component_met
     assert backend.capture.indexer_metadata.page_table is capture.c4_indexer_page_table
 
 
+def test_dsv4_route_b_component_page_table_lifetime_cache_invalidates_lifecycle(
+    monkeypatch,
+):
+    cfg = _tiny_dsv4_config([4, 128])
+    page_size = 128
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0, 4 * page_size, 8 * page_size],
+        max_len=4 * page_size,
+        enable_component_loc_ownership=True,
+    )
+    page_starts = torch.arange(0, 12 * page_size, page_size, dtype=torch.int32)
+    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
+    backend = ctx.attn_backend
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE", "1")
+    monkeypatch.setenv("MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY", "1")
+
+    def cache_handle(row: int, cached_pages: int, node_uuid: int) -> SimpleNamespace:
+        prefix_len = cached_pages * page_size
+        handles = ctx.kv_cache.make_component_page_handles(
+            ctx.page_table[row, :prefix_len],
+            page_size,
+        )
+        return SimpleNamespace(
+            cached_len=prefix_len,
+            node=SimpleNamespace(uuid=node_uuid),
+            get_dsv4_component_pages=lambda handles=handles: handles,
+        )
+
+    def decode_c4_pages(req: Req) -> list[int]:
+        batch = _prepare_decode_batch([req])
+        backend.prepare_metadata(batch)
+        width = (req.device_len + page_size - 1) // page_size
+        meta = batch.attn_metadata.core_metadata
+        return meta.c4_page_table[0, :width].tolist()
+
+    req = _req(11, 0, 2 * page_size + 1, cached_len=2 * page_size)
+    req.cache_handle = cache_handle(0, 2, 100)
+    assert decode_c4_pages(req) == [0, 1, 2]
+    original_signature = backend._component_page_table_cache_signatures[0]
+
+    assert decode_c4_pages(req) == [0, 1, 2]
+    assert backend._component_page_table_cache_signatures[0] == original_signature
+
+    ctx.page_table[0].copy_(ctx.page_table[1])
+    reused_slot = _req(12, 0, 2 * page_size + 1, cached_len=2 * page_size)
+    reused_slot.cache_handle = cache_handle(0, 2, 200)
+    assert decode_c4_pages(reused_slot) == [4, 5, 6]
+
+    ctx.page_table[0].copy_(ctx.page_table[2])
+    moved_prefix = _req(12, 0, 2 * page_size + 1, cached_len=2 * page_size)
+    moved_prefix.cache_handle = cache_handle(0, 2, 201)
+    assert decode_c4_pages(moved_prefix) == [8, 9, 10]
+
+    grown_active_page = _req(12, 0, 3 * page_size + 1, cached_len=3 * page_size)
+    grown_active_page.cache_handle = cache_handle(0, 2, 201)
+    assert decode_c4_pages(grown_active_page) == [8, 9, 10, 11]
+
+
 def test_dsv4_component_loc_ownership_capture_locs_graph_hook_is_guarded(monkeypatch):
     cfg = _tiny_dsv4_config([4, 128])
     ctx = _install_context(

@@ -68,8 +68,9 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08.25 | `prompts/TARGET_08.25_dsv4_sm80_route_b_direct_graph_metadata_buffers.md` | completed keep experimental | Direct graph metadata buffers were safe, but large-wave gains were too small and full direct generation was not promotable. |
 | TARGET 08.26 | `prompts/TARGET_08.26_dsv4_sm80_route_b_remaining_gap_attribution_reset.md` | completed | Re-ranked the remaining Route B gap to decode-prepare component page-table/metadata lifetime overhead. |
 | TARGET 08.27 | `prompts/TARGET_08.27_dsv4_sm80_sglang_aligned_route_b_metadata_lifetime.md` | completed strong opt-in | Added SGLang-aligned Route B component page-table lifetime cache; serving mixed improved to `162.47` output tok/s. |
-| TARGET 08.28 | `prompts/TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md` | active next | Promotion gate for the 08.27 lifetime cache across verifier, prefix_multi, eviction pressure, decode controls, and graph replay. |
-| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned after 08.28 | Reprofile after prefix metadata-lifetime promotion decisions, then choose TARGET 09 low precision or TARGET 10 attention/communication. |
+| TARGET 08.28 | `prompts/TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md` | completed promote | Promoted the 08.27 lifetime cache after verifier/text/eviction/prefix_multi/decode-control gates. |
+| TARGET 08.29 | `prompts/TARGET_08.29_dsv4_sm80_route_b_lifetime_promotion_cleanup.md` | active next | Create one clean promoted Route B lifetime prefix preset before global post-prefix reprofile. |
+| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned after 08.29 | Reprofile after prefix metadata-lifetime promotion cleanup, then choose TARGET 09 low precision, TARGET 10 attention/communication, more TARGET 08 cache work, or serving hardening. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned after TARGET 08 | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | future optional | Attention, PyNCCL, communication overlap, and graph/runtime experiments if fresh profiles justify them. |
 
@@ -90,10 +91,10 @@ Post-07.78 stable retest:
 - eager decode `0`;
 - old serving baseline crossed: `114.07 output tok/s`.
 
-Decision from TARGET 07.79 through TARGET 08.27:
+Decision from TARGET 07.79 through TARGET 08.28:
 
 ```text
-continue with TARGET 08.28 DSV4 Route B lifetime cache promotion gate
+continue with TARGET 08.29 DSV4 Route B lifetime promotion cleanup
 ```
 
 Reason: DSV4 radix prefix cache works as an explicit opt-in, and Route B is now
@@ -107,12 +108,15 @@ across decode replay steps.  TARGET 08.27 addressed that owner with a
 SGLang-aligned request/table-slot keyed component page-table lifetime cache:
 `serving_mixed_112req_wave16` improved from `138.1281` to `162.4726` output
 tok/s, decode prepare dropped from `4.2067 s` to `1.1416 s`, and graph replay
-remained `441/0`.
+remained `441/0`.  TARGET 08.28 then promoted this path after verifier, text
+smoke, prefix_multi, eviction pressure, decode-control, and graph replay gates.
+`serving_mixed_112req_wave16` reached `163.7220` output tok/s with `441/0`
+replay.
 
-The next target should not invent a new metadata mechanism.  Gate the 08.27
-lifetime cache across verifier, prefix_multi, eviction pressure, decode
-controls, table-slot reuse, and graph replay.  If it passes, promote it to the
-preferred Route B opt-in bundle.  If it fails, split only small lifecycle fixes.
+The next target should not invent a new runtime mechanism.  Create one clean
+promoted Route B lifetime prefix preset, preserve verifier behavior, update
+docs/tests, and prepare TARGET 08.30 to run a global post-prefix bottleneck
+reset against that preset.
 
 ## Archive Policy
 
@@ -126,7 +130,7 @@ For new child threads, start from:
 
 1. `prompts/target.md`
 2. the active target prompt, currently
-   `prompts/TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md`
+   `prompts/TARGET_08.29_dsv4_sm80_route_b_lifetime_promotion_cleanup.md`
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache phase-1 context
 

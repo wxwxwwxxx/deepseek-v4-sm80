@@ -11,10 +11,10 @@ same-shape drift analysis, TARGET 08.20 fail-closed V1 design, TARGET
 final promotion gate rerun, TARGET 08.22.1 component mapping lifecycle fix, and
 TARGET 08.24 component-aware metadata deforest/copy-elision experiment, TARGET
 08.25 direct graph metadata buffer experiment, TARGET 08.26 remaining-gap
-attribution reset, and TARGET 08.27 SGLang-aligned Route B metadata lifetime
-cache are complete.  Continue with TARGET 08.28: a Route B lifetime-cache
-promotion gate across broader serving, verifier, graph replay, and eviction
-workloads.
+attribution reset, TARGET 08.27 SGLang-aligned Route B metadata lifetime cache,
+and TARGET 08.28 Route B lifetime-cache promotion gate are complete.  Continue
+with TARGET 08.29: a small promotion cleanup target that creates one clear
+promoted Route B lifetime preset before TARGET 08.30 post-prefix reprofile.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -100,8 +100,9 @@ Run in this order:
 | TARGET 08.25 | `prompts/TARGET_08.25_dsv4_sm80_route_b_direct_graph_metadata_buffers.md` | complete keep experimental | Generated SWA/C4/C128 metadata directly into graph buffers, but large-wave gains were too small and full direct generation regressed throughput. |
 | TARGET 08.26 | `prompts/TARGET_08.26_dsv4_sm80_route_b_remaining_gap_attribution_reset.md` | complete recommends SGLang-aligned metadata lifetime | Re-ranked Route B direct C4 remaining gap: decode prepare component page-table and stable metadata updates dominate; SWA-tail and forward attention/MoE/communication are not the next owner. |
 | TARGET 08.27 | `prompts/TARGET_08.27_dsv4_sm80_sglang_aligned_route_b_metadata_lifetime.md` | complete strong opt-in | Added SGLang-aligned Route B component page-table lifetime cache; `serving_mixed_112req_wave16` improved from `138.13` to `162.47` output tok/s and graph replay stayed `441/0`. |
-| TARGET 08.28 | `prompts/TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md` | active next | Gate the 08.27 lifetime cache across verifier, prefix_multi, eviction pressure, decode controls, and table-slot/component-row lifecycle before promotion. |
-| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after correctness and component-retention decisions, then decide whether to move to TARGET 09 or TARGET 10. |
+| TARGET 08.28 | `prompts/TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md` | complete promote | Promoted the lifetime cache: verifier/text/eviction/prefix_multi/decode controls passed; `serving_mixed` reached `163.72` output tok/s with `441/0` replay. |
+| TARGET 08.29 | `prompts/TARGET_08.29_dsv4_sm80_route_b_lifetime_promotion_cleanup.md` | active next | Create a clean promoted Route B lifetime prefix preset, preserve verifier behavior, update docs/tests, and prepare for 08.30. |
+| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned after 08.29 | Reprofile the promoted prefix path and decide whether the next evidence-based phase is TARGET 09, TARGET 10, more TARGET 08 cache work, or serving hardening. |
 
 Rationale:
 
@@ -161,11 +162,15 @@ Rationale:
   from-scratch dirty-row subsystem.  On `serving_mixed_112req_wave16`, Route B
   direct C4 improved from `138.1281` to `162.4726` output tok/s, decode prepare
   dropped from `4.2067 s` to `1.1416 s`, and graph replay stayed `441/0`.
-  TARGET 08.28 should now gate this opt-in across verifier, prefix_multi,
-  eviction pressure, decode controls, and table-slot/component-row lifecycle
-  before promotion.  TARGET 08.23 remains conditional and should be revisited
-  only if later workloads show SWA-tail retention or exact page-multiple
-  shortening is a real capacity or hit-rate bottleneck.
+  TARGET 08.28 gated this opt-in across verifier, prefix_multi, eviction
+  pressure, decode controls, and table-slot/component-row lifecycle, and reached
+  a `promote` decision.  `serving_mixed_112req_wave16` reached `163.7220`
+  output tok/s, verifier passed serving and eviction workloads, prefix_multi
+  recovered `49152` saved prefill tokens, and graph replay stayed zero-eager.
+  TARGET 08.29 should now clean up the promoted preset before TARGET 08.30
+  reprofiles the whole system.  TARGET 08.23 remains conditional and should be
+  revisited only if later workloads show SWA-tail retention or exact
+  page-multiple shortening is a real capacity or hit-rate bottleneck.
 - TARGET 09 remains reserved for low-precision research.  Do not rename
   SGLang-style SWA retention to TARGET 09.
 

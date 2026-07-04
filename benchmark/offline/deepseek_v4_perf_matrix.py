@@ -1468,6 +1468,11 @@ def _preserved_dsv4_sm80_env_names(dsv4_kernel) -> tuple[str, ...]:
             "DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV",
             "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES",
         ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE",
+            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY",
+        ),
     )
 
 

@@ -672,6 +672,50 @@ def test_configure_variant_records_route_b_metadata_lifetime(monkeypatch):
     assert "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS" not in result["active_dsv4_toggles"]
 
 
+def test_configure_variant_preserves_route_b_lifetime_verifier(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE = (
+            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY"
+        )
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS",
+            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE",
+            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS":
+                return False
+            return os.environ.get(name) in {"1", "true"}
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY", "1")
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()[
+            "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
+        ],
+    )
+
+    assert result["preserved_dsv4_sm80_env"] == {
+        "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY": "1"
+    }
+    assert (
+        result["raw_dsv4_sm80_env"][
+            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY"
+        ]
+        == "1"
+    )
+    assert (
+        "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY"
+        in result["active_dsv4_toggles"]
+    )
+
+
 def test_configure_variant_preserves_victory_disable_toggles(monkeypatch):
     bench = _load_module()
 
