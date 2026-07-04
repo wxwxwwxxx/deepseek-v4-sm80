@@ -1,0 +1,616 @@
+{
+  "classification": "GEMM shape numeric drift",
+  "continue_08_20": false,
+  "continue_08_20_reason": "q-path root cause is classified, but same-shape/identical decode logits are still not a clean oracle",
+  "git": {
+    "branch": "dsv4-sglang-based",
+    "rev": "0feddbf12f5a2997775692235f127e5bf6a9eb1c",
+    "status_short": "M performance_milestones/target08_exact_path_slot_page_invariance/scripts/run_dsv4_exact_path_invariance_probe.py\n M python/minisgl/attention/deepseek_v4.py\n M python/minisgl/engine/graph.py\n M python/minisgl/kernel/deepseek_v4.py\n M python/minisgl/models/deepseek_v4.py\n M tests/kernel/test_deepseek_v4_wrappers.py\n?? performance_milestones/target08_batched_attention_indexer_row_coupling/\n?? performance_milestones/target08_q_path_same_shape_same_input_invariance/\n?? tests/engine/test_graph_runner.py"
+  },
+  "microbench_worst": {
+    "active_q_norm_max": 0.0,
+    "active_vs_reference_max": 0.0625,
+    "fused_available": true,
+    "fused_q_kv_max": 0.0,
+    "fused_vs_reference_max": 0.0625,
+    "reference_max": 0.0
+  },
+  "output_dir": "performance_milestones/target08_q_path_same_shape_same_input_invariance/summaries/same_shape_eager",
+  "run_dir": "performance_milestones/target08_q_path_same_shape_same_input_invariance/raw/same_shape_eager",
+  "same_shape": {
+    "decode:layer0.attention_input": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "decode:layer0.final_attention_output": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": false,
+        "available": true,
+        "exact_equal": false,
+        "l2": 1.2007898092269897,
+        "max_abs": 0.078125,
+        "mean_abs": 0.014736153185367584,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "decode:layer0.q_after_q_norm_rope": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "decode:layer0.q_lora_after_norm": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "decode:layer0.q_wqb_output": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "decode:layer0.wqa_output": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "prefill:layer0.attention_input": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "prefill:layer0.final_attention_output": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": false,
+        "available": true,
+        "exact_equal": false,
+        "l2": 1.126671552658081,
+        "max_abs": 0.0625,
+        "mean_abs": 0.013861611485481262,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "prefill:layer0.q_after_q_norm_rope": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": false,
+        "available": true,
+        "exact_equal": false,
+        "l2": 0.471660852432251,
+        "max_abs": 0.03515625,
+        "mean_abs": 0.005334610119462013,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "prefill:layer0.q_lora_after_norm": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": false,
+        "l2": 0.0024332294706255198,
+        "max_abs": 0.00048828125,
+        "mean_abs": 2.4969514925032854e-05,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "prefill:layer0.q_wqb_output": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": false,
+        "l2": 0.01782093569636345,
+        "max_abs": 0.001953125,
+        "mean_abs": 0.0002034451754298061,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    },
+    "prefill:layer0.wqa_output": {
+      "identical_rows": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]"
+      },
+      "same_shape_filler": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altB_fillers[0]"
+      },
+      "same_shape_position": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": true,
+        "l2": 0.0,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "pair": "target_slot0_fixed_fillers[0] vs target_slot3_fixed_fillers[3]"
+      },
+      "shape_change": {
+        "allclose": true,
+        "available": true,
+        "exact_equal": false,
+        "l2": 0.004089246969670057,
+        "max_abs": 0.0009765625,
+        "mean_abs": 4.269380588084459e-05,
+        "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]"
+      }
+    }
+  },
+  "topk": {
+    "decode:identical_rows": {
+      "available": true,
+      "left_sampled": 322,
+      "left_top1": 322,
+      "left_top1_margin": 0.11642837524414062,
+      "left_top1_value": 15.340550422668457,
+      "max_abs": 0.9407691955566406,
+      "max_abs_can_close_top1_margin": true,
+      "mean_abs": 0.10797954350709915,
+      "pair": "identical_prompts_batch[0] vs identical_prompts_batch[2]",
+      "right_sampled": 603,
+      "right_top1": 603,
+      "right_top1_value": 15.428586959838867,
+      "sampled_equal": false,
+      "top10_equal": false,
+      "top1_equal": false
+    },
+    "decode:same_shape_filler": {
+      "available": true,
+      "left_sampled": 223,
+      "left_top1": 223,
+      "left_top1_margin": 0.156402587890625,
+      "left_top1_value": 15.5283203125,
+      "max_abs": 0.9765996932983398,
+      "max_abs_can_close_top1_margin": true,
+      "mean_abs": 0.12871716916561127,
+      "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altA_fillers[0]",
+      "right_sampled": 223,
+      "right_top1": 223,
+      "right_top1_value": 15.385037422180176,
+      "sampled_equal": true,
+      "top10_equal": false,
+      "top1_equal": true
+    },
+    "decode:same_shape_position": {
+      "available": true,
+      "left_sampled": 223,
+      "left_top1": 223,
+      "left_top1_margin": 0.156402587890625,
+      "left_top1_value": 15.5283203125,
+      "max_abs": 1.519674301147461,
+      "max_abs_can_close_top1_margin": true,
+      "mean_abs": 0.12961307168006897,
+      "pair": "target_slot0_fixed_fillers[0] vs target_slot1_fixed_fillers[1]",
+      "right_sampled": 603,
+      "right_top1": 603,
+      "right_top1_value": 15.429672241210938,
+      "sampled_equal": false,
+      "top10_equal": false,
+      "top1_equal": false
+    },
+    "decode:shape_change": {
+      "available": true,
+      "left_sampled": 223,
+      "left_top1": 223,
+      "left_top1_margin": 0.14983463287353516,
+      "left_top1_value": 15.512953758239746,
+      "max_abs": 0.7560462951660156,
+      "max_abs_can_close_top1_margin": true,
+      "mean_abs": 0.12302760034799576,
+      "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]",
+      "right_sampled": 223,
+      "right_top1": 223,
+      "right_top1_value": 15.5283203125,
+      "sampled_equal": true,
+      "top10_equal": false,
+      "top1_equal": true
+    },
+    "prefill:identical_rows": {
+      "available": true,
+      "left_sampled": 32,
+      "left_top1": 32,
+      "left_top1_margin": 1.0773448944091797,
+      "left_top1_value": 16.98574447631836,
+      "max_abs": 0.8879618644714355,
+      "max_abs_can_close_top1_margin": true,
+      "mean_abs": 0.13648119568824768,
+      "pair": "identical_prompts_batch[0] vs identical_prompts_batch[3]",
+      "right_sampled": 32,
+      "right_top1": 32,
+      "right_top1_value": 17.03029441833496,
+      "sampled_equal": true,
+      "top10_equal": false,
+      "top1_equal": true
+    },
+    "prefill:same_shape_filler": {
+      "available": true,
+      "left_sampled": 32,
+      "left_top1": 32,
+      "left_top1_margin": 0.9298648834228516,
+      "left_top1_value": 16.70347785949707,
+      "max_abs": 1.0062360763549805,
+      "max_abs_can_close_top1_margin": true,
+      "mean_abs": 0.13629691302776337,
+      "pair": "target_slot0_fixed_fillers[0] vs target_slot0_altA_fillers[0]",
+      "right_sampled": 32,
+      "right_top1": 32,
+      "right_top1_value": 17.28458595275879,
+      "sampled_equal": true,
+      "top10_equal": false,
+      "top1_equal": true
+    },
+    "prefill:same_shape_position": {
+      "available": true,
+      "left_sampled": 32,
+      "left_top1": 32,
+      "left_top1_margin": 0.9298648834228516,
+      "left_top1_value": 16.70347785949707,
+      "max_abs": 1.2215118408203125,
+      "max_abs_can_close_top1_margin": true,
+      "mean_abs": 0.16352801024913788,
+      "pair": "target_slot0_fixed_fillers[0] vs target_slot2_fixed_fillers[2]",
+      "right_sampled": 32,
+      "right_top1": 32,
+      "right_top1_value": 17.21725845336914,
+      "sampled_equal": true,
+      "top10_equal": false,
+      "top1_equal": true
+    },
+    "prefill:shape_change": {
+      "available": true,
+      "left_sampled": 32,
+      "left_top1": 32,
+      "left_top1_margin": 1.1102609634399414,
+      "left_top1_value": 16.910871505737305,
+      "max_abs": 0.8482370376586914,
+      "max_abs_can_close_top1_margin": true,
+      "mean_abs": 0.145078644156456,
+      "pair": "single_target_alone[0] vs target_slot0_fixed_fillers[0]",
+      "right_sampled": 32,
+      "right_top1": 32,
+      "right_top1_value": 16.70347785949707,
+      "sampled_equal": true,
+      "top10_equal": false,
+      "top1_equal": true
+    }
+  }
+}

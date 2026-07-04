@@ -1,0 +1,376 @@
+{
+  "active_q_backend": "q_norm_rope_fallback_or_triton",
+  "device": "cuda:0",
+  "env": {
+    "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE": "1",
+    "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES": ""
+  },
+  "fused_q_kv_backend": "q_kv_norm_rope_cache_bf16",
+  "fused_q_kv_norm_rope_store_enabled": true,
+  "input_source": {
+    "filler_source": "target_slot0_fixed_fillers",
+    "position": 256,
+    "target": "single_target_alone layer0.q_wqb_output/wkv_output selected row 0"
+  },
+  "model_path": "/models/DeepSeek-V4-Flash",
+  "params": {
+    "base": 10000.0,
+    "beta_fast": 32,
+    "beta_slow": 1,
+    "factor": 16.0,
+    "layer0_compress_ratio": 0,
+    "original_seq_len": 0,
+    "rms_norm_eps": 1e-06,
+    "rotary_dim": 64
+  },
+  "q_norm_rope_triton_enabled": true,
+  "rows": [
+    {
+      "active_q_norm_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "active_q_norm_vs_reference_batch": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "active_q_norm_vs_reference_single": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "captured_single_vs_reference": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_backend": "q_kv_norm_rope_cache_bf16",
+      "fused_q_kv_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_vs_reference_batch": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_vs_reference_single": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "reference_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "target_slot": 0
+    },
+    {
+      "active_q_norm_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "active_q_norm_vs_reference_batch": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "active_q_norm_vs_reference_single": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "captured_single_vs_reference": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_backend": "q_kv_norm_rope_cache_bf16",
+      "fused_q_kv_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_vs_reference_batch": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_vs_reference_single": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "reference_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "target_slot": 1
+    },
+    {
+      "active_q_norm_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "active_q_norm_vs_reference_batch": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "active_q_norm_vs_reference_single": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "captured_single_vs_reference": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_backend": "q_kv_norm_rope_cache_bf16",
+      "fused_q_kv_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_vs_reference_batch": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_vs_reference_single": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "reference_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "target_slot": 2
+    },
+    {
+      "active_q_norm_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "active_q_norm_vs_reference_batch": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "active_q_norm_vs_reference_single": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "captured_single_vs_reference": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_backend": "q_kv_norm_rope_cache_bf16",
+      "fused_q_kv_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_vs_reference_batch": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "fused_q_kv_vs_reference_single": {
+        "allclose_zero": false,
+        "available": true,
+        "max_abs": 0.0625,
+        "mean_abs": 0.00025192927569150925,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "reference_single_vs_batch": {
+        "allclose_zero": true,
+        "available": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "shape": [
+          8,
+          512
+        ]
+      },
+      "target_slot": 3
+    }
+  ],
+  "run_dir": "performance_milestones/target08_q_path_same_shape_same_input_invariance/raw/same_shape_eager",
+  "run_scenarios": [
+    "single_target_alone",
+    "identical_prompts_batch",
+    "target_slot0_fixed_fillers",
+    "target_slot1_fixed_fillers",
+    "target_slot2_fixed_fillers",
+    "target_slot3_fixed_fillers",
+    "target_slot0_altA_fillers",
+    "target_slot0_altB_fillers"
+  ]
+}

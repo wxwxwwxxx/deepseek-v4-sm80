@@ -2,7 +2,7 @@
 
 ## Status
 
-Active next TARGET 08 subtarget.
+Complete, narrowed by TARGET 08.197.
 
 Run this after TARGET 08.195 and before TARGET 08.20.
 
@@ -14,9 +14,11 @@ the promoted exact path fully invariant.  Remaining drift appears around
 attention/indexer outputs when multiple requests share a batch, while
 single-request table/page churn probes pass exactly.
 
-Do not start TARGET 08.20 until this target either fixes the remaining batched
-row-coupling issue or defines a correctness guard/oracle that is narrow enough
-for component-retention work.
+This target added the needed attention/indexer debug direction and exact-bs
+graph guard, but did not clear broad component-retention correctness.  TARGET
+08.197 later classified the layer0 q-path issue as GEMM shape numeric drift, so
+the active follow-up is TARGET 08.198 post-layer0 same-shape decode drift
+isolation.
 
 ## Goal
 

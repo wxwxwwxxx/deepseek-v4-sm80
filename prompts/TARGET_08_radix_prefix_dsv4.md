@@ -3,9 +3,11 @@
 ## Status
 
 Phase 1, serving graph bucket policy, CUDA graph memory attribution, prefix
-stability, memory ledger, TARGET 08.19 correctness probing, and TARGET 08.195
-slot/page invariance probing are complete.  Continue with TARGET 08.196 before
-starting component-retention work.
+stability, memory ledger, TARGET 08.19 correctness probing, TARGET 08.195
+slot/page invariance probing, TARGET 08.196 batched attention/indexer probing,
+TARGET 08.197 q-path same-shape/same-input probing, and TARGET 08.198
+post-layer0 same-shape drift analysis are complete.  Continue with TARGET 08.20
+under the guarded oracle.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -41,9 +43,9 @@ Phase-1 result:
 - do not promote by default yet.
 
 The next work is no longer "implement the first prefix cache".  It is to make
-the feature serving-credible by resolving the remaining DSV4 batched
-attention/indexer row-coupling blocker, then reducing SWA/compressed-state
-memory pressure with a conservative, SGLang-aligned component-retention design.
+the feature serving-credible by reducing SWA/compressed-state memory pressure
+with a conservative, SGLang-aligned component-retention design under the
+guarded correctness oracle from TARGET 08.198.
 
 ## Goal
 
@@ -75,8 +77,10 @@ Run in this order:
 | TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | complete | Quantified full-page-owner memory/capacity cost and recommended guarded component-retention work. |
 | TARGET 08.19 | `prompts/TARGET_08.19_dsv4_sm80_prefix_cache_logit_metadata_correctness.md` | complete blocked | Metadata boundary was clean, but logits exposed a DSV4 exact-path slot/page-location blocker. |
 | TARGET 08.195 | `prompts/TARGET_08.195_dsv4_sm80_exact_path_slot_page_invariance.md` | complete partial fix | Fixed a real compressor cross-request pooling bug and established guards, but remaining batched attention/indexer row-coupling still blocks broad oracle use. |
-| TARGET 08.196 | `prompts/TARGET_08.196_dsv4_sm80_batched_attention_indexer_row_coupling.md` | active next | Isolate and fix or guard remaining batched attention/indexer row-coupling before component retention. |
-| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | planned after 08.196 | Implement a conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in, if 08.196 clears or guards correctness risk. |
+| TARGET 08.196 | `prompts/TARGET_08.196_dsv4_sm80_batched_attention_indexer_row_coupling.md` | complete narrowed | Added attention/indexer debug hooks and exact-bs graph guard; found layer0 q-path drift but did not clear broad correctness. |
+| TARGET 08.197 | `performance_milestones/target08_q_path_same_shape_same_input_invariance/README.md` | complete classification | Classified the layer0 q-path issue as GEMM shape numeric drift, not q_norm/RoPE row-coupling; still blocked by post-layer0 same-shape decode drift. |
+| TARGET 08.198 | `prompts/TARGET_08.198_dsv4_sm80_post_layer0_same_shape_decode_drift.md` | complete guarded | Found tiny later-layer attention/indexer drift amplified by small logits margins; accepted guarded oracle because batch-slot invariance is not guaranteed. |
+| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | active next | Implement a conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in under the 08.198 guarded oracle. |
 | TARGET 08.21 | `prompts/TARGET_08.21_dsv4_sm80_sglang_aligned_component_retention_v2.md` | planned if V1 succeeds | Move from the conservative V1 slice to a more complete SGLang-aligned component-retention model without long-distance SWA replay. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after correctness and component-retention decisions, then decide whether to move to TARGET 09 or TARGET 10. |
 
@@ -95,8 +99,15 @@ Rationale:
 - TARGET 08.195 fixed a real compressor cross-request pooling bug and showed
   single-request page/table churn is clean, but remaining drift still appears in
   batched attention/indexer paths.
-- TARGET 08.196 comes before TARGET 08.20 because component-retention code
-  should not inherit a batched attention/indexer row-coupling blocker.
+- TARGET 08.196/08.197 narrowed the blocker: layer0 q_norm/RoPE is not guilty,
+  and the original q-path drift is shape-dependent GEMM numeric drift.  However,
+  same-shape decode logits can still drift later and change sampled tokens.
+- TARGET 08.198 concluded that mini does not currently guarantee batch-slot
+  invariance.  Cross-slot/filler/identical-row generated-token equality should
+  be diagnostic only.  TARGET 08.20 may continue with a slot-pinned/same-layout
+  oracle and text smoke that rejects obvious correctness failures such as
+  garbled or invalid-byte text, degenerate output, crashes, leaks, or
+  cache-state corruption.
 - TARGET 08.20 is a conservative first implementation slice: it should align
   with SGLang's SWA tombstone/tail-retention direction without replaying
   thousands of tokens just to rebuild SWA.

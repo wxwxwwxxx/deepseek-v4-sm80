@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import time
 import traceback
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ if TYPE_CHECKING:
     from minisgl.models import BaseLLMModel
 
 logger = init_logger(__name__)
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+DSV4_CUDA_GRAPH_EXACT_BS_ONLY_ENV = "MINISGL_DSV4_CUDA_GRAPH_EXACT_BS_ONLY"
 
 
 @dataclass
@@ -151,8 +154,13 @@ class GraphRunner:
         self.device = device
         self.capture_fail_open = capture_fail_open
         self.capture_greedy_sample = capture_greedy_sample
+        self.exact_bs_only = (
+            os.environ.get(DSV4_CUDA_GRAPH_EXACT_BS_ONLY_ENV, "").strip().lower()
+            in _TRUE_ENV_VALUES
+        )
         self.capture_status = {
             "enabled": bool(cuda_graph_bs),
+            "exact_bs_only": bool(self.exact_bs_only),
             "requested_bs": list(self.graph_bs_list),
             "captured_bs": [],
             "capture_greedy_sample": bool(capture_greedy_sample),
@@ -332,7 +340,11 @@ class GraphRunner:
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
-        return batch.is_decode and batch.size <= self.max_graph_bs
+        if not batch.is_decode or batch.size > self.max_graph_bs:
+            return False
+        if self.exact_bs_only and batch.size not in self.graph_map:
+            return False
+        return True
 
     def _increment_status_counter(self, name: str, key: int) -> None:
         counter = self.capture_status[name]

@@ -52,12 +52,23 @@ def _capture_debug_activation(
     dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
 
 
-def _compressed_debug_row_indices(
+def _debug_can_materialize_tensor(tensor: torch.Tensor) -> bool:
+    if not _debug_activations_enabled():
+        return False
+    if tensor.is_cuda:
+        try:
+            if torch.cuda.is_current_stream_capturing():
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _compressed_debug_end_indices(
     positions: torch.Tensor,
     ratio: int,
-    batch: Batch,
 ) -> torch.Tensor | None:
-    if not _debug_activations_enabled() or positions.numel() == 0 or ratio <= 0:
+    if positions.numel() == 0 or ratio <= 0:
         return None
     if positions.is_cuda:
         try:
@@ -77,13 +88,24 @@ def _compressed_debug_row_indices(
         expected = pos[end_indices[valid]][:, None] - (ratio - 1) + offsets[None, :]
         contiguous = torch.all(pos[gather_valid] == expected, dim=1)
         valid_rows = torch.nonzero(valid, as_tuple=False).flatten()[contiguous]
-        end_indices = end_indices[valid_rows]
-    else:
+        return end_indices[valid_rows]
+    return None
+
+
+def _compressed_debug_row_indices(
+    positions: torch.Tensor,
+    ratio: int,
+    batch: Batch,
+) -> torch.Tensor | None:
+    if not _debug_activations_enabled() or positions.numel() == 0 or ratio <= 0:
+        return None
+    end_indices = _compressed_debug_end_indices(positions, ratio)
+    if end_indices is None:
         return None
     if end_indices.numel() == 0:
         return None
 
-    output_rows = torch.arange(end_indices.numel(), dtype=torch.long, device=pos.device)
+    output_rows = torch.arange(end_indices.numel(), dtype=torch.long, device=end_indices.device)
     selected = []
     start = 0
     for req in getattr(batch, "reqs", []):
@@ -96,6 +118,43 @@ def _compressed_debug_row_indices(
     if not selected:
         return None
     return torch.stack(selected)
+
+
+def _capture_compressed_debug_window(
+    name: str,
+    tensor: torch.Tensor,
+    positions: torch.Tensor,
+    ratio: int,
+    batch: Batch,
+) -> None:
+    if not _debug_can_materialize_tensor(tensor):
+        return
+    end_indices = _compressed_debug_end_indices(positions, ratio)
+    if end_indices is None or end_indices.numel() == 0:
+        return
+    offsets = torch.arange(ratio, dtype=torch.long, device=end_indices.device)
+    selected = []
+    start = 0
+    for req in getattr(batch, "reqs", []):
+        length = int(req.extend_len)
+        end = start + length
+        mask = (end_indices >= start) & (end_indices < end)
+        if bool(torch.any(mask)):
+            window_end = end_indices[mask][-1]
+            selected.append(window_end - (ratio - 1) + offsets)
+        start = end
+    if not selected:
+        return
+    gather = torch.stack(selected)
+    gather_flat = gather.reshape(-1).to(device=tensor.device, dtype=torch.long)
+    if gather_flat.numel() == 0 or int(gather_flat.max().item()) >= tensor.shape[0]:
+        return
+    window = tensor.index_select(0, gather_flat).reshape(
+        gather.shape[0],
+        gather.shape[1],
+        *tensor.shape[1:],
+    )
+    dsv4_prefix_debug.capture_dsv4_activation(name, window, batch, row_indices=None)
 
 
 def _owner_timing_prefix(owner_label: str) -> str:
@@ -1372,8 +1431,15 @@ class DSV4Attention(BaseOP):
                     x,
                     fp8_gemm=q_wqa_fp8_gemm if q_wqa_fp8_gemm else None,
                 )
+            _capture_debug_activation(f"layer{self.layer_id}.wqa_output", q_lora_raw)
+            if kv_from_shared_wqa_wkv is not None:
+                _capture_debug_activation(
+                    f"layer{self.layer_id}.wkv_shared_activation_output",
+                    kv_from_shared_wqa_wkv,
+                )
             if not fused_q_kv_rmsnorm:
                 q_lora = self.q_norm.forward(q_lora_raw)
+                _capture_debug_activation(f"layer{self.layer_id}.q_lora_after_norm", q_lora)
         if fused_q_kv_rmsnorm:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
                 kv = (
@@ -1381,6 +1447,7 @@ class DSV4Attention(BaseOP):
                     if kv_from_shared_wqa_wkv is not None
                     else self.wkv.forward(x)
                 )
+                _capture_debug_activation(f"layer{self.layer_id}.wkv_output", kv)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_kv_rmsnorm"):
                 q_lora, kv = dsv4_kernel.rms_norm_pair_fallback(
                     q_lora_raw,
@@ -1389,6 +1456,8 @@ class DSV4Attention(BaseOP):
                     self.kv_norm.weight,
                     eps=self.rms_norm_eps,
                 )
+                _capture_debug_activation(f"layer{self.layer_id}.q_lora_after_norm", q_lora)
+                _capture_debug_activation(f"layer{self.layer_id}.kv_after_kv_norm", kv)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_wqb"):
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
                 q = self.wq_b.forward_fp8_marlin_weight(
@@ -1410,6 +1479,7 @@ class DSV4Attention(BaseOP):
                     q_lora,
                     fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
                 ).view(-1, self.num_local_heads, self.head_dim)
+            _capture_debug_activation(f"layer{self.layer_id}.q_wqb_output", q)
         if fused_q_kv_norm_rope_store and kv is None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
                 kv = (
@@ -1417,6 +1487,7 @@ class DSV4Attention(BaseOP):
                     if kv_from_shared_wqa_wkv is not None
                     else self.wkv.forward(x)
                 )
+                _capture_debug_activation(f"layer{self.layer_id}.wkv_output", kv)
         q_kv_norm_rope_cache_written = False
         if fused_q_kv_norm_rope_store and kv is not None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_kv_norm_rope_store"):
@@ -1435,6 +1506,9 @@ class DSV4Attention(BaseOP):
                     beta_fast=self.beta_fast,
                     beta_slow=self.beta_slow,
                 )
+                if q_kv_norm_rope_cache_written:
+                    _capture_debug_activation(f"layer{self.layer_id}.q_after_q_norm_rope", q)
+                    _capture_debug_activation(f"layer{self.layer_id}.kv_after_kv_norm_rope", kv)
         if not q_kv_norm_rope_cache_written:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_norm_rope"):
                 dsv4_kernel.q_norm_rope_fallback(
@@ -1448,6 +1522,7 @@ class DSV4Attention(BaseOP):
                     beta_fast=self.beta_fast,
                     beta_slow=self.beta_slow,
                 )
+                _capture_debug_activation(f"layer{self.layer_id}.q_after_q_norm_rope", q)
 
         if kv is None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
@@ -1456,6 +1531,7 @@ class DSV4Attention(BaseOP):
                     if kv_from_shared_wqa_wkv is not None
                     else self.wkv.forward(x)
                 )
+                _capture_debug_activation(f"layer{self.layer_id}.wkv_output", kv)
         kv_cache_written = False
         if kv_norm_rope_store_enabled:
             if not q_kv_norm_rope_cache_written:
@@ -1474,6 +1550,10 @@ class DSV4Attention(BaseOP):
                         beta_fast=self.beta_fast,
                         beta_slow=self.beta_slow,
                     )
+                    _capture_debug_activation(
+                        f"layer{self.layer_id}.kv_after_kv_norm_rope",
+                        kv,
+                    )
             kv_cache_written = True
         else:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_norm_rope"):
@@ -1489,6 +1569,7 @@ class DSV4Attention(BaseOP):
                     beta_fast=self.beta_fast,
                     beta_slow=self.beta_slow,
                 )
+                _capture_debug_activation(f"layer{self.layer_id}.kv_after_kv_norm_rope", kv)
         if self.rope_head_dim < kv.shape[-1]:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_quant"):
                 kv[..., : -self.rope_head_dim] = dsv4_kernel.quantize_fp8_activation_ref(
@@ -1541,6 +1622,18 @@ class DSV4Attention(BaseOP):
                         beta_fast=self.beta_fast,
                         beta_slow=self.beta_slow,
                     )
+                    _capture_debug_activation(f"layer{self.layer_id}.indexer_query_bf16", indexer_q)
+                    _capture_debug_activation(
+                        f"layer{self.layer_id}.indexer_query_weights",
+                        indexer_weights,
+                    )
+                _capture_compressed_debug_window(
+                    f"layer{self.layer_id}.indexer_compressor_input_window",
+                    x,
+                    positions,
+                    4,
+                    batch,
+                )
                 indexer_kv = self.indexer.forward(
                     x,
                     q_lora,
@@ -1548,6 +1641,15 @@ class DSV4Attention(BaseOP):
                     apply_norm=not compress_store_fuses_norm,
                     touch_projections=not (indexer_select_bf16 or indexer_select_fp8),
                 )
+                if indexer_fp8_query is not None:
+                    _capture_debug_activation(
+                        f"layer{self.layer_id}.indexer_query_fp8_values",
+                        indexer_fp8_query.q_values,
+                    )
+                    _capture_debug_activation(
+                        f"layer{self.layer_id}.indexer_query_fp8_weights",
+                        indexer_fp8_query.weights,
+                    )
                 compressed_debug_rows = _compressed_debug_row_indices(
                     positions,
                     4,
@@ -1609,6 +1711,13 @@ class DSV4Attention(BaseOP):
                     )
         if hasattr(self, "compressor"):
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.compress"):
+                _capture_compressed_debug_window(
+                    f"layer{self.layer_id}.compressor_input_r{self.compress_ratio}_window",
+                    x,
+                    positions,
+                    self.compress_ratio,
+                    batch,
+                )
                 compressed_kv = self.compressor.forward(
                     x,
                     positions,
@@ -1658,6 +1767,7 @@ class DSV4Attention(BaseOP):
         else:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.fallback_backend"):
                 o = self._fallback_attention(q, kv, batch)
+        _capture_debug_activation(f"layer{self.layer_id}.merged_attention_output_before_wo", o)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.o_rope"):
             dsv4_kernel.apply_rotary_tail(
                 o,
@@ -1669,6 +1779,10 @@ class DSV4Attention(BaseOP):
                 factor=self.rope_factor,
                 beta_fast=self.beta_fast,
                 beta_slow=self.beta_slow,
+            )
+            _capture_debug_activation(
+                f"layer{self.layer_id}.merged_attention_output_after_inverse_rope",
+                o,
             )
         d_per_group = self._wo_a_d_per_group()
         o = o.reshape(x.shape[0], self.num_local_groups, d_per_group)
@@ -1707,26 +1821,32 @@ class DSV4Attention(BaseOP):
                 )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_b"):
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
-                return self.wo_b.forward_fp8_marlin_weight(
+                out = self.wo_b.forward_fp8_marlin_weight(
                     o,
                     cache_name=self._wo_b_marlin_weight_cache_name,
                     owner_label=self._wo_b_owner_label,
                     reduce=True,
                     reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
                 )
+                _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
+                return out
             if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE):
-                return self.wo_b.forward_fp8_cached_bf16_weight(
+                out = self.wo_b.forward_fp8_cached_bf16_weight(
                     o,
                     cache_name=self._wo_b_bf16_weight_cache_name,
                     owner_label=self._wo_b_owner_label,
                     reduce=True,
                     reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
                 )
+                _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
+                return out
             wo_b_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_WO_B_FP8_GEMM")
-            return self.wo_b.forward(
+            out = self.wo_b.forward(
                 o,
                 fp8_gemm=wo_b_fp8_gemm if wo_b_fp8_gemm else None,
             )
+            _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
+            return out
 
 
 class DSV4TopK(BaseOP):

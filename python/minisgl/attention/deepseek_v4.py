@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from minisgl.core import Batch, get_global_ctx
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
-from minisgl.utils import div_ceil, dsv4_direct_copy_nvtx
+from minisgl.utils import div_ceil, dsv4_direct_copy_nvtx, dsv4_prefix_debug
 
 from .base import BaseAttnBackend, BaseAttnMetadata
 
@@ -23,6 +23,7 @@ _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH_ENV = (
     "MINISGL_DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH"
 )
+DSV4_DEBUG_ATTENTION_COMPONENTS_ENV = "MINISGL_DSV4_PREFIX_DEBUG_ATTENTION_COMPONENTS"
 
 
 def _pad_last_dim(
@@ -46,6 +47,40 @@ def _pad_last_dim(
 
 def _to_int32(x: torch.Tensor, device: torch.device) -> torch.Tensor:
     return x.to(device=device, dtype=torch.int32)
+
+
+def _debug_activations_enabled() -> bool:
+    recorder = dsv4_prefix_debug.get_dsv4_prefix_debug_recorder()
+    return recorder is not None and bool(getattr(recorder, "capture_activations", False))
+
+
+def _debug_attention_components_enabled() -> bool:
+    return (
+        _debug_activations_enabled()
+        and os.environ.get(DSV4_DEBUG_ATTENTION_COMPONENTS_ENV, "").strip().lower()
+        in _TRUE_ENV_VALUES
+    )
+
+
+def _capture_debug_activation(
+    name: str,
+    tensor: torch.Tensor,
+    row_indices: torch.Tensor | None = None,
+) -> None:
+    try:
+        batch = get_global_ctx().batch
+    except Exception:
+        batch = None
+    dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
+
+
+def _debug_topk_scores(logits: torch.Tensor, raw_indices: torch.Tensor) -> torch.Tensor:
+    if logits.numel() == 0 or raw_indices.numel() == 0:
+        return logits.new_empty(raw_indices.shape)
+    max_col = max(logits.shape[1] - 1, 0)
+    gather = raw_indices.to(device=logits.device, dtype=torch.long).clamp(min=0, max=max_col)
+    scores = torch.gather(logits, 1, gather)
+    return torch.where(raw_indices.to(device=logits.device) >= 0, scores, torch.full_like(scores, float("-inf")))
 
 
 @dataclass
@@ -330,6 +365,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             width=max(self.index_topk, 1),
             ratio=4,
         )
+        self._capture_indexer_select_debug(layer_id, out, seq_lens, page_table)
         core = metadata.core_metadata
         core.c4_sparse_raw_indices = self._merge_indexer_rows(
             core.c4_sparse_raw_indices,
@@ -402,6 +438,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 width=max(self.index_topk, 1),
                 ratio=4,
             )
+        self._capture_indexer_select_debug(layer_id, out, seq_lens, page_table)
         core = metadata.core_metadata
         core.c4_sparse_raw_indices = self._merge_indexer_rows(
             core.c4_sparse_raw_indices,
@@ -421,6 +458,29 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 out.topk.topk_lens,
             )
         return out
+
+    def _capture_indexer_select_debug(
+        self,
+        layer_id: int,
+        out: dsv4_kernel.DSV4IndexerSelectOutput,
+        seq_lens: torch.Tensor,
+        page_table: torch.Tensor,
+    ) -> None:
+        if not _debug_activations_enabled():
+            return
+        prefix = f"layer{layer_id}.indexer_select"
+        _capture_debug_activation(f"{prefix}.seq_lens", seq_lens)
+        _capture_debug_activation(f"{prefix}.page_table", page_table)
+        _capture_debug_activation(f"{prefix}.logits", out.logits)
+        _capture_debug_activation(f"{prefix}.topk_raw_indices", out.topk.raw_indices)
+        _capture_debug_activation(f"{prefix}.topk_page_indices", out.topk.page_indices)
+        _capture_debug_activation(f"{prefix}.topk_full_indices", out.topk.full_indices)
+        if out.topk.topk_lens is not None:
+            _capture_debug_activation(f"{prefix}.topk_lens", out.topk.topk_lens)
+        _capture_debug_activation(
+            f"{prefix}.topk_scores",
+            _debug_topk_scores(out.logits, out.topk.raw_indices),
+        )
 
     def _merge_indexer_rows(self, current: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
         padded = _pad_last_dim(values, value=-1)
@@ -842,6 +902,106 @@ class DSV4AttentionBackend(BaseAttnBackend):
             out[row] = torch.einsum("ht,td->hd", attn, candidates).to(q.dtype)
         return out
 
+    def _debug_attention_rows(
+        self,
+        metadata: DSV4CoreAttentionMetadata,
+        rows: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if not _debug_activations_enabled() or rows <= 0:
+            return None
+        try:
+            batch_rows = int(metadata.extend_lens.numel())
+            row_indices = metadata.get_last_indices(batch_rows).to(device=device, dtype=torch.long)
+            row_indices = row_indices[(row_indices >= 0) & (row_indices < rows)]
+            if row_indices.numel() > 0:
+                return row_indices
+        except Exception:
+            pass
+        count = min(rows, 4)
+        return torch.arange(count, dtype=torch.long, device=device)
+
+    def _capture_attention_debug(
+        self,
+        layer_id: int,
+        q: torch.Tensor,
+        metadata: DSV4CoreAttentionMetadata,
+        rows: int,
+        *,
+        swa_indices: torch.Tensor,
+        swa_lengths: torch.Tensor,
+        swa_cache: torch.Tensor,
+        compressed_cache: torch.Tensor | None,
+        compressed_indices: torch.Tensor | None,
+        compressed_lengths: torch.Tensor | None,
+        compress_ratio: DSV4CompressRatio,
+        attn_sink: torch.Tensor | None,
+        merged_output: torch.Tensor,
+    ) -> None:
+        if not _debug_activations_enabled():
+            return
+        row_indices = self._debug_attention_rows(metadata, rows, q.device)
+        prefix = f"layer{layer_id}.attention_backend"
+        _capture_debug_activation(f"{prefix}.swa_selected_full_indices", swa_indices, row_indices)
+        _capture_debug_activation(f"{prefix}.swa_lengths", swa_lengths, row_indices)
+        if compressed_indices is not None:
+            name = "c4" if compress_ratio == 4 else "c128"
+            _capture_debug_activation(
+                f"{prefix}.{name}_selected_page_indices",
+                compressed_indices,
+                row_indices,
+            )
+            if compressed_lengths is not None:
+                _capture_debug_activation(
+                    f"{prefix}.{name}_lengths",
+                    compressed_lengths,
+                    row_indices,
+                )
+        _capture_debug_activation(
+            f"{prefix}.merged_attention_output_before_wo",
+            merged_output,
+            row_indices,
+        )
+        if not _debug_attention_components_enabled() or row_indices is None:
+            return
+        if row_indices.numel() == 0:
+            return
+        q_sel = q.index_select(0, row_indices)
+        swa_indices_sel = swa_indices.index_select(0, row_indices)
+        swa_lengths_sel = swa_lengths.index_select(0, row_indices)
+        swa_out = self._two_source_attention_torch(
+            q_sel,
+            swa_cache,
+            swa_indices_sel,
+            swa_lengths_sel,
+            compressed_cache=None,
+            compressed_indices=None,
+            compressed_lengths=None,
+            attn_sink=attn_sink,
+        )
+        _capture_debug_activation(f"{prefix}.swa_attention_output", swa_out)
+        if (
+            compressed_cache is not None
+            and compressed_indices is not None
+            and compressed_lengths is not None
+        ):
+            compressed_indices_sel = compressed_indices.index_select(0, row_indices)
+            compressed_lengths_sel = compressed_lengths.index_select(0, row_indices)
+            empty_swa_indices = swa_indices_sel[:, :1]
+            empty_swa_lengths = torch.zeros_like(swa_lengths_sel)
+            compressed_out = self._two_source_attention_torch(
+                q_sel,
+                swa_cache,
+                empty_swa_indices,
+                empty_swa_lengths,
+                compressed_cache=compressed_cache,
+                compressed_indices=compressed_indices_sel,
+                compressed_lengths=compressed_lengths_sel,
+                attn_sink=attn_sink,
+            )
+            name = "c4_sparse" if compress_ratio == 4 else "c128"
+            _capture_debug_activation(f"{prefix}.{name}_attention_output", compressed_out)
+
     def _sparse_attention_two_source(
         self,
         q: torch.Tensor,
@@ -928,6 +1088,21 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 attn_sink=attn_sink,
             )
             if fast is not None:
+                self._capture_attention_debug(
+                    layer_id,
+                    q,
+                    metadata,
+                    rows,
+                    swa_indices=swa_indices,
+                    swa_lengths=swa_lengths,
+                    swa_cache=splitk_swa_cache,
+                    compressed_cache=compressed_cache,
+                    compressed_indices=compressed_indices,
+                    compressed_lengths=compressed_lengths,
+                    compress_ratio=compress_ratio,
+                    attn_sink=attn_sink,
+                    merged_output=fast,
+                )
                 return fast
 
         with dsv4_direct_copy_nvtx(
@@ -947,6 +1122,21 @@ class DSV4AttentionBackend(BaseAttnBackend):
             attn_sink=attn_sink,
         )
         if fast is not None:
+            self._capture_attention_debug(
+                layer_id,
+                q,
+                metadata,
+                rows,
+                swa_indices=swa_indices,
+                swa_lengths=swa_lengths,
+                swa_cache=base_swa_cache,
+                compressed_cache=compressed_cache,
+                compressed_indices=compressed_indices,
+                compressed_lengths=compressed_lengths,
+                compress_ratio=compress_ratio,
+                attn_sink=attn_sink,
+                merged_output=fast,
+            )
             return fast
         if compressed_cache is None:
             return None
@@ -955,7 +1145,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             src=self.kvcache.swa_cache(layer_id),
         ):
             fallback_swa_cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
-        return self._two_source_attention_torch(
+        out = self._two_source_attention_torch(
             q,
             fallback_swa_cache,
             swa_indices,
@@ -965,6 +1155,22 @@ class DSV4AttentionBackend(BaseAttnBackend):
             compressed_lengths=compressed_lengths,
             attn_sink=attn_sink,
         )
+        self._capture_attention_debug(
+            layer_id,
+            q,
+            metadata,
+            rows,
+            swa_indices=swa_indices,
+            swa_lengths=swa_lengths,
+            swa_cache=fallback_swa_cache,
+            compressed_cache=compressed_cache,
+            compressed_indices=compressed_indices,
+            compressed_lengths=compressed_lengths,
+            compress_ratio=compress_ratio,
+            attn_sink=attn_sink,
+            merged_output=out,
+        )
+        return out
 
     def _context_metadata_for_queries(
         self,

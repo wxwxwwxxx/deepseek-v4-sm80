@@ -49,6 +49,7 @@ DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV = (
 DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE = "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
 DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
 DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE = "MINISGL_DSV4_SM80_FUSED_TOPK_SWA_INDICES"
+DSV4_FORCE_TORCH_TOPK_ENV = "MINISGL_DSV4_FORCE_TORCH_TOPK"
 DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
 DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
@@ -168,6 +169,7 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE,
     DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE,
     DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE,
+    DSV4_FORCE_TORCH_TOPK_ENV,
     DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE,
     DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE,
     DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE,
@@ -3254,6 +3256,7 @@ def topk_transform_512_full_fallback(
         width=int(width),
         ratio=int(ratio),
     )
+    force_torch = os.environ.get(DSV4_FORCE_TORCH_TOPK_ENV, "").strip().lower() in _TRUE_ENV_VALUES
     raw_indices = torch.empty(
         (scores.shape[0], int(width)), dtype=torch.int32, device=scores.device
     )
@@ -3263,7 +3266,7 @@ def topk_transform_512_full_fallback(
     clamped_lens = seq_lens.to(device=scores.device, dtype=torch.int32).clamp(
         min=0, max=scores.shape[1]
     )
-    if _run_local_cuda_global_topk_lens_512(
+    if not force_torch and _run_local_cuda_global_topk_lens_512(
         scores.to(torch.float32),
         clamped_lens,
         page_table.to(device=scores.device, dtype=torch.int32),
@@ -3284,12 +3287,12 @@ def topk_transform_512_full_fallback(
         )
     if dsv4_env_flag(DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE) and _cuda_graph_capture_active(
         scores.device
-    ):
-        raise RuntimeError(
-            "DSV4 CUDA graph capture requires the global topk/lens JIT path when "
-            f"{DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE}=1."
-        )
-    if _run_local_cuda_topk_transform_512(
+        ):
+            raise RuntimeError(
+                "DSV4 CUDA graph capture requires the global topk/lens JIT path when "
+                f"{DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE}=1."
+            )
+    if not force_torch and _run_local_cuda_topk_transform_512(
         scores.to(torch.float32),
         clamped_lens,
         page_table.to(device=scores.device, dtype=torch.int32),

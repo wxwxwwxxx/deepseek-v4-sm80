@@ -49,8 +49,10 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08.18 | `prompts/TARGET_08.18_dsv4_sm80_prefix_cache_memory_ledger_go_nogo.md` | completed | Computed full-page-owner prefix-cache memory/capacity cost and recommended guarded component-retention work. |
 | TARGET 08.19 | `prompts/TARGET_08.19_dsv4_sm80_prefix_cache_logit_metadata_correctness.md` | completed blocked | Prefix metadata was clean, but logits exposed a DSV4 exact-path slot/page-location blocker. |
 | TARGET 08.195 | `prompts/TARGET_08.195_dsv4_sm80_exact_path_slot_page_invariance.md` | completed partial fix | Fixed a real compressor cross-request pooling bug and established guards, but remaining batched attention/indexer row-coupling still blocks broad oracle use. |
-| TARGET 08.196 | `prompts/TARGET_08.196_dsv4_sm80_batched_attention_indexer_row_coupling.md` | active next | Isolate and fix or guard remaining batched attention/indexer row-coupling before component retention. |
-| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | planned after 08.196 | Conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in. |
+| TARGET 08.196 | `prompts/TARGET_08.196_dsv4_sm80_batched_attention_indexer_row_coupling.md` | completed narrowed | Added attention/indexer debug hooks and exact-bs graph guard; found layer0 q-path drift but did not clear broad correctness. |
+| TARGET 08.197 | `performance_milestones/target08_q_path_same_shape_same_input_invariance/README.md` | completed classification | Classified layer0 q-path drift as GEMM shape numeric drift, not q_norm/RoPE row-coupling. |
+| TARGET 08.198 | `prompts/TARGET_08.198_dsv4_sm80_post_layer0_same_shape_decode_drift.md` | completed guarded | Found tiny later-layer attention/indexer drift amplified by small logits margins; accepted guarded oracle because batch-slot invariance is not guaranteed. |
+| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | active next | Conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in under the 08.198 guarded oracle. |
 | TARGET 08.21 | `prompts/TARGET_08.21_dsv4_sm80_sglang_aligned_component_retention_v2.md` | planned if V1 succeeds | More complete SGLang-aligned component-retention model without long-distance SWA replay. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix correctness/component-retention decisions, then choose TARGET 09 low precision or TARGET 10 attention/communication. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned after TARGET 08 | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
@@ -74,10 +76,11 @@ Post-07.78 stable retest:
 - old serving baseline crossed: `114.07 output tok/s`.
 
 Decision from TARGET 07.79, TARGET 08 phase 1, TARGET 08.05, TARGET 08.06,
-TARGET 08.07, TARGET 08.10, TARGET 08.18, TARGET 08.19, and TARGET 08.195:
+TARGET 08.07, TARGET 08.10, TARGET 08.18, TARGET 08.19, TARGET 08.195,
+TARGET 08.196, TARGET 08.197, and TARGET 08.198:
 
 ```text
-continue with TARGET 08.196 DSV4 batched attention/indexer row-coupling
+continue with TARGET 08.20 DSV4 SGLang-style SWA tail retention V1
 ```
 
 Reason: DSV4 radix prefix cache works as an explicit opt-in, and TARGET 08.05
@@ -90,9 +93,15 @@ full-page-owner retention has material logical capacity cost.  TARGET 08.19
 showed prefix-cache metadata is clean, but deterministic logits exposed a
 prefix-disabled DSV4 exact-path slot/page-location blocker.  TARGET 08.195 fixed
 a real compressor cross-request pooling bug and showed single-request
-page/table churn can be stable, but remaining drift appears in batched
-attention/indexer outputs.  Component retention should wait until TARGET 08.196
-fixes or guards that row-coupling issue.
+page/table churn can be stable.  TARGET 08.196 narrowed the remaining batched
+drift and added an exact-bs graph guard.  TARGET 08.197 proved the layer0
+q-path issue is GEMM shape numeric drift rather than q_norm/RoPE row-coupling.
+TARGET 08.198 found tiny later-layer attention/indexer drift amplified by small
+logits margins and concluded that mini does not currently guarantee batch-slot
+invariance.  Component retention may continue with a guarded oracle:
+slot-pinned/same-layout prefix-on versus prefix-off checks, logits/top-k/margin
+reporting, and text smoke that rejects obvious correctness failures such as乱码,
+degenerate output, crashes, leaks, or cache-state corruption.
 
 ## Archive Policy
 
@@ -106,7 +115,7 @@ For new child threads, start from:
 
 1. `prompts/target.md`
 2. the active target prompt, currently
-   `prompts/TARGET_08.196_dsv4_sm80_batched_attention_indexer_row_coupling.md`
+   `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md`
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache phase-1 context
 

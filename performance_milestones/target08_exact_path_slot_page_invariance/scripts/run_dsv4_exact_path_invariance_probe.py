@@ -401,6 +401,118 @@ def _scenario_page_boundary(
     )
 
 
+def _scenario_target_same_length_fillers(
+    bank: dict[str, list[int]],
+    rng: random.Random,
+    vocab_size: int,
+    token_id_range: int,
+    page_size: int,
+) -> InvarianceScenario:
+    fillers = _make_fillers(
+        rng,
+        3,
+        page_size + 1,
+        vocab_size=vocab_size,
+        token_id_range=token_id_range,
+        marker_base=390,
+    )
+    return InvarianceScenario(
+        name="target_same_length_fillers",
+        description="The 257-token target prompt batched with unrelated 257-token fillers.",
+        coverage=["target prompt + filler prompts with same length"],
+        probe_prompts=[list(bank["target_257"]), *fillers],
+        probe_labels=["target", "filler_same0", "filler_same1", "filler_same2"],
+        prelude_batches=[],
+    )
+
+
+def _scenario_target_c4_boundary_fillers(
+    bank: dict[str, list[int]],
+    rng: random.Random,
+    vocab_size: int,
+    token_id_range: int,
+    page_size: int,
+) -> InvarianceScenario:
+    del page_size
+    lengths = (252, 253, 254)
+    fillers = [
+        _random_tokens(
+            rng,
+            length,
+            vocab_size=vocab_size,
+            token_id_range=token_id_range,
+            marker=410 + idx,
+        )
+        for idx, length in enumerate(lengths)
+    ]
+    return InvarianceScenario(
+        name="target_c4_boundary_fillers",
+        description="The 257-token target prompt batched with fillers around C4 boundaries.",
+        coverage=["target prompt + filler prompts crossing C4 boundaries"],
+        probe_prompts=[list(bank["target_257"]), *fillers],
+        probe_labels=["target", "len252", "len253", "len254"],
+        prelude_batches=[],
+    )
+
+
+def _scenario_target_c128_boundary_fillers(
+    bank: dict[str, list[int]],
+    rng: random.Random,
+    vocab_size: int,
+    token_id_range: int,
+    page_size: int,
+) -> InvarianceScenario:
+    del page_size
+    lengths = (127, 128, 129)
+    fillers = [
+        _random_tokens(
+            rng,
+            length,
+            vocab_size=vocab_size,
+            token_id_range=token_id_range,
+            marker=430 + idx,
+        )
+        for idx, length in enumerate(lengths)
+    ]
+    return InvarianceScenario(
+        name="target_c128_boundary_fillers",
+        description="The 257-token target prompt batched with fillers around C128 boundaries.",
+        coverage=["target prompt + filler prompts crossing C128 boundaries"],
+        probe_prompts=[list(bank["target_257"]), *fillers],
+        probe_labels=["target", "len127", "len128", "len129"],
+        prelude_batches=[],
+    )
+
+
+def _scenario_target_swa_boundary_fillers(
+    bank: dict[str, list[int]],
+    rng: random.Random,
+    vocab_size: int,
+    token_id_range: int,
+    page_size: int,
+) -> InvarianceScenario:
+    del page_size
+    lengths = (127, 128, 129)
+    fillers = [
+        _random_tokens(
+            rng,
+            length,
+            vocab_size=vocab_size,
+            token_id_range=token_id_range,
+            marker=450 + idx,
+        )
+        for idx, length in enumerate(lengths)
+    ]
+    return InvarianceScenario(
+        name="target_swa_boundary_fillers",
+        description="The 257-token target prompt batched with fillers around the SWA boundary.",
+        coverage=["target prompt + filler prompts around SWA 127/128/129"],
+        probe_prompts=[list(bank["target_257"]), *fillers],
+        probe_labels=["target", "len127", "len128", "len129"],
+        prelude_batches=[],
+    )
+
+
 def _scenario_c4_c128_boundary(
     bank: dict[str, list[int]],
     rng: random.Random,
@@ -445,6 +557,10 @@ _SCENARIO_BUILDERS: dict[str, Callable[..., InvarianceScenario]] = {
     "target_physical_page_mixed_pages": _make_page_location_scenario("mixed_pages"),
     "swa_boundary_127_128_129_bs3": _scenario_swa_boundary,
     "page_boundary_255_256_257_258": _scenario_page_boundary,
+    "target_same_length_fillers": _scenario_target_same_length_fillers,
+    "target_c4_boundary_fillers": _scenario_target_c4_boundary_fillers,
+    "target_c128_boundary_fillers": _scenario_target_c128_boundary_fillers,
+    "target_swa_boundary_fillers": _scenario_target_swa_boundary_fillers,
     "c4_c128_boundary_lengths": _scenario_c4_c128_boundary,
 }
 _SCENARIO_ORDER = list(_SCENARIO_BUILDERS)
@@ -560,6 +676,9 @@ def run(args: argparse.Namespace) -> int:
     os.environ["MINISGL_DSV4_PREFIX_DEBUG_SAVE_FULL_LOGITS"] = "1"
     os.environ["MINISGL_DSV4_PREFIX_DEBUG_MODE"] = args.mode
     os.environ["MINISGL_DSV4_PREFIX_DEBUG_ACTIVATIONS"] = "1" if args.capture_activations else "0"
+    os.environ["MINISGL_DSV4_PREFIX_DEBUG_ATTENTION_COMPONENTS"] = (
+        "1" if args.debug_attention_components else "0"
+    )
     os.environ["MINISGL_DSV4_PREFIX_DEBUG_MAX_ACTIVATION_ROWS"] = str(args.max_activation_rows)
     os.environ["MINISGL_DSV4_PREFIX_DEBUG_SAVE_FULL_ACTIVATIONS"] = (
         "1" if args.save_full_activations else "0"
@@ -623,6 +742,7 @@ def run(args: argparse.Namespace) -> int:
                     "token_id_range": args.token_id_range,
                     "seed": args.seed,
                     "capture_activations": bool(args.capture_activations),
+                    "debug_attention_components": bool(args.debug_attention_components),
                     "max_activation_rows": args.max_activation_rows,
                     "save_full_activations": bool(args.save_full_activations),
                     "disable_toggles": os.environ.get(
@@ -688,6 +808,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--token-id-range", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=8195)
     parser.add_argument("--capture-activations", action="store_true")
+    parser.add_argument("--debug-attention-components", action="store_true")
     parser.add_argument("--max-activation-rows", type=int, default=4)
     parser.add_argument("--save-full-activations", action="store_true")
     parser.add_argument("--list-scenarios", action="store_true")

@@ -1694,6 +1694,65 @@ def test_dsv4_rotary_yarn_fallback_matches_configured_ramp_range():
     assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
 
 
+def test_dsv4_compress_forward_keeps_request_contiguous_windows():
+    class MarkerWkvGate:
+        def __init__(self, width: int):
+            self.width = width
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            marker = x[:, :1].float()
+            kv = marker.repeat(1, self.width)
+            score = torch.zeros_like(kv)
+            return torch.cat((kv, score), dim=-1).to(x.dtype)
+
+    class IdentityNorm:
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    def run_case(ratio: int, request_len: int, *, overlap: bool) -> None:
+        rows = request_len * 2
+        head_dim = 1
+        coff = 2 if overlap else 1
+        x = torch.arange(rows, dtype=torch.float32).view(rows, 1).to(torch.bfloat16)
+        positions = torch.tensor(list(range(request_len)) * 2, dtype=torch.int64)
+        ape = torch.zeros((ratio, coff * head_dim), dtype=torch.float32)
+        expected = torch.tensor(
+            [
+                [(ratio - 1) / 2],
+                [request_len + (ratio - 1) / 2],
+            ],
+            dtype=torch.bfloat16,
+        )
+
+        fallback = dsv4_kernel.compress_forward_fallback(
+            x,
+            positions,
+            ratio=ratio,
+            head_dim=head_dim,
+            overlap=overlap,
+            ape=ape,
+            wkv_gate=MarkerWkvGate(coff * head_dim),
+            norm=IdentityNorm(),
+        )
+        vectorized = dsv4_kernel._compress_forward_vectorized(
+            x,
+            positions,
+            ratio=ratio,
+            head_dim=head_dim,
+            overlap=overlap,
+            ape=ape,
+            wkv_gate=MarkerWkvGate(coff * head_dim),
+            norm=IdentityNorm(),
+            apply_norm=True,
+        )
+        assert torch.equal(fallback, expected)
+        assert vectorized is not None
+        assert torch.equal(vectorized, expected)
+
+    run_case(4, 5, overlap=True)
+    run_case(128, 129, overlap=False)
+
+
 def test_indexer_bf16_query_logits_and_topk_are_fallback_clean():
     q = torch.randn(3, 2, 4, dtype=torch.float32)
     positions = torch.tensor([0, 3, 7], dtype=torch.int64)

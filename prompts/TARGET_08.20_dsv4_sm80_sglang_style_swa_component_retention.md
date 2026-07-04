@@ -2,14 +2,24 @@
 
 ## Status
 
-Planned after TARGET 08.196.
+Active next TARGET 08 subtarget.
 
 TARGET 08.18 recommends GO for component retention with guardrails.  This target
 is the first conservative implementation slice, but TARGET 08.19 found a DSV4
-exact-path slot/page-location blocker.  Start this target only after TARGET
-08.195/08.196 fixes that blocker or provides a stable slot-pinned/page-normalized
-oracle.  This target should remain behind a new opt-in and must not replace
-phase-1 full-page-owner prefix cache by default.
+exact-path slot/page-location blocker.  TARGET 08.195 fixed a real compressor
+cross-request pooling bug, TARGET 08.196 narrowed the remaining batched drift,
+and TARGET 08.197 classified the layer0 q-path drift as GEMM shape numeric
+drift rather than q_norm/RoPE row-coupling.  Start this target only after TARGET
+08.198 fixes or guards the remaining post-layer0 same-shape decode drift, or
+provides a stable oracle.  This target should remain behind a new opt-in and
+must not replace phase-1 full-page-owner prefix cache by default.
+
+TARGET 08.198 provided the required guard: mini does not currently guarantee
+batch-slot invariance.  For this target, cross-slot/filler-content/identical-row
+generated-token equality is diagnostic only, not a pass/fail oracle.  Use a
+slot-pinned, same-layout prefix-on versus prefix-off comparison plus text smoke
+that rejects obvious correctness failures such as garbled or invalid-byte text,
+crashes, leaks, metadata corruption, or cache-state misuse.
 
 ## Motivation
 
@@ -39,8 +49,8 @@ The V1 target should answer:
    SWA/full pages are released or tombstoned?
 3. What minimal component ownership model is needed for C4, C128, indexer, and
    compression state to survive after old full pages are no longer canonical?
-4. Does the opt-in preserve TARGET 08.19 logits/metadata correctness and TARGET
-   08.05 graph replay coverage?
+4. Does the opt-in preserve slot-pinned/same-layout logits and metadata, text
+   smoke quality, and TARGET 08.05 graph replay coverage?
 
 ## Source References
 
@@ -120,7 +130,21 @@ Correctness:
 - mixed hit/miss batch;
 - repeated hit/evict cycle;
 - eviction pressure;
-- logits/metadata comparison using TARGET 08.19 style checks.
+- guarded logits/metadata comparison:
+  - main pass/fail: slot-pinned, same-layout prefix-on versus prefix-off;
+  - diagnostics only: cross-slot, filler-content, and identical-row
+    generated-token equality;
+  - report max/mean logit diffs, top-k, top1 margin, and sampled ids;
+  - treat sampled-token changes as unstable but expected when
+    `2 * max_abs >= top1_margin`;
+  - for decode step 1+, use teacher-forced/fixed-token probes where possible,
+    or label natural autoregressive mismatch as sampler feedback once decode0
+    sampled ids differ.
+- text smoke:
+  - shared-prefix and non-shared-prefix prompts;
+  - no obvious garbled or invalid-byte artifacts;
+  - no empty/degenerate output unless EOS is expected;
+  - no crash, hang, or cache-state assertion failure.
 
 Capacity and performance:
 
@@ -147,7 +171,8 @@ The README must include:
 
 - SGLang source parity summary;
 - mini V1 design and opt-in name;
-- correctness results;
+- guarded correctness results;
+- text-smoke results;
 - recovered-capacity table;
 - performance A/B versus phase-1 prefix cache;
 - graph replay coverage;
@@ -157,7 +182,9 @@ The README must include:
 
 Keep V1 as an opt-in if:
 
-- logits/metadata correctness passes for tested boundaries;
+- slot-pinned/same-layout logits and metadata pass for tested boundaries;
+- text smoke shows no obvious garbled output, degenerate output, crash, or
+  state misuse;
 - no leaks or double frees;
 - graph replay remains covered;
 - recovered pages are material for sustained or eviction-pressure workloads.
@@ -175,7 +202,10 @@ Stop and report blocked if:
 
 - compressed components cannot outlive released full pages safely;
 - compression state ownership cannot be made unambiguous;
-- logits diverge from phase-1 prefix cache or prefix-disabled mode;
+- slot-pinned/same-layout logits diverge from phase-1 prefix cache or
+  prefix-disabled mode beyond the guarded oracle;
+- text smoke shows garbled output, degenerate output, or repeated invalid-byte
+  artifacts;
 - recovered capacity is below the noise floor;
 - implementation starts turning into a global KV allocator rewrite.
 
