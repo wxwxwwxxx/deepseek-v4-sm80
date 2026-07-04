@@ -1,0 +1,20 @@
+source,variant,scenario,output_tok_s,decode_prepare_s,decode_forward_s,graph,note
+TARGET 07.79 non-prefix,target07_control,historical_4096_1024_bs4,131.7561,,,0 eager,from prompts/target.md
+TARGET 07.79 non-prefix,target07_control,historical_4096_128_bs4,62.3925,,,0 eager,from prompts/target.md
+old vLLM baseline,vLLM old serving line,4096_1024_bs4_serving_line,114.07,,,,historical old serving victory line
+TARGET 08.28 promoted gate,route_b_lifetime_legacy_name,serving_mixed_112req_wave16,163.722,1.1359,9.8927,441/0,from target08_route_b_lifetime_cache_promotion_gate
+TARGET 08.28 promoted gate,route_b_lifetime_legacy_name,prefix_multi_112req_wave16,105.4163,0.2868,1.9164,49/0,from target08_route_b_lifetime_cache_promotion_gate
+TARGET 08.28 promoted gate,route_b_lifetime_legacy_name,prefix_eviction_pressure_96req_wave16,13.026,0.1537,0.1917,6/0,from target08_route_b_lifetime_cache_promotion_gate
+TARGET 08.28 promoted gate,route_b_lifetime_legacy_name,decode_ladder_bs16,98.3116,0.1639,1.6786,63/0,from target08_route_b_lifetime_cache_promotion_gate
+TARGET 08.30 current,promoted_prefix,decode_ladder_bs16,130.7604826043519,0.15765043596426645,1.3664720027397077,63/0,CV=0.0011
+TARGET 08.30 current,promoted_prefix,historical_4096_1024_bs4,137.16253775248933,2.2244739265491567,22.297711692750454,1023/0,CV=0.0014
+TARGET 08.30 current,promoted_prefix,historical_4096_128_bs4,62.89331650604807,0.2814439069479704,2.768439224610726,127/0,CV=0.0022
+TARGET 08.30 current,promoted_prefix,prefix_eviction_pressure_96req_wave16,13.082659580029793,0.14635865949094296,0.17139489452044168,6/0,CV=0.0019
+TARGET 08.30 current,promoted_prefix,prefix_multi_112req_wave16,110.14167038530877,0.27790257210532826,1.474988021577398,49/0,CV=0.0033
+TARGET 08.30 current,promoted_prefix,serving_mixed_112req_wave16,163.39847150338042,1.091879177838564,9.762444363286098,441/0,CV=0.0035
+TARGET 08.30 current,target07_control,decode_ladder_bs16,135.53534336972174,0.1295219138264656,1.329728877171874,63/0,CV=0.0222
+TARGET 08.30 current,target07_control,historical_4096_1024_bs4,139.8415141160007,1.979318148146073,22.049778717880447,1023/0,CV=0.0008
+TARGET 08.30 current,target07_control,historical_4096_128_bs4,63.77315591975327,0.2524587331960599,2.725789754341046,127/0,CV=0.0015
+TARGET 08.30 current,target07_control,prefix_eviction_pressure_96req_wave16,15.026961066519698,0.017501364772518475,0.14532775369783243,6/0,CV=0.0041
+TARGET 08.30 current,target07_control,prefix_multi_112req_wave16,51.05073457615875,0.13241369587679705,1.1798767000436783,49/0,CV=0.0031
+TARGET 08.30 current,target07_control,serving_mixed_112req_wave16,178.30042963276864,0.9129527093221744,9.255212110156814,441/0,CV=0.0010
