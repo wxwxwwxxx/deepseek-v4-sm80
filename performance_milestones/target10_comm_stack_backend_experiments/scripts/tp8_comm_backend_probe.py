@@ -45,10 +45,38 @@ class TraceCase:
     forward_repeats: int
 
 
+@dataclass(frozen=True)
+class TraceSegment:
+    hidden_rows: int
+    lm_batch: int
+    forward_repeats: int
+
+
+@dataclass(frozen=True)
+class RouteTraceCase:
+    scenario: str
+    segments: tuple[TraceSegment, ...]
+
+
 DTYPES = {
     "bf16": torch.bfloat16,
     "fp32": torch.float32,
 }
+
+THRESHOLD32M_BYTES = 32 * 1024 * 1024
+HIDDEN_ALL_REDUCE_OWNERS = {
+    "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+    "dsv4.v1_moe_reduce_once_all_reduce",
+    "dsv4.embedding_all_reduce",
+}
+LM_HEAD_ALL_GATHER_OWNER = "dsv4.lm_head_all_gather"
+ROUTE_POLICIES = (
+    "torch_all",
+    "pynccl_threshold32m",
+    "route_small_hidden_to_pynccl",
+    "route_hidden_to_pynccl",
+    "route_gather_to_pynccl",
+)
 
 
 OWNER_CASES = [
@@ -110,6 +138,56 @@ OWNER_CASES = [
         (16, LM_HEAD_SHARD),
         (128, LM_HEAD_SHARD),
     ),
+    OwnerCase(
+        "prefix_multi_112req_wave16",
+        "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "all_reduce",
+        "bf16",
+        (1024, HIDDEN_SIZE),
+    ),
+    OwnerCase(
+        "prefix_multi_112req_wave16",
+        "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "all_reduce",
+        "bf16",
+        (9216, HIDDEN_SIZE),
+    ),
+    OwnerCase(
+        "prefix_multi_112req_wave16",
+        "dsv4.v1_moe_reduce_once_all_reduce",
+        "all_reduce",
+        "bf16",
+        (1024, HIDDEN_SIZE),
+    ),
+    OwnerCase(
+        "prefix_multi_112req_wave16",
+        "dsv4.v1_moe_reduce_once_all_reduce",
+        "all_reduce",
+        "bf16",
+        (9216, HIDDEN_SIZE),
+    ),
+    OwnerCase(
+        "prefix_multi_112req_wave16",
+        "dsv4.embedding_all_reduce",
+        "all_reduce",
+        "bf16",
+        (1024, HIDDEN_SIZE),
+    ),
+    OwnerCase(
+        "prefix_multi_112req_wave16",
+        "dsv4.embedding_all_reduce",
+        "all_reduce",
+        "bf16",
+        (9216, HIDDEN_SIZE),
+    ),
+    OwnerCase(
+        "prefix_multi_112req_wave16",
+        "dsv4.lm_head_all_gather",
+        "all_gather",
+        "fp32",
+        (16, LM_HEAD_SHARD),
+        (128, LM_HEAD_SHARD),
+    ),
 ]
 
 
@@ -118,11 +196,34 @@ TRACE_CASES = [
     TraceCase("serving_mixed_112req_wave16", hidden_rows=2496, lm_batch=16, forward_repeats=56),
 ]
 
+ROUTE_TRACE_CASES = [
+    RouteTraceCase(
+        "historical_4096_128_bs4",
+        segments=(TraceSegment(hidden_rows=16384, lm_batch=4, forward_repeats=16),),
+    ),
+    RouteTraceCase(
+        "historical_4096_1024_bs4",
+        segments=(TraceSegment(hidden_rows=16384, lm_batch=4, forward_repeats=16),),
+    ),
+    RouteTraceCase(
+        "serving_mixed_112req_wave16",
+        segments=(TraceSegment(hidden_rows=2496, lm_batch=16, forward_repeats=56),),
+    ),
+    RouteTraceCase(
+        "prefix_multi_112req_wave16",
+        segments=(
+            TraceSegment(hidden_rows=9216, lm_batch=16, forward_repeats=8),
+            TraceSegment(hidden_rows=1024, lm_batch=16, forward_repeats=48),
+        ),
+    ),
+]
+
 
 @dataclass
 class Backend:
     name: str
     pynccl_comm: object | None
+    symm_max_bytes: int = 0
 
 
 def _local_rank() -> int:
@@ -207,6 +308,61 @@ def _all_gather_fn(
         return lambda: dist.all_gather_into_tensor(dst, src)
     assert backend.pynccl_comm is not None
     return lambda: backend.pynccl_comm.all_gather(dst, src)
+
+
+def _backend_by_name(backends: list[Backend]) -> dict[str, Backend]:
+    return {backend.name: backend for backend in backends}
+
+
+def _case_input_bytes(case: OwnerCase) -> int:
+    dtype = DTYPES[case.dtype]
+    return _numel(case.shape) * torch.empty((), dtype=dtype).element_size()
+
+
+def _select_route_backend(policy: str, case: OwnerCase) -> str:
+    input_bytes = _case_input_bytes(case)
+    if policy == "torch_all":
+        return "torch_nccl"
+    if policy == "pynccl_threshold32m":
+        return "pynccl_threshold32m"
+    if policy == "route_small_hidden_to_pynccl":
+        if (
+            case.op == "all_reduce"
+            and case.dtype == "bf16"
+            and case.owner in HIDDEN_ALL_REDUCE_OWNERS
+            and input_bytes <= THRESHOLD32M_BYTES
+        ):
+            return "pynccl_threshold32m"
+        return "torch_nccl"
+    if policy == "route_hidden_to_pynccl":
+        if (
+            case.op == "all_reduce"
+            and case.dtype == "bf16"
+            and case.owner in HIDDEN_ALL_REDUCE_OWNERS
+        ):
+            return "pynccl_threshold32m"
+        return "torch_nccl"
+    if policy == "route_gather_to_pynccl":
+        if case.op == "all_gather" and case.owner == LM_HEAD_ALL_GATHER_OWNER:
+            return "pynccl_threshold32m"
+        return "torch_nccl"
+    raise ValueError(f"unknown route policy: {policy}")
+
+
+def _selected_backend_entry(backends_by_name: dict[str, Backend], policy: str, case: OwnerCase) -> Backend:
+    return backends_by_name[_select_route_backend(policy, case)]
+
+
+def _selected_copy_bytes_per_call(backend: Backend, case: OwnerCase) -> int:
+    input_bytes = _case_input_bytes(case)
+    if (
+        backend.pynccl_comm is not None
+        and case.op == "all_reduce"
+        and backend.symm_max_bytes > 0
+        and input_bytes <= backend.symm_max_bytes
+    ):
+        return 2 * input_bytes
+    return 0
 
 
 def _bench_copy(shape: tuple[int, ...], dtype: torch.dtype, warmup: int, iterations: int) -> dict:
@@ -327,11 +483,7 @@ def _bench_collective(
 
     copy_bytes_per_call = 0
     copy_time_us_per_call = 0.0
-    if (
-        backend.name == "pynccl_symmetric"
-        and case.op == "all_reduce"
-        and input_bytes <= symm_max_bytes
-    ):
+    if backend.pynccl_comm is not None and case.op == "all_reduce" and input_bytes <= backend.symm_max_bytes:
         copy_key = (case.shape, case.dtype)
         if copy_key not in copy_cache:
             copy_cache[copy_key] = _bench_copy(case.shape, dtype, warmup=warmup, iterations=iterations)
@@ -423,7 +575,7 @@ def _bench_trace(
     all_reduce_calls = trace.forward_repeats * (1 + 2 * NUM_LAYERS)
     all_gather_calls = trace.forward_repeats
     copy_bytes = 0
-    if backend.name == "pynccl_symmetric" and hidden_bytes <= symm_max_bytes:
+    if backend.pynccl_comm is not None and symm_max_bytes > 0 and hidden_bytes <= symm_max_bytes:
         copy_bytes = all_reduce_calls * 2 * hidden_bytes
 
     return {
@@ -440,6 +592,235 @@ def _bench_trace(
         "graph_replay": graph_result,
         "symm_copy_bytes_total": int(copy_bytes),
     }
+
+
+def _route_segment_body(
+    policy: str,
+    backends_by_name: dict[str, Backend],
+    hidden_rows: int,
+    lm_batch: int,
+) -> tuple[Callable[[], None], list[dict]]:
+    owners = (
+        "dsv4.embedding_all_reduce",
+        "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "dsv4.v1_moe_reduce_once_all_reduce",
+        LM_HEAD_ALL_GATHER_OWNER,
+    )
+    hidden_tensors = {
+        owner: torch.zeros((hidden_rows, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+        for owner in owners
+        if owner != LM_HEAD_ALL_GATHER_OWNER
+    }
+    lm_src = torch.zeros((lm_batch, LM_HEAD_SHARD), dtype=torch.float32, device="cuda")
+    lm_dst = torch.empty((lm_batch * _world_size(), LM_HEAD_SHARD), dtype=torch.float32, device="cuda")
+
+    selected: list[dict] = []
+    selected_fns: dict[str, Callable[[], None]] = {}
+    for owner, tensor in hidden_tensors.items():
+        case = OwnerCase(
+            "route_trace",
+            owner,
+            "all_reduce",
+            "bf16",
+            (hidden_rows, HIDDEN_SIZE),
+        )
+        backend = _selected_backend_entry(backends_by_name, policy, case)
+        row = _route_selected_row(policy, case, backend)
+        row["segment_hidden_rows"] = int(hidden_rows)
+        row["segment_lm_batch"] = int(lm_batch)
+        selected.append(row)
+        selected_fns[owner] = _all_reduce_fn(backend, tensor)
+
+    gather_case = OwnerCase(
+        "route_trace",
+        LM_HEAD_ALL_GATHER_OWNER,
+        "all_gather",
+        "fp32",
+        (lm_batch, LM_HEAD_SHARD),
+        (lm_batch * _world_size(), LM_HEAD_SHARD),
+    )
+    gather_backend = _selected_backend_entry(backends_by_name, policy, gather_case)
+    gather_row = _route_selected_row(policy, gather_case, gather_backend)
+    gather_row["segment_hidden_rows"] = int(hidden_rows)
+    gather_row["segment_lm_batch"] = int(lm_batch)
+    selected.append(gather_row)
+    gather_fn = _all_gather_fn(gather_backend, lm_src, lm_dst)
+
+    def body() -> None:
+        selected_fns["dsv4.embedding_all_reduce"]()
+        for _ in range(NUM_LAYERS):
+            selected_fns["dsv4.attn.wo_b.row_parallel_projection_all_reduce"]()
+            selected_fns["dsv4.v1_moe_reduce_once_all_reduce"]()
+        gather_fn()
+
+    return body, selected
+
+
+def _route_selected_row(policy: str, case: OwnerCase, backend: Backend) -> dict:
+    output_shape = case.output_shape or case.shape
+    dtype = DTYPES[case.dtype]
+    input_bytes = _numel(case.shape) * torch.empty((), dtype=dtype).element_size()
+    output_bytes = _numel(output_shape) * torch.empty((), dtype=dtype).element_size()
+    return {
+        "route_policy": policy,
+        "owner": case.owner,
+        "op": case.op,
+        "dtype": _dtype_name(dtype),
+        "shape": _shape_list(case.shape),
+        "output_shape": _shape_list(output_shape),
+        "backend": backend.name,
+        "input_bytes": int(input_bytes),
+        "output_bytes": int(output_bytes),
+        "copy_bytes_per_call": int(_selected_copy_bytes_per_call(backend, case)),
+    }
+
+
+def _time_route_trace_eager(
+    segment_bodies: list[tuple[TraceSegment, Callable[[], None]]],
+    *,
+    warmup: int,
+    iterations: int,
+) -> dict:
+    def once() -> None:
+        for segment, body in segment_bodies:
+            for _ in range(segment.forward_repeats):
+                body()
+
+    times = _time_cuda(once, warmup=warmup, iterations=iterations)
+    return _summary_us(times)
+
+
+def _time_route_trace_graph(
+    segment_bodies: list[tuple[TraceSegment, Callable[[], None]]],
+    *,
+    iterations: int,
+) -> dict:
+    try:
+        graphs: list[tuple[TraceSegment, torch.cuda.CUDAGraph]] = []
+        for segment, body in segment_bodies:
+            for _ in range(2):
+                body()
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                body()
+            graphs.append((segment, graph))
+        torch.cuda.synchronize()
+
+        graph_times: list[float] = []
+        for _ in range(iterations):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for segment, graph in graphs:
+                for _ in range(segment.forward_repeats):
+                    graph.replay()
+            end.record()
+            end.synchronize()
+            graph_times.append(float(start.elapsed_time(end) * 1000.0))
+        return {"ok": True, "error": None, **_summary_us(graph_times)}
+    except Exception as exc:  # noqa: BLE001
+        torch.cuda.synchronize()
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _bench_route_trace(
+    policy: str,
+    backends_by_name: dict[str, Backend],
+    trace: RouteTraceCase,
+    *,
+    iterations: int,
+) -> dict:
+    segment_bodies = []
+    selected_rows: list[dict] = []
+    for segment in trace.segments:
+        body, selected = _route_segment_body(
+            policy,
+            backends_by_name,
+            hidden_rows=segment.hidden_rows,
+            lm_batch=segment.lm_batch,
+        )
+        segment_bodies.append((segment, body))
+        selected_rows.extend(selected)
+
+    eager = _time_route_trace_eager(segment_bodies, warmup=1, iterations=iterations)
+    graph = _time_route_trace_graph(segment_bodies, iterations=iterations)
+    selected_summary = _summarize_route_selected_rows(selected_rows, trace.segments)
+    return {
+        "scenario": trace.scenario,
+        "route_policy": policy,
+        "segments": [asdict(segment) for segment in trace.segments],
+        "eager": eager,
+        "graph_replay": graph,
+        "selected_backends": selected_summary,
+        "symm_copy_bytes_total": int(
+            sum(int(row["copy_bytes_total"]) for row in selected_summary)
+        ),
+    }
+
+
+def _summarize_route_selected_rows(
+    selected_rows: list[dict],
+    segments: tuple[TraceSegment, ...],
+) -> list[dict]:
+    summary: list[dict] = []
+    for row in selected_rows:
+        hidden_rows = int(row["segment_hidden_rows"])
+        lm_batch = int(row["segment_lm_batch"])
+        repeat_count = next(
+            int(segment.forward_repeats)
+            for segment in segments
+            if segment.hidden_rows == hidden_rows and segment.lm_batch == lm_batch
+        )
+        if row["op"] == "all_gather":
+            call_count = repeat_count
+        elif row["owner"] == "dsv4.embedding_all_reduce":
+            call_count = repeat_count
+        else:
+            call_count = repeat_count * NUM_LAYERS
+        entry = dict(row)
+        entry["call_count"] = int(call_count)
+        entry["copy_bytes_total"] = int(row["copy_bytes_per_call"]) * int(call_count)
+        summary.append(entry)
+    return summary
+
+
+def _bench_route_microbench(
+    policy: str,
+    backends_by_name: dict[str, Backend],
+    bench_cache: dict[tuple[str, str, tuple[int, ...], str], dict],
+    copy_cache: dict[tuple[tuple[int, ...], str], dict],
+    *,
+    warmup: int,
+    iterations: int,
+    graph_replays: int,
+) -> list[dict]:
+    rows: list[dict] = []
+    for case in OWNER_CASES:
+        backend = _selected_backend_entry(backends_by_name, policy, case)
+        key = (backend.name, case.op, case.shape, case.dtype)
+        if key not in bench_cache:
+            bench_cache[key] = _bench_collective(
+                backend,
+                case,
+                warmup=warmup,
+                iterations=iterations,
+                graph_replays=graph_replays,
+                symm_max_bytes=backend.symm_max_bytes,
+                copy_cache=copy_cache,
+            )
+        row = dict(bench_cache[key])
+        row.update(
+            {
+                "route_policy": policy,
+                "selected_backend": backend.name,
+                "scenario": case.scenario,
+                "owner": case.owner,
+                "output_shape": _shape_list(case.output_shape or case.shape),
+            }
+        )
+        rows.append(row)
+    return rows
 
 
 def _partial_runtime_probe(backends: list[Backend]) -> list[dict]:
@@ -557,11 +938,19 @@ def main() -> None:
         tp_cpu_group=gloo_group,
         max_size_bytes=max_hidden_bytes,
     )
+    threshold_comm = init_pynccl(
+        tp_rank=rank,
+        tp_size=world_size,
+        tp_cpu_group=gloo_group,
+        max_size_bytes=THRESHOLD32M_BYTES,
+    )
     backends = [
         Backend("torch_nccl", None),
-        Backend("pynccl_direct", direct_comm),
-        Backend("pynccl_symmetric", symm_comm),
+        Backend("pynccl_direct", direct_comm, 0),
+        Backend("pynccl_symmetric", symm_comm, max_hidden_bytes),
+        Backend("pynccl_threshold32m", threshold_comm, THRESHOLD32M_BYTES),
     ]
+    backends_by_name = _backend_by_name(backends)
 
     started = time.time()
     copy_cache: dict[tuple[tuple[int, ...], str], dict] = {}
@@ -577,7 +966,7 @@ def main() -> None:
                     warmup=args.warmup,
                     iterations=args.iterations,
                     graph_replays=args.graph_replays,
-                    symm_max_bytes=max_hidden_bytes,
+                    symm_max_bytes=backend.symm_max_bytes,
                     copy_cache=copy_cache,
                 )
             row = dict(bench_cache[key])
@@ -598,7 +987,33 @@ def main() -> None:
                     backend,
                     trace,
                     repeats=args.trace_iterations,
-                    symm_max_bytes=max_hidden_bytes,
+                    symm_max_bytes=backend.symm_max_bytes,
+                )
+            )
+
+    route_microbench: list[dict] = []
+    for policy in ROUTE_POLICIES:
+        route_microbench.extend(
+            _bench_route_microbench(
+                policy,
+                backends_by_name,
+                bench_cache,
+                copy_cache,
+                warmup=args.warmup,
+                iterations=args.iterations,
+                graph_replays=args.graph_replays,
+            )
+        )
+
+    route_traces: list[dict] = []
+    for policy in ROUTE_POLICIES:
+        for trace in ROUTE_TRACE_CASES:
+            route_traces.append(
+                _bench_route_trace(
+                    policy,
+                    backends_by_name,
+                    trace,
+                    iterations=args.trace_iterations,
                 )
             )
 
@@ -616,13 +1031,18 @@ def main() -> None:
             "iterations": int(args.iterations),
             "trace_iterations": int(args.trace_iterations),
             "graph_replays": int(args.graph_replays),
+            "threshold32m_bytes": int(THRESHOLD32M_BYTES),
+            "route_policies": list(ROUTE_POLICIES),
             "elapsed_seconds": float(time.time() - started),
         },
         "owner_cases": [asdict(case) for case in OWNER_CASES],
         "trace_cases": [asdict(case) for case in TRACE_CASES],
+        "route_trace_cases": [asdict(case) for case in ROUTE_TRACE_CASES],
         "microbench": microbench,
         "d2d_copy_microbench": list(copy_cache.values()),
         "trace_replay": traces,
+        "route_microbench": route_microbench,
+        "route_trace_replay": route_traces,
         "partial_runtime_probe": partial_probe,
         "p2p": p2p,
     }

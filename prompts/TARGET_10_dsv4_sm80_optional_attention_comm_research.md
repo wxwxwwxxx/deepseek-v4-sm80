@@ -39,9 +39,11 @@ Run in this order:
 | Stage | Prompt | Status | Purpose |
 | --- | --- | --- | --- |
 | TARGET 10.1 | `prompts/TARGET_10.1_dsv4_sm80_comm_path_parity_vllm.md` | completed | Compare mini and vLLM communication paths: owner boundaries, collective count, bytes, dtype, shapes, metadata/runtime overhead, and graph placement. |
-| TARGET 10.15 | `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md` | next | Isolate and fix the high-severity MoE reduce-once dtype/bytes mismatch found by 10.1: mini fp32 reduce versus vLLM-aligned BF16 hidden-state reduce. |
-| TARGET 10.2 | `prompts/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md` | after 10.15 | Test communication backends only after path and dtype parity, starting from pure communication microbench and no-weight trace replay before full-model correctness/macro A/B. |
-| TARGET 10.3 | future conditional | not written yet | If 10.1/10.2 prove a real opportunity, test overlap, NCCL grouping, stream scheduling, or fused compute+collective boundaries. |
+| TARGET 10.15 | `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md` | completed | Isolated the high-severity MoE reduce-once dtype/bytes mismatch found by 10.1; BF16 reduce is implemented and kept as explicit opt-in. |
+| TARGET 10.2 | `prompts/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md` | completed | Tested communication backends with micro-first and no-weight replay gates; best candidate was PyNCCL threshold32m opt-in, but not repeat-stable enough to promote. |
+| TARGET 10.25 | `prompts/TARGET_10.25_dsv4_sm80_comm_size_owner_routing.md` | completed | Validated PyNCCL threshold32m as a positive opt-in; explicit per-owner/per-size routing did not beat the global threshold in no-weight replay. |
+| TARGET 10.26 | `prompts/TARGET_10.26_dsv4_sm80_pynccl_threshold32m_promotion_gate.md` | next | Run the short promotion gate for PyNCCL threshold32m: all required macro scenarios, repeat stability, text smoke, graph replay, and owner timing/profile. |
+| TARGET 10.3 | future conditional | not written yet | If 10.26 promotes or rejects threshold32m but communication remains material, test overlap, NCCL grouping, stream scheduling, or fused compute+collective boundaries. |
 
 Do not start broad attention-kernel work inside TARGET 10 unless a fresh profile
 shows attention compute, not communication, is the top remaining owner.

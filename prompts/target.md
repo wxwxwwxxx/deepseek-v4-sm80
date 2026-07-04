@@ -50,8 +50,10 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | recommended family | Post-prefix profiles point to decode-forward communication/all-reduce owners as the next evidence-based surface. |
 | TARGET 10.1 | `prompts/TARGET_10.1_dsv4_sm80_comm_path_parity_vllm.md` | completed | Compared mini and vLLM communication owner boundaries; found matching boundaries but a high-severity MoE reduce-once fp32-vs-BF16 dtype/bytes mismatch. |
-| TARGET 10.15 | `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md` | next | Isolate mini MoE reduce-once BF16 parity against vLLM, with correctness, communication-byte, profile, and macro gates. |
-| TARGET 10.2 | `prompts/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md` | after 10.15 | Test PyTorch/NCCL, mini PyNCCL, symmetric-memory workspace, and per-owner backend routing with micro-first and no-weight replay gates before full-model A/B. |
+| TARGET 10.15 | `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md` | completed | Implemented BF16 MoE reduce-once as an explicit opt-in; hot fp32 all-reduce disappeared, but promotion awaits repeat-stable evidence. |
+| TARGET 10.2 | `prompts/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md` | completed | Tested Torch/NCCL, mini PyNCCL, symmetric-memory workspace, and no-weight replay; best candidate was PyNCCL threshold32m opt-in, not yet promoted. |
+| TARGET 10.25 | `prompts/TARGET_10.25_dsv4_sm80_comm_size_owner_routing.md` | completed | Repeat-gated PyNCCL threshold32m as a positive opt-in; explicit owner/size routing did not beat the global threshold cheap gate. |
+| TARGET 10.26 | `prompts/TARGET_10.26_dsv4_sm80_pynccl_threshold32m_promotion_gate.md` | next | Short promotion gate for PyNCCL threshold32m: repeat all macro scenarios, text smoke, graph replay, and owner timing/profile. |
 
 ## Current Milestones
 
@@ -94,7 +96,7 @@ Decision:
 
 ```text
 TARGET 08 is closed as a prefix-cache baseline.
-Recommended next: TARGET 10.15 MoE reduce-once BF16 parity with vLLM.
+Recommended next: TARGET 10.26 PyNCCL threshold32m promotion gate.
 TARGET 09 remains planned for low-precision research after the communication
 surface is either exploited or disproven.
 ```
@@ -106,7 +108,13 @@ all-reduce, and embedding all-reduce. TARGET 10.1 found that the communication
 owner boundaries largely match vLLM, but mini currently reduces the combined
 MoE output in fp32 while vLLM's SM80 source path indicates a BF16 hidden-state
 reduce. TARGET 10.15 fixes or rejects that dtype/bytes mismatch before any
-PyNCCL or symmetric-memory tuning in TARGET 10.2.
+PyNCCL or symmetric-memory tuning in TARGET 10.2. TARGET 10.2 then found that
+PyNCCL threshold32m is a promising opt-in, but not yet repeat-stable enough to
+promote. TARGET 10.25 should first repeat-gate that candidate, then test whether
+an explicit per-owner/per-size routing layer is better than a global PyNCCL
+threshold. TARGET 10.25 found that the global threshold remains the best simple
+candidate and explicit owner/size routing did not beat it. TARGET 10.26 should
+now run the final promotion gate before changing recommended defaults.
 
 ## Archive Policy
 
