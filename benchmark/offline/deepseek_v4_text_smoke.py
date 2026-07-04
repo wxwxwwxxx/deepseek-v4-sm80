@@ -804,7 +804,8 @@ VARIANTS: tuple[Variant, ...] = (
         },
         (
             "TARGET 07.64 smoke opt-in: dsv4_sm80_a100_victory plus fused "
-            "decode metadata indices/lens assembly."
+            "decode metadata indices/lens assembly. Under Route B component "
+            "loc ownership this uses component-owned page tables."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
@@ -1431,8 +1432,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Explicitly enable TARGET 08.21.2 DSV4 Route B component loc ownership. "
-            "Requires --enable-dsv4-radix-prefix-cache and keeps decode metadata "
-            "deforest guarded off while graph replay uses direct component metadata copy."
+            "Requires --enable-dsv4-radix-prefix-cache; Route B decode metadata "
+            "deforest remains a separate MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST opt-in."
         ),
     )
     parser.add_argument(

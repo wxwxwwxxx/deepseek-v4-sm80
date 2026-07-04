@@ -750,6 +750,151 @@ def test_copy_decode_metadata_for_replay_matches_legacy_copy(monkeypatch):
             assert torch.equal(args[f"dst_{name}"], expected[name])
 
 
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_decode_metadata_deforest_component_tables_match_oracle(monkeypatch):
+    device = torch.device("cuda")
+    rows = 3
+    page_size = 128
+    max_seqlen_k = 384
+    window_size = 8
+    index_topk = 5
+    alignment = 64
+    table_len = 3
+
+    ctx_page_table = torch.stack(
+        [
+            torch.arange(0, max_seqlen_k, dtype=torch.int32),
+            torch.arange(1024, 1024 + max_seqlen_k, dtype=torch.int32),
+            torch.arange(2048, 2048 + max_seqlen_k, dtype=torch.int32),
+        ]
+    ).to(device)
+    ctx_page_table[0, :page_size] = -1
+    table_indices = torch.arange(rows, dtype=torch.int32, device=device)
+    positions = torch.tensor([255, 256, 383], dtype=torch.int32, device=device)
+    c4_page_table = torch.tensor(
+        [[10, 11, 12], [13, -1, 15], [16, 17, 18]],
+        dtype=torch.int32,
+        device=device,
+    )
+    c128_page_table = torch.tensor(
+        [[20, 21, 22], [-1, 31, 32], [40, 41, 42]],
+        dtype=torch.int32,
+        device=device,
+    )
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE, "1")
+    out = dsv4_kernel.decode_metadata_deforest_fallback(
+        ctx_page_table,
+        table_indices,
+        positions,
+        page_size=page_size,
+        max_seqlen_k=max_seqlen_k,
+        window_size=window_size,
+        index_topk=index_topk,
+        alignment=alignment,
+        c4_page_table=c4_page_table,
+        c128_page_table=c128_page_table,
+        component_loc_ownership=True,
+    )
+    assert out is not None
+    torch.cuda.synchronize()
+
+    c4_page_size = page_size // 4
+    c128_page_size = max(page_size // 128, 1)
+    cpu_ctx = ctx_page_table.cpu()
+    cpu_c4 = c4_page_table.cpu()
+    cpu_c128 = c128_page_table.cpu()
+    cpu_pos = positions.cpu().tolist()
+
+    for row, pos in enumerate(cpu_pos):
+        seq_len = pos + 1
+        expected_pages = []
+        for logical_page in range(table_len):
+            full = int(cpu_ctx[row, logical_page * page_size].item())
+            expected_pages.append(full // page_size if full >= 0 else -1)
+        assert out.page_table[row, :table_len].cpu().tolist() == expected_pages
+
+        c4_len = seq_len // 4
+        c4_start = max(c4_len - index_topk, 0)
+        c4_raw = list(range(c4_start, c4_len))
+        expected_c4_locs = []
+        expected_c4_full = []
+        for raw in c4_raw:
+            logical_page = raw // c4_page_size
+            offset = raw % c4_page_size
+            component_page = int(cpu_c4[row, logical_page].item())
+            expected_c4_locs.append(
+                component_page * c4_page_size + offset if component_page >= 0 else -1
+            )
+            full_pos = raw * 4 + 3
+            full = int(cpu_ctx[row, full_pos].item())
+            expected_c4_full.append(full if full >= 0 else -1)
+        assert out.c4_sparse_raw_indices[row, : len(c4_raw)].cpu().tolist() == c4_raw
+        assert out.c4_sparse_page_indices[row, : len(c4_raw)].cpu().tolist() == expected_c4_locs
+        assert out.c4_sparse_full_indices[row, : len(c4_raw)].cpu().tolist() == expected_c4_full
+
+        c128_len = seq_len // 128
+        expected_c128_locs = []
+        expected_c128_full = []
+        for raw in range(c128_len):
+            logical_page = raw // c128_page_size
+            offset = raw % c128_page_size
+            component_page = int(cpu_c128[row, logical_page].item())
+            expected_c128_locs.append(
+                component_page * c128_page_size + offset if component_page >= 0 else -1
+            )
+            full_pos = raw * 128 + 127
+            full = int(cpu_ctx[row, full_pos].item())
+            expected_c128_full.append(full if full >= 0 else -1)
+        assert out.c128_raw_indices[row, :c128_len].cpu().tolist() == list(range(c128_len))
+        assert out.c128_page_indices[row, :c128_len].cpu().tolist() == expected_c128_locs
+        assert out.c128_full_indices[row, :c128_len].cpu().tolist() == expected_c128_full
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_copy_component_write_locs_for_replay_from_component_tables(monkeypatch):
+    device = torch.device("cuda")
+    rows = 5
+    page_size = 128
+    c4_page_table = torch.tensor(
+        [[7, 8], [9, 10], [11, 12], [13, 14], [15, -1]],
+        dtype=torch.int32,
+        device=device,
+    )
+    c128_page_table = torch.tensor(
+        [[17, 18], [19, 20], [21, 22], [23, 24], [25, -1]],
+        dtype=torch.int32,
+        device=device,
+    )
+    c4_indexer_page_table = torch.tensor(
+        [[27, 28], [29, 30], [31, 32], [33, 34], [35, -1]],
+        dtype=torch.int32,
+        device=device,
+    )
+    positions = torch.tensor([3, 4, 127, 128, 255], dtype=torch.int32, device=device)
+    c4_out = torch.full((rows,), -999, dtype=torch.int32, device=device)
+    c128_out = torch.full((rows,), -999, dtype=torch.int32, device=device)
+    c4_indexer_out = torch.full((rows,), -999, dtype=torch.int32, device=device)
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE, "1")
+    assert dsv4_kernel.copy_component_write_locs_for_replay(
+        c4_page_table=c4_page_table,
+        c128_page_table=c128_page_table,
+        c4_indexer_page_table=c4_indexer_page_table,
+        positions=positions,
+        c4_out_loc=c4_out,
+        c128_out_loc=c128_out,
+        c4_indexer_out_loc=c4_indexer_out,
+        rows=rows,
+        page_size=page_size,
+    )
+    torch.cuda.synchronize()
+
+    assert c4_out.cpu().tolist() == [7 * 32, -1, 11 * 32 + 31, -1, -1]
+    assert c128_out.cpu().tolist() == [-1, -1, 21, -1, -1]
+    assert c4_indexer_out.cpu().tolist() == [27 * 32, -1, 31 * 32 + 31, -1, -1]
+
+
 def test_dsv4_unsupported_sm80_paths_fail_clearly():
     with pytest.raises(NotImplementedError) as exc:
         dsv4_kernel.fused_q_indexer_rope_hadamard_fp4_quant()

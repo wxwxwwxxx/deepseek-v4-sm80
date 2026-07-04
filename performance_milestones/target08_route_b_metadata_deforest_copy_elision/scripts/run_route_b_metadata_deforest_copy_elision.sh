@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+MILESTONE_DIR="${ROOT}/performance_milestones/target08_route_b_metadata_deforest_copy_elision"
+RAW_DIR="${MILESTONE_DIR}/raw"
+MODEL_PATH="${MODEL_PATH:-/models/DeepSeek-V4-Flash}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+TORCHRUN_TIMEOUT_SECONDS="${TORCHRUN_TIMEOUT_SECONDS:-7200}"
+
+export CUDA_VISIBLE_DEVICES
+export MINISGL_DISABLE_OVERLAP_SCHEDULING=1
+export MINISGL_DSV4_OWNER_TIMING_MAX_SAMPLES="${MINISGL_DSV4_OWNER_TIMING_MAX_SAMPLES:-40000}"
+
+cd "${ROOT}"
+
+SCENARIOS=(
+  decode_ladder_bs16
+  serving_mixed_112req_wave16
+  prefix_full_hit_257_bs4
+  prefix_full_hit_512_bs4
+  prefix_full_hit_513_bs4
+  prefix_full_hit_768_bs4
+  prefix_full_hit_769_bs4
+  prefix_full_hit_513_longout_bs4
+  prefix_partial_hit_769_bs8
+  prefix_mixed_hit_miss_bs16
+  prefix_multi_112req_wave16
+  prefix_eviction_pressure_96req_wave16
+)
+
+PROFILE_SCENARIOS=(
+  decode_ladder_bs16
+  serving_mixed_112req_wave16
+  prefix_multi_112req_wave16
+  prefix_eviction_pressure_96req_wave16
+)
+
+COMMON_PERF_ARGS=(
+  --model-path "${MODEL_PATH}"
+  --scenarios "${SCENARIOS[@]}"
+  --page-size 256
+  --num-pages 128
+  --allow-dsv4-cuda-graph
+  --cuda-graph-bs 1 2 4 8 16
+  --keep-going
+)
+
+COMMON_PROFILE_ARGS=(
+  --model-path "${MODEL_PATH}"
+  --scenarios "${PROFILE_SCENARIOS[@]}"
+  --page-size 256
+  --num-pages 128
+  --allow-dsv4-cuda-graph
+  --cuda-graph-bs 1 2 4 8 16
+  --keep-going
+)
+
+COMMON_TEXT_ARGS=(
+  --model-path "${MODEL_PATH}"
+  --page-size 256
+  --num-pages 64
+  --max-seq-len 1024
+  --max-extend-tokens 4096
+  --max-tokens 16
+  --fail-on-warning
+  --prompt "请阅读前缀：杭州西湖位于浙江省。请用一句中文说出它在哪个城市？"
+  --prompt "请阅读前缀：杭州西湖位于浙江省。请用一句中文说出它所在省份？"
+  --prompt "Answer in one short English sentence: what color is the sky on a clear day?"
+  --prompt "Use one concise English sentence: name one benefit of caching a shared prompt prefix."
+)
+
+rm -rf \
+  "${RAW_DIR}/perf_prefix_off" \
+  "${RAW_DIR}/perf_phase1_prefix_on" \
+  "${RAW_DIR}/perf_route_b_graph_baseline" \
+  "${RAW_DIR}/perf_route_b_metadata_deforest" \
+  "${RAW_DIR}/perf_route_b_metadata_deforest_profile" \
+  "${RAW_DIR}/text_smoke_prefix_off"* \
+  "${RAW_DIR}/text_smoke_phase1_prefix_on"* \
+  "${RAW_DIR}/text_smoke_route_b_graph_baseline"* \
+  "${RAW_DIR}/text_smoke_route_b_metadata_deforest"* \
+  "${MILESTONE_DIR}/summaries"
+mkdir -p "${RAW_DIR}" "${MILESTONE_DIR}/summaries"
+
+pytest -q \
+  tests/core/test_deepseek_v4_kvcache.py \
+  tests/attention/test_deepseek_v4_backend_metadata.py \
+  tests/core/test_dsv4_cache_option_guards.py \
+  tests/engine/test_graph_runner.py \
+  tests/benchmark/test_deepseek_v4_perf_matrix.py \
+  tests/kernel/test_deepseek_v4_wrappers.py::test_decode_metadata_deforest_component_tables_match_oracle \
+  tests/kernel/test_deepseek_v4_wrappers.py::test_copy_component_write_locs_for_replay_from_component_tables \
+  > "${RAW_DIR}/pytest_route_b_metadata_deforest_correctness.log" 2>&1
+
+timeout "${TORCHRUN_TIMEOUT_SECONDS}" torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_perf_matrix.py \
+  "${COMMON_PERF_ARGS[@]}" \
+  --variants dsv4_sm80_a100_victory \
+  --output-dir "${RAW_DIR}/perf_prefix_off" \
+  > "${RAW_DIR}/perf_prefix_off.log" 2>&1
+
+timeout "${TORCHRUN_TIMEOUT_SECONDS}" torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_perf_matrix.py \
+  "${COMMON_PERF_ARGS[@]}" \
+  --variants dsv4_sm80_a100_victory \
+  --enable-dsv4-radix-prefix-cache \
+  --output-dir "${RAW_DIR}/perf_phase1_prefix_on" \
+  > "${RAW_DIR}/perf_phase1_prefix_on.log" 2>&1
+
+timeout "${TORCHRUN_TIMEOUT_SECONDS}" torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_perf_matrix.py \
+  "${COMMON_PERF_ARGS[@]}" \
+  --variants dsv4_sm80_a100_victory \
+  --enable-dsv4-radix-prefix-cache \
+  --enable-dsv4-component-loc-ownership \
+  --output-dir "${RAW_DIR}/perf_route_b_graph_baseline" \
+  > "${RAW_DIR}/perf_route_b_graph_baseline.log" 2>&1
+
+timeout "${TORCHRUN_TIMEOUT_SECONDS}" torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_perf_matrix.py \
+  "${COMMON_PERF_ARGS[@]}" \
+  --variants dsv4_sm80_a100_victory_metadatadeforest \
+  --enable-dsv4-radix-prefix-cache \
+  --enable-dsv4-component-loc-ownership \
+  --output-dir "${RAW_DIR}/perf_route_b_metadata_deforest" \
+  > "${RAW_DIR}/perf_route_b_metadata_deforest.log" 2>&1
+
+MINISGL_DSV4_OWNER_TIMING=1 timeout "${TORCHRUN_TIMEOUT_SECONDS}" \
+  torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_perf_matrix.py \
+  "${COMMON_PROFILE_ARGS[@]}" \
+  --variants dsv4_sm80_a100_victory_metadatadeforest \
+  --enable-dsv4-radix-prefix-cache \
+  --enable-dsv4-component-loc-ownership \
+  --output-dir "${RAW_DIR}/perf_route_b_metadata_deforest_profile" \
+  > "${RAW_DIR}/perf_route_b_metadata_deforest_profile.log" 2>&1
+
+timeout 900 torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_text_smoke.py \
+  "${COMMON_TEXT_ARGS[@]}" \
+  --variants dsv4_sm80_a100_victory \
+  --allow-dsv4-cuda-graph \
+  --cuda-graph-bs 1 2 4 8 16 \
+  --output "${RAW_DIR}/text_smoke_prefix_off.json" \
+  > "${RAW_DIR}/text_smoke_prefix_off.log" 2>&1
+
+timeout 900 torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_text_smoke.py \
+  "${COMMON_TEXT_ARGS[@]}" \
+  --variants dsv4_sm80_a100_victory \
+  --allow-dsv4-cuda-graph \
+  --cuda-graph-bs 1 2 4 8 16 \
+  --enable-dsv4-radix-prefix-cache \
+  --output "${RAW_DIR}/text_smoke_phase1_prefix_on.json" \
+  > "${RAW_DIR}/text_smoke_phase1_prefix_on.log" 2>&1
+
+timeout 900 torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_text_smoke.py \
+  "${COMMON_TEXT_ARGS[@]}" \
+  --variants dsv4_sm80_a100_victory \
+  --allow-dsv4-cuda-graph \
+  --cuda-graph-bs 1 2 4 8 16 \
+  --enable-dsv4-radix-prefix-cache \
+  --enable-dsv4-component-loc-ownership \
+  --output "${RAW_DIR}/text_smoke_route_b_graph_baseline.json" \
+  > "${RAW_DIR}/text_smoke_route_b_graph_baseline.log" 2>&1
+
+timeout 900 torchrun --standalone --nproc_per_node=8 \
+  benchmark/offline/deepseek_v4_text_smoke.py \
+  "${COMMON_TEXT_ARGS[@]}" \
+  --variants dsv4_sm80_a100_victory_metadatadeforest \
+  --allow-dsv4-cuda-graph \
+  --cuda-graph-bs 1 2 4 8 16 \
+  --enable-dsv4-radix-prefix-cache \
+  --enable-dsv4-component-loc-ownership \
+  --output "${RAW_DIR}/text_smoke_route_b_metadata_deforest.json" \
+  > "${RAW_DIR}/text_smoke_route_b_metadata_deforest.log" 2>&1
+
+python performance_milestones/target08_route_b_final_prefix_promotion_gate/scripts/quantify_swa_tail_guard.py \
+  --milestone-dir "${MILESTONE_DIR}"
+
+python "${MILESTONE_DIR}/scripts/summarize_route_b_metadata_deforest_copy_elision.py" \
+  --milestone-dir "${MILESTONE_DIR}"

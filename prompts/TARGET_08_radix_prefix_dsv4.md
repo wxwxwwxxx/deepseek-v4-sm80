@@ -8,9 +8,10 @@ slot/page invariance probing, TARGET 08.196 batched attention/indexer probing,
 TARGET 08.197 q-path same-shape/same-input probing, TARGET 08.198 post-layer0
 same-shape drift analysis, TARGET 08.20 fail-closed V1 design, TARGET
 08.21.1-08.21.4 Route B component ownership/graph integration, TARGET 08.22
-final promotion gate rerun, and TARGET 08.22.1 component mapping lifecycle fix
-are complete.  Continue with TARGET 08.24 Route B metadata deforest/copy
-elision before revisiting independent SWA ownership.
+final promotion gate rerun, TARGET 08.22.1 component mapping lifecycle fix, and
+TARGET 08.24 component-aware metadata deforest/copy-elision experiment are
+complete.  Continue with TARGET 08.25 direct graph metadata buffer generation
+before revisiting independent SWA ownership.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -92,7 +93,8 @@ Run in this order:
 | TARGET 08.22 | `prompts/TARGET_08.22_dsv4_sm80_route_b_final_prefix_promotion_gate.md` | complete preferred opt-in | Rerun passed correctness/text/graph, selected Route B as preferred opt-in, and identified guarded metadata deforest as the main remaining gap. |
 | TARGET 08.22.1 | `prompts/TARGET_08.22.1_dsv4_sm80_route_b_component_mapping_lifecycle_fix.md` | complete | Fixed `DSV4 component mapping is missing for active C4 full pages`; focused Route B TP8 graph scenarios pass. |
 | TARGET 08.23 | `prompts/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md` | deferred conditional | Implement SGLang-aligned independent SWA ownership only if later evidence shows the SWA-tail guard materially blocks serving capacity or hit rate. |
-| TARGET 08.24 | `prompts/TARGET_08.24_dsv4_sm80_route_b_metadata_deforest_copy_elision.md` | next | Reduce Route B decode metadata construction and graph-staging overhead by porting deforest to component-owned metadata and eliminating avoidable copies. |
+| TARGET 08.24 | `prompts/TARGET_08.24_dsv4_sm80_route_b_metadata_deforest_copy_elision.md` | complete keep experimental | Proved component-aware metadata generation is safe, but the runtime opt-in regressed performance because large source metadata tensors were still materialized and staged. |
+| TARGET 08.25 | `prompts/TARGET_08.25_dsv4_sm80_route_b_direct_graph_metadata_buffers.md` | next | Generate Route B decode metadata directly into graph replay buffers and reuse stable rows to remove source tensor materialization/copy. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after correctness and component-retention decisions, then decide whether to move to TARGET 09 or TARGET 10. |
 
 Rationale:
@@ -138,11 +140,15 @@ Rationale:
   gap is decode metadata overhead: Route B keeps deforest guarded off because
   the old deforest path assumes component metadata can be derived from full
   token locations.
-- TARGET 08.24 is therefore the next target.  Fix Route B metadata
-  construction/copy overhead before implementing independent SWA ownership.
-  TARGET 08.23 remains conditional and should be revisited only if later
-  workloads show SWA-tail retention or exact page-multiple shortening is a real
-  capacity or hit-rate bottleneck.
+- TARGET 08.24 proved the component-aware formula is safe but did not solve the
+  performance problem.  It changed how metadata is generated while still
+  materializing large source tensors and staging them into graph buffers, so the
+  opt-in remains experimental.
+- TARGET 08.25 is therefore the next target.  Generate Route B metadata
+  directly into graph replay buffers and reuse stable rows before implementing
+  independent SWA ownership.  TARGET 08.23 remains conditional and should be
+  revisited only if later workloads show SWA-tail retention or exact
+  page-multiple shortening is a real capacity or hit-rate bottleneck.
 - TARGET 09 remains reserved for low-precision research.  Do not rename
   SGLang-style SWA retention to TARGET 09.
 

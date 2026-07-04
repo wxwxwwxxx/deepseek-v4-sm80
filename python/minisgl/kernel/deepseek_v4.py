@@ -3508,6 +3508,9 @@ def decode_metadata_deforest_fallback(
     window_size: int,
     index_topk: int,
     alignment: int = 64,
+    c4_page_table: torch.Tensor | None = None,
+    c128_page_table: torch.Tensor | None = None,
+    component_loc_ownership: bool = False,
 ) -> DSV4DecodeMetadataDeforestOutput | None:
     if not dsv4_sm80_triton_enabled(DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE):
         return None
@@ -3530,6 +3533,22 @@ def decode_metadata_deforest_fallback(
         return None
     if not (ctx_page_table.is_contiguous() and table_indices.is_contiguous()):
         return None
+    if component_loc_ownership:
+        if c4_page_table is None or c128_page_table is None:
+            return None
+        if (
+            c4_page_table.ndim != 2
+            or c128_page_table.ndim != 2
+            or c4_page_table.dtype is not torch.int32
+            or c128_page_table.dtype is not torch.int32
+            or not c4_page_table.is_cuda
+            or not c128_page_table.is_cuda
+            or not c4_page_table.is_contiguous()
+            or not c128_page_table.is_contiguous()
+            or c4_page_table.shape[0] != positions.numel()
+            or c128_page_table.shape[0] != positions.numel()
+        ):
+            return None
 
     rows = positions.numel()
     device = positions.device
@@ -3554,28 +3573,55 @@ def decode_metadata_deforest_fallback(
     c128_full_indices = torch.empty_like(c128_raw_indices)
 
     try:
-        ok = _triton_dsv4_ops().build_decode_metadata_indices(
-            ctx_page_table,
-            table_indices,
-            positions,
-            page_table,
-            swa_page_indices,
-            swa_topk_lengths,
-            c4_topk_lengths_raw,
-            c4_topk_lengths_clamp1,
-            c4_sparse_topk_lengths,
-            c4_sparse_raw_indices,
-            c4_sparse_page_indices,
-            c4_sparse_full_indices,
-            c128_topk_lengths_clamp1,
-            c128_raw_indices,
-            c128_page_indices,
-            c128_full_indices,
-            page_size=int(page_size),
-            max_seqlen_k=int(max_seqlen_k),
-            window_size=int(window_size),
-            index_topk=int(index_topk),
-        )
+        if component_loc_ownership:
+            assert c4_page_table is not None and c128_page_table is not None
+            ok = _triton_dsv4_ops().build_decode_metadata_indices_component(
+                ctx_page_table,
+                table_indices,
+                positions,
+                c4_page_table,
+                c128_page_table,
+                page_table,
+                swa_page_indices,
+                swa_topk_lengths,
+                c4_topk_lengths_raw,
+                c4_topk_lengths_clamp1,
+                c4_sparse_topk_lengths,
+                c4_sparse_raw_indices,
+                c4_sparse_page_indices,
+                c4_sparse_full_indices,
+                c128_topk_lengths_clamp1,
+                c128_raw_indices,
+                c128_page_indices,
+                c128_full_indices,
+                page_size=int(page_size),
+                max_seqlen_k=int(max_seqlen_k),
+                window_size=int(window_size),
+                index_topk=int(index_topk),
+            )
+        else:
+            ok = _triton_dsv4_ops().build_decode_metadata_indices(
+                ctx_page_table,
+                table_indices,
+                positions,
+                page_table,
+                swa_page_indices,
+                swa_topk_lengths,
+                c4_topk_lengths_raw,
+                c4_topk_lengths_clamp1,
+                c4_sparse_topk_lengths,
+                c4_sparse_raw_indices,
+                c4_sparse_page_indices,
+                c4_sparse_full_indices,
+                c128_topk_lengths_clamp1,
+                c128_raw_indices,
+                c128_page_indices,
+                c128_full_indices,
+                page_size=int(page_size),
+                max_seqlen_k=int(max_seqlen_k),
+                window_size=int(window_size),
+                index_topk=int(index_topk),
+            )
         if ok:
             return DSV4DecodeMetadataDeforestOutput(
                 page_table=page_table,
@@ -3790,6 +3836,78 @@ def copy_decode_metadata_for_replay(
                 src_c128_full_indices=src_c128_full_indices,
                 rows=int(rows),
                 graph_inputs_bound=bool(graph_inputs_bound),
+            )
+        )
+    except Exception:
+        return False
+
+
+def copy_component_write_locs_for_replay(
+    *,
+    c4_page_table: torch.Tensor | None,
+    c128_page_table: torch.Tensor | None,
+    c4_indexer_page_table: torch.Tensor | None,
+    positions: torch.Tensor,
+    c4_out_loc: torch.Tensor | None,
+    c128_out_loc: torch.Tensor | None,
+    c4_indexer_out_loc: torch.Tensor | None,
+    rows: int,
+    page_size: int,
+) -> bool:
+    if not dsv4_env_flag(DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE):
+        return False
+    tensors = (
+        c4_page_table,
+        c128_page_table,
+        c4_indexer_page_table,
+        positions,
+        c4_out_loc,
+        c128_out_loc,
+        c4_indexer_out_loc,
+    )
+    if rows <= 0:
+        return True
+    if page_size <= 0:
+        return False
+    if any(t is None for t in tensors):
+        return False
+    assert c4_page_table is not None
+    assert c128_page_table is not None
+    assert c4_indexer_page_table is not None
+    assert c4_out_loc is not None
+    assert c128_out_loc is not None
+    assert c4_indexer_out_loc is not None
+    if not all(t.is_cuda and t.dtype is torch.int32 and t.is_contiguous() for t in tensors):
+        return False
+    if (
+        c4_page_table.ndim != 2
+        or c128_page_table.ndim != 2
+        or c4_indexer_page_table.ndim != 2
+        or positions.ndim != 1
+        or c4_out_loc.ndim != 1
+        or c128_out_loc.ndim != 1
+        or c4_indexer_out_loc.ndim != 1
+        or positions.numel() < rows
+        or c4_page_table.shape[0] < rows
+        or c128_page_table.shape[0] < rows
+        or c4_indexer_page_table.shape[0] < rows
+        or c4_out_loc.numel() < rows
+        or c128_out_loc.numel() < rows
+        or c4_indexer_out_loc.numel() < rows
+    ):
+        return False
+    try:
+        return bool(
+            _triton_dsv4_ops().copy_component_write_locs_for_replay(
+                c4_page_table=c4_page_table,
+                c128_page_table=c128_page_table,
+                c4_indexer_page_table=c4_indexer_page_table,
+                positions=positions,
+                c4_out_loc=c4_out_loc,
+                c128_out_loc=c128_out_loc,
+                c4_indexer_out_loc=c4_indexer_out_loc,
+                rows=int(rows),
+                page_size=int(page_size),
             )
         )
     except Exception:
@@ -4047,6 +4165,7 @@ __all__ = [
     "build_moe_v2_execution_plan",
     "copy_masked_compressed_locs",
     "copy_decode_metadata_for_replay",
+    "copy_component_write_locs_for_replay",
     "decode_metadata_deforest_fallback",
     "dense_fp8_marlin_projection_enabled",
     "compress_norm_rope_store_fallback",

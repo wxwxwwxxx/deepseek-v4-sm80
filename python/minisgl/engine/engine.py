@@ -308,8 +308,8 @@ def _adjust_config(config: EngineConfig):
             if getattr(config, "enable_dsv4_component_loc_ownership", False):
                 logger.info_rank0(
                     "Opting in to DeepSeek V4 Route B decode CUDA graph metadata "
-                    "copy; decode deforest remains guarded off for component loc "
-                    "ownership."
+                    "copy; component-aware decode deforest remains an explicit "
+                    "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST opt-in."
                 )
             logger.info_rank0(
                 f"Opting in to DeepSeek V4 decode CUDA graph sizes: {config.cuda_graph_bs}"
