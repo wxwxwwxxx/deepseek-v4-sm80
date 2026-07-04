@@ -2,15 +2,19 @@
 
 ## Status
 
-Future optional target.
+Recommended next bounded target after TARGET 08.30.
 
-Run this only after TARGET 08 and TARGET 09 results show that attention,
-communication, or graph/runtime replay has become a top remaining limiter.
+TARGET 08.30 closed the prefix-cache milestone and showed that prefix
+metadata/runtime is no longer the first bottleneck.  The next evidence-based
+surface is decode forward, especially communication/all-reduce owners.  Start
+with communication attribution before changing attention kernels or graph
+runtime layout.
 
 ## Goal
 
-Keep a bounded research plan for surfaces that are real but not currently the
-best next project step:
+Keep a bounded research plan for surfaces that are real.  The first pass should
+focus on communication/all-reduce because it is the current post-prefix profile
+leader:
 
 - C4A/C128A sparse attention kernels;
 - FlashAttention-style alternatives for selected-token attention;
@@ -80,8 +84,10 @@ Possible future probes:
 
 ## Gate To Start This Target
 
-Start implementation only if a fresh post-TARGET08 or post-TARGET09 profile
-shows one coherent surface with:
+TARGET 08.30 already satisfies the gate for a communication-first pass.  For
+attention kernels, graph/runtime rewrites, or broader PyNCCL changes, start
+implementation only if a fresh post-TARGET08 or post-TARGET09 profile shows one
+coherent surface with:
 
 - at least `5%` of decode envelope or `3%` of E2E elapsed;
 - plausible `>=2%` E2E improvement;

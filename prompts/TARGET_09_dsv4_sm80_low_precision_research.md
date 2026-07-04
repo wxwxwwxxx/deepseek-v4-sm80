@@ -2,12 +2,15 @@
 
 ## Status
 
-Planned after TARGET 08.
+Planned, but not the immediate next default after TARGET 08.30.
 
-Do not run this before DSV4 radix/SWA prefix cache has a correctness and
-performance baseline.  TARGET 09 is intentionally separated from the exact
-TARGET 07 path because it may change activation, cache, or expert precision and
-therefore needs stronger quality gates.
+DSV4 radix prefix cache now has a correctness and performance baseline.  The
+post-prefix reprofile points first to decode-forward communication/all-reduce
+owners, so run TARGET 10 before broad low-precision work unless a new profile
+or capacity requirement makes precision the clearer bottleneck.  TARGET 09 is
+intentionally separated from the exact TARGET 07/TARGET 08 paths because it may
+change activation, cache, or expert precision and therefore needs stronger
+quality gates.
 
 ## Goal
 
