@@ -12,9 +12,10 @@ final promotion gate rerun, TARGET 08.22.1 component mapping lifecycle fix, and
 TARGET 08.24 component-aware metadata deforest/copy-elision experiment, TARGET
 08.25 direct graph metadata buffer experiment, TARGET 08.26 remaining-gap
 attribution reset, TARGET 08.27 SGLang-aligned Route B metadata lifetime cache,
-and TARGET 08.28 Route B lifetime-cache promotion gate are complete.  Continue
-with TARGET 08.29: a small promotion cleanup target that creates one clear
-promoted Route B lifetime preset before TARGET 08.30 post-prefix reprofile.
+TARGET 08.28 Route B lifetime-cache promotion gate, and TARGET 08.29 Route B
+lifetime promotion cleanup are complete.  Continue with TARGET 08.30: reprofile
+the promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime` prefix preset and
+choose the next evidence-based phase.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -101,8 +102,8 @@ Run in this order:
 | TARGET 08.26 | `prompts/TARGET_08.26_dsv4_sm80_route_b_remaining_gap_attribution_reset.md` | complete recommends SGLang-aligned metadata lifetime | Re-ranked Route B direct C4 remaining gap: decode prepare component page-table and stable metadata updates dominate; SWA-tail and forward attention/MoE/communication are not the next owner. |
 | TARGET 08.27 | `prompts/TARGET_08.27_dsv4_sm80_sglang_aligned_route_b_metadata_lifetime.md` | complete strong opt-in | Added SGLang-aligned Route B component page-table lifetime cache; `serving_mixed_112req_wave16` improved from `138.13` to `162.47` output tok/s and graph replay stayed `441/0`. |
 | TARGET 08.28 | `prompts/TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md` | complete promote | Promoted the lifetime cache: verifier/text/eviction/prefix_multi/decode controls passed; `serving_mixed` reached `163.72` output tok/s with `441/0` replay. |
-| TARGET 08.29 | `prompts/TARGET_08.29_dsv4_sm80_route_b_lifetime_promotion_cleanup.md` | active next | Create a clean promoted Route B lifetime prefix preset, preserve verifier behavior, update docs/tests, and prepare for 08.30. |
-| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned after 08.29 | Reprofile the promoted prefix path and decide whether the next evidence-based phase is TARGET 09, TARGET 10, more TARGET 08 cache work, or serving hardening. |
+| TARGET 08.29 | `prompts/TARGET_08.29_dsv4_sm80_route_b_lifetime_promotion_cleanup.md` | complete cleanup | Added promoted preset `dsv4_sm80_a100_victory_prefix_routeb_lifetime`, preserved verifier env reset behavior, and kept the old diagnostic lifetime name as an alias. |
+| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | active next | Reprofile the promoted prefix path and decide whether the next evidence-based phase is TARGET 09, TARGET 10, more TARGET 08 cache work, or serving hardening. |
 
 Rationale:
 
@@ -167,8 +168,12 @@ Rationale:
   a `promote` decision.  `serving_mixed_112req_wave16` reached `163.7220`
   output tok/s, verifier passed serving and eviction workloads, prefix_multi
   recovered `49152` saved prefill tokens, and graph replay stayed zero-eager.
-  TARGET 08.29 should now clean up the promoted preset before TARGET 08.30
-  reprofiles the whole system.  TARGET 08.23 remains conditional and should be
+  TARGET 08.29 cleaned this into the promoted preset
+  `dsv4_sm80_a100_victory_prefix_routeb_lifetime`, preserving the verifier env
+  opt-in across benchmark/text-smoke variant reset and keeping the old
+  `dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime` name as a
+  historical alias.  TARGET 08.30 should reprofile the whole system with the
+  promoted preset.  TARGET 08.23 remains conditional and should be
   revisited only if later workloads show SWA-tail retention or exact
   page-multiple shortening is a real capacity or hit-rate bottleneck.
 - TARGET 09 remains reserved for low-precision research.  Do not rename

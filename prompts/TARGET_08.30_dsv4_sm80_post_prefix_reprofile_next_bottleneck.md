@@ -5,8 +5,9 @@
 Run this after TARGET 08.29.
 
 TARGET 08.28 promoted the Route B component page-table lifetime cache as the
-preferred Route B prefix-cache opt-in, and TARGET 08.29 should make that path a
-clear benchmark/text-smoke preset.
+preferred Route B prefix-cache opt-in, and TARGET 08.29 made that path the
+clear benchmark/text-smoke preset
+`dsv4_sm80_a100_victory_prefix_routeb_lifetime`.
 
 This target is a measurement and decision target.  Do not implement a new major
 optimization here.  Reprofile the promoted prefix path and decide the next
@@ -44,7 +45,13 @@ still rank whether the evidence points toward low precision or attention/comm.
 
 ## Final Recommended Configuration
 
-Use the promoted TARGET 08.29 prefix preset.  It should include:
+Use the promoted TARGET 08.29 prefix preset:
+
+```text
+dsv4_sm80_a100_victory_prefix_routeb_lifetime
+```
+
+It should include:
 
 ```text
 MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE=1

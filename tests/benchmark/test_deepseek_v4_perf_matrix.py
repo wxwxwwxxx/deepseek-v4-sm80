@@ -631,7 +631,7 @@ def test_configure_variant_records_direct_graph_metadata_c4_groups(monkeypatch):
     assert "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS" not in result["active_dsv4_toggles"]
 
 
-def test_configure_variant_records_route_b_metadata_lifetime(monkeypatch):
+def test_configure_variant_records_promoted_route_b_metadata_lifetime(monkeypatch):
     bench = _load_module()
 
     class FakeKernel:
@@ -648,28 +648,40 @@ def test_configure_variant_records_route_b_metadata_lifetime(monkeypatch):
                 return False
             return os.environ.get(name) in {"1", "true"}
 
+    variant = bench._variant_map()["dsv4_sm80_a100_victory_prefix_routeb_lifetime"]
     result = bench.configure_variant(
         FakeKernel,
-        bench._variant_map()[
-            "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
-        ],
+        variant,
     )
 
+    assert variant.env == {
+        "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE": "1",
+        "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS": "1",
+        "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS": "c4",
+        "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE": "1",
+    }
+    assert variant.allow_dsv4_cuda_graph is True
     assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
     assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS"] == "1"
     assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS"] == "c4"
     assert (
-        result["raw_dsv4_sm80_env"][
-            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
-        ]
-        == "1"
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"] == "1"
     )
     assert "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS" in result["active_dsv4_toggles"]
-    assert (
-        "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
-        in result["active_dsv4_toggles"]
-    )
+    assert "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE" in result["active_dsv4_toggles"]
     assert "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS" not in result["active_dsv4_toggles"]
+
+
+def test_route_b_lifetime_legacy_variant_aliases_promoted_env():
+    bench = _load_module()
+
+    variants = bench._variant_map()
+    promoted = variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"]
+    legacy = variants["dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"]
+
+    assert legacy.env == promoted.env
+    assert legacy.allow_dsv4_cuda_graph == promoted.allow_dsv4_cuda_graph
+    assert legacy.cuda_graph_capture_greedy_sample == promoted.cuda_graph_capture_greedy_sample
 
 
 def test_configure_variant_preserves_route_b_lifetime_verifier(monkeypatch):
@@ -696,18 +708,14 @@ def test_configure_variant_preserves_route_b_lifetime_verifier(monkeypatch):
     monkeypatch.setenv("MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY", "1")
     result = bench.configure_variant(
         FakeKernel,
-        bench._variant_map()[
-            "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
-        ],
+        bench._variant_map()["dsv4_sm80_a100_victory_prefix_routeb_lifetime"],
     )
 
     assert result["preserved_dsv4_sm80_env"] == {
         "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY": "1"
     }
     assert (
-        result["raw_dsv4_sm80_env"][
-            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY"
-        ]
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY"]
         == "1"
     )
     assert (

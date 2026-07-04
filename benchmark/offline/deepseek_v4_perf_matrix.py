@@ -73,6 +73,16 @@ DSV4_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_SHARED_EXPERT_B
 DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
 DSV4_DENSE_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION"
 DSV4_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION"
+DSV4_PROMOTED_ROUTE_B_LIFETIME_VARIANT = "dsv4_sm80_a100_victory_prefix_routeb_lifetime"
+DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
+    "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
+)
+DSV4_ROUTE_B_LIFETIME_ENV = {
+    DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+    DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
+    DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "c4",
+    DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE: "1",
+}
 
 
 @dataclass(frozen=True)
@@ -1216,18 +1226,25 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
-        name="dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime",
-        env={
-            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
-            DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
-            DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "c4",
-            DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE: "1",
-        },
+        name=DSV4_PROMOTED_ROUTE_B_LIFETIME_VARIANT,
+        env=dict(DSV4_ROUTE_B_LIFETIME_ENV),
         description=(
-            "TARGET 08.27 opt-in: Route B direct-C4 graph metadata plus a "
-            "request-slot keyed component page-table lifetime cache. The "
-            "uncached Route B builder remains the rollback path and optional "
-            "oracle."
+            "TARGET 08.29 promoted Route B prefix preset: A100 victory bundle, "
+            "direct C4 graph metadata buffers, and request-slot keyed component "
+            "page-table lifetime caching. Pair with --enable-dsv4-radix-prefix-cache, "
+            "--enable-dsv4-component-loc-ownership, --page-size 256, "
+            "--num-pages 128, and graph buckets 1 2 4 8 16."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT,
+        env=dict(DSV4_ROUTE_B_LIFETIME_ENV),
+        description=(
+            "Historical TARGET 08.27/08.28 diagnostic alias for "
+            f"{DSV4_PROMOTED_ROUTE_B_LIFETIME_VARIANT}. Kept for artifact and "
+            "script reproduction; new runs should use the promoted preset name."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
