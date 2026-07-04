@@ -9,9 +9,12 @@ TARGET 08.197 q-path same-shape/same-input probing, TARGET 08.198 post-layer0
 same-shape drift analysis, TARGET 08.20 fail-closed V1 design, TARGET
 08.21.1-08.21.4 Route B component ownership/graph integration, TARGET 08.22
 final promotion gate rerun, TARGET 08.22.1 component mapping lifecycle fix, and
-TARGET 08.24 component-aware metadata deforest/copy-elision experiment are
-complete.  Continue with TARGET 08.25 direct graph metadata buffer generation
-before revisiting independent SWA ownership.
+TARGET 08.24 component-aware metadata deforest/copy-elision experiment, TARGET
+08.25 direct graph metadata buffer experiment, TARGET 08.26 remaining-gap
+attribution reset, and TARGET 08.27 SGLang-aligned Route B metadata lifetime
+cache are complete.  Continue with TARGET 08.28: a Route B lifetime-cache
+promotion gate across broader serving, verifier, graph replay, and eviction
+workloads.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -94,7 +97,10 @@ Run in this order:
 | TARGET 08.22.1 | `prompts/TARGET_08.22.1_dsv4_sm80_route_b_component_mapping_lifecycle_fix.md` | complete | Fixed `DSV4 component mapping is missing for active C4 full pages`; focused Route B TP8 graph scenarios pass. |
 | TARGET 08.23 | `prompts/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md` | deferred conditional | Implement SGLang-aligned independent SWA ownership only if later evidence shows the SWA-tail guard materially blocks serving capacity or hit rate. |
 | TARGET 08.24 | `prompts/TARGET_08.24_dsv4_sm80_route_b_metadata_deforest_copy_elision.md` | complete keep experimental | Proved component-aware metadata generation is safe, but the runtime opt-in regressed performance because large source metadata tensors were still materialized and staged. |
-| TARGET 08.25 | `prompts/TARGET_08.25_dsv4_sm80_route_b_direct_graph_metadata_buffers.md` | next | Generate Route B decode metadata directly into graph replay buffers and reuse stable rows to remove source tensor materialization/copy. |
+| TARGET 08.25 | `prompts/TARGET_08.25_dsv4_sm80_route_b_direct_graph_metadata_buffers.md` | complete keep experimental | Generated SWA/C4/C128 metadata directly into graph buffers, but large-wave gains were too small and full direct generation regressed throughput. |
+| TARGET 08.26 | `prompts/TARGET_08.26_dsv4_sm80_route_b_remaining_gap_attribution_reset.md` | complete recommends SGLang-aligned metadata lifetime | Re-ranked Route B direct C4 remaining gap: decode prepare component page-table and stable metadata updates dominate; SWA-tail and forward attention/MoE/communication are not the next owner. |
+| TARGET 08.27 | `prompts/TARGET_08.27_dsv4_sm80_sglang_aligned_route_b_metadata_lifetime.md` | complete strong opt-in | Added SGLang-aligned Route B component page-table lifetime cache; `serving_mixed_112req_wave16` improved from `138.13` to `162.47` output tok/s and graph replay stayed `441/0`. |
+| TARGET 08.28 | `prompts/TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md` | active next | Gate the 08.27 lifetime cache across verifier, prefix_multi, eviction pressure, decode controls, and table-slot/component-row lifecycle before promotion. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after correctness and component-retention decisions, then decide whether to move to TARGET 09 or TARGET 10. |
 
 Rationale:
@@ -144,11 +150,22 @@ Rationale:
   performance problem.  It changed how metadata is generated while still
   materializing large source tensors and staging them into graph buffers, so the
   opt-in remains experimental.
-- TARGET 08.25 is therefore the next target.  Generate Route B metadata
-  directly into graph replay buffers and reuse stable rows before implementing
-  independent SWA ownership.  TARGET 08.23 remains conditional and should be
-  revisited only if later workloads show SWA-tail retention or exact
-  page-multiple shortening is a real capacity or hit-rate bottleneck.
+- TARGET 08.25 showed that direct graph metadata generation is safe, and C4-only
+  direct generation can give a small local win, but full SWA+C4+C128 direct
+  generation did not meet the performance gate.  TARGET 08.26 reset attribution
+  around Route B direct C4: the remaining phase1 gap is overwhelmingly decode
+  prepare, with component page-table construction as the largest owner and
+  per-request/per-prefix-hit metadata rows updated on all 441 decode replay
+  steps.  TARGET 08.27 followed SGLang's stable request-row idea and added a
+  request/table-slot keyed component page-table lifetime cache instead of a
+  from-scratch dirty-row subsystem.  On `serving_mixed_112req_wave16`, Route B
+  direct C4 improved from `138.1281` to `162.4726` output tok/s, decode prepare
+  dropped from `4.2067 s` to `1.1416 s`, and graph replay stayed `441/0`.
+  TARGET 08.28 should now gate this opt-in across verifier, prefix_multi,
+  eviction pressure, decode controls, and table-slot/component-row lifecycle
+  before promotion.  TARGET 08.23 remains conditional and should be revisited
+  only if later workloads show SWA-tail retention or exact page-multiple
+  shortening is a real capacity or hit-rate bottleneck.
 - TARGET 09 remains reserved for low-precision research.  Do not rename
   SGLang-style SWA retention to TARGET 09.
 
@@ -175,9 +192,15 @@ vLLM references:
 
 SGLang references:
 
+- `/workspace/sglang-main/python/sglang/srt/layers/attention/deepseek_v4_backend.py`
+- `/workspace/sglang-main/python/sglang/srt/layers/attention/dsv4/metadata.py`
+- `/workspace/sglang-main/python/sglang/srt/model_executor/cuda_graph_buffer_registry.py`
+- `/workspace/sglang-main/python/sglang/srt/environ.py`
 - `/workspace/sglang-main/python/sglang/srt/mem_cache/deepseek_v4_memory_pool.py`
 - `/workspace/sglang-main/python/sglang/srt/mem_cache/deepseek_v4_compress_state.py`
 - `/workspace/sglang-main/python/sglang/srt/mem_cache/allocator/swa.py`
+- `/workspace/sglang-main/python/sglang/srt/mem_cache/unified_radix_cache.py`
+- `/workspace/sglang-main/python/sglang/srt/mem_cache/unified_cache_components/tree_component.py`
 - `/workspace/sglang-main/python/sglang/srt/mem_cache/unified_cache_components/swa_component.py`
 
 Old branch references, use carefully:

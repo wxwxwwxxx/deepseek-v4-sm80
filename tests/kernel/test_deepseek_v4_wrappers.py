@@ -438,8 +438,7 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
         in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
     )
     assert (
-        dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE
-        in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
+        dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
     )
     assert (
         dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
@@ -463,9 +462,7 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
     )
 
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, "1")
-    assert dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-    )
+    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE)
     monkeypatch.setenv(
         dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
         "q_wqb,shared_expert,MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE",
@@ -473,42 +470,26 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
     assert dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE in (
         dsv4_kernel.dsv4_env_disabled_toggles()
     )
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
-    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE)
     assert not dsv4_kernel.dsv4_env_flag(
         dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
     )
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE
-    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE)
     assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE)
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE, "1")
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
-    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE)
     monkeypatch.setenv(
         dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
         "projection_bf16_caches",
     )
     assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
-    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE)
     assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE
-    )
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE
-    )
-    assert dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE)
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE)
+    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE)
     monkeypatch.delenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, raising=False)
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
-    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE)
     assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE)
     monkeypatch.delenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, raising=False)
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE, "1")
@@ -516,15 +497,11 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
         dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
     )
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE, "1")
-    assert dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-    )
+    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE)
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE, "1")
     assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE)
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE, "1")
-    assert dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
-    )
+    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE)
     _clear_dsv4_sm80_env(monkeypatch)
 
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE, "1")
@@ -748,6 +725,275 @@ def test_copy_decode_metadata_for_replay_matches_legacy_copy(monkeypatch):
         assert torch.equal(args["dst_cu_seqlens_q"], expected["cu_seqlens_q"])
         for name in two_d_specs:
             assert torch.equal(args[f"dst_{name}"], expected[name])
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_copy_decode_metadata_for_replay_can_skip_c4_sparse(monkeypatch):
+    device = torch.device("cuda")
+    rows = 2
+
+    def vec(offset: int) -> torch.Tensor:
+        return torch.arange(offset, offset + rows, device=device, dtype=torch.int32)
+
+    args = {
+        "dst_raw_out_loc": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_raw_out_loc": vec(10),
+        "dst_seq_lens": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_seq_lens": vec(20),
+        "dst_req_seq_lens": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_req_seq_lens": vec(30),
+        "dst_extend_lens": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_extend_lens": vec(40),
+        "dst_positions": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_positions": vec(50),
+        "dst_req_table_indices": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_req_table_indices": vec(60),
+        "dst_swa_topk_lengths": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_swa_topk_lengths": vec(70),
+        "dst_c4_topk_lengths_raw": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_c4_topk_lengths_raw": vec(80),
+        "dst_c4_topk_lengths_clamp1": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_c4_topk_lengths_clamp1": vec(90),
+        "dst_c4_sparse_topk_lengths": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_c4_sparse_topk_lengths": vec(100),
+        "dst_c128_topk_lengths_clamp1": torch.full((rows,), -999, device=device, dtype=torch.int32),
+        "src_c128_topk_lengths_clamp1": vec(110),
+        "dst_cu_seqlens_q": torch.full((rows + 1,), -999, device=device, dtype=torch.int32),
+        "src_cu_seqlens_q": torch.arange(120, 120 + rows + 1, device=device, dtype=torch.int32),
+        "dst_page_table": torch.full((rows, 2), -999, device=device, dtype=torch.int32),
+        "src_page_table": torch.arange(
+            200, 200 + rows * 2, device=device, dtype=torch.int32
+        ).reshape(rows, 2),
+        "dst_swa_page_indices": torch.full((rows, 3), -999, device=device, dtype=torch.int32),
+        "src_swa_page_indices": torch.arange(
+            300, 300 + rows * 3, device=device, dtype=torch.int32
+        ).reshape(rows, 3),
+        "dst_c4_sparse_raw_indices": torch.full((rows, 4), -777, device=device, dtype=torch.int32),
+        "src_c4_sparse_raw_indices": torch.arange(
+            400, 400 + rows, device=device, dtype=torch.int32
+        ).reshape(rows, 1),
+        "dst_c4_sparse_page_indices": torch.full((rows, 4), -778, device=device, dtype=torch.int32),
+        "src_c4_sparse_page_indices": torch.arange(
+            500, 500 + rows, device=device, dtype=torch.int32
+        ).reshape(rows, 1),
+        "dst_c4_sparse_full_indices": torch.full((rows, 4), -779, device=device, dtype=torch.int32),
+        "src_c4_sparse_full_indices": torch.arange(
+            600, 600 + rows, device=device, dtype=torch.int32
+        ).reshape(rows, 1),
+        "dst_c128_raw_indices": torch.full((rows, 2), -999, device=device, dtype=torch.int32),
+        "src_c128_raw_indices": torch.arange(
+            700, 700 + rows * 2, device=device, dtype=torch.int32
+        ).reshape(rows, 2),
+        "dst_c128_page_indices": torch.full((rows, 2), -999, device=device, dtype=torch.int32),
+        "src_c128_page_indices": torch.arange(
+            800, 800 + rows * 2, device=device, dtype=torch.int32
+        ).reshape(rows, 2),
+        "dst_c128_full_indices": torch.full((rows, 2), -999, device=device, dtype=torch.int32),
+        "src_c128_full_indices": torch.arange(
+            900, 900 + rows * 2, device=device, dtype=torch.int32
+        ).reshape(rows, 2),
+        "rows": rows,
+        "graph_inputs_bound": False,
+        "skip_c4_sparse_indices": True,
+    }
+    expected_c4 = {
+        "dst_c4_sparse_raw_indices": args["dst_c4_sparse_raw_indices"].clone(),
+        "dst_c4_sparse_page_indices": args["dst_c4_sparse_page_indices"].clone(),
+        "dst_c4_sparse_full_indices": args["dst_c4_sparse_full_indices"].clone(),
+    }
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE, "1")
+    assert dsv4_kernel.copy_decode_metadata_for_replay(**args)
+    torch.cuda.synchronize()
+
+    assert torch.equal(args["dst_seq_lens"], args["src_seq_lens"])
+    assert torch.equal(args["dst_page_table"], args["src_page_table"])
+    assert torch.equal(args["dst_c128_raw_indices"], args["src_c128_raw_indices"])
+    for name, expected in expected_c4.items():
+        assert torch.equal(args[name], expected)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_direct_c4_sparse_metadata_for_replay_component_tables_match_oracle(monkeypatch):
+    device = torch.device("cuda")
+    rows = 3
+    page_size = 128
+    index_topk = 5
+    max_seqlen_k = 384
+
+    ctx_page_table = torch.stack(
+        [
+            torch.arange(0, max_seqlen_k, dtype=torch.int32),
+            torch.arange(1024, 1024 + max_seqlen_k, dtype=torch.int32),
+            torch.arange(2048, 2048 + max_seqlen_k, dtype=torch.int32),
+        ]
+    ).to(device)
+    ctx_page_table[0, :page_size] = -1
+    table_indices = torch.arange(rows, dtype=torch.int32, device=device)
+    positions = torch.tensor([255, 256, 383], dtype=torch.int32, device=device)
+    c4_page_table = torch.tensor(
+        [[10, 11, 12], [13, -1, 15], [16, 17, 18]],
+        dtype=torch.int32,
+        device=device,
+    )
+    dst_raw = torch.full((rows, 8), -99, dtype=torch.int32, device=device)
+    dst_page = torch.full_like(dst_raw, -98)
+    dst_full = torch.full_like(dst_raw, -97)
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE, "1")
+    assert dsv4_kernel.direct_c4_sparse_metadata_for_replay(
+        ctx_page_table=ctx_page_table,
+        table_indices=table_indices,
+        positions=positions,
+        c4_page_table=c4_page_table,
+        dst_c4_sparse_raw_indices=dst_raw,
+        dst_c4_sparse_page_indices=dst_page,
+        dst_c4_sparse_full_indices=dst_full,
+        rows=rows,
+        page_size=page_size,
+        index_topk=index_topk,
+        component_loc_ownership=True,
+    )
+    torch.cuda.synchronize()
+
+    c4_page_size = page_size // 4
+    cpu_ctx = ctx_page_table.cpu()
+    cpu_c4 = c4_page_table.cpu()
+    for row, pos in enumerate(positions.cpu().tolist()):
+        c4_len = (pos + 1) // 4
+        c4_start = max(c4_len - index_topk, 0)
+        c4_raw = list(range(c4_start, c4_len))
+        expected_raw = c4_raw + [-1] * (dst_raw.shape[1] - len(c4_raw))
+        expected_page = []
+        expected_full = []
+        for raw in c4_raw:
+            logical_page = raw // c4_page_size
+            offset = raw % c4_page_size
+            component_page = int(cpu_c4[row, logical_page].item())
+            expected_page.append(
+                component_page * c4_page_size + offset if component_page >= 0 else -1
+            )
+            full = int(cpu_ctx[row, raw * 4 + 3].item())
+            expected_full.append(full if full >= 0 else -1)
+        expected_page += [-1] * (dst_page.shape[1] - len(expected_page))
+        expected_full += [-1] * (dst_full.shape[1] - len(expected_full))
+
+        assert dst_raw[row].cpu().tolist() == expected_raw
+        assert dst_page[row].cpu().tolist() == expected_page
+        assert dst_full[row].cpu().tolist() == expected_full
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_direct_decode_index_metadata_for_replay_matches_oracle(monkeypatch):
+    device = torch.device("cuda")
+    rows = 3
+    page_size = 128
+    window_size = 8
+    index_topk = 5
+    max_seqlen_k = 384
+
+    ctx_page_table = torch.stack(
+        [
+            torch.arange(0, max_seqlen_k, dtype=torch.int32),
+            torch.arange(1024, 1024 + max_seqlen_k, dtype=torch.int32),
+            torch.arange(2048, 2048 + max_seqlen_k, dtype=torch.int32),
+        ]
+    ).to(device)
+    ctx_page_table[0, :page_size] = -1
+    table_indices = torch.arange(rows, dtype=torch.int32, device=device)
+    positions = torch.tensor([255, 256, 383], dtype=torch.int32, device=device)
+    c4_page_table = torch.tensor(
+        [[10, 11, 12], [13, -1, 15], [16, 17, 18]],
+        dtype=torch.int32,
+        device=device,
+    )
+    c128_page_table = torch.tensor(
+        [[20, 21, 22], [-1, 31, 32], [40, 41, 42]],
+        dtype=torch.int32,
+        device=device,
+    )
+    dst_swa = torch.full((rows, 8), -91, dtype=torch.int32, device=device)
+    dst_c4_raw = torch.full((rows, 8), -92, dtype=torch.int32, device=device)
+    dst_c4_page = torch.full_like(dst_c4_raw, -93)
+    dst_c4_full = torch.full_like(dst_c4_raw, -94)
+    dst_c128_raw = torch.full((rows, 8), -95, dtype=torch.int32, device=device)
+    dst_c128_page = torch.full_like(dst_c128_raw, -96)
+    dst_c128_full = torch.full_like(dst_c128_raw, -97)
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE, "1")
+    assert dsv4_kernel.direct_decode_index_metadata_for_replay(
+        ctx_page_table=ctx_page_table,
+        table_indices=table_indices,
+        positions=positions,
+        c4_page_table=c4_page_table,
+        c128_page_table=c128_page_table,
+        dst_swa_page_indices=dst_swa,
+        dst_c4_sparse_raw_indices=dst_c4_raw,
+        dst_c4_sparse_page_indices=dst_c4_page,
+        dst_c4_sparse_full_indices=dst_c4_full,
+        dst_c128_raw_indices=dst_c128_raw,
+        dst_c128_page_indices=dst_c128_page,
+        dst_c128_full_indices=dst_c128_full,
+        rows=rows,
+        page_size=page_size,
+        window_size=window_size,
+        index_topk=index_topk,
+        direct_swa=True,
+        direct_c4=True,
+        direct_c128=True,
+    )
+    torch.cuda.synchronize()
+
+    cpu_ctx = ctx_page_table.cpu()
+    cpu_c4 = c4_page_table.cpu()
+    cpu_c128 = c128_page_table.cpu()
+    c4_page_size = page_size // 4
+    c128_page_size = max(page_size // 128, 1)
+    for row, pos in enumerate(positions.cpu().tolist()):
+        expected_swa = []
+        for offset in range(dst_swa.shape[1]):
+            logical = pos - offset
+            expected_swa.append(int(cpu_ctx[row, logical].item()) if logical >= 0 else -1)
+        assert dst_swa[row].cpu().tolist() == expected_swa
+
+        c4_len = (pos + 1) // 4
+        c4_raw = list(range(max(c4_len - index_topk, 0), c4_len))
+        expected_c4_raw = c4_raw + [-1] * (dst_c4_raw.shape[1] - len(c4_raw))
+        expected_c4_page = []
+        expected_c4_full = []
+        for raw in c4_raw:
+            logical_page = raw // c4_page_size
+            offset = raw % c4_page_size
+            component_page = int(cpu_c4[row, logical_page].item())
+            expected_c4_page.append(
+                component_page * c4_page_size + offset if component_page >= 0 else -1
+            )
+            full = int(cpu_ctx[row, raw * 4 + 3].item())
+            expected_c4_full.append(full if full >= 0 else -1)
+        expected_c4_page += [-1] * (dst_c4_page.shape[1] - len(expected_c4_page))
+        expected_c4_full += [-1] * (dst_c4_full.shape[1] - len(expected_c4_full))
+        assert dst_c4_raw[row].cpu().tolist() == expected_c4_raw
+        assert dst_c4_page[row].cpu().tolist() == expected_c4_page
+        assert dst_c4_full[row].cpu().tolist() == expected_c4_full
+
+        c128_len = (pos + 1) // 128
+        expected_c128_raw = list(range(c128_len)) + [-1] * (dst_c128_raw.shape[1] - c128_len)
+        expected_c128_page = []
+        expected_c128_full = []
+        for raw in range(c128_len):
+            logical_page = raw // c128_page_size
+            offset = raw % c128_page_size
+            component_page = int(cpu_c128[row, logical_page].item())
+            expected_c128_page.append(
+                component_page * c128_page_size + offset if component_page >= 0 else -1
+            )
+            full = int(cpu_ctx[row, raw * 128 + 127].item())
+            expected_c128_full.append(full if full >= 0 else -1)
+        expected_c128_page += [-1] * (dst_c128_page.shape[1] - len(expected_c128_page))
+        expected_c128_full += [-1] * (dst_c128_full.shape[1] - len(expected_c128_full))
+        assert dst_c128_raw[row].cpu().tolist() == expected_c128_raw
+        assert dst_c128_page[row].cpu().tolist() == expected_c128_page
+        assert dst_c128_full[row].cpu().tolist() == expected_c128_full
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
@@ -1319,10 +1565,7 @@ def test_static_projection_scale_cache_preserves_projection_outputs(monkeypatch)
         pass
 
     owner = Owner()
-    assert (
-        dsv4_model._cached_projection_scale(owner, "_test_scale_cache", fp8_scale)
-        is fp8_scale
-    )
+    assert dsv4_model._cached_projection_scale(owner, "_test_scale_cache", fp8_scale) is fp8_scale
 
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE, "1")
     cached_fp8_scale = dsv4_model._cached_projection_scale(
@@ -1360,9 +1603,7 @@ def test_static_projection_scale_cache_preserves_projection_outputs(monkeypatch)
     assert torch.allclose(actual_fp8, expected_fp8, atol=3e-2, rtol=3e-2)
 
     fp4_weight = torch.randint(-128, 127, (96, 64), device=device, dtype=torch.int8)
-    fp4_scale = torch.rand(96, 4, device=device, dtype=torch.float32).to(
-        dsv4_kernel.e8m0_dtype()
-    )
+    fp4_scale = torch.rand(96, 4, device=device, dtype=torch.float32).to(dsv4_kernel.e8m0_dtype())
     fp4_owner = Owner()
     cached_fp4_scale = dsv4_model._cached_projection_scale(
         fp4_owner,

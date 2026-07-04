@@ -58,6 +58,11 @@ DSV4_WO_A_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16"
 DSV4_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
 DSV4_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
 DSV4_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
+DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS"
+DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS"
+DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
+    "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
+)
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
@@ -811,6 +816,34 @@ VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        "dsv4_sm80_a100_victory_directgraphmetadata",
+        {
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
+        },
+        (
+            "TARGET 08.25 smoke opt-in: Route B graph replay direct C4 sparse "
+            "metadata generation into captured graph buffers."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime",
+        {
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
+            DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "c4",
+            DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE: "1",
+        },
+        (
+            "TARGET 08.27 smoke opt-in: Route B direct-C4 graph metadata plus "
+            "request-slot keyed component page-table lifetime caching."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         "target0762_woabf16bmmcache",
         {DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1"},
         ("Legacy alias for dsv4_sm80_a100_victory kept for TARGET 07.62 " "artifacts and scripts."),
@@ -1433,7 +1466,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Explicitly enable TARGET 08.21.2 DSV4 Route B component loc ownership. "
             "Requires --enable-dsv4-radix-prefix-cache; Route B decode metadata "
-            "deforest remains a separate MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST opt-in."
+            "deforest/direct graph metadata buffers remain separate env opt-ins."
         ),
     )
     parser.add_argument(

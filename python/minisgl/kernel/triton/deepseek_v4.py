@@ -806,6 +806,205 @@ def _build_decode_metadata_indices_component_kernel(
 
 
 @triton.jit
+def _direct_c4_sparse_metadata_for_replay_kernel(
+    ctx_page_table_ptr,
+    table_indices_ptr,
+    positions_ptr,
+    c4_page_table_ptr,
+    dst_c4_sparse_raw_indices_ptr,
+    dst_c4_sparse_page_indices_ptr,
+    dst_c4_sparse_full_indices_ptr,
+    ctx_page_table_stride0: tl.constexpr,
+    ctx_page_table_width: tl.constexpr,
+    c4_page_table_width: tl.constexpr,
+    c4_width: tl.constexpr,
+    page_size: tl.constexpr,
+    index_topk: tl.constexpr,
+    component_loc_ownership: tl.constexpr,
+    c4_component_page_size: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK)
+    mask = offsets < c4_width
+    table_idx = tl.load(table_indices_ptr + row)
+    pos = tl.load(positions_ptr + row)
+    seq_len = pos + 1
+
+    c4_len = seq_len // 4
+    c4_sparse_len = tl.minimum(c4_len, index_topk)
+    c4_start = tl.maximum(c4_len - index_topk, 0)
+    c4_valid = offsets < c4_sparse_len
+    c4_raw = c4_start + offsets
+
+    c4_full_pos = c4_raw * 4 + 3
+    c4_full = tl.load(
+        ctx_page_table_ptr + table_idx * ctx_page_table_stride0 + c4_full_pos,
+        mask=c4_valid & (c4_full_pos >= 0) & (c4_full_pos < ctx_page_table_width),
+        other=-1,
+    )
+    c4_full_valid = c4_valid & (c4_full >= 0)
+
+    if component_loc_ownership:
+        c4_logical_page = c4_raw // c4_component_page_size
+        c4_offset = c4_raw - c4_logical_page * c4_component_page_size
+        c4_component_page = tl.load(
+            c4_page_table_ptr + row * c4_page_table_width + c4_logical_page,
+            mask=c4_valid & (c4_logical_page >= 0) & (c4_logical_page < c4_page_table_width),
+            other=-1,
+        )
+        c4_component_loc = c4_component_page * c4_component_page_size + c4_offset
+        c4_page = tl.where(c4_valid & (c4_component_page >= 0), c4_component_loc, -1)
+    else:
+        c4_page = tl.where(c4_full_valid, c4_full // 4, -1)
+
+    tl.store(
+        dst_c4_sparse_raw_indices_ptr + row * c4_width + offsets,
+        tl.where(c4_valid, c4_raw, -1),
+        mask=mask,
+    )
+    tl.store(
+        dst_c4_sparse_page_indices_ptr + row * c4_width + offsets,
+        c4_page,
+        mask=mask,
+    )
+    tl.store(
+        dst_c4_sparse_full_indices_ptr + row * c4_width + offsets,
+        tl.where(c4_full_valid, c4_full, -1),
+        mask=mask,
+    )
+
+
+@triton.jit
+def _direct_decode_index_metadata_for_replay_kernel(
+    ctx_page_table_ptr,
+    table_indices_ptr,
+    positions_ptr,
+    c4_page_table_ptr,
+    c128_page_table_ptr,
+    dst_swa_page_indices_ptr,
+    dst_c4_sparse_raw_indices_ptr,
+    dst_c4_sparse_page_indices_ptr,
+    dst_c4_sparse_full_indices_ptr,
+    dst_c128_raw_indices_ptr,
+    dst_c128_page_indices_ptr,
+    dst_c128_full_indices_ptr,
+    ctx_page_table_stride0: tl.constexpr,
+    ctx_page_table_width: tl.constexpr,
+    c4_page_table_width: tl.constexpr,
+    c128_page_table_width: tl.constexpr,
+    swa_width: tl.constexpr,
+    c4_width: tl.constexpr,
+    c128_width: tl.constexpr,
+    page_size: tl.constexpr,
+    window_size: tl.constexpr,
+    index_topk: tl.constexpr,
+    direct_swa: tl.constexpr,
+    direct_c4: tl.constexpr,
+    direct_c128: tl.constexpr,
+    c4_component_page_size: tl.constexpr,
+    c128_component_page_size: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK)
+    table_idx = tl.load(table_indices_ptr + row)
+    pos = tl.load(positions_ptr + row)
+    seq_len = pos + 1
+
+    if direct_swa:
+        swa_mask = offsets < swa_width
+        swa_logical_pos = pos - offsets
+        swa_valid = (offsets < window_size) & (swa_logical_pos >= 0)
+        swa_value = tl.load(
+            ctx_page_table_ptr + table_idx * ctx_page_table_stride0 + swa_logical_pos,
+            mask=swa_valid & (swa_logical_pos < ctx_page_table_width),
+            other=-1,
+        )
+        tl.store(
+            dst_swa_page_indices_ptr + row * swa_width + offsets,
+            tl.where(swa_valid, swa_value, -1),
+            mask=swa_mask,
+        )
+
+    if direct_c4:
+        c4_len = seq_len // 4
+        c4_sparse_len = tl.minimum(c4_len, index_topk)
+        c4_start = tl.maximum(c4_len - index_topk, 0)
+        c4_mask = offsets < c4_width
+        c4_valid = offsets < c4_sparse_len
+        c4_raw = c4_start + offsets
+        c4_full_pos = c4_raw * 4 + 3
+        c4_full = tl.load(
+            ctx_page_table_ptr + table_idx * ctx_page_table_stride0 + c4_full_pos,
+            mask=c4_valid & (c4_full_pos >= 0) & (c4_full_pos < ctx_page_table_width),
+            other=-1,
+        )
+        c4_full_valid = c4_valid & (c4_full >= 0)
+        c4_logical_page = c4_raw // c4_component_page_size
+        c4_offset = c4_raw - c4_logical_page * c4_component_page_size
+        c4_component_page = tl.load(
+            c4_page_table_ptr + row * c4_page_table_width + c4_logical_page,
+            mask=c4_valid & (c4_logical_page >= 0) & (c4_logical_page < c4_page_table_width),
+            other=-1,
+        )
+        c4_component_loc = c4_component_page * c4_component_page_size + c4_offset
+        tl.store(
+            dst_c4_sparse_raw_indices_ptr + row * c4_width + offsets,
+            tl.where(c4_valid, c4_raw, -1),
+            mask=c4_mask,
+        )
+        tl.store(
+            dst_c4_sparse_page_indices_ptr + row * c4_width + offsets,
+            tl.where(c4_valid & (c4_component_page >= 0), c4_component_loc, -1),
+            mask=c4_mask,
+        )
+        tl.store(
+            dst_c4_sparse_full_indices_ptr + row * c4_width + offsets,
+            tl.where(c4_full_valid, c4_full, -1),
+            mask=c4_mask,
+        )
+
+    if direct_c128:
+        c128_len = seq_len // 128
+        c128_mask = offsets < c128_width
+        c128_valid = offsets < c128_len
+        c128_raw = offsets
+        c128_full_pos = c128_raw * 128 + 127
+        c128_full = tl.load(
+            ctx_page_table_ptr + table_idx * ctx_page_table_stride0 + c128_full_pos,
+            mask=c128_valid & (c128_full_pos >= 0) & (c128_full_pos < ctx_page_table_width),
+            other=-1,
+        )
+        c128_full_valid = c128_valid & (c128_full >= 0)
+        c128_logical_page = c128_raw // c128_component_page_size
+        c128_offset = c128_raw - c128_logical_page * c128_component_page_size
+        c128_component_page = tl.load(
+            c128_page_table_ptr + row * c128_page_table_width + c128_logical_page,
+            mask=c128_valid
+            & (c128_logical_page >= 0)
+            & (c128_logical_page < c128_page_table_width),
+            other=-1,
+        )
+        c128_component_loc = c128_component_page * c128_component_page_size + c128_offset
+        tl.store(
+            dst_c128_raw_indices_ptr + row * c128_width + offsets,
+            tl.where(c128_valid, c128_raw, -1),
+            mask=c128_mask,
+        )
+        tl.store(
+            dst_c128_page_indices_ptr + row * c128_width + offsets,
+            tl.where(c128_valid & (c128_component_page >= 0), c128_component_loc, -1),
+            mask=c128_mask,
+        )
+        tl.store(
+            dst_c128_full_indices_ptr + row * c128_width + offsets,
+            tl.where(c128_full_valid, c128_full, -1),
+            mask=c128_mask,
+        )
+
+
+@triton.jit
 def _copy_masked_compressed_locs_kernel(
     raw_out_loc_ptr,
     positions_ptr,
@@ -865,9 +1064,7 @@ def _copy_component_write_locs_for_replay_kernel(
 
     c4_indexer_component_page = tl.load(
         c4_indexer_page_table_ptr + offsets * c4_indexer_page_table_width + c4_logical_page,
-        mask=c4_boundary
-        & (c4_logical_page >= 0)
-        & (c4_logical_page < c4_indexer_page_table_width),
+        mask=c4_boundary & (c4_logical_page >= 0) & (c4_logical_page < c4_indexer_page_table_width),
         other=-1,
     )
     c4_indexer_loc = c4_indexer_component_page * c4_component_page_size + c4_offset
@@ -883,9 +1080,7 @@ def _copy_component_write_locs_for_replay_kernel(
     c128_offset = c128_raw - c128_logical_page * c128_component_page_size
     c128_component_page = tl.load(
         c128_page_table_ptr + offsets * c128_page_table_width + c128_logical_page,
-        mask=c128_boundary
-        & (c128_logical_page >= 0)
-        & (c128_logical_page < c128_page_table_width),
+        mask=c128_boundary & (c128_logical_page >= 0) & (c128_logical_page < c128_page_table_width),
         other=-1,
     )
     c128_loc = c128_component_page * c128_component_page_size + c128_offset
@@ -987,6 +1182,9 @@ def _copy_decode_metadata_for_replay_kernel(
     src_c128_page_indices_width: tl.constexpr,
     dst_c128_full_indices_width: tl.constexpr,
     src_c128_full_indices_width: tl.constexpr,
+    skip_swa_page_indices: tl.constexpr,
+    skip_c4_sparse_indices: tl.constexpr,
+    skip_c128_indices: tl.constexpr,
     BLOCK: tl.constexpr,
 ) -> None:
     field = tl.program_id(1)
@@ -1034,75 +1232,82 @@ def _copy_decode_metadata_for_replay_kernel(
             0,
         )
     elif field == 13:
-        _copy_2d_i32_fill(
-            src_swa_page_indices,
-            dst_swa_page_indices,
-            offsets,
-            rows,
-            dst_swa_page_indices_width,
-            src_swa_page_indices_width,
-            -1,
-        )
+        if not skip_swa_page_indices:
+            _copy_2d_i32_fill(
+                src_swa_page_indices,
+                dst_swa_page_indices,
+                offsets,
+                rows,
+                dst_swa_page_indices_width,
+                src_swa_page_indices_width,
+                -1,
+            )
     elif field == 14:
-        _copy_2d_i32_fill(
-            src_c4_sparse_raw_indices,
-            dst_c4_sparse_raw_indices,
-            offsets,
-            rows,
-            dst_c4_sparse_raw_indices_width,
-            src_c4_sparse_raw_indices_width,
-            -1,
-        )
+        if not skip_c4_sparse_indices:
+            _copy_2d_i32_fill(
+                src_c4_sparse_raw_indices,
+                dst_c4_sparse_raw_indices,
+                offsets,
+                rows,
+                dst_c4_sparse_raw_indices_width,
+                src_c4_sparse_raw_indices_width,
+                -1,
+            )
     elif field == 15:
-        _copy_2d_i32_fill(
-            src_c4_sparse_page_indices,
-            dst_c4_sparse_page_indices,
-            offsets,
-            rows,
-            dst_c4_sparse_page_indices_width,
-            src_c4_sparse_page_indices_width,
-            -1,
-        )
+        if not skip_c4_sparse_indices:
+            _copy_2d_i32_fill(
+                src_c4_sparse_page_indices,
+                dst_c4_sparse_page_indices,
+                offsets,
+                rows,
+                dst_c4_sparse_page_indices_width,
+                src_c4_sparse_page_indices_width,
+                -1,
+            )
     elif field == 16:
-        _copy_2d_i32_fill(
-            src_c4_sparse_full_indices,
-            dst_c4_sparse_full_indices,
-            offsets,
-            rows,
-            dst_c4_sparse_full_indices_width,
-            src_c4_sparse_full_indices_width,
-            -1,
-        )
+        if not skip_c4_sparse_indices:
+            _copy_2d_i32_fill(
+                src_c4_sparse_full_indices,
+                dst_c4_sparse_full_indices,
+                offsets,
+                rows,
+                dst_c4_sparse_full_indices_width,
+                src_c4_sparse_full_indices_width,
+                -1,
+            )
     elif field == 17:
-        _copy_2d_i32_fill(
-            src_c128_raw_indices,
-            dst_c128_raw_indices,
-            offsets,
-            rows,
-            dst_c128_raw_indices_width,
-            src_c128_raw_indices_width,
-            -1,
-        )
+        if not skip_c128_indices:
+            _copy_2d_i32_fill(
+                src_c128_raw_indices,
+                dst_c128_raw_indices,
+                offsets,
+                rows,
+                dst_c128_raw_indices_width,
+                src_c128_raw_indices_width,
+                -1,
+            )
     elif field == 18:
-        _copy_2d_i32_fill(
-            src_c128_page_indices,
-            dst_c128_page_indices,
-            offsets,
-            rows,
-            dst_c128_page_indices_width,
-            src_c128_page_indices_width,
-            -1,
-        )
+        if not skip_c128_indices:
+            _copy_2d_i32_fill(
+                src_c128_page_indices,
+                dst_c128_page_indices,
+                offsets,
+                rows,
+                dst_c128_page_indices_width,
+                src_c128_page_indices_width,
+                -1,
+            )
     else:
-        _copy_2d_i32_fill(
-            src_c128_full_indices,
-            dst_c128_full_indices,
-            offsets,
-            rows,
-            dst_c128_full_indices_width,
-            src_c128_full_indices_width,
-            -1,
-        )
+        if not skip_c128_indices:
+            _copy_2d_i32_fill(
+                src_c128_full_indices,
+                dst_c128_full_indices,
+                offsets,
+                rows,
+                dst_c128_full_indices_width,
+                src_c128_full_indices_width,
+                -1,
+            )
 
 
 @triton.jit
@@ -1302,24 +1507,20 @@ def _hc_prenorm_split_pre_kernel(
     scale1 = tl.load(scale_ptr + 1).to(tl.float32)
     scale2 = tl.load(scale_ptr + 2).to(tl.float32)
 
-    pre_logits = (
-        tl.load(mixes_ptr + mix_base + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
-        * rsqrt
-        * scale0
-        + tl.load(base_ptr + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
-    )
+    pre_logits = tl.load(mixes_ptr + mix_base + hc_offsets, mask=hc_mask, other=0.0).to(
+        tl.float32
+    ) * rsqrt * scale0 + tl.load(base_ptr + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
     pre = tl.sigmoid(pre_logits) + eps
     pre = tl.where(hc_mask, pre, 0.0)
     tl.store(pre_ptr + token * hc_mult + hc_offsets, pre, mask=hc_mask)
 
     post_start = hc_mult
-    post_logits = (
-        tl.load(mixes_ptr + mix_base + post_start + hc_offsets, mask=hc_mask, other=0.0).to(
-            tl.float32
-        )
-        * rsqrt
-        * scale1
-        + tl.load(base_ptr + post_start + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
+    post_logits = tl.load(
+        mixes_ptr + mix_base + post_start + hc_offsets, mask=hc_mask, other=0.0
+    ).to(tl.float32) * rsqrt * scale1 + tl.load(
+        base_ptr + post_start + hc_offsets, mask=hc_mask, other=0.0
+    ).to(
+        tl.float32
     )
     post = 2.0 * tl.sigmoid(post_logits)
     post = tl.where(hc_mask, post, 0.0)
@@ -1330,11 +1531,10 @@ def _hc_prenorm_split_pre_kernel(
     matrix_mask = (rows < hc_mult) & (cols < hc_mult)
     comb_start = 2 * hc_mult
     comb_offsets = comb_start + rows * hc_mult + cols
-    comb_logits = (
-        tl.load(mixes_ptr + mix_base + comb_offsets, mask=matrix_mask, other=0.0).to(tl.float32)
-        * rsqrt
-        * scale2
-        + tl.load(base_ptr + comb_offsets, mask=matrix_mask, other=0.0).to(tl.float32)
+    comb_logits = tl.load(mixes_ptr + mix_base + comb_offsets, mask=matrix_mask, other=0.0).to(
+        tl.float32
+    ) * rsqrt * scale2 + tl.load(base_ptr + comb_offsets, mask=matrix_mask, other=0.0).to(
+        tl.float32
     )
     comb_logits = tl.where(matrix_mask, comb_logits, -3.4028234663852886e38)
     row_max = tl.max(comb_logits, axis=1)
@@ -3769,6 +3969,212 @@ def build_decode_metadata_indices_component(
     return True
 
 
+def direct_c4_sparse_metadata_for_replay(
+    ctx_page_table: torch.Tensor,
+    table_indices: torch.Tensor,
+    positions: torch.Tensor,
+    c4_page_table: torch.Tensor | None,
+    dst_c4_sparse_raw_indices: torch.Tensor,
+    dst_c4_sparse_page_indices: torch.Tensor,
+    dst_c4_sparse_full_indices: torch.Tensor,
+    *,
+    page_size: int,
+    index_topk: int,
+    component_loc_ownership: bool,
+) -> bool:
+    tensors = (
+        ctx_page_table,
+        table_indices,
+        positions,
+        dst_c4_sparse_raw_indices,
+        dst_c4_sparse_page_indices,
+        dst_c4_sparse_full_indices,
+    )
+    rows = int(positions.numel())
+    if (
+        ctx_page_table.ndim != 2
+        or table_indices.ndim != 1
+        or positions.ndim != 1
+        or dst_c4_sparse_raw_indices.ndim != 2
+        or dst_c4_sparse_page_indices.shape != dst_c4_sparse_raw_indices.shape
+        or dst_c4_sparse_full_indices.shape != dst_c4_sparse_raw_indices.shape
+        or table_indices.shape != positions.shape
+        or dst_c4_sparse_raw_indices.shape[0] < rows
+        or page_size <= 0
+        or page_size & (page_size - 1)
+        or index_topk <= 0
+    ):
+        return False
+    if component_loc_ownership:
+        if c4_page_table is None or c4_page_table.ndim != 2 or c4_page_table.shape[0] < rows:
+            return False
+        tensors = (*tensors, c4_page_table)
+    if not all(t.is_cuda and t.dtype is torch.int32 and t.is_contiguous() for t in tensors):
+        return False
+    if rows <= 0:
+        return True
+    c4_width = int(dst_c4_sparse_raw_indices.shape[1])
+    if c4_width <= 0:
+        return False
+    c4_component_page_size = max(int(page_size) // 4, 1)
+    block = triton.next_power_of_2(max(c4_width, 1))
+    dummy_c4_page_table = c4_page_table if c4_page_table is not None else ctx_page_table
+    _direct_c4_sparse_metadata_for_replay_kernel[(rows,)](
+        ctx_page_table,
+        table_indices,
+        positions,
+        dummy_c4_page_table,
+        dst_c4_sparse_raw_indices,
+        dst_c4_sparse_page_indices,
+        dst_c4_sparse_full_indices,
+        ctx_page_table_stride0=ctx_page_table.stride(0),
+        ctx_page_table_width=ctx_page_table.shape[1],
+        c4_page_table_width=dummy_c4_page_table.shape[1],
+        c4_width=c4_width,
+        page_size=int(page_size),
+        index_topk=int(index_topk),
+        component_loc_ownership=bool(component_loc_ownership),
+        c4_component_page_size=c4_component_page_size,
+        BLOCK=block,
+    )
+    return True
+
+
+def direct_decode_index_metadata_for_replay(
+    ctx_page_table: torch.Tensor,
+    table_indices: torch.Tensor,
+    positions: torch.Tensor,
+    c4_page_table: torch.Tensor | None,
+    c128_page_table: torch.Tensor | None,
+    dst_swa_page_indices: torch.Tensor,
+    dst_c4_sparse_raw_indices: torch.Tensor,
+    dst_c4_sparse_page_indices: torch.Tensor,
+    dst_c4_sparse_full_indices: torch.Tensor,
+    dst_c128_raw_indices: torch.Tensor,
+    dst_c128_page_indices: torch.Tensor,
+    dst_c128_full_indices: torch.Tensor,
+    *,
+    page_size: int,
+    window_size: int,
+    index_topk: int,
+    direct_swa: bool,
+    direct_c4: bool,
+    direct_c128: bool,
+) -> bool:
+    rows = int(positions.numel())
+    tensors = [ctx_page_table, table_indices, positions]
+    if direct_swa:
+        tensors.append(dst_swa_page_indices)
+    if direct_c4:
+        if c4_page_table is None:
+            return False
+        tensors.extend(
+            [
+                c4_page_table,
+                dst_c4_sparse_raw_indices,
+                dst_c4_sparse_page_indices,
+                dst_c4_sparse_full_indices,
+            ]
+        )
+    if direct_c128:
+        if c128_page_table is None:
+            return False
+        tensors.extend(
+            [
+                c128_page_table,
+                dst_c128_raw_indices,
+                dst_c128_page_indices,
+                dst_c128_full_indices,
+            ]
+        )
+    if (
+        not (direct_swa or direct_c4 or direct_c128)
+        or ctx_page_table.ndim != 2
+        or table_indices.ndim != 1
+        or positions.ndim != 1
+        or table_indices.shape != positions.shape
+        or page_size <= 0
+        or page_size & (page_size - 1)
+        or window_size <= 0
+        or index_topk <= 0
+    ):
+        return False
+    if direct_swa and (dst_swa_page_indices.ndim != 2 or dst_swa_page_indices.shape[0] < rows):
+        return False
+    if direct_c4:
+        assert c4_page_table is not None
+        if (
+            c4_page_table.ndim != 2
+            or c4_page_table.shape[0] < rows
+            or dst_c4_sparse_raw_indices.ndim != 2
+            or dst_c4_sparse_raw_indices.shape[0] < rows
+            or dst_c4_sparse_page_indices.shape != dst_c4_sparse_raw_indices.shape
+            or dst_c4_sparse_full_indices.shape != dst_c4_sparse_raw_indices.shape
+        ):
+            return False
+    if direct_c128:
+        assert c128_page_table is not None
+        if (
+            c128_page_table.ndim != 2
+            or c128_page_table.shape[0] < rows
+            or dst_c128_raw_indices.ndim != 2
+            or dst_c128_raw_indices.shape[0] < rows
+            or dst_c128_page_indices.shape != dst_c128_raw_indices.shape
+            or dst_c128_full_indices.shape != dst_c128_raw_indices.shape
+        ):
+            return False
+    if not all(t.is_cuda and t.dtype is torch.int32 and t.is_contiguous() for t in tensors):
+        return False
+    if rows <= 0:
+        return True
+
+    dummy_c4_page_table = c4_page_table if c4_page_table is not None else ctx_page_table
+    dummy_c128_page_table = c128_page_table if c128_page_table is not None else ctx_page_table
+    swa_width = int(dst_swa_page_indices.shape[1]) if direct_swa else 1
+    c4_width = int(dst_c4_sparse_raw_indices.shape[1]) if direct_c4 else 1
+    c128_width = int(dst_c128_raw_indices.shape[1]) if direct_c128 else 1
+    max_width = max(
+        swa_width if direct_swa else 0,
+        c4_width if direct_c4 else 0,
+        c128_width if direct_c128 else 0,
+        1,
+    )
+    block = triton.next_power_of_2(max_width)
+    c4_component_page_size = max(int(page_size) // 4, 1)
+    c128_component_page_size = max(int(page_size) // 128, 1)
+    _direct_decode_index_metadata_for_replay_kernel[(rows,)](
+        ctx_page_table,
+        table_indices,
+        positions,
+        dummy_c4_page_table,
+        dummy_c128_page_table,
+        dst_swa_page_indices,
+        dst_c4_sparse_raw_indices,
+        dst_c4_sparse_page_indices,
+        dst_c4_sparse_full_indices,
+        dst_c128_raw_indices,
+        dst_c128_page_indices,
+        dst_c128_full_indices,
+        ctx_page_table_stride0=ctx_page_table.stride(0),
+        ctx_page_table_width=ctx_page_table.shape[1],
+        c4_page_table_width=dummy_c4_page_table.shape[1],
+        c128_page_table_width=dummy_c128_page_table.shape[1],
+        swa_width=swa_width,
+        c4_width=c4_width,
+        c128_width=c128_width,
+        page_size=int(page_size),
+        window_size=int(window_size),
+        index_topk=int(index_topk),
+        direct_swa=bool(direct_swa),
+        direct_c4=bool(direct_c4),
+        direct_c128=bool(direct_c128),
+        c4_component_page_size=c4_component_page_size,
+        c128_component_page_size=c128_component_page_size,
+        BLOCK=block,
+    )
+    return True
+
+
 def copy_masked_compressed_locs(
     raw_out_loc: torch.Tensor,
     positions: torch.Tensor,
@@ -3920,6 +4326,9 @@ def copy_decode_metadata_for_replay(
     src_c128_full_indices: torch.Tensor,
     rows: int,
     graph_inputs_bound: bool,
+    skip_swa_page_indices: bool = False,
+    skip_c4_sparse_indices: bool = False,
+    skip_c128_indices: bool = False,
 ) -> bool:
     if rows <= 0:
         return True
@@ -3927,13 +4336,13 @@ def copy_decode_metadata_for_replay(
         rows,
         rows + 1,
         rows * dst_page_table.shape[1],
-        rows * dst_swa_page_indices.shape[1],
-        rows * dst_c4_sparse_raw_indices.shape[1],
-        rows * dst_c4_sparse_page_indices.shape[1],
-        rows * dst_c4_sparse_full_indices.shape[1],
-        rows * dst_c128_raw_indices.shape[1],
-        rows * dst_c128_page_indices.shape[1],
-        rows * dst_c128_full_indices.shape[1],
+        0 if skip_swa_page_indices else rows * dst_swa_page_indices.shape[1],
+        0 if skip_c4_sparse_indices else rows * dst_c4_sparse_raw_indices.shape[1],
+        0 if skip_c4_sparse_indices else rows * dst_c4_sparse_page_indices.shape[1],
+        0 if skip_c4_sparse_indices else rows * dst_c4_sparse_full_indices.shape[1],
+        0 if skip_c128_indices else rows * dst_c128_raw_indices.shape[1],
+        0 if skip_c128_indices else rows * dst_c128_page_indices.shape[1],
+        0 if skip_c128_indices else rows * dst_c128_full_indices.shape[1],
     )
     block = 256
     grid = (triton.cdiv(max_elements, block), 20)
@@ -3996,6 +4405,9 @@ def copy_decode_metadata_for_replay(
         src_c128_page_indices_width=src_c128_page_indices.shape[1],
         dst_c128_full_indices_width=dst_c128_full_indices.shape[1],
         src_c128_full_indices_width=src_c128_full_indices.shape[1],
+        skip_swa_page_indices=bool(skip_swa_page_indices),
+        skip_c4_sparse_indices=bool(skip_c4_sparse_indices),
+        skip_c128_indices=bool(skip_c128_indices),
         BLOCK=block,
     )
     return True
@@ -5383,6 +5795,8 @@ __all__ = [
     "apply_rotary_tail",
     "build_decode_metadata_indices",
     "build_decode_metadata_indices_component",
+    "direct_decode_index_metadata_for_replay",
+    "direct_c4_sparse_metadata_for_replay",
     "compress_norm_rope_store_bf16",
     "build_moe_route_plan",
     "grouped_fp4_moe",

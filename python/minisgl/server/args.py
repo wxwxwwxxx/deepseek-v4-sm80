@@ -236,8 +236,8 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         help=(
             "Explicitly enable TARGET 08.21.2 DSV4 Route B C4/C128/indexer "
             "component loc ownership. Requires --enable-dsv4-radix-prefix-cache "
-            "and keeps Route B metadata deforest as an explicit "
-            "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST opt-in."
+            "and keeps Route B metadata deforest/direct graph metadata buffers "
+            "as explicit env opt-ins."
         ),
     )
 

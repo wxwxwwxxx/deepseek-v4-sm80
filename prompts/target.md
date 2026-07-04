@@ -21,6 +21,9 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
   otherwise.
 - Compare against vLLM/SGLang source behavior before writing a local
   replacement for a major runtime boundary.
+- Do not reinvent runtime mechanisms when SGLang/vLLM already has a mature
+  design; first map the source behavior, then adapt or port the proven part
+  when it fits mini-sglang's constraints.
 - Use fair TP8 macro runs, source parity, and focused microbench evidence before
   promoting optimizations.
 - Keep large profiler outputs and raw benchmark data under
@@ -58,10 +61,15 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08.21.2 | `prompts/TARGET_08.21.2_dsv4_sm80_independent_compressed_indexer_ownership.md` | completed | B1: independent C4/C128/indexer ownership behind an opt-in. |
 | TARGET 08.21.3 | `prompts/TARGET_08.21.3_dsv4_sm80_compression_state_ownership.md` | completed | B2: independent C4/C128/indexer compression-state ownership; SWA-tail guard remains. |
 | TARGET 08.21.4 | `prompts/TARGET_08.21.4_dsv4_sm80_route_b_graph_deforest_serving.md` | completed preferred opt-in candidate | B3: Route B graph metadata/copy restored for `[1,2,4,8,16]`; deforest guarded; full gate needed. |
-| TARGET 08.22 | `prompts/TARGET_08.22_dsv4_sm80_route_b_final_prefix_promotion_gate.md` | active rerun | Full Route B serving/correctness/capacity promotion gate after 08.22.1 fixed the component mapping lifecycle blocker. |
+| TARGET 08.22 | `prompts/TARGET_08.22_dsv4_sm80_route_b_final_prefix_promotion_gate.md` | completed preferred opt-in | Final Route B rerun passed correctness/text/graph and selected Route B as the preferred prefix-cache opt-in. |
 | TARGET 08.22.1 | `prompts/TARGET_08.22.1_dsv4_sm80_route_b_component_mapping_lifecycle_fix.md` | completed | Fixed Route B active full-page to component-page mapping lifecycle for multi-page serving reuse. |
-| TARGET 08.23 | `prompts/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md` | conditional after rerun 08.22 | SGLang-aligned independent SWA ownership only if the fixed final gate shows SWA-tail guard materially blocks promotion. |
-| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix correctness/component-retention decisions, then choose TARGET 09 low precision or TARGET 10 attention/communication. |
+| TARGET 08.23 | `prompts/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md` | deferred conditional | SGLang-aligned independent SWA ownership only if later evidence shows the SWA-tail guard materially blocks serving capacity or hit rate. |
+| TARGET 08.24 | `prompts/TARGET_08.24_dsv4_sm80_route_b_metadata_deforest_copy_elision.md` | completed keep experimental | Component-aware metadata generation was correct but slower because it still materialized and staged large source tensors. |
+| TARGET 08.25 | `prompts/TARGET_08.25_dsv4_sm80_route_b_direct_graph_metadata_buffers.md` | completed keep experimental | Direct graph metadata buffers were safe, but large-wave gains were too small and full direct generation was not promotable. |
+| TARGET 08.26 | `prompts/TARGET_08.26_dsv4_sm80_route_b_remaining_gap_attribution_reset.md` | completed | Re-ranked the remaining Route B gap to decode-prepare component page-table/metadata lifetime overhead. |
+| TARGET 08.27 | `prompts/TARGET_08.27_dsv4_sm80_sglang_aligned_route_b_metadata_lifetime.md` | completed strong opt-in | Added SGLang-aligned Route B component page-table lifetime cache; serving mixed improved to `162.47` output tok/s. |
+| TARGET 08.28 | `prompts/TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md` | active next | Promotion gate for the 08.27 lifetime cache across verifier, prefix_multi, eviction pressure, decode controls, and graph replay. |
+| TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned after 08.28 | Reprofile after prefix metadata-lifetime promotion decisions, then choose TARGET 09 low precision or TARGET 10 attention/communication. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned after TARGET 08 | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | future optional | Attention, PyNCCL, communication overlap, and graph/runtime experiments if fresh profiles justify them. |
 
@@ -82,52 +90,29 @@ Post-07.78 stable retest:
 - eager decode `0`;
 - old serving baseline crossed: `114.07 output tok/s`.
 
-Decision from TARGET 07.79, TARGET 08 phase 1, TARGET 08.05, TARGET 08.06,
-TARGET 08.07, TARGET 08.10, TARGET 08.18, TARGET 08.19, TARGET 08.195,
-TARGET 08.196, TARGET 08.197, TARGET 08.198, TARGET 08.20, and TARGET
-08.21.1-08.21.4, plus the first blocked TARGET 08.22 gate and completed
-TARGET 08.22.1:
+Decision from TARGET 07.79 through TARGET 08.27:
 
 ```text
-continue with TARGET 08.22 DSV4 Route B final prefix promotion gate rerun
+continue with TARGET 08.28 DSV4 Route B lifetime cache promotion gate
 ```
 
-Reason: DSV4 radix prefix cache works as an explicit opt-in, and TARGET 08.05
-selected `[1,2,4,8,16]` as the recommended serving graph bucket set.  TARGET
-08.06 and 08.07 showed the observed `~19 GiB/rank` graph capture memory delta is
-a stable first-graph/private-pool cost, not a BF16-cache-specific regression.
-TARGET 08.10 showed strong shared-prefix wins and stable graph replay, but did
-not provide a clean generated-token promotion oracle.  TARGET 08.18 showed
-full-page-owner retention has material logical capacity cost.  TARGET 08.19
-showed prefix-cache metadata is clean, but deterministic logits exposed a
-prefix-disabled DSV4 exact-path slot/page-location blocker.  TARGET 08.195 fixed
-a real compressor cross-request pooling bug and showed single-request
-page/table churn can be stable.  TARGET 08.196 narrowed the remaining batched
-drift and added an exact-bs graph guard.  TARGET 08.197 proved the layer0
-q-path issue is GEMM shape numeric drift rather than q_norm/RoPE row-coupling.
-TARGET 08.198 found tiny later-layer attention/indexer drift amplified by small
-logits margins and concluded that mini does not currently guarantee batch-slot
-invariance.  TARGET 08.20 added a fail-closed V1 opt-in and proved runtime V1
-is unsafe without component-level ownership because C4/C128/indexer/state locs
-are derived from released full-token pages.  Continue with Route B:
-component-loc metadata plus component-level ownership/refcount/free rules.
-Route A retained-store materialization may be used only as an oracle or
-correctness harness, not as the main runtime serving path.  TARGET 08.21 is a
-route overview; run TARGET 08.21.1 first, then 08.21.2/08.21.3/08.21.4 in
-order if each evidence gate passes.  TARGET 08.21.1-08.21.4 completed the
-Route B stack through graph-capable serving: direct component loc tables,
-independent C4/C128/indexer ownership, independent compression-state ownership,
-and graph replay for buckets `[1,2,4,8,16]`.  Decode metadata deforest remains
-guarded off, and SWA KV is still full-token-owned, so Route B keeps a live
-full/SWA tail guard.  The first TARGET 08.22 final gate was blocked by
-`RuntimeError: DSV4 component mapping is missing for active C4 full pages` in
-`CacheManager.cache_req()` / `DeepSeekV4KVCache.make_component_page_handles()`.
-This is a Route B component mapping lifecycle bug, not yet evidence that
-independent SWA ownership is required.  TARGET 08.22.1 fixed this blocker:
-focused Route B TP8 graph scenarios pass, `512/768` obey the SWA-tail guard
-without crashing, and `513/769` recover safe hits.  Rerun TARGET 08.22 now.
-Run TARGET 08.23 independent SWA ownership only if the fixed 08.22 rerun shows
-the SWA-tail guard is a material serving bottleneck.
+Reason: DSV4 radix prefix cache works as an explicit opt-in, and Route B is now
+the preferred prefix-cache ownership route after TARGET 08.22 rerun.  Route B
+recovers most phase-1 saved-prefill tokens and preserves graph replay, but it
+still pays a large decode-prepare tax.  TARGET 08.24 and TARGET 08.25 proved
+component-aware metadata generation and direct graph metadata buffers are safe
+but not yet fast enough.  TARGET 08.26 reset attribution and found the remaining
+gap is dominated by component page-table and metadata lifetime work repeated
+across decode replay steps.  TARGET 08.27 addressed that owner with a
+SGLang-aligned request/table-slot keyed component page-table lifetime cache:
+`serving_mixed_112req_wave16` improved from `138.1281` to `162.4726` output
+tok/s, decode prepare dropped from `4.2067 s` to `1.1416 s`, and graph replay
+remained `441/0`.
+
+The next target should not invent a new metadata mechanism.  Gate the 08.27
+lifetime cache across verifier, prefix_multi, eviction pressure, decode
+controls, table-slot reuse, and graph replay.  If it passes, promote it to the
+preferred Route B opt-in bundle.  If it fails, split only small lifecycle fixes.
 
 ## Archive Policy
 
@@ -141,7 +126,7 @@ For new child threads, start from:
 
 1. `prompts/target.md`
 2. the active target prompt, currently
-   `prompts/TARGET_08.22_dsv4_sm80_route_b_final_prefix_promotion_gate.md`
+   `prompts/TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md`
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache phase-1 context
 

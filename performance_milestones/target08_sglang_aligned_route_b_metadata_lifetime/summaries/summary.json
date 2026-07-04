@@ -1,0 +1,50 @@
+{
+  "throughput": {
+    "mode": "Route B direct C4 + lifetime cache",
+    "runs": 3,
+    "output_tok_s_mean": 162.47257961845625,
+    "output_tok_s_stdev": 0.5951662401030103,
+    "decode_tok_s_mean": 268.5945577208527,
+    "decode_prepare_s_mean": 1.1415871760497491,
+    "decode_forward_s_mean": 10.007659922043482,
+    "elapsed_s_mean": 17.233831737190485,
+    "replay": 441,
+    "eager": 0,
+    "saved_prefill": 0,
+    "source": "08.27 current opt-in"
+  },
+  "profile": {
+    "mode": "Route B direct C4 + lifetime cache",
+    "profile_output_tok_s": 117.9047251574618,
+    "decode_prepare_s": 1.5189345050603151,
+    "decode_forward_s": 14.361677488312125,
+    "host_attention_metadata_ms": 1330.1929403096437,
+    "make_component_page_tables_ms": 354.41206499934196,
+    "make_full_page_table_ms": 69.8970241099596,
+    "make_swa_indices_ms": 85.0729918628931,
+    "make_c4_sparse_indices_ms": 410.36205291748047,
+    "make_c128_indices_ms": 429.77833491563797,
+    "make_write_locs_ms": 251.0355843603611,
+    "replay_fused_copy_ms": 16.8248319812119,
+    "replay_component_page_tables_ms": 103.09574407339096,
+    "replay_write_locs_ms": 70.58780780434608,
+    "direct_index_buffers_ms": 66.39692832529545
+  },
+  "component_page_table_cache": {
+    "dirty_rows": 112,
+    "clean_rows": 2576,
+    "total_rows": 2688
+  },
+  "correctness": {
+    "text_status": "pass",
+    "status": "pass",
+    "output_tok_s": 161.21532514368252,
+    "decode_tok_s": 266.6485125801377,
+    "decode_prepare_s": 1.1327692177146673,
+    "decode_forward_s": 10.080686271190643,
+    "elapsed_s": 17.3680758792907,
+    "replay": 441,
+    "eager": 0,
+    "saved_prefill": 0
+  }
+}

@@ -214,10 +214,7 @@ class Engine:
         logits: torch.Tensor | None = None
         forward_source = "unknown"
         with self.ctx.forward_batch(batch):
-            if (
-                args.temperatures is None
-                and self.graph_runner.can_replay_greedy_sample(batch)
-            ):
+            if args.temperatures is None and self.graph_runner.can_replay_greedy_sample(batch):
                 forward_source = "cuda_graph_greedy_sample"
                 next_tokens_gpu = self.graph_runner.replay_greedy_sample(batch)
             elif self.graph_runner.can_use_cuda_graph(batch):
@@ -308,8 +305,8 @@ def _adjust_config(config: EngineConfig):
             if getattr(config, "enable_dsv4_component_loc_ownership", False):
                 logger.info_rank0(
                     "Opting in to DeepSeek V4 Route B decode CUDA graph metadata "
-                    "copy; component-aware decode deforest remains an explicit "
-                    "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST opt-in."
+                    "copy; component-aware decode deforest and direct graph "
+                    "metadata buffers remain explicit env opt-ins."
                 )
             logger.info_rank0(
                 f"Opting in to DeepSeek V4 decode CUDA graph sizes: {config.cuda_graph_bs}"

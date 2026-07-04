@@ -53,6 +53,11 @@ DSV4_WO_A_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16"
 DSV4_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
 DSV4_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
 DSV4_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
+DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS"
+DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS"
+DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
+    "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
+)
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
@@ -1182,6 +1187,52 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        name="dsv4_sm80_a100_victory_directgraphmetadata",
+        env={
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 08.25 opt-in: Route B graph replay writes C4 sparse "
+            "metadata directly into captured graph buffers instead of "
+            "materializing eager C4 source tensors and staging copies."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name="dsv4_sm80_a100_victory_directgraphmetadata_c4",
+        env={
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
+            DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "c4",
+        },
+        description=(
+            "TARGET 08.26 diagnostic: Route B graph replay writes only C4 sparse "
+            "metadata directly into captured graph buffers; SWA and C128 keep "
+            "the 08.22/08.25 eager-source staging path."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name="dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime",
+        env={
+            DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+            DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
+            DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "c4",
+            DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE: "1",
+        },
+        description=(
+            "TARGET 08.27 opt-in: Route B direct-C4 graph metadata plus a "
+            "request-slot keyed component page-table lifetime cache. The "
+            "uncached Route B builder remains the rollback path and optional "
+            "oracle."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         name="target0762_woabf16bmmcache",
         env={DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1"},
         description=(
@@ -1533,8 +1584,7 @@ def _random_token_bank(
     token_id_range: int,
 ) -> list[list[int]]:
     return [
-        _random_tokens(rng, length, vocab_size, token_id_range=token_id_range)
-        for _ in range(count)
+        _random_tokens(rng, length, vocab_size, token_id_range=token_id_range) for _ in range(count)
     ]
 
 
@@ -1841,9 +1891,7 @@ def make_benchmark_llm_class():
             enqueue_range_name = (
                 f"batch_forward_enqueue:{batch.phase}:" f"bs{batch.size}:padded{batch.padded_size}"
             )
-            graph_before = copy.deepcopy(
-                getattr(self.engine.graph_runner, "capture_status", {})
-            )
+            graph_before = copy.deepcopy(getattr(self.engine.graph_runner, "capture_status", {}))
             torch.cuda.synchronize(self.device)
             with torch.cuda.nvtx.range(range_name):
                 tic = time.perf_counter()
@@ -2318,9 +2366,7 @@ def _bucket_coverage_table(
             {
                 **bucket,
                 "wall_s": wall_s,
-                "wall_share": None
-                if total_decode_wall_s <= 0
-                else wall_s / total_decode_wall_s,
+                "wall_share": None if total_decode_wall_s <= 0 else wall_s / total_decode_wall_s,
             }
         )
     return rows
@@ -2356,21 +2402,29 @@ def _generation_parts(
     prompts: list[list[int]],
     sampling_params: list[Any],
 ) -> tuple[tuple[list[list[int]], list[Any]], ...]:
-    if scenario.kind in {
-        "shared_prefix_reuse",
-        "prefix_full_hit_reuse",
-        "prefix_partial_hit_reuse",
-        "prefix_mixed_hit_miss",
-    } and len(prompts) > 1:
+    if (
+        scenario.kind
+        in {
+            "shared_prefix_reuse",
+            "prefix_full_hit_reuse",
+            "prefix_partial_hit_reuse",
+            "prefix_mixed_hit_miss",
+        }
+        and len(prompts) > 1
+    ):
         return (
             (prompts[:1], sampling_params[:1]),
             (prompts[1:], sampling_params[1:]),
         )
-    if scenario.kind in {
-        "serving_mixed",
-        "prefix_multi_sustained",
-        "prefix_eviction_pressure",
-    } and scenario.wave_size > 0:
+    if (
+        scenario.kind
+        in {
+            "serving_mixed",
+            "prefix_multi_sustained",
+            "prefix_eviction_pressure",
+        }
+        and scenario.wave_size > 0
+    ):
         return tuple(
             (
                 prompts[start : start + scenario.wave_size],
@@ -3006,9 +3060,7 @@ def run_case(
     )
     replayed_padded_sizes = [
         int(size)
-        for size, count in graph_status_case
-        .get("replay_count_by_padded_size", {})
-        .items()
+        for size, count in graph_status_case.get("replay_count_by_padded_size", {}).items()
         if int(count) > 0
     ]
     rank_payload = {
@@ -3354,7 +3406,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Explicitly enable TARGET 08.21.2 DSV4 Route B component loc ownership. "
             "Requires --enable-dsv4-radix-prefix-cache; Route B decode metadata "
-            "deforest remains a separate MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST opt-in."
+            "deforest/direct graph metadata buffers remain separate env opt-ins."
         ),
     )
     parser.add_argument(

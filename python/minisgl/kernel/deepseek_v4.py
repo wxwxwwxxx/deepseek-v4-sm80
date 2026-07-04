@@ -38,14 +38,20 @@ DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
 DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
 DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
 DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
+DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS"
+DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS_ENV = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS"
+DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
+    "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
+)
+DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE = (
+    "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY"
+)
 DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
 DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE = "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE"
 DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
-DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV = (
-    "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES"
-)
+DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV = "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES"
 DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE = "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
 DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
 DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE = "MINISGL_DSV4_SM80_FUSED_TOPK_SWA_INDICES"
@@ -164,6 +170,10 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE,
     DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE,
     DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE,
+    DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE,
+    DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS_ENV,
+    DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE,
+    DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE,
     DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE,
     DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE,
     DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE,
@@ -3287,11 +3297,11 @@ def topk_transform_512_full_fallback(
         )
     if dsv4_env_flag(DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE) and _cuda_graph_capture_active(
         scores.device
-        ):
-            raise RuntimeError(
-                "DSV4 CUDA graph capture requires the global topk/lens JIT path when "
-                f"{DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE}=1."
-            )
+    ):
+        raise RuntimeError(
+            "DSV4 CUDA graph capture requires the global topk/lens JIT path when "
+            f"{DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE}=1."
+        )
     if not force_torch and _run_local_cuda_topk_transform_512(
         scores.to(torch.float32),
         clamped_lens,
@@ -3678,6 +3688,173 @@ def copy_masked_compressed_locs(
     _copy_masked_compressed_locs_fallback(c128_out_loc, raw_out_loc, positions, rows, ratio=128)
 
 
+def direct_c4_sparse_metadata_for_replay(
+    *,
+    ctx_page_table: torch.Tensor,
+    table_indices: torch.Tensor,
+    positions: torch.Tensor,
+    c4_page_table: torch.Tensor | None,
+    dst_c4_sparse_raw_indices: torch.Tensor,
+    dst_c4_sparse_page_indices: torch.Tensor,
+    dst_c4_sparse_full_indices: torch.Tensor,
+    rows: int,
+    page_size: int,
+    index_topk: int,
+    component_loc_ownership: bool,
+) -> bool:
+    if not dsv4_env_flag(DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE):
+        return False
+    if rows < 0 or page_size <= 0 or index_topk <= 0:
+        return False
+    if rows == 0:
+        return True
+    tensors = (
+        ctx_page_table,
+        table_indices,
+        positions,
+        dst_c4_sparse_raw_indices,
+        dst_c4_sparse_page_indices,
+        dst_c4_sparse_full_indices,
+    )
+    if component_loc_ownership:
+        if c4_page_table is None:
+            return False
+        tensors = (*tensors, c4_page_table)
+    if not all(t.is_cuda and t.dtype is torch.int32 and t.is_contiguous() for t in tensors):
+        return False
+    if (
+        ctx_page_table.ndim != 2
+        or table_indices.ndim != 1
+        or positions.ndim != 1
+        or dst_c4_sparse_raw_indices.ndim != 2
+        or dst_c4_sparse_page_indices.shape != dst_c4_sparse_raw_indices.shape
+        or dst_c4_sparse_full_indices.shape != dst_c4_sparse_raw_indices.shape
+        or table_indices.numel() < rows
+        or positions.numel() < rows
+        or dst_c4_sparse_raw_indices.shape[0] < rows
+        or page_size & (page_size - 1)
+    ):
+        return False
+    if component_loc_ownership:
+        assert c4_page_table is not None
+        if c4_page_table.ndim != 2 or c4_page_table.shape[0] < rows:
+            return False
+    try:
+        return bool(
+            _triton_dsv4_ops().direct_c4_sparse_metadata_for_replay(
+                ctx_page_table,
+                table_indices[:rows],
+                positions[:rows],
+                c4_page_table[:rows] if c4_page_table is not None else None,
+                dst_c4_sparse_raw_indices,
+                dst_c4_sparse_page_indices,
+                dst_c4_sparse_full_indices,
+                page_size=int(page_size),
+                index_topk=int(index_topk),
+                component_loc_ownership=bool(component_loc_ownership),
+            )
+        )
+    except Exception:
+        return False
+
+
+def direct_decode_index_metadata_for_replay(
+    *,
+    ctx_page_table: torch.Tensor,
+    table_indices: torch.Tensor,
+    positions: torch.Tensor,
+    c4_page_table: torch.Tensor | None,
+    c128_page_table: torch.Tensor | None,
+    dst_swa_page_indices: torch.Tensor,
+    dst_c4_sparse_raw_indices: torch.Tensor,
+    dst_c4_sparse_page_indices: torch.Tensor,
+    dst_c4_sparse_full_indices: torch.Tensor,
+    dst_c128_raw_indices: torch.Tensor,
+    dst_c128_page_indices: torch.Tensor,
+    dst_c128_full_indices: torch.Tensor,
+    rows: int,
+    page_size: int,
+    window_size: int,
+    index_topk: int,
+    direct_swa: bool,
+    direct_c4: bool,
+    direct_c128: bool,
+) -> bool:
+    if not dsv4_env_flag(DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE):
+        return False
+    if rows < 0 or page_size <= 0 or window_size <= 0 or index_topk <= 0:
+        return False
+    if rows == 0:
+        return True
+    tensors = [
+        ctx_page_table,
+        table_indices,
+        positions,
+    ]
+    if direct_swa:
+        tensors.append(dst_swa_page_indices)
+    if direct_c4:
+        if c4_page_table is None:
+            return False
+        tensors.extend(
+            [
+                c4_page_table,
+                dst_c4_sparse_raw_indices,
+                dst_c4_sparse_page_indices,
+                dst_c4_sparse_full_indices,
+            ]
+        )
+    if direct_c128:
+        if c128_page_table is None:
+            return False
+        tensors.extend(
+            [
+                c128_page_table,
+                dst_c128_raw_indices,
+                dst_c128_page_indices,
+                dst_c128_full_indices,
+            ]
+        )
+    if not (direct_swa or direct_c4 or direct_c128):
+        return False
+    if not all(t.is_cuda and t.dtype is torch.int32 and t.is_contiguous() for t in tensors):
+        return False
+    if (
+        ctx_page_table.ndim != 2
+        or table_indices.ndim != 1
+        or positions.ndim != 1
+        or table_indices.numel() < rows
+        or positions.numel() < rows
+        or page_size & (page_size - 1)
+    ):
+        return False
+    try:
+        return bool(
+            _triton_dsv4_ops().direct_decode_index_metadata_for_replay(
+                ctx_page_table,
+                table_indices[:rows],
+                positions[:rows],
+                c4_page_table[:rows] if c4_page_table is not None else None,
+                c128_page_table[:rows] if c128_page_table is not None else None,
+                dst_swa_page_indices,
+                dst_c4_sparse_raw_indices,
+                dst_c4_sparse_page_indices,
+                dst_c4_sparse_full_indices,
+                dst_c128_raw_indices,
+                dst_c128_page_indices,
+                dst_c128_full_indices,
+                page_size=int(page_size),
+                window_size=int(window_size),
+                index_topk=int(index_topk),
+                direct_swa=bool(direct_swa),
+                direct_c4=bool(direct_c4),
+                direct_c128=bool(direct_c128),
+            )
+        )
+    except Exception:
+        return False
+
+
 def copy_decode_metadata_for_replay(
     *,
     dst_raw_out_loc: torch.Tensor,
@@ -3722,6 +3899,9 @@ def copy_decode_metadata_for_replay(
     src_c128_full_indices: torch.Tensor,
     rows: int,
     graph_inputs_bound: bool,
+    skip_swa_page_indices: bool = False,
+    skip_c4_sparse_indices: bool = False,
+    skip_c128_indices: bool = False,
 ) -> bool:
     if not dsv4_env_flag(DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE):
         return False
@@ -3836,6 +4016,9 @@ def copy_decode_metadata_for_replay(
                 src_c128_full_indices=src_c128_full_indices,
                 rows=int(rows),
                 graph_inputs_bound=bool(graph_inputs_bound),
+                skip_swa_page_indices=bool(skip_swa_page_indices),
+                skip_c4_sparse_indices=bool(skip_c4_sparse_indices),
+                skip_c128_indices=bool(skip_c128_indices),
             )
         )
     except Exception:
@@ -4122,6 +4305,7 @@ __all__ = [
     "DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST",
     "DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE",
     "DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE",
+    "DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE",
     "DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE",
     "DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE",
     "DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE",
@@ -4166,6 +4350,8 @@ __all__ = [
     "copy_masked_compressed_locs",
     "copy_decode_metadata_for_replay",
     "copy_component_write_locs_for_replay",
+    "direct_decode_index_metadata_for_replay",
+    "direct_c4_sparse_metadata_for_replay",
     "decode_metadata_deforest_fallback",
     "dense_fp8_marlin_projection_enabled",
     "compress_norm_rope_store_fallback",
