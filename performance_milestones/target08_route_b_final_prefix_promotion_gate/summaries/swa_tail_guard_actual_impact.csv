@@ -1,0 +1,13 @@
+scenario,phase1_saved_prefill_tokens,route_b_saved_prefill_tokens,actual_saved_prefill_token_delta,phase1_hit_requests,route_b_hit_requests,phase1_ttft_s,route_b_ttft_s,route_b_minus_phase1_ttft_s
+decode_ladder_bs16,0,0,0,0,0,1.434955196455121,1.468614000827074,0.03365880437195301
+serving_mixed_112req_wave16,0,0,0,0,0,0.6365909555128643,0.6758807583578995,0.03928980284503525
+prefix_full_hit_257_bs4,768,768,0,3,3,0.21508809318765998,0.23252347949892282,0.017435386311262846
+prefix_full_hit_512_bs4,768,0,-768,3,0,0.31147787580266595,,
+prefix_full_hit_513_bs4,1536,0,-1536,3,0,0.20683236047625542,,
+prefix_full_hit_768_bs4,1536,0,-1536,3,0,0.3129773107357323,,
+prefix_full_hit_769_bs4,2304,0,-2304,3,0,0.21745921298861504,,
+prefix_full_hit_513_longout_bs4,1536,0,-1536,3,0,0.20426128013059497,,
+prefix_partial_hit_769_bs8,1792,0,-1792,7,0,0.9270422235131264,,
+prefix_mixed_hit_miss_bs16,6144,0,-6144,8,0,1.3109138767467812,,
+prefix_multi_112req_wave16,49152,0,-49152,96,0,0.6226752980479172,,
+prefix_eviction_pressure_96req_wave16,0,0,0,0,0,1.9278940341124933,,

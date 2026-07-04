@@ -249,6 +249,73 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
         ),
     ),
     Scenario(
+        name="prefix_full_hit_512_bs4",
+        kind="prefix_full_hit_reuse",
+        batch_size=4,
+        prompt_len=512,
+        decode_len=4,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET08.22 exact page-multiple stress: one 512-token warm request, "
+            "then three identical requests. Route B SWA-tail guard should shorten "
+            "the otherwise page-aligned hit from 256 to 0."
+        ),
+    ),
+    Scenario(
+        name="prefix_full_hit_513_bs4",
+        kind="prefix_full_hit_reuse",
+        batch_size=4,
+        prompt_len=513,
+        decode_len=4,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET08.22 neighboring control for 512: one 513-token warm request, "
+            "then three identical requests should hit the retained 512-token prefix."
+        ),
+    ),
+    Scenario(
+        name="prefix_full_hit_768_bs4",
+        kind="prefix_full_hit_reuse",
+        batch_size=4,
+        prompt_len=768,
+        decode_len=4,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET08.22 exact page-multiple stress: one 768-token warm request, "
+            "then three identical requests. Route B SWA-tail guard should shorten "
+            "the otherwise page-aligned hit from 512 to 0."
+        ),
+    ),
+    Scenario(
+        name="prefix_full_hit_769_bs4",
+        kind="prefix_full_hit_reuse",
+        batch_size=4,
+        prompt_len=769,
+        decode_len=4,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET08.22 neighboring control for 768: one 769-token warm request, "
+            "then three identical requests should hit the retained 768-token prefix."
+        ),
+    ),
+    Scenario(
+        name="prefix_full_hit_513_longout_bs4",
+        kind="prefix_full_hit_reuse",
+        batch_size=4,
+        prompt_len=513,
+        decode_len=32,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET08.22 longer-output shared-prefix control: one 513-token warm "
+            "request, then three identical requests with 32 generated tokens each."
+        ),
+    ),
+    Scenario(
         name="prefix_partial_hit_769_bs8",
         kind="prefix_partial_hit_reuse",
         batch_size=8,

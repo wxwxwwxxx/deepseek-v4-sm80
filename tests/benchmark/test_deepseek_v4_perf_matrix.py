@@ -85,6 +85,11 @@ def test_target0810_prefix_scenarios_have_stable_prompt_shapes():
 
     names = {
         "prefix_full_hit_257_bs4",
+        "prefix_full_hit_512_bs4",
+        "prefix_full_hit_513_bs4",
+        "prefix_full_hit_768_bs4",
+        "prefix_full_hit_769_bs4",
+        "prefix_full_hit_513_longout_bs4",
         "prefix_partial_hit_769_bs8",
         "prefix_mixed_hit_miss_bs16",
         "prefix_multi_112req_wave16",
@@ -117,6 +122,38 @@ def test_target0810_prefix_scenarios_have_stable_prompt_shapes():
     assert all(len(part[0]) == 16 for part in parts)
     assert prompts[0][:512] == prompts[8][:512]
     assert prompts[0][:512] == prompts[16][:512]
+
+    exact_512 = bench._scenario_map()["prefix_full_hit_512_bs4"]
+    prompts, params = bench.build_workload(
+        exact_512,
+        vocab_size=4096,
+        seed=123,
+        token_id_range=1024,
+    )
+    parts = bench._generation_parts(exact_512, prompts, params)
+    assert [len(part[0]) for part in parts] == [1, 3]
+    assert all(len(prompt) == 512 for prompt in prompts)
+    assert all(prompt == prompts[0] for prompt in prompts)
+
+    neighbor_769 = bench._scenario_map()["prefix_full_hit_769_bs4"]
+    prompts, params = bench.build_workload(
+        neighbor_769,
+        vocab_size=4096,
+        seed=123,
+        token_id_range=1024,
+    )
+    assert all(len(prompt) == 769 for prompt in prompts)
+    assert all(param.max_tokens == 4 for param in params)
+
+    longout = bench._scenario_map()["prefix_full_hit_513_longout_bs4"]
+    prompts, params = bench.build_workload(
+        longout,
+        vocab_size=4096,
+        seed=123,
+        token_id_range=1024,
+    )
+    assert all(len(prompt) == 513 for prompt in prompts)
+    assert all(param.max_tokens == 32 for param in params)
 
 
 def test_configure_variant_clears_existing_sm80_env_and_sets_v0(monkeypatch):

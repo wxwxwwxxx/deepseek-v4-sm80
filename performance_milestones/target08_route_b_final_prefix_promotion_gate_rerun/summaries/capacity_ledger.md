@@ -1,0 +1,26 @@
+| mode | scenario | prefix pages | live full/SWA pages | C4/C128/indexer | state C4/C128/indexer | recovered pages/tokens/GiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| phase1_prefix_on | decode_ladder_bs16 | 0 | 0 | 0/0/0 | 0/0/0 | 0/0/0.0000 |
+| route_b_graph | decode_ladder_bs16 | 0 | 0 | 0/0/0 | 0/0/0 | 0/0/0.0000 |
+| phase1_prefix_on | serving_mixed_112req_wave16 | 14 | 14 | 896/28/896 | 112/1792/112 | 0/0/0.0000 |
+| route_b_graph | serving_mixed_112req_wave16 | 14 | 14 | 896/28/896 | 112/1792/112 | 0/0/0.0000 |
+| phase1_prefix_on | prefix_full_hit_257_bs4 | 15 | 15 | 960/30/960 | 120/1920/120 | 0/0/0.0000 |
+| route_b_graph | prefix_full_hit_257_bs4 | 15 | 15 | 960/30/960 | 120/1920/120 | 0/0/0.0000 |
+| phase1_prefix_on | prefix_full_hit_512_bs4 | 17 | 17 | 1088/34/1088 | 136/2176/136 | 0/0/0.0000 |
+| route_b_graph | prefix_full_hit_512_bs4 | 17 | 16 | 1088/34/1088 | 136/2176/136 | 1/256/0.0105 |
+| phase1_prefix_on | prefix_full_hit_513_bs4 | 19 | 19 | 1216/38/1216 | 152/2432/152 | 0/0/0.0000 |
+| route_b_graph | prefix_full_hit_513_bs4 | 19 | 17 | 1216/38/1216 | 152/2432/152 | 2/512/0.0210 |
+| phase1_prefix_on | prefix_full_hit_768_bs4 | 22 | 22 | 1408/44/1408 | 176/2816/176 | 0/0/0.0000 |
+| route_b_graph | prefix_full_hit_768_bs4 | 22 | 18 | 1408/44/1408 | 176/2816/176 | 4/1024/0.0420 |
+| phase1_prefix_on | prefix_full_hit_769_bs4 | 25 | 25 | 1600/50/1600 | 200/3200/200 | 0/0/0.0000 |
+| route_b_graph | prefix_full_hit_769_bs4 | 25 | 19 | 1600/50/1600 | 200/3200/200 | 6/1536/0.0630 |
+| phase1_prefix_on | prefix_full_hit_513_longout_bs4 | 27 | 27 | 1728/54/1728 | 216/3456/216 | 0/0/0.0000 |
+| route_b_graph | prefix_full_hit_513_longout_bs4 | 27 | 20 | 1728/54/1728 | 216/3456/216 | 7/1792/0.0735 |
+| phase1_prefix_on | prefix_partial_hit_769_bs8 | 42 | 42 | 2688/84/2688 | 336/5376/336 | 0/0/0.0000 |
+| route_b_graph | prefix_partial_hit_769_bs8 | 42 | 28 | 2688/84/2688 | 336/5376/336 | 14/3584/0.1470 |
+| phase1_prefix_on | prefix_mixed_hit_miss_bs16 | 66 | 66 | 4224/132/4224 | 528/8448/528 | 0/0/0.0000 |
+| route_b_graph | prefix_mixed_hit_miss_bs16 | 66 | 36 | 4224/132/4224 | 528/8448/528 | 30/7680/0.3149 |
+| phase1_prefix_on | prefix_multi_112req_wave16 | 82 | 82 | 5248/164/5248 | 656/10496/656 | 0/0/0.0000 |
+| route_b_graph | prefix_multi_112req_wave16 | 82 | 44 | 5248/164/5248 | 656/10496/656 | 38/9728/0.3989 |
+| phase1_prefix_on | prefix_eviction_pressure_96req_wave16 | 112 | 112 | 7168/224/7168 | 896/14336/896 | 0/0/0.0000 |
+| route_b_graph | prefix_eviction_pressure_96req_wave16 | 112 | 56 | 7168/224/7168 | 896/14336/896 | 56/14336/0.5879 |

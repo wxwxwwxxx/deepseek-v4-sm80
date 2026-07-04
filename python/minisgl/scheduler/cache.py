@@ -147,32 +147,42 @@ class CacheManager:
         insert_ids = req.input_ids[: req.cached_len]
         page_indices = self.page_table[req.table_idx, : req.cached_len]
         old_handle = req.cache_handle
-        component_pages = None
         if self.dsv4_component_ownership:
-            insert_len = align_down(req.cached_len, self.page_size)
-            component_pages = self.kv_cache.make_component_page_handles(
-                page_indices[:insert_len],
-                self.page_size,
-            )
-        if self.dsv4_component_ownership:
+            def make_new_component_pages(
+                start: int,
+                end: int,
+            ):
+                return self.kv_cache.make_component_page_handles(
+                    page_indices[start:end],
+                    self.page_size,
+                )
+
             cached_len, new_handle = self.prefix_cache.insert_prefix(
                 insert_ids,
                 page_indices,
-                dsv4_component_pages=component_pages,
+                dsv4_component_pages_builder=make_new_component_pages,
             )
         else:
             cached_len, new_handle = self.prefix_cache.insert_prefix(insert_ids, page_indices)
         self.metrics.inserted_tokens += max(0, new_handle.cached_len - cached_len)
+        already_cached_indices = page_indices[old_handle.cached_len : cached_len].clone()
+        if self.dsv4_component_ownership and cached_len > old_handle.cached_len:
+            matched_indices = new_handle.get_matched_indices()
+            page_indices[old_handle.cached_len : cached_len].copy_(
+                matched_indices[old_handle.cached_len : cached_len]
+            )
         # unlock until all operations on handle is done
         self.unlock(old_handle)
         # this part is already in the prefix cache, free it
-        self._free(page_indices[old_handle.cached_len : cached_len])
+        self._free(already_cached_indices)
         if finished:  # this tail part should be freed
             self._free(page_indices[new_handle.cached_len :])
         else:  # keep the tail part, update the handle
             req.cache_handle = new_handle
             self.lock(new_handle)
         self._release_dsv4_component_owned_full_head(new_handle)
+        if self.dsv4_component_ownership and not finished and new_handle.cached_len > 0:
+            page_indices[: new_handle.cached_len].copy_(new_handle.get_matched_indices())
 
     def check_integrity(self) -> None:
         self.prefix_cache.check_integrity()

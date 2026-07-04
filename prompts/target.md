@@ -58,8 +58,9 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08.21.2 | `prompts/TARGET_08.21.2_dsv4_sm80_independent_compressed_indexer_ownership.md` | completed | B1: independent C4/C128/indexer ownership behind an opt-in. |
 | TARGET 08.21.3 | `prompts/TARGET_08.21.3_dsv4_sm80_compression_state_ownership.md` | completed | B2: independent C4/C128/indexer compression-state ownership; SWA-tail guard remains. |
 | TARGET 08.21.4 | `prompts/TARGET_08.21.4_dsv4_sm80_route_b_graph_deforest_serving.md` | completed preferred opt-in candidate | B3: Route B graph metadata/copy restored for `[1,2,4,8,16]`; deforest guarded; full gate needed. |
-| TARGET 08.22 | `prompts/TARGET_08.22_dsv4_sm80_route_b_final_prefix_promotion_gate.md` | active next | Full Route B serving/correctness/capacity promotion gate. |
-| TARGET 08.23 | `prompts/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md` | conditional after 08.22 | SGLang-aligned independent SWA ownership only if SWA-tail guard materially blocks promotion. |
+| TARGET 08.22 | `prompts/TARGET_08.22_dsv4_sm80_route_b_final_prefix_promotion_gate.md` | active rerun | Full Route B serving/correctness/capacity promotion gate after 08.22.1 fixed the component mapping lifecycle blocker. |
+| TARGET 08.22.1 | `prompts/TARGET_08.22.1_dsv4_sm80_route_b_component_mapping_lifecycle_fix.md` | completed | Fixed Route B active full-page to component-page mapping lifecycle for multi-page serving reuse. |
+| TARGET 08.23 | `prompts/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md` | conditional after rerun 08.22 | SGLang-aligned independent SWA ownership only if the fixed final gate shows SWA-tail guard materially blocks promotion. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix correctness/component-retention decisions, then choose TARGET 09 low precision or TARGET 10 attention/communication. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned after TARGET 08 | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | future optional | Attention, PyNCCL, communication overlap, and graph/runtime experiments if fresh profiles justify them. |
@@ -84,10 +85,11 @@ Post-07.78 stable retest:
 Decision from TARGET 07.79, TARGET 08 phase 1, TARGET 08.05, TARGET 08.06,
 TARGET 08.07, TARGET 08.10, TARGET 08.18, TARGET 08.19, TARGET 08.195,
 TARGET 08.196, TARGET 08.197, TARGET 08.198, TARGET 08.20, and TARGET
-08.21.1-08.21.4:
+08.21.1-08.21.4, plus the first blocked TARGET 08.22 gate and completed
+TARGET 08.22.1:
 
 ```text
-continue with TARGET 08.22 DSV4 Route B final prefix promotion gate
+continue with TARGET 08.22 DSV4 Route B final prefix promotion gate rerun
 ```
 
 Reason: DSV4 radix prefix cache works as an explicit opt-in, and TARGET 08.05
@@ -117,9 +119,15 @@ Route B stack through graph-capable serving: direct component loc tables,
 independent C4/C128/indexer ownership, independent compression-state ownership,
 and graph replay for buckets `[1,2,4,8,16]`.  Decode metadata deforest remains
 guarded off, and SWA KV is still full-token-owned, so Route B keeps a live
-full/SWA tail guard.  Run TARGET 08.22 before deciding promotion.  Run TARGET
-08.23 independent SWA ownership only if 08.22 shows the SWA-tail guard is a
-material serving bottleneck.
+full/SWA tail guard.  The first TARGET 08.22 final gate was blocked by
+`RuntimeError: DSV4 component mapping is missing for active C4 full pages` in
+`CacheManager.cache_req()` / `DeepSeekV4KVCache.make_component_page_handles()`.
+This is a Route B component mapping lifecycle bug, not yet evidence that
+independent SWA ownership is required.  TARGET 08.22.1 fixed this blocker:
+focused Route B TP8 graph scenarios pass, `512/768` obey the SWA-tail guard
+without crashing, and `513/769` recover safe hits.  Rerun TARGET 08.22 now.
+Run TARGET 08.23 independent SWA ownership only if the fixed 08.22 rerun shows
+the SWA-tail guard is a material serving bottleneck.
 
 ## Archive Policy
 

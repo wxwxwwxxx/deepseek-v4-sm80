@@ -6,9 +6,11 @@ Phase 1, serving graph bucket policy, CUDA graph memory attribution, prefix
 stability, memory ledger, TARGET 08.19 correctness probing, TARGET 08.195
 slot/page invariance probing, TARGET 08.196 batched attention/indexer probing,
 TARGET 08.197 q-path same-shape/same-input probing, TARGET 08.198 post-layer0
-same-shape drift analysis, TARGET 08.20 fail-closed V1 design, and TARGET
-08.21.1-08.21.4 Route B component ownership/graph integration are complete.
-Continue with TARGET 08.22 Route B final prefix promotion gate.
+same-shape drift analysis, TARGET 08.20 fail-closed V1 design, TARGET
+08.21.1-08.21.4 Route B component ownership/graph integration, TARGET 08.22
+final promotion gate rerun, and TARGET 08.22.1 component mapping lifecycle fix
+are complete.  Continue with TARGET 08.24 Route B metadata deforest/copy
+elision before revisiting independent SWA ownership.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -87,8 +89,10 @@ Run in this order:
 | TARGET 08.21.2 | `prompts/TARGET_08.21.2_dsv4_sm80_independent_compressed_indexer_ownership.md` | complete | B1: implemented independent C4/C128/indexer ownership behind an opt-in. |
 | TARGET 08.21.3 | `prompts/TARGET_08.21.3_dsv4_sm80_compression_state_ownership.md` | complete | B2: implemented independent C4/C128/indexer compression-state ownership; SWA-tail guard remains. |
 | TARGET 08.21.4 | `prompts/TARGET_08.21.4_dsv4_sm80_route_b_graph_deforest_serving.md` | complete preferred opt-in candidate | B3: restored Route B graph replay for `[1,2,4,8,16]`; deforest remains guarded; full serving gate still needed. |
-| TARGET 08.22 | `prompts/TARGET_08.22_dsv4_sm80_route_b_final_prefix_promotion_gate.md` | active next | Run the full serving/correctness/capacity gate and decide whether Route B becomes the preferred opt-in. |
-| TARGET 08.23 | `prompts/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md` | conditional after 08.22 | Implement SGLang-aligned independent SWA ownership only if 08.22 shows SWA-tail guard materially blocks promotion. |
+| TARGET 08.22 | `prompts/TARGET_08.22_dsv4_sm80_route_b_final_prefix_promotion_gate.md` | complete preferred opt-in | Rerun passed correctness/text/graph, selected Route B as preferred opt-in, and identified guarded metadata deforest as the main remaining gap. |
+| TARGET 08.22.1 | `prompts/TARGET_08.22.1_dsv4_sm80_route_b_component_mapping_lifecycle_fix.md` | complete | Fixed `DSV4 component mapping is missing for active C4 full pages`; focused Route B TP8 graph scenarios pass. |
+| TARGET 08.23 | `prompts/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md` | deferred conditional | Implement SGLang-aligned independent SWA ownership only if later evidence shows the SWA-tail guard materially blocks serving capacity or hit rate. |
+| TARGET 08.24 | `prompts/TARGET_08.24_dsv4_sm80_route_b_metadata_deforest_copy_elision.md` | next | Reduce Route B decode metadata construction and graph-staging overhead by porting deforest to component-owned metadata and eliminating avoidable copies. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after correctness and component-retention decisions, then decide whether to move to TARGET 09 or TARGET 10. |
 
 Rationale:
@@ -127,10 +131,18 @@ Rationale:
   ownership, and graph replay for `[1,2,4,8,16]`.  The remaining guard is SWA
   KV ownership: SWA still lives in the full-token namespace, so Route B keeps a
   live full/SWA tail.
-- TARGET 08.22 is the final promotion gate.  It should measure the full serving
-  suite before any default/promotion decision.  TARGET 08.23 independent SWA
-  ownership is intentionally conditional; run it only if 08.22 proves the
-  SWA-tail guard is a real serving bottleneck.
+- TARGET 08.22 rerun passed correctness/text/graph and selected Route B as the
+  preferred prefix-cache opt-in.  Route B recovered `0.9648x` of phase-1 saved
+  prefill tokens, while the exact page-multiple SWA-tail guard accounted for
+  only a small saved-token delta in the measured suite.  The larger remaining
+  gap is decode metadata overhead: Route B keeps deforest guarded off because
+  the old deforest path assumes component metadata can be derived from full
+  token locations.
+- TARGET 08.24 is therefore the next target.  Fix Route B metadata
+  construction/copy overhead before implementing independent SWA ownership.
+  TARGET 08.23 remains conditional and should be revisited only if later
+  workloads show SWA-tail retention or exact page-multiple shortening is a real
+  capacity or hit-rate bottleneck.
 - TARGET 09 remains reserved for low-precision research.  Do not rename
   SGLang-style SWA retention to TARGET 09.
 

@@ -1,0 +1,13 @@
+scenario,requests,probe_or_reuse_requests,exact_multiple_requests,exact_multiple_probe_or_reuse_requests,exact_multiple_request_fraction,exact_multiple_probe_or_reuse_fraction,theoretical_shortened_probe_tokens
+decode_ladder_bs16,16,0,0,0,0.0,0.0,0
+serving_mixed_112req_wave16,112,96,14,12,0.125,0.125,0
+prefix_full_hit_257_bs4,4,3,0,0,0.0,0.0,0
+prefix_full_hit_512_bs4,4,3,4,3,1.0,1.0,768
+prefix_full_hit_513_bs4,4,3,0,0,0.0,0.0,0
+prefix_full_hit_768_bs4,4,3,4,3,1.0,1.0,1536
+prefix_full_hit_769_bs4,4,3,0,0,0.0,0.0,0
+prefix_full_hit_513_longout_bs4,4,3,0,0,0.0,0.0,0
+prefix_partial_hit_769_bs8,8,7,0,0,0.0,0.0,0
+prefix_mixed_hit_miss_bs16,16,15,0,0,0.0,0.0,0
+prefix_multi_112req_wave16,112,96,0,0,0.0,0.0,0
+prefix_eviction_pressure_96req_wave16,96,80,0,0,0.0,0.0,0

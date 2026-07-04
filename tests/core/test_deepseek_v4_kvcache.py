@@ -100,8 +100,14 @@ def _allocate_req(cm: CacheManager, uid: int, input_len: int) -> Req:
     return _allocate_req_with_ids(cm, uid, input_ids)
 
 
-def _allocate_req_with_ids(cm: CacheManager, uid: int, input_ids: torch.Tensor) -> Req:
-    sampling_params = SamplingParams(max_tokens=1)
+def _allocate_req_with_ids(
+    cm: CacheManager,
+    uid: int,
+    input_ids: torch.Tensor,
+    *,
+    output_len: int = 1,
+) -> Req:
+    sampling_params = SamplingParams(max_tokens=output_len)
     pending = PendingReq(uid=uid, input_ids=input_ids, sampling_params=sampling_params)
     handle = cm.match_req(pending).cuda_handle
     cm.lock(handle)
@@ -112,7 +118,7 @@ def _allocate_req_with_ids(cm: CacheManager, uid: int, input_ids: torch.Tensor) 
         input_ids=input_ids,
         table_idx=table_idx,
         cached_len=handle.cached_len,
-        output_len=1,
+        output_len=output_len,
         uid=uid,
         sampling_params=sampling_params,
         cache_handle=handle,
@@ -124,6 +130,23 @@ def _allocate_req_with_ids(cm: CacheManager, uid: int, input_ids: torch.Tensor) 
 def _finish_req(cm: CacheManager, req: Req) -> None:
     req.cached_len = req.device_len
     cm.cache_req(req, finished=True)
+
+
+def _complete_one_generated(req: Req, token: int) -> None:
+    req.cached_len = req.device_len
+    req.device_len += 1
+    req.append_host(torch.tensor([token], dtype=req.input_ids.dtype))
+
+
+def _cache_serving_prompt(cm: CacheManager, uid: int, input_ids: torch.Tensor) -> Req:
+    req = _allocate_req_with_ids(cm, uid, input_ids, output_len=2)
+    _complete_one_generated(req, 30_000 + uid * 2)
+    cm.cache_req(req, finished=False)
+    cm.allocate_paged([req])
+    _complete_one_generated(req, 30_001 + uid * 2)
+    cm.cache_req(req, finished=True)
+    cm.check_integrity()
+    return req
 
 
 def _cache_finished_prompt(cm: CacheManager, uid: int, input_ids: torch.Tensor) -> Req:
@@ -467,3 +490,185 @@ def test_dsv4_component_loc_ownership_retains_state_but_keeps_swa_safe_boundary(
 
     _evict_all_prefix(cm, pool, page_size)
     pool.assert_no_leak()
+
+
+@pytest.mark.parametrize(
+    ("prompt_len", "expected_hit"),
+    [
+        (257, 256),
+        (512, 0),
+        (513, 512),
+        (768, 0),
+        (769, 768),
+    ],
+)
+def test_dsv4_component_lifecycle_serving_boundaries_do_not_reuse_stale_mappings(
+    prompt_len: int,
+    expected_hit: int,
+):
+    page_size = 256
+    num_pages = 12
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    prompt = torch.arange(prompt_len, dtype=torch.int32)
+    _cache_serving_prompt(cm, 0, prompt)
+
+    handle = cm.match_req(PendingReq(1, prompt, SamplingParams(max_tokens=2))).cuda_handle
+    assert handle.cached_len == expected_hit
+    cm.lock(handle)
+    cm.unlock(handle)
+
+    _cache_serving_prompt(cm, 1, prompt)
+    cm.check_integrity()
+
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_component_lifecycle_does_not_build_handles_for_tombstoned_heads(
+    monkeypatch,
+):
+    page_size = 256
+    num_pages = 8
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    calls: list[torch.Tensor] = []
+    original_make_handles = pool.make_component_page_handles
+
+    def record_make_handles(
+        full_indices: torch.Tensor,
+        page_size_arg: int,
+    ):
+        calls.append(full_indices.clone())
+        return original_make_handles(full_indices, page_size_arg)
+
+    monkeypatch.setattr(pool, "make_component_page_handles", record_make_handles)
+    req = _allocate_req_with_ids(
+        cm,
+        0,
+        torch.arange(512, dtype=torch.int32),
+        output_len=2,
+    )
+
+    _complete_one_generated(req, 40_000)
+    cm.cache_req(req, finished=False)
+    assert calls
+    assert calls[-1].numel() == 2 * page_size
+    assert torch.all(calls[-1] >= 0)
+    assert cm.page_table[req.table_idx, 0].item() == -1
+    assert cm.page_table[req.table_idx, page_size].item() >= 0
+
+    cm.allocate_paged([req])
+    _complete_one_generated(req, 40_001)
+    call_count = len(calls)
+    cm.cache_req(req, finished=True)
+    assert len(calls) == call_count
+    cm.check_integrity()
+
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_component_lifecycle_partial_and_mixed_hit_miss_batches_are_safe():
+    page_size = 256
+    num_pages = 24
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    warm_prefix = torch.arange(257, dtype=torch.int32)
+    _cache_serving_prompt(cm, 0, warm_prefix)
+    partial = torch.cat(
+        [warm_prefix, torch.arange(512, dtype=torch.int32) + 10_000]
+    )
+    partial_req = _allocate_req_with_ids(cm, 1, partial, output_len=2)
+    assert partial_req.cache_handle.cached_len == page_size
+    _complete_one_generated(partial_req, 41_000)
+    cm.cache_req(partial_req, finished=False)
+    cm.allocate_paged([partial_req])
+    _complete_one_generated(partial_req, 41_001)
+    cm.cache_req(partial_req, finished=True)
+
+    warm_full = torch.arange(769, dtype=torch.int32) + 20_000
+    _cache_serving_prompt(cm, 2, warm_full)
+    before = cm.prefix_metrics_snapshot()
+    for offset in range(6):
+        prompt = (
+            warm_full.clone()
+            if offset % 2 == 0
+            else torch.arange(769, dtype=torch.int32) + 30_000 + offset * 1_000
+        )
+        _cache_serving_prompt(cm, 3 + offset, prompt)
+
+    after = cm.prefix_metrics_snapshot()
+    assert after["hit_requests"] > before["hit_requests"]
+    assert after["miss_requests"] > before["miss_requests"]
+    cm.check_integrity()
+
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_component_lifecycle_multi_prefix_sustained_reuse_and_evict():
+    page_size = 256
+    num_pages = 32
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    prefixes = [torch.arange(512, dtype=torch.int32) + i * 10_000 for i in range(4)]
+    uid = 0
+    for wave in range(3):
+        for prefix_id, prefix in enumerate(prefixes):
+            suffix = torch.arange(64, dtype=torch.int32) + 100_000 + wave * 1_000 + prefix_id * 100
+            _cache_serving_prompt(cm, uid, torch.cat([prefix, suffix]))
+            uid += 1
+
+    snapshot = cm.prefix_metrics_snapshot()
+    assert snapshot["hit_requests"] >= 8
+    assert snapshot["saved_prefill_tokens"] >= 8 * 512
+    cm.check_integrity()
+
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_component_lifecycle_repeated_hit_evict_has_no_double_free_or_leak():
+    page_size = 256
+    num_pages = 8
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    for cycle in range(3):
+        prompt = torch.arange(513, dtype=torch.int32) + cycle * 10_000
+        _cache_serving_prompt(cm, cycle * 2, prompt)
+        hit = cm.match_req(PendingReq(cycle * 2 + 1, prompt, SamplingParams(max_tokens=2)))
+        assert hit.cuda_handle.cached_len == 2 * page_size
+        _cache_serving_prompt(cm, cycle * 2 + 1, prompt)
+        _evict_all_prefix(cm, pool, page_size)
+        assert cm.prefix_cache.size_info.total_size == 0
+        pool.assert_no_leak()

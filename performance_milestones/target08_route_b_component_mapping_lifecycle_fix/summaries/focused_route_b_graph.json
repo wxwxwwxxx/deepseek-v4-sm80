@@ -1,0 +1,298 @@
+[
+  {
+    "avg_saved_per_hit": 256.0,
+    "captured_bs": [
+      16,
+      8,
+      4,
+      2,
+      1
+    ],
+    "eager": 0,
+    "error": "",
+    "hit_rate": 0.75,
+    "hit_requests": 3,
+    "match_requests": 4,
+    "output_tok_s": 7.126961851611599,
+    "replay": 6,
+    "replay_by_padded_size": {
+      "1": 3,
+      "4": 3
+    },
+    "report_path": "/workspace/mini-sglang/performance_milestones/target08_route_b_component_mapping_lifecycle_fix/raw/focused_route_b_graph/reports/000_prefix_full_hit_257_bs4__dsv4_sm80_a100_victory.json",
+    "requested_bs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "saved_prefill_tokens": 768,
+    "scenario": "prefix_full_hit_257_bs4",
+    "status": "pass",
+    "ttft_s_mean": 0.5148153500631452
+  },
+  {
+    "avg_saved_per_hit": null,
+    "captured_bs": [
+      16,
+      8,
+      4,
+      2,
+      1
+    ],
+    "eager": 0,
+    "error": "",
+    "hit_rate": 0.0,
+    "hit_requests": 0,
+    "match_requests": 4,
+    "output_tok_s": 17.04075098094124,
+    "replay": 6,
+    "replay_by_padded_size": {
+      "1": 3,
+      "4": 3
+    },
+    "report_path": "/workspace/mini-sglang/performance_milestones/target08_route_b_component_mapping_lifecycle_fix/raw/focused_route_b_graph/reports/001_prefix_full_hit_512_bs4__dsv4_sm80_a100_victory.json",
+    "requested_bs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "saved_prefill_tokens": 0,
+    "scenario": "prefix_full_hit_512_bs4",
+    "status": "pass",
+    "ttft_s_mean": 0.43674877751618624
+  },
+  {
+    "avg_saved_per_hit": 512.0,
+    "captured_bs": [
+      16,
+      8,
+      4,
+      2,
+      1
+    ],
+    "eager": 0,
+    "error": "",
+    "hit_rate": 0.75,
+    "hit_requests": 3,
+    "match_requests": 4,
+    "output_tok_s": 24.86869192177123,
+    "replay": 6,
+    "replay_by_padded_size": {
+      "1": 3,
+      "4": 3
+    },
+    "report_path": "/workspace/mini-sglang/performance_milestones/target08_route_b_component_mapping_lifecycle_fix/raw/focused_route_b_graph/reports/002_prefix_full_hit_513_bs4__dsv4_sm80_a100_victory.json",
+    "requested_bs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "saved_prefill_tokens": 1536,
+    "scenario": "prefix_full_hit_513_bs4",
+    "status": "pass",
+    "ttft_s_mean": 0.215059919282794
+  },
+  {
+    "avg_saved_per_hit": null,
+    "captured_bs": [
+      16,
+      8,
+      4,
+      2,
+      1
+    ],
+    "eager": 0,
+    "error": "",
+    "hit_rate": 0.0,
+    "hit_requests": 0,
+    "match_requests": 4,
+    "output_tok_s": 13.14940657340166,
+    "replay": 6,
+    "replay_by_padded_size": {
+      "1": 3,
+      "4": 3
+    },
+    "report_path": "/workspace/mini-sglang/performance_milestones/target08_route_b_component_mapping_lifecycle_fix/raw/focused_route_b_graph/reports/003_prefix_full_hit_768_bs4__dsv4_sm80_a100_victory.json",
+    "requested_bs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "saved_prefill_tokens": 0,
+    "scenario": "prefix_full_hit_768_bs4",
+    "status": "pass",
+    "ttft_s_mean": 0.622594803571701
+  },
+  {
+    "avg_saved_per_hit": 768.0,
+    "captured_bs": [
+      16,
+      8,
+      4,
+      2,
+      1
+    ],
+    "eager": 0,
+    "error": "",
+    "hit_rate": 0.75,
+    "hit_requests": 3,
+    "match_requests": 4,
+    "output_tok_s": 23.22278345968309,
+    "replay": 6,
+    "replay_by_padded_size": {
+      "1": 3,
+      "4": 3
+    },
+    "report_path": "/workspace/mini-sglang/performance_milestones/target08_route_b_component_mapping_lifecycle_fix/raw/focused_route_b_graph/reports/004_prefix_full_hit_769_bs4__dsv4_sm80_a100_victory.json",
+    "requested_bs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "saved_prefill_tokens": 2304,
+    "scenario": "prefix_full_hit_769_bs4",
+    "status": "pass",
+    "ttft_s_mean": 0.22452754201367497
+  },
+  {
+    "avg_saved_per_hit": 512.0,
+    "captured_bs": [
+      16,
+      8,
+      4,
+      2,
+      1
+    ],
+    "eager": 0,
+    "error": "",
+    "hit_rate": 0.75,
+    "hit_requests": 3,
+    "match_requests": 4,
+    "output_tok_s": 61.859687262261026,
+    "replay": 62,
+    "replay_by_padded_size": {
+      "1": 31,
+      "4": 31
+    },
+    "report_path": "/workspace/mini-sglang/performance_milestones/target08_route_b_component_mapping_lifecycle_fix/raw/focused_route_b_graph/reports/005_prefix_full_hit_513_longout_bs4__dsv4_sm80_a100_victory.json",
+    "requested_bs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "saved_prefill_tokens": 1536,
+    "scenario": "prefix_full_hit_513_longout_bs4",
+    "status": "pass",
+    "ttft_s_mean": 0.22061639046296477
+  },
+  {
+    "avg_saved_per_hit": 256.0,
+    "captured_bs": [
+      16,
+      8,
+      4,
+      2,
+      1
+    ],
+    "eager": 0,
+    "error": "",
+    "hit_rate": 0.875,
+    "hit_requests": 7,
+    "match_requests": 8,
+    "output_tok_s": 36.41553269360548,
+    "replay": 14,
+    "replay_by_padded_size": {
+      "1": 7,
+      "8": 7
+    },
+    "report_path": "/workspace/mini-sglang/performance_milestones/target08_route_b_component_mapping_lifecycle_fix/raw/focused_route_b_graph/reports/006_prefix_partial_hit_769_bs8__dsv4_sm80_a100_victory.json",
+    "requested_bs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "saved_prefill_tokens": 1792,
+    "scenario": "prefix_partial_hit_769_bs8",
+    "status": "pass",
+    "ttft_s_mean": 0.9616552132647485
+  },
+  {
+    "avg_saved_per_hit": 768.0,
+    "captured_bs": [
+      16,
+      8,
+      4,
+      2,
+      1
+    ],
+    "eager": 0,
+    "error": "",
+    "hit_rate": 0.5,
+    "hit_requests": 8,
+    "match_requests": 16,
+    "output_tok_s": 55.4632093552832,
+    "replay": 14,
+    "replay_by_padded_size": {
+      "1": 7,
+      "16": 7
+    },
+    "report_path": "/workspace/mini-sglang/performance_milestones/target08_route_b_component_mapping_lifecycle_fix/raw/focused_route_b_graph/reports/007_prefix_mixed_hit_miss_bs16__dsv4_sm80_a100_victory.json",
+    "requested_bs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "saved_prefill_tokens": 6144,
+    "scenario": "prefix_mixed_hit_miss_bs16",
+    "status": "pass",
+    "ttft_s_mean": 1.3757363149197772
+  },
+  {
+    "avg_saved_per_hit": 512.0,
+    "captured_bs": [
+      16,
+      8,
+      4,
+      2,
+      1
+    ],
+    "eager": 0,
+    "error": "",
+    "hit_rate": 0.8571428571428571,
+    "hit_requests": 96,
+    "match_requests": 112,
+    "output_tok_s": 114.90003777336453,
+    "replay": 49,
+    "replay_by_padded_size": {
+      "16": 49
+    },
+    "report_path": "/workspace/mini-sglang/performance_milestones/target08_route_b_component_mapping_lifecycle_fix/raw/focused_route_b_graph/reports/008_prefix_multi_112req_wave16__dsv4_sm80_a100_victory.json",
+    "requested_bs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "saved_prefill_tokens": 49152,
+    "scenario": "prefix_multi_112req_wave16",
+    "status": "pass",
+    "ttft_s_mean": 0.7165952545723745
+  }
+]

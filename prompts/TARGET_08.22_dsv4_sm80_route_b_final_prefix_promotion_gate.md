@@ -2,11 +2,42 @@
 
 ## Status
 
-Active next TARGET 08 subtarget.
+Active rerun after TARGET 08.22.1.
 
 Run this after TARGET 08.21.4.  TARGET 08.21.4 showed that Route B is
 graph-capable and is a preferred opt-in candidate, but it did not run the full
 serving/correctness gate needed for promotion.
+
+First run artifact:
+
+```text
+performance_milestones/target08_route_b_final_prefix_promotion_gate/
+```
+
+First run blocker:
+
+```text
+RuntimeError: DSV4 component mapping is missing for active C4 full pages
+```
+
+This is tracked by:
+
+```text
+prompts/TARGET_08.22.1_dsv4_sm80_route_b_component_mapping_lifecycle_fix.md
+```
+
+TARGET 08.22.1 has now fixed the lifecycle blocker.  Its focused rerun showed
+the component mapping crash is gone, exact page-multiple cases `512` and `768`
+obey the SWA-tail guard without crashing, neighboring controls `513` and `769`
+recover safe hits, and Route B graph replay still covers `[1,2,4,8,16]`.
+
+Rerun artifact:
+
+```text
+performance_milestones/target08_route_b_final_prefix_promotion_gate_rerun/
+```
+
+Keep the first blocked artifact unchanged for history.
 
 ## Goal
 
@@ -62,6 +93,8 @@ page-multiple cases are common enough to matter.
 - `performance_milestones/target08_independent_compressed_indexer_ownership/README.md`
 - `performance_milestones/target08_compression_state_ownership/README.md`
 - `performance_milestones/target08_route_b_graph_deforest_serving/README.md`
+- `performance_milestones/target08_route_b_component_mapping_lifecycle_fix/README.md`
+- `performance_milestones/target08_route_b_component_mapping_lifecycle_fix/DESIGN.md`
 - `prompts/TARGET_08.10_dsv4_sm80_prefix_cache_serving_stability_promotion_gate.md`
 - `prompts/TARGET_08.198_dsv4_sm80_post_layer0_same_shape_decode_drift.md`
 
@@ -134,6 +167,18 @@ Serving workloads should include:
 If runtime cost is high, keep a compact smoke matrix first, then run the full
 suite only on the candidates that pass.
 
+Before the full rerun, confirm the TARGET 08.22.1 focused scenarios still pass
+if any Route B cache/radix code has changed since that target:
+
+- `prefix_full_hit_257_bs4`
+- `prefix_full_hit_512_bs4`
+- `prefix_full_hit_513_bs4`
+- `prefix_full_hit_768_bs4`
+- `prefix_full_hit_769_bs4`
+- `prefix_partial_hit_769_bs8`
+- `prefix_mixed_hit_miss_bs16`
+- `prefix_multi_112req_wave16`
+
 ## Correctness Gate
 
 Use the TARGET 08.198 guarded oracle:
@@ -188,7 +233,7 @@ prefix_off vs phase1_prefix_on vs route_b_graph
 Create:
 
 ```text
-performance_milestones/target08_route_b_final_prefix_promotion_gate/
+performance_milestones/target08_route_b_final_prefix_promotion_gate_rerun/
   README.md
   raw/
   scripts/

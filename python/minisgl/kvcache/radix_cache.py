@@ -176,7 +176,15 @@ class RadixPrefixCache(BasePrefixCache):
         input_ids: torch.Tensor,
         indices: torch.Tensor,
         dsv4_component_pages: DSV4ComponentPageHandles | None = None,
+        dsv4_component_pages_builder: Callable[
+            [int, int], DSV4ComponentPageHandles | None
+        ]
+        | None = None,
     ) -> InsertResult:
+        if dsv4_component_pages is not None and dsv4_component_pages_builder is not None:
+            raise ValueError(
+                "Pass either dsv4_component_pages or dsv4_component_pages_builder, not both"
+            )
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, indices = input_ids[:insert_len], indices[:insert_len]
         if dsv4_component_pages is not None:
@@ -184,11 +192,23 @@ class RadixPrefixCache(BasePrefixCache):
         node, prefix_len = self._tree_walk(input_ids)
         if prefix_len != insert_len:  # NOTE: prefix_len < insert_len
             new_node = RadixTreeNode(self.key_fn)
-            new_components = (
-                None
-                if dsv4_component_pages is None
-                else dsv4_component_pages.slice_tokens(prefix_len, insert_len)
-            )
+            if dsv4_component_pages_builder is not None:
+                new_components = dsv4_component_pages_builder(prefix_len, insert_len)
+                if (
+                    new_components is not None
+                    and new_components.length != insert_len - prefix_len
+                ):
+                    raise ValueError(
+                        "Radix DSV4 component builder returned length mismatch: "
+                        f"new_segment={insert_len - prefix_len}, "
+                        f"components={new_components.length}"
+                    )
+            else:
+                new_components = (
+                    None
+                    if dsv4_component_pages is None
+                    else dsv4_component_pages.slice_tokens(prefix_len, insert_len)
+                )
             new_node.set_key_value(
                 input_ids[prefix_len:],
                 indices[prefix_len:].clone(),
