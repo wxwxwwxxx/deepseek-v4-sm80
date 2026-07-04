@@ -42,10 +42,46 @@ class ForwardInput(NamedTuple):
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
 
 
+def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
+    cache_type = config.cache_type
+    if not config.model_config.is_deepseek_v4:
+        return cache_type
+
+    if config.enable_dsv4_swa_tail_retention_v1:
+        raise RuntimeError(
+            "TARGET 08.20 DSV4 SWA tail/component retention V1 is fail-closed. "
+            "Mini's current DSV4 C4/C128/indexer/compression-state locations are "
+            "derived from released full-token pages, so enabling this would risk "
+            "dangling component reads or double frees. Keep using "
+            "--enable-dsv4-radix-prefix-cache for the phase-1 full-page-owner "
+            "baseline; see performance_milestones/target08_swa_tail_retention_v1/"
+            "DESIGN.md."
+        )
+    if config.enable_dsv4_radix_prefix_cache:
+        if config.page_size % 128 != 0:
+            raise ValueError(
+                "DeepSeek V4 radix prefix cache requires a page size divisible "
+                f"by 128, got page_size={config.page_size}. Use --page-size 256 "
+                "for TARGET 08 runs."
+            )
+        if cache_type != "radix":
+            raise ValueError(
+                "DeepSeek V4 radix prefix cache opt-in requires "
+                f"cache_type='radix', got {cache_type!r}."
+            )
+        logger.info("Opting in to DeepSeek V4 radix prefix cache.")
+        return cache_type
+
+    if cache_type != "naive":
+        logger.info("Disabling radix prefix cache for DeepSeek V4 KV cache v1.")
+    return "naive"
+
+
 class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from minisgl.engine import Engine
 
+        cache_type = resolve_dsv4_cache_type(config)
         self.engine = Engine(config)
 
         # use another stream to overlap metadata processing with computation
@@ -56,25 +92,6 @@ class Scheduler(SchedulerIOMixin):
 
         # initialize other managers
         self.table_manager = TableManager(config.max_running_req, self.engine.page_table)
-        cache_type = config.cache_type
-        if config.model_config.is_deepseek_v4:
-            if config.enable_dsv4_radix_prefix_cache:
-                if config.page_size % 128 != 0:
-                    raise ValueError(
-                        "DeepSeek V4 radix prefix cache requires a page size divisible "
-                        f"by 128, got page_size={config.page_size}. Use --page-size 256 "
-                        "for TARGET 08 runs."
-                    )
-                if cache_type != "radix":
-                    raise ValueError(
-                        "DeepSeek V4 radix prefix cache opt-in requires "
-                        f"cache_type='radix', got {cache_type!r}."
-                    )
-                logger.info_rank0("Opting in to DeepSeek V4 radix prefix cache.")
-            else:
-                if cache_type != "naive":
-                    logger.info_rank0("Disabling radix prefix cache for DeepSeek V4 KV cache v1.")
-                cache_type = "naive"
         self.cache_manager = CacheManager(
             self.engine.num_pages,
             config.page_size,

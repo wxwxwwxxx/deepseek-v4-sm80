@@ -2,7 +2,7 @@
 
 ## Status
 
-Active next TARGET 08 subtarget.
+Complete. Runtime V1 was rejected and left fail-closed.
 
 TARGET 08.18 recommends GO for component retention with guardrails.  This target
 is the first conservative implementation slice, but TARGET 08.19 found a DSV4
@@ -20,6 +20,15 @@ generated-token equality is diagnostic only, not a pass/fail oracle.  Use a
 slot-pinned, same-layout prefix-on versus prefix-off comparison plus text smoke
 that rejects obvious correctness failures such as garbled or invalid-byte text,
 crashes, leaks, metadata corruption, or cache-state misuse.
+
+Execution result:
+
+- `--enable-dsv4-swa-tail-retention-v1` exists but fails closed for DSV4;
+- phase-1 `--enable-dsv4-radix-prefix-cache` remains the rollback path;
+- runtime V1 was rejected because mini's C4/C128/indexer/compression-state locs
+  are derived from full-token pages;
+- continue with TARGET 08.21 Route B component-loc ownership instead of runtime
+  Route A materialization.
 
 ## Motivation
 

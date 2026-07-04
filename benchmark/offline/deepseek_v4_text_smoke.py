@@ -1242,6 +1242,7 @@ def run_variant(
             "allow_dsv4_cuda_graph": runtime_options["allow_dsv4_cuda_graph"],
             "cuda_graph_bs": runtime_options["cuda_graph_bs"],
             "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
+            "enable_dsv4_swa_tail_retention_v1": args.enable_dsv4_swa_tail_retention_v1,
             "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
             "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
@@ -1304,6 +1305,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             cuda_graph_bs=runtime_options["cuda_graph_bs"],
             cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
             enable_dsv4_radix_prefix_cache=args.enable_dsv4_radix_prefix_cache,
+            enable_dsv4_swa_tail_retention_v1=args.enable_dsv4_swa_tail_retention_v1,
             **llm_kwargs,
         )
         for variant in variants:
@@ -1354,6 +1356,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                     "cuda_graph_capture_greedy_sample"
                 ],
                 "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
+                "enable_dsv4_swa_tail_retention_v1": args.enable_dsv4_swa_tail_retention_v1,
                 "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
                 "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
                 "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
@@ -1411,6 +1414,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--enable-dsv4-radix-prefix-cache",
         action="store_true",
         help="Explicitly opt in to DeepSeek V4 radix prefix cache.",
+    )
+    parser.add_argument(
+        "--enable-dsv4-swa-tail-retention-v1",
+        action="store_true",
+        help=(
+            "Explicitly request TARGET 08.20 DSV4 SWA tail/component retention V1. "
+            "The runtime currently fails closed; see the target DESIGN.md."
+        ),
     )
     parser.add_argument(
         "--cuda-graph-bs",

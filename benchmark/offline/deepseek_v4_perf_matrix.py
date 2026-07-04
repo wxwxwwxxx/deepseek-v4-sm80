@@ -2985,6 +2985,7 @@ def run_case(
             **asdict(scenario),
             "scheduler_supports_interleaved_arrivals": False,
             "radix_prefix_enabled": bool(args.enable_dsv4_radix_prefix_cache),
+            "swa_tail_retention_v1_requested": bool(args.enable_dsv4_swa_tail_retention_v1),
         },
         "classification": run_classification(
             tp_size=tp_size,
@@ -3012,6 +3013,7 @@ def run_case(
             "max_running_req": args.max_running_req,
             "token_id_range": args.token_id_range,
             "radix_prefix_enabled": bool(args.enable_dsv4_radix_prefix_cache),
+            "enable_dsv4_swa_tail_retention_v1": args.enable_dsv4_swa_tail_retention_v1,
             "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
         },
@@ -3070,6 +3072,7 @@ def _init_llm(
         cuda_graph_bs=runtime_options["cuda_graph_bs"],
         cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
         enable_dsv4_radix_prefix_cache=args.enable_dsv4_radix_prefix_cache,
+        enable_dsv4_swa_tail_retention_v1=args.enable_dsv4_swa_tail_retention_v1,
         **kwargs,
     )
     torch.cuda.synchronize(llm.device)
@@ -3162,6 +3165,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "page_size": args.page_size,
                         "num_pages": args.num_pages,
                         "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
+                        "enable_dsv4_swa_tail_retention_v1": (
+                            args.enable_dsv4_swa_tail_retention_v1
+                        ),
                         "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
                         "classification": run_classification(
                             tp_size=tp_size,
@@ -3259,6 +3265,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--enable-dsv4-radix-prefix-cache",
         action="store_true",
         help="Explicitly opt in to DeepSeek V4 radix prefix cache.",
+    )
+    parser.add_argument(
+        "--enable-dsv4-swa-tail-retention-v1",
+        action="store_true",
+        help=(
+            "Explicitly request TARGET 08.20 DSV4 SWA tail/component retention V1. "
+            "The runtime currently fails closed; see the target DESIGN.md."
+        ),
     )
     parser.add_argument(
         "--cuda-graph-bs",

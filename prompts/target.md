@@ -52,8 +52,12 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08.196 | `prompts/TARGET_08.196_dsv4_sm80_batched_attention_indexer_row_coupling.md` | completed narrowed | Added attention/indexer debug hooks and exact-bs graph guard; found layer0 q-path drift but did not clear broad correctness. |
 | TARGET 08.197 | `performance_milestones/target08_q_path_same_shape_same_input_invariance/README.md` | completed classification | Classified layer0 q-path drift as GEMM shape numeric drift, not q_norm/RoPE row-coupling. |
 | TARGET 08.198 | `prompts/TARGET_08.198_dsv4_sm80_post_layer0_same_shape_decode_drift.md` | completed guarded | Found tiny later-layer attention/indexer drift amplified by small logits margins; accepted guarded oracle because batch-slot invariance is not guaranteed. |
-| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | active next | Conservative V1 SGLang-style SWA tail/tombstone/component-retention opt-in under the 08.198 guarded oracle. |
-| TARGET 08.21 | `prompts/TARGET_08.21_dsv4_sm80_sglang_aligned_component_retention_v2.md` | planned if V1 succeeds | More complete SGLang-aligned component-retention model without long-distance SWA replay. |
+| TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | completed rejected | Added fail-closed V1 opt-in and proved runtime V1 is unsafe without component-level ownership. |
+| TARGET 08.21 | `prompts/TARGET_08.21_dsv4_sm80_component_loc_ownership_route_b.md` | route overview | Route B family map; do not run as one monolithic implementation target. |
+| TARGET 08.21.1 | `prompts/TARGET_08.21.1_dsv4_sm80_component_loc_table_preflight.md` | active next | B0 preflight: prove direct component loc tables match phase-1 derived metadata while full pages stay live. |
+| TARGET 08.21.2 | `prompts/TARGET_08.21.2_dsv4_sm80_independent_compressed_indexer_ownership.md` | planned after 08.21.1 | B1: independent C4/C128/indexer ownership behind an opt-in. |
+| TARGET 08.21.3 | `prompts/TARGET_08.21.3_dsv4_sm80_compression_state_ownership.md` | planned after 08.21.2 | B2: compression-state ownership, reconstruction, or safe hit-length guard. |
+| TARGET 08.21.4 | `prompts/TARGET_08.21.4_dsv4_sm80_route_b_graph_deforest_serving.md` | planned after 08.21.3 | B3: Route B graph metadata, deforest, serving benchmark, and promotion decision. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after prefix correctness/component-retention decisions, then choose TARGET 09 low precision or TARGET 10 attention/communication. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned after TARGET 08 | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | future optional | Attention, PyNCCL, communication overlap, and graph/runtime experiments if fresh profiles justify them. |
@@ -77,10 +81,10 @@ Post-07.78 stable retest:
 
 Decision from TARGET 07.79, TARGET 08 phase 1, TARGET 08.05, TARGET 08.06,
 TARGET 08.07, TARGET 08.10, TARGET 08.18, TARGET 08.19, TARGET 08.195,
-TARGET 08.196, TARGET 08.197, and TARGET 08.198:
+TARGET 08.196, TARGET 08.197, TARGET 08.198, and TARGET 08.20:
 
 ```text
-continue with TARGET 08.20 DSV4 SGLang-style SWA tail retention V1
+continue with TARGET 08.21.1 DSV4 component-loc table preflight
 ```
 
 Reason: DSV4 radix prefix cache works as an explicit opt-in, and TARGET 08.05
@@ -98,10 +102,14 @@ drift and added an exact-bs graph guard.  TARGET 08.197 proved the layer0
 q-path issue is GEMM shape numeric drift rather than q_norm/RoPE row-coupling.
 TARGET 08.198 found tiny later-layer attention/indexer drift amplified by small
 logits margins and concluded that mini does not currently guarantee batch-slot
-invariance.  Component retention may continue with a guarded oracle:
-slot-pinned/same-layout prefix-on versus prefix-off checks, logits/top-k/margin
-reporting, and text smoke that rejects obvious correctness failures such as乱码,
-degenerate output, crashes, leaks, or cache-state corruption.
+invariance.  TARGET 08.20 added a fail-closed V1 opt-in and proved runtime V1
+is unsafe without component-level ownership because C4/C128/indexer/state locs
+are derived from released full-token pages.  Continue with Route B:
+component-loc metadata plus component-level ownership/refcount/free rules.
+Route A retained-store materialization may be used only as an oracle or
+correctness harness, not as the main runtime serving path.  TARGET 08.21 is a
+route overview; run TARGET 08.21.1 first, then 08.21.2/08.21.3/08.21.4 in
+order if each evidence gate passes.
 
 ## Archive Policy
 
@@ -115,7 +123,7 @@ For new child threads, start from:
 
 1. `prompts/target.md`
 2. the active target prompt, currently
-   `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md`
+   `prompts/TARGET_08.21.1_dsv4_sm80_component_loc_table_preflight.md`
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache phase-1 context
 

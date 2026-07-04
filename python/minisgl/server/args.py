@@ -219,6 +219,16 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
             "DSV4-safe 128-aligned page size such as --page-size 256."
         ),
     )
+    parser.add_argument(
+        "--enable-dsv4-swa-tail-retention-v1",
+        action="store_true",
+        dest="enable_dsv4_swa_tail_retention_v1",
+        help=(
+            "Explicitly request TARGET 08.20 DSV4 SWA tail/component retention V1. "
+            "This fail-closed guard currently rejects runtime enablement; see "
+            "performance_milestones/target08_swa_tail_retention_v1/DESIGN.md."
+        ),
+    )
 
     parser.add_argument(
         "--moe-backend",

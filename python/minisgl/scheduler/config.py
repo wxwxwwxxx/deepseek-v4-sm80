@@ -16,6 +16,7 @@ class SchedulerConfig(EngineConfig):
     max_extend_tokens: int = 8192
     cache_type: str = "radix"
     enable_dsv4_radix_prefix_cache: bool = False
+    enable_dsv4_swa_tail_retention_v1: bool = False
     offline_mode: bool = False
 
     # networking config
