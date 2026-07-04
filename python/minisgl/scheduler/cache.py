@@ -72,6 +72,16 @@ class CacheManager:
         self.page_size = page_size
         self.kv_cache = kv_cache
         self.metrics = PrefixCacheMetrics()
+        self.dsv4_component_ownership = bool(
+            getattr(kv_cache, "component_loc_ownership_enabled", False)
+        )
+        if self.dsv4_component_ownership:
+            setattr(self.prefix_cache, "dsv4_component_ownership_enabled", True)
+            setattr(
+                self.prefix_cache,
+                "dsv4_component_evict_callback",
+                self._release_dsv4_component_pages,
+            )
 
     def match_req(self, req: PendingReq) -> MatchResult:
         input_len = req.input_len
@@ -82,6 +92,25 @@ class CacheManager:
 
     @property
     def available_size(self) -> int:
+        if self.dsv4_component_ownership:
+            live_full_tokens = int(
+                getattr(
+                    self.prefix_cache,
+                    "dsv4_evictable_live_full_tokens",
+                    self.prefix_cache.size_info.evictable_size,
+                )
+            )
+            component_tokens = int(
+                getattr(
+                    self.prefix_cache,
+                    "dsv4_evictable_component_tokens",
+                    self.prefix_cache.size_info.evictable_size,
+                )
+            )
+            component_available_pages = int(self.kv_cache.available_component_pages())
+            full_pages = len(self.free_slots) + live_full_tokens // self.page_size
+            component_pages = component_available_pages + component_tokens // self.page_size
+            return min(full_pages, component_pages) * self.page_size
         return self.prefix_cache.size_info.evictable_size + len(self.free_slots) * self.page_size
 
     def lock(self, handle: BaseCacheHandle) -> None:
@@ -118,7 +147,21 @@ class CacheManager:
         insert_ids = req.input_ids[: req.cached_len]
         page_indices = self.page_table[req.table_idx, : req.cached_len]
         old_handle = req.cache_handle
-        cached_len, new_handle = self.prefix_cache.insert_prefix(insert_ids, page_indices)
+        component_pages = None
+        if self.dsv4_component_ownership:
+            insert_len = align_down(req.cached_len, self.page_size)
+            component_pages = self.kv_cache.make_component_page_handles(
+                page_indices[:insert_len],
+                self.page_size,
+            )
+        if self.dsv4_component_ownership:
+            cached_len, new_handle = self.prefix_cache.insert_prefix(
+                insert_ids,
+                page_indices,
+                dsv4_component_pages=component_pages,
+            )
+        else:
+            cached_len, new_handle = self.prefix_cache.insert_prefix(insert_ids, page_indices)
         self.metrics.inserted_tokens += max(0, new_handle.cached_len - cached_len)
         # unlock until all operations on handle is done
         self.unlock(old_handle)
@@ -129,18 +172,34 @@ class CacheManager:
         else:  # keep the tail part, update the handle
             req.cache_handle = new_handle
             self.lock(new_handle)
+        self._release_dsv4_component_owned_full_head(new_handle)
 
     def check_integrity(self) -> None:
         self.prefix_cache.check_integrity()
         cache_pages = self.prefix_cache.size_info.total_size // self.page_size
         live_pages = self.num_pages - len(self.free_slots)
         if self.kv_cache is not None:
+            if self.dsv4_component_ownership:
+                live_full_slots = self.kv_cache.allocation_counts.full_slots
+                if live_full_slots % self.page_size != 0:
+                    raise RuntimeError(
+                        "DSV4 component ownership full-slot refcount is not page-aligned: "
+                        f"full_slots={live_full_slots}, page_size={self.page_size}"
+                    )
+                live_pages = live_full_slots // self.page_size
             self.kv_cache.check_allocation_integrity(live_pages, self.page_size)
-        if len(self.free_slots) + cache_pages != self.num_pages:
+        if self.dsv4_component_ownership:
+            expected_pages = self.num_pages
+            actual_pages = len(self.free_slots) + live_pages
+        else:
+            expected_pages = self.num_pages
+            actual_pages = len(self.free_slots) + cache_pages
+        if actual_pages != expected_pages:
             raise RuntimeError(
                 "CacheManager integrity check failed:"
                 f" free_pages({len(self.free_slots)}) +"
-                f" cache_pages({cache_pages}) != num_pages({self.num_pages})"
+                f" live_pages({live_pages}) + cache_pages({cache_pages}) "
+                f"!= num_pages({self.num_pages})"
             )
         if self.page_size > 1:
             assert torch.all(self.free_slots % self.page_size == 0)
@@ -148,9 +207,11 @@ class CacheManager:
     @contextmanager
     def lazy_free_region(self):
         def lazy_free(indices: torch.Tensor) -> None:
-            if len(indices) > 0 and self.kv_cache is not None:
-                self.kv_cache.on_token_indices_freed(indices, self.page_size)
-            lazy_free_list.append(indices[:: self.page_size])
+            valid = self._valid_full_indices(indices)
+            if len(valid) > 0 and self.kv_cache is not None:
+                self.kv_cache.on_token_indices_freed(valid, self.page_size)
+            if len(valid) > 0:
+                lazy_free_list.append(valid[:: self.page_size])
 
         lazy_free_list: List[torch.Tensor] = []
         try:
@@ -161,7 +222,9 @@ class CacheManager:
             self.free_slots = torch.cat([self.free_slots] + lazy_free_list)
 
     def _allocate(self, needed_pages: int) -> torch.Tensor:
-        if needed_pages > (free_pages := len(self.free_slots)):
+        if self.dsv4_component_ownership:
+            self._evict_for_dsv4_component_capacity(needed_pages)
+        elif needed_pages > (free_pages := len(self.free_slots)):
             evicted = self.prefix_cache.evict((needed_pages - free_pages) * self.page_size)
             self._record_prefix_eviction(evicted)
             if self.kv_cache is not None:
@@ -175,10 +238,83 @@ class CacheManager:
         return allocated
 
     def _free(self, indices: torch.Tensor) -> None:
+        indices = self._valid_full_indices(indices)
         if len(indices) > 0:
             if self.kv_cache is not None:
                 self.kv_cache.on_token_indices_freed(indices, self.page_size)
             self.free_slots = torch.cat([self.free_slots, indices[:: self.page_size]])
+
+    def _valid_full_indices(self, indices: torch.Tensor) -> torch.Tensor:
+        if len(indices) == 0:
+            return indices
+        if not self.dsv4_component_ownership:
+            return indices
+        if indices.numel() % self.page_size != 0:
+            page_starts = indices[:: self.page_size]
+            page_starts = page_starts[page_starts >= 0]
+            if page_starts.numel() == 0:
+                return indices.new_empty((0,))
+            return self._page_to_token(page_starts)
+        pages = indices.view(-1, self.page_size)
+        valid = pages[:, 0] >= 0
+        if not bool(torch.any(valid)):
+            return indices.new_empty((0,))
+        return pages[valid].reshape(-1)
+
+    def _release_dsv4_component_pages(self, handles) -> None:
+        if self.kv_cache is None:
+            return
+        release = getattr(self.kv_cache, "release_component_page_handles", None)
+        if callable(release):
+            release(handles)
+
+    def _release_dsv4_component_owned_full_head(self, handle: BaseCacheHandle) -> None:
+        if not self.dsv4_component_ownership:
+            return
+        releaser = getattr(self.prefix_cache, "release_dsv4_full_head", None)
+        if not callable(releaser):
+            return
+        released = releaser(handle, tail_tokens=self.page_size)
+        released = self._valid_full_indices(released)
+        if released.numel() == 0:
+            return
+        if self.kv_cache is not None:
+            self.kv_cache.on_token_indices_freed(
+                released,
+                self.page_size,
+                free_components=False,
+            )
+        self.free_slots = torch.cat([self.free_slots, released[:: self.page_size]])
+
+    def _evict_for_dsv4_component_capacity(self, needed_pages: int) -> None:
+        assert self.kv_cache is not None
+        while (
+            len(self.free_slots) < needed_pages
+            or self.kv_cache.available_component_pages() < needed_pages
+        ):
+            full_deficit = max(0, needed_pages - len(self.free_slots))
+            component_deficit = max(0, needed_pages - self.kv_cache.available_component_pages())
+            evict_pages = max(full_deficit, component_deficit, 1)
+            evicted = self.prefix_cache.evict(evict_pages * self.page_size)
+            self._record_prefix_eviction(evicted)
+            valid = self._valid_full_indices(evicted)
+            if valid.numel() > 0:
+                self.kv_cache.on_token_indices_freed(
+                    valid,
+                    self.page_size,
+                    free_components=False,
+                )
+                self.free_slots = torch.cat([self.free_slots, valid[:: self.page_size]])
+            if (
+                valid.numel() == 0
+                and self.kv_cache.available_component_pages() < needed_pages
+                and self.prefix_cache.size_info.evictable_size == 0
+            ):
+                break
+        assert len(self.free_slots) >= needed_pages, "Eviction did not free enough full pages."
+        assert (
+            self.kv_cache.available_component_pages() >= needed_pages
+        ), "Eviction did not free enough DSV4 component pages."
 
     def _page_to_token(self, pages: torch.Tensor) -> torch.Tensor:
         if self.page_size == 1:
@@ -204,6 +340,26 @@ class CacheManager:
         retention_estimator = getattr(self.kv_cache, "estimate_prefix_retention", None)
         if callable(retention_estimator):
             snapshot["dsv4_retention"] = retention_estimator(retained_tokens, self.page_size)
+        if self.dsv4_component_ownership and self.kv_cache is not None:
+            counts = self.kv_cache.allocation_counts
+            snapshot["dsv4_component_ownership"] = {
+                "enabled": True,
+                "live_full_pages": counts.full_slots // self.page_size,
+                "live_full_slots": counts.full_slots,
+                "live_c4_slots": counts.c4_slots,
+                "live_c128_slots": counts.c128_slots,
+                "live_c4_indexer_slots": counts.c4_indexer_slots,
+                "live_c4_state_slots": counts.c4_state_slots,
+                "live_c128_state_slots": counts.c128_state_slots,
+                "live_c4_indexer_state_slots": counts.c4_indexer_state_slots,
+                "available_component_pages": self.kv_cache.available_component_pages(),
+                "evictable_live_full_tokens": int(
+                    getattr(self.prefix_cache, "dsv4_evictable_live_full_tokens", 0)
+                ),
+                "evictable_component_tokens": int(
+                    getattr(self.prefix_cache, "dsv4_evictable_component_tokens", 0)
+                ),
+            }
         return snapshot
 
     def _record_prefix_match(self, cached_len: int, input_len: int) -> None:

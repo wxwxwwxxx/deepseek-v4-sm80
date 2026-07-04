@@ -72,6 +72,9 @@ class Engine:
             page_size=config.page_size,
             device=self.device,
             dtype=self.dtype,
+            enable_dsv4_component_loc_ownership=bool(
+                getattr(config, "enable_dsv4_component_loc_ownership", False)
+            ),
         )
 
         # ======================= Page table initialization ========================
@@ -302,6 +305,12 @@ def _adjust_config(config: EngineConfig):
             if config.cuda_graph_max_bs is None:
                 override("cuda_graph_max_bs", max(config.cuda_graph_bs or [0]))
             override("cuda_graph_capture_fail_open", True)
+            if getattr(config, "enable_dsv4_component_loc_ownership", False):
+                logger.info_rank0(
+                    "Opting in to DeepSeek V4 Route B decode CUDA graph metadata "
+                    "copy; decode deforest remains guarded off for component loc "
+                    "ownership."
+                )
             logger.info_rank0(
                 f"Opting in to DeepSeek V4 decode CUDA graph sizes: {config.cuda_graph_bs}"
             )

@@ -30,6 +30,7 @@ def create_kvcache_pool(
     page_size: int,
     dtype: torch.dtype,
     device: torch.device,
+    enable_dsv4_component_loc_ownership: bool = False,
 ) -> BaseKVCachePool:
     if model_config.is_deepseek_v4:
         from .deepseek_v4_pool import DeepSeekV4KVCache
@@ -40,6 +41,7 @@ def create_kvcache_pool(
             page_size=page_size,
             device=device,
             dtype=dtype,
+            enable_component_loc_ownership=enable_dsv4_component_loc_ownership,
         )
 
     from .mha_pool import MHAKVCache

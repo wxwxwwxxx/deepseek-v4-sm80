@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import contextlib
+import copy
 import importlib
 import importlib.metadata
 import json
@@ -2986,6 +2986,7 @@ def run_case(
             "scheduler_supports_interleaved_arrivals": False,
             "radix_prefix_enabled": bool(args.enable_dsv4_radix_prefix_cache),
             "swa_tail_retention_v1_requested": bool(args.enable_dsv4_swa_tail_retention_v1),
+            "component_loc_ownership_enabled": bool(args.enable_dsv4_component_loc_ownership),
         },
         "classification": run_classification(
             tp_size=tp_size,
@@ -3014,6 +3015,7 @@ def run_case(
             "token_id_range": args.token_id_range,
             "radix_prefix_enabled": bool(args.enable_dsv4_radix_prefix_cache),
             "enable_dsv4_swa_tail_retention_v1": args.enable_dsv4_swa_tail_retention_v1,
+            "enable_dsv4_component_loc_ownership": args.enable_dsv4_component_loc_ownership,
             "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
         },
@@ -3073,6 +3075,7 @@ def _init_llm(
         cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
         enable_dsv4_radix_prefix_cache=args.enable_dsv4_radix_prefix_cache,
         enable_dsv4_swa_tail_retention_v1=args.enable_dsv4_swa_tail_retention_v1,
+        enable_dsv4_component_loc_ownership=args.enable_dsv4_component_loc_ownership,
         **kwargs,
     )
     torch.cuda.synchronize(llm.device)
@@ -3167,6 +3170,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
                         "enable_dsv4_swa_tail_retention_v1": (
                             args.enable_dsv4_swa_tail_retention_v1
+                        ),
+                        "enable_dsv4_component_loc_ownership": (
+                            args.enable_dsv4_component_loc_ownership
                         ),
                         "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
                         "classification": run_classification(
@@ -3272,6 +3278,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Explicitly request TARGET 08.20 DSV4 SWA tail/component retention V1. "
             "The runtime currently fails closed; see the target DESIGN.md."
+        ),
+    )
+    parser.add_argument(
+        "--enable-dsv4-component-loc-ownership",
+        action="store_true",
+        help=(
+            "Explicitly enable TARGET 08.21.2 DSV4 Route B component loc ownership. "
+            "Requires --enable-dsv4-radix-prefix-cache and keeps decode metadata "
+            "deforest guarded off while graph replay uses direct component metadata copy."
         ),
     )
     parser.add_argument(

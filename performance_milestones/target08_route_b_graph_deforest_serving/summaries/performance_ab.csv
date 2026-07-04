@@ -1,0 +1,4 @@
+label,status,elapsed_s,ttft_s_mean,topt_s_mean,prefill_tokens_per_s,decode_tokens_per_s,e2e_output_tokens_per_s,e2e_total_tokens_per_s,graph_replay_count,eager_decode_count,prefix_hit_requests,saved_prefill_tokens,retained_prefix_pages,live_full_pages,live_c4_slots,live_c128_slots,live_c4_indexer_slots,live_c4_state_slots,live_c128_state_slots,live_c4_indexer_state_slots
+prefix_off,pass,5.412576645612717,2.8735768664628267,0.19678104730943838,197.7047405346548,93.13383305779676,2.9560782317917202,192.88410462440976,6,0,0,0,0,,,,,,,
+phase1_prefix_on,pass,2.3376443535089493,0.9903501337394118,0.0538711273111403,120.71010906051474,101.90118039398452,6.844497100674449,446.6034358190078,6,0,3,768,1,,,,,,,
+route_b_graph,pass,2.4248724598437548,1.0063057225197554,0.06549316318705678,120.03708932012887,99.53931054770909,6.598285173741035,430.5381075866025,6,0,3,768,1,1,64,2,64,8,128,8

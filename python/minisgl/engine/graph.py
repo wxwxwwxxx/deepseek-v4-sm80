@@ -256,6 +256,13 @@ class GraphRunner:
         self.capture_status["capture_compressed_locs_in_graph_disabled_by_env"] = bool(
             getattr(self.attn_backend, "capture_compressed_locs_in_graph_disabled_by_env", False)
         )
+        self.capture_status["capture_compressed_locs_in_graph_component_guarded"] = bool(
+            getattr(
+                self.attn_backend,
+                "capture_compressed_locs_in_graph_component_guarded",
+                False,
+            )
+        )
 
         pbar = tqdm(
             sorted(self.graph_bs_list, reverse=True),

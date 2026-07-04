@@ -87,10 +87,109 @@ class DSV4AllocationCounts:
     c4_slots: int
     c128_slots: int
     c4_indexer_slots: int
+    c4_state_slots: int = 0
+    c128_state_slots: int = 0
+    c4_indexer_state_slots: int = 0
 
     @property
     def any_allocated(self) -> bool:
-        return any((self.full_slots, self.c4_slots, self.c128_slots, self.c4_indexer_slots))
+        return any(
+            (
+                self.full_slots,
+                self.c4_slots,
+                self.c128_slots,
+                self.c4_indexer_slots,
+                self.c4_state_slots,
+                self.c128_state_slots,
+                self.c4_indexer_state_slots,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class DSV4ComponentPageHandles:
+    length: int
+    page_size: int
+    c4_pages: torch.Tensor | None = None
+    c128_pages: torch.Tensor | None = None
+    c4_indexer_pages: torch.Tensor | None = None
+    c4_state_pages: torch.Tensor | None = None
+    c128_state_pages: torch.Tensor | None = None
+    c4_indexer_state_pages: torch.Tensor | None = None
+
+    @property
+    def num_pages(self) -> int:
+        return div_ceil(self.length, self.page_size) if self.length else 0
+
+    @property
+    def has_required_state_pages(self) -> bool:
+        return (
+            (self.c4_pages is None or self.c4_state_pages is not None)
+            and (self.c128_pages is None or self.c128_state_pages is not None)
+            and (
+                self.c4_indexer_pages is None
+                or self.c4_indexer_state_pages is not None
+            )
+        )
+
+    def slice_tokens(self, start: int, end: int) -> DSV4ComponentPageHandles:
+        start = int(start)
+        end = int(end)
+        if start < 0 or end < start or end > self.length:
+            raise ValueError(
+                "Invalid DSV4 component handle slice: "
+                f"start={start}, end={end}, length={self.length}"
+            )
+        if start % self.page_size != 0 or end % self.page_size != 0:
+            raise ValueError(
+                "DSV4 component handles can only be sliced on page boundaries: "
+                f"start={start}, end={end}, page_size={self.page_size}"
+            )
+        page_start = start // self.page_size
+        page_end = end // self.page_size
+
+        def _slice(x: torch.Tensor | None) -> torch.Tensor | None:
+            return None if x is None else x[page_start:page_end].clone()
+
+        return DSV4ComponentPageHandles(
+            length=end - start,
+            page_size=self.page_size,
+            c4_pages=_slice(self.c4_pages),
+            c128_pages=_slice(self.c128_pages),
+            c4_indexer_pages=_slice(self.c4_indexer_pages),
+            c4_state_pages=_slice(self.c4_state_pages),
+            c128_state_pages=_slice(self.c128_state_pages),
+            c4_indexer_state_pages=_slice(self.c4_indexer_state_pages),
+        )
+
+    @staticmethod
+    def concat(handles: list[DSV4ComponentPageHandles]) -> DSV4ComponentPageHandles | None:
+        handles = [h for h in handles if h.length > 0]
+        if not handles:
+            return None
+        page_size = handles[0].page_size
+        if any(h.page_size != page_size for h in handles):
+            raise ValueError("Cannot concatenate DSV4 component handles with mixed page sizes")
+
+        def _cat(attr: str) -> torch.Tensor | None:
+            chunks = [getattr(h, attr) for h in handles]
+            present = [x for x in chunks if x is not None]
+            if not present:
+                return None
+            if len(present) != len(handles):
+                raise ValueError(f"Mixed DSV4 component handle field presence for {attr}")
+            return torch.cat(present)
+
+        return DSV4ComponentPageHandles(
+            length=sum(h.length for h in handles),
+            page_size=page_size,
+            c4_pages=_cat("c4_pages"),
+            c128_pages=_cat("c128_pages"),
+            c4_indexer_pages=_cat("c4_indexer_pages"),
+            c4_state_pages=_cat("c4_state_pages"),
+            c128_state_pages=_cat("c128_state_pages"),
+            c4_indexer_state_pages=_cat("c4_indexer_state_pages"),
+        )
 
 
 class DSV4KVAndScore:
@@ -179,6 +278,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         device: torch.device,
         dtype: torch.dtype | None = None,
         policy: DSV4CacheLayoutPolicy | None = None,
+        enable_component_loc_ownership: bool = False,
     ) -> None:
         del dtype
         self._policy = policy or DSV4CacheLayoutPolicy()
@@ -192,6 +292,16 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._num_tokens = num_pages * page_size
         self._c4_slots = div_ceil(self._num_tokens, 4)
         self._c128_slots = div_ceil(self._num_tokens, 128)
+        self._component_loc_ownership_enabled = bool(enable_component_loc_ownership)
+        self._c4_component_page_size = max(div_ceil(page_size, 4), 1)
+        self._c128_component_page_size = max(div_ceil(page_size, 128), 1)
+        self._c4_state_page_size = self.C4_STATE_RING_SIZE
+        self._c128_state_page_size = self.C128_STATE_RING_SIZE
+        self._c4_component_pages = div_ceil(self._c4_slots, self._c4_component_page_size)
+        self._c128_component_pages = div_ceil(
+            self._c128_slots,
+            self._c128_component_page_size,
+        )
 
         self._layer_mapping = _build_layer_mapping(model_config.compress_ratios, self._num_layers)
         self._normal_layer_count = sum(m.compress_ratio == 0 for m in self._layer_mapping)
@@ -251,6 +361,58 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._c4_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
         self._c128_refcount = torch.zeros(self._c128_slots, dtype=torch.int16, device=device)
         self._c4_indexer_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
+        self._c4_state_refcount = torch.zeros(
+            self._num_pages * self._c4_state_page_size,
+            dtype=torch.int16,
+            device=device,
+        )
+        self._c128_state_refcount = torch.zeros(
+            self._num_pages * self._c128_state_page_size,
+            dtype=torch.int16,
+            device=device,
+        )
+        self._c4_indexer_state_refcount = torch.zeros_like(self._c4_state_refcount)
+        self._full_to_c4_page = torch.full(
+            (self._num_pages,),
+            -1,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._full_to_c128_page = torch.full_like(self._full_to_c4_page, -1)
+        self._full_to_c4_indexer_page = torch.full_like(self._full_to_c4_page, -1)
+        self._full_to_c4_state_page = torch.full_like(self._full_to_c4_page, -1)
+        self._full_to_c128_state_page = torch.full_like(self._full_to_c4_page, -1)
+        self._full_to_c4_indexer_state_page = torch.full_like(self._full_to_c4_page, -1)
+        self._free_c4_pages = torch.arange(
+            self._c4_component_pages,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._free_c128_pages = torch.arange(
+            self._c128_component_pages,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._free_c4_indexer_pages = torch.arange(
+            self._c4_component_pages,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._free_c4_state_pages = torch.arange(
+            self._num_pages,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._free_c128_state_pages = torch.arange(
+            self._num_pages,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._free_c4_indexer_state_pages = torch.arange(
+            self._num_pages,
+            dtype=torch.int32,
+            device=device,
+        )
 
         self._compress_state_pools: list[DSV4CompressStatePool | None] = [None] * self._num_layers
         self._indexer_compress_state_pools: list[DSV4CompressStatePool | None] = [
@@ -307,6 +469,18 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         return self._page_size
 
     @property
+    def component_loc_ownership_enabled(self) -> bool:
+        return self._component_loc_ownership_enabled
+
+    @property
+    def c4_component_page_size(self) -> int:
+        return self._c4_component_page_size
+
+    @property
+    def c128_component_page_size(self) -> int:
+        return self._c128_component_page_size
+
+    @property
     def num_tokens(self) -> int:
         return self._num_tokens
 
@@ -328,6 +502,21 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             ),
             c4_indexer_slots=(
                 int(torch.count_nonzero(self._c4_indexer_refcount).item())
+                if self._c4_layer_count
+                else 0
+            ),
+            c4_state_slots=(
+                int(torch.count_nonzero(self._c4_state_refcount).item())
+                if self._c4_layer_count
+                else 0
+            ),
+            c128_state_slots=(
+                int(torch.count_nonzero(self._c128_state_refcount).item())
+                if self._c128_layer_count
+                else 0
+            ),
+            c4_indexer_state_slots=(
+                int(torch.count_nonzero(self._c4_indexer_state_refcount).item())
                 if self._c4_layer_count
                 else 0
             ),
@@ -413,7 +602,28 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             full_locs = full_locs[(positions + 1) % ratio == 0]
         if full_locs.numel() == 0:
             return full_locs
-        return torch.unique_consecutive(full_locs // ratio)
+        if not self._component_loc_ownership_enabled:
+            return torch.unique_consecutive(full_locs // ratio)
+        return torch.unique_consecutive(
+            self._component_locs_from_full_locs(full_locs, ratio, component="compressed")
+        )
+
+    def indexer_locs_from_full_locs(
+        self,
+        full_locs: torch.Tensor,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not self._component_loc_ownership_enabled:
+            return self.compressed_locs_from_full_locs(full_locs, 4, positions)
+        full_locs = full_locs.to(device=self.device, dtype=torch.long)
+        if positions is not None:
+            positions = positions.to(device=self.device, dtype=torch.long)
+            full_locs = full_locs[(positions + 1) % 4 == 0]
+        if full_locs.numel() == 0:
+            return full_locs
+        return torch.unique_consecutive(
+            self._component_locs_from_full_locs(full_locs, 4, component="indexer")
+        )
 
     def store_swa(self, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
         if kv.numel() == 0:
@@ -443,6 +653,9 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         if full_locs.numel() == 0:
             return
         self._full_refcount[full_locs] += 1
+        if self._component_loc_ownership_enabled:
+            self._allocate_component_pages_for_full_pages(page_starts, page_size)
+            return
         if self._c4_layer_count:
             c4_locs = torch.unique(full_locs // 4)
             self._c4_refcount[c4_locs] += 1
@@ -450,14 +663,29 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         if self._c128_layer_count:
             self._c128_refcount[torch.unique(full_locs // 128)] += 1
 
-    def on_token_indices_freed(self, indices: torch.Tensor, page_size: int) -> None:
+    def on_token_indices_freed(
+        self,
+        indices: torch.Tensor,
+        page_size: int,
+        *,
+        free_components: bool = True,
+    ) -> None:
         if indices.numel() == 0:
             return
-        page_starts = indices[::page_size]
+        page_starts = self._valid_page_starts(indices, page_size)
+        if page_starts.numel() == 0:
+            return
         full_locs = self._expand_page_starts(page_starts, page_size)
         if full_locs.numel() == 0:
             return
         self._decrement_refcount(self._full_refcount, full_locs, "full token")
+        if self._component_loc_ownership_enabled:
+            self._release_component_pages_for_full_pages(
+                page_starts,
+                page_size,
+                free_components=free_components,
+            )
+            return
         if self._c4_layer_count:
             c4_locs = torch.unique(full_locs // 4)
             self._decrement_refcount(self._c4_refcount, c4_locs, "C4")
@@ -572,6 +800,212 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "page_size_c128_aligned": page_size % 128 == 0,
         }
 
+    def make_component_page_handles(
+        self,
+        full_indices: torch.Tensor,
+        page_size: int,
+    ) -> DSV4ComponentPageHandles | None:
+        if not self._component_loc_ownership_enabled:
+            return None
+        if full_indices.numel() == 0:
+            return DSV4ComponentPageHandles(length=0, page_size=page_size)
+        if full_indices.numel() % page_size != 0:
+            raise ValueError(
+                "DSV4 component handles require page-aligned full indices, "
+                f"got {full_indices.numel()} tokens for page_size={page_size}"
+            )
+        page_starts = full_indices[::page_size].to(device=self.device, dtype=torch.long)
+        full_pages = torch.where(
+            page_starts >= 0,
+            page_starts.div(page_size, rounding_mode="floor"),
+            torch.full_like(page_starts, -1),
+        )
+
+        def _gather(mapping: torch.Tensor, enabled: bool, name: str) -> torch.Tensor | None:
+            if not enabled:
+                return None
+            out = torch.full_like(full_pages, -1, dtype=torch.int32)
+            valid = full_pages >= 0
+            if bool(torch.any(valid)):
+                gathered = mapping[full_pages[valid]]
+                if torch.any(gathered < 0):
+                    raise RuntimeError(
+                        f"DSV4 component mapping is missing for active {name} full pages"
+                    )
+                out[valid] = gathered.to(torch.int32)
+            return out
+
+        return DSV4ComponentPageHandles(
+            length=int(full_indices.numel()),
+            page_size=page_size,
+            c4_pages=_gather(self._full_to_c4_page, self._c4_layer_count > 0, "C4"),
+            c128_pages=_gather(self._full_to_c128_page, self._c128_layer_count > 0, "C128"),
+            c4_indexer_pages=_gather(
+                self._full_to_c4_indexer_page,
+                self._c4_layer_count > 0,
+                "C4 indexer",
+            ),
+            c4_state_pages=_gather(
+                self._full_to_c4_state_page,
+                self._c4_layer_count > 0,
+                "C4 state",
+            ),
+            c128_state_pages=_gather(
+                self._full_to_c128_state_page,
+                self._c128_layer_count > 0,
+                "C128 state",
+            ),
+            c4_indexer_state_pages=_gather(
+                self._full_to_c4_indexer_state_page,
+                self._c4_layer_count > 0,
+                "C4 indexer state",
+            ),
+        )
+
+    def component_pages_from_full_page_starts(
+        self,
+        page_starts: torch.Tensor,
+        page_size: int,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        page_starts = page_starts.to(device=self.device, dtype=torch.long)
+        full_pages = torch.where(
+            page_starts >= 0,
+            page_starts.div(page_size, rounding_mode="floor"),
+            torch.full_like(page_starts, -1),
+        )
+
+        def _gather(mapping: torch.Tensor, enabled: bool) -> torch.Tensor | None:
+            if not enabled:
+                return None
+            out = torch.full_like(full_pages, -1, dtype=torch.int32)
+            valid = full_pages >= 0
+            if bool(torch.any(valid)):
+                out[valid] = mapping[full_pages[valid]].to(torch.int32)
+            return out
+
+        if not self._component_loc_ownership_enabled:
+            full_page_i32 = full_pages.to(torch.int32)
+            return (
+                full_page_i32 if self._c4_layer_count else None,
+                full_page_i32 if self._c128_layer_count else None,
+                full_page_i32 if self._c4_layer_count else None,
+            )
+        return (
+            _gather(self._full_to_c4_page, self._c4_layer_count > 0),
+            _gather(self._full_to_c128_page, self._c128_layer_count > 0),
+            _gather(self._full_to_c4_indexer_page, self._c4_layer_count > 0),
+        )
+
+    def state_locs_from_full_locs(
+        self,
+        full_locs: torch.Tensor,
+        ratio: Literal[4, 128],
+        *,
+        component: Literal["attention", "indexer"] = "attention",
+    ) -> torch.Tensor:
+        if ratio == 4:
+            mapping = (
+                self._full_to_c4_indexer_state_page
+                if component == "indexer"
+                else self._full_to_c4_state_page
+            )
+            state_page_size = self._c4_state_page_size
+        else:
+            if component == "indexer":
+                raise ValueError("DSV4 C128 has no indexer compression state")
+            mapping = self._full_to_c128_state_page
+            state_page_size = self._c128_state_page_size
+
+        full_locs = full_locs.to(device=self.device, dtype=torch.long)
+        if full_locs.numel() == 0:
+            return full_locs
+        if not self._component_loc_ownership_enabled:
+            page_size = max(self._page_size, 1)
+            pages = full_locs.div(page_size, rounding_mode="floor")
+            state_locs = pages * state_page_size + (full_locs % state_page_size)
+            return torch.where(full_locs < 0, torch.full_like(state_locs, -1), state_locs)
+
+        full_pages = full_locs.div(self._page_size, rounding_mode="floor")
+        offsets = full_locs % state_page_size
+        valid = (full_locs >= 0) & (full_pages >= 0) & (full_pages < self._num_pages)
+        out = torch.full_like(full_locs, -1)
+        if bool(torch.any(valid)):
+            state_pages = mapping[full_pages[valid]]
+            if torch.any(state_pages < 0):
+                raise RuntimeError(
+                    "DSV4 state loc requested for full locs without active state mapping"
+                )
+            out[valid] = state_pages.to(torch.long) * state_page_size + offsets[valid]
+        return out
+
+    def release_component_page_handles(self, handles: DSV4ComponentPageHandles | None) -> None:
+        if handles is None or handles.length == 0:
+            return
+        if not self._component_loc_ownership_enabled:
+            return
+        if handles.c4_pages is not None:
+            self._free_component_pages(
+                handles.c4_pages,
+                refcount=self._c4_refcount,
+                page_size=self._c4_component_page_size,
+                free_attr="_free_c4_pages",
+                name="C4",
+            )
+        if handles.c128_pages is not None:
+            self._free_component_pages(
+                handles.c128_pages,
+                refcount=self._c128_refcount,
+                page_size=self._c128_component_page_size,
+                free_attr="_free_c128_pages",
+                name="C128",
+            )
+        if handles.c4_indexer_pages is not None:
+            self._free_component_pages(
+                handles.c4_indexer_pages,
+                refcount=self._c4_indexer_refcount,
+                page_size=self._c4_component_page_size,
+                free_attr="_free_c4_indexer_pages",
+                name="C4 indexer",
+            )
+        if handles.c4_state_pages is not None:
+            self._free_component_pages(
+                handles.c4_state_pages,
+                refcount=self._c4_state_refcount,
+                page_size=self._c4_state_page_size,
+                free_attr="_free_c4_state_pages",
+                name="C4 state",
+            )
+        if handles.c128_state_pages is not None:
+            self._free_component_pages(
+                handles.c128_state_pages,
+                refcount=self._c128_state_refcount,
+                page_size=self._c128_state_page_size,
+                free_attr="_free_c128_state_pages",
+                name="C128 state",
+            )
+        if handles.c4_indexer_state_pages is not None:
+            self._free_component_pages(
+                handles.c4_indexer_state_pages,
+                refcount=self._c4_indexer_state_refcount,
+                page_size=self._c4_state_page_size,
+                free_attr="_free_c4_indexer_state_pages",
+                name="C4 indexer state",
+            )
+
+    def available_component_pages(self) -> int:
+        if not self._component_loc_ownership_enabled:
+            return self._num_pages
+        counts: list[int] = []
+        if self._c4_layer_count:
+            counts.append(int(self._free_c4_pages.numel()))
+            counts.append(int(self._free_c4_indexer_pages.numel()))
+            counts.append(int(self._free_c4_state_pages.numel()))
+            counts.append(int(self._free_c4_indexer_state_pages.numel()))
+        if self._c128_layer_count:
+            counts.append(int(self._free_c128_pages.numel()))
+            counts.append(int(self._free_c128_state_pages.numel()))
+        return min(counts) if counts else self._num_pages
+
     def _expand_page_starts(self, page_starts: torch.Tensor, page_size: int) -> torch.Tensor:
         if page_starts.numel() == 0:
             return torch.empty(0, dtype=torch.long, device=self.device)
@@ -579,6 +1013,234 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         offsets = torch.arange(page_size, dtype=torch.long, device=self.device)
         full_locs = (page_starts.unsqueeze(1) + offsets).flatten()
         return full_locs[full_locs < self._num_tokens]
+
+    def _valid_page_starts(self, indices: torch.Tensor, page_size: int) -> torch.Tensor:
+        if indices.numel() == 0:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        page_starts = indices.to(device=self.device, dtype=torch.long)[::page_size]
+        return page_starts[page_starts >= 0]
+
+    def _component_locs_from_pages(
+        self,
+        component_pages: torch.Tensor,
+        *,
+        page_size: int,
+    ) -> torch.Tensor:
+        if component_pages.numel() == 0:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        pages = component_pages.to(device=self.device, dtype=torch.long)
+        offsets = torch.arange(page_size, dtype=torch.long, device=self.device)
+        locs = (pages.unsqueeze(1) * page_size + offsets.unsqueeze(0)).flatten()
+        return locs[locs >= 0]
+
+    def _alloc_component_pages(self, attr: str, count: int, name: str) -> torch.Tensor:
+        free_pages = getattr(self, attr)
+        if count > int(free_pages.numel()):
+            raise RuntimeError(
+                f"DSV4 component allocator exhausted for {name}: "
+                f"need={count}, available={int(free_pages.numel())}"
+            )
+        pages = free_pages[:count].clone()
+        setattr(self, attr, free_pages[count:])
+        return pages
+
+    def _allocate_component_pages_for_full_pages(
+        self,
+        page_starts: torch.Tensor,
+        page_size: int,
+    ) -> None:
+        page_starts = page_starts.to(device=self.device, dtype=torch.long)
+        if page_starts.numel() == 0:
+            return
+        full_pages = page_starts.div(page_size, rounding_mode="floor")
+        count = int(full_pages.numel())
+        if torch.any(full_pages < 0) or torch.any(full_pages >= self._num_pages):
+            raise RuntimeError("DSV4 component allocation received out-of-range full pages")
+        if torch.any(self._full_to_c4_page[full_pages] >= 0) or torch.any(
+            self._full_to_c128_page[full_pages] >= 0
+        ) or torch.any(self._full_to_c4_indexer_page[full_pages] >= 0) or torch.any(
+            self._full_to_c4_state_page[full_pages] >= 0
+        ) or torch.any(self._full_to_c128_state_page[full_pages] >= 0) or torch.any(
+            self._full_to_c4_indexer_state_page[full_pages] >= 0
+        ):
+            raise RuntimeError("DSV4 component allocation found stale full-to-component mapping")
+
+        if self._c4_layer_count:
+            c4_pages = self._alloc_component_pages("_free_c4_pages", count, "C4")
+            c4_locs = self._component_locs_from_pages(
+                c4_pages,
+                page_size=self._c4_component_page_size,
+            )
+            self._c4_refcount[c4_locs] += 1
+            self._full_to_c4_page[full_pages] = c4_pages
+
+            indexer_pages = self._alloc_component_pages(
+                "_free_c4_indexer_pages",
+                count,
+                "C4 indexer",
+            )
+            indexer_locs = self._component_locs_from_pages(
+                indexer_pages,
+                page_size=self._c4_component_page_size,
+            )
+            self._c4_indexer_refcount[indexer_locs] += 1
+            self._full_to_c4_indexer_page[full_pages] = indexer_pages
+
+            c4_state_pages = self._alloc_component_pages(
+                "_free_c4_state_pages",
+                count,
+                "C4 state",
+            )
+            c4_state_locs = self._component_locs_from_pages(
+                c4_state_pages,
+                page_size=self._c4_state_page_size,
+            )
+            self._c4_state_refcount[c4_state_locs] += 1
+            self._full_to_c4_state_page[full_pages] = c4_state_pages
+
+            indexer_state_pages = self._alloc_component_pages(
+                "_free_c4_indexer_state_pages",
+                count,
+                "C4 indexer state",
+            )
+            indexer_state_locs = self._component_locs_from_pages(
+                indexer_state_pages,
+                page_size=self._c4_state_page_size,
+            )
+            self._c4_indexer_state_refcount[indexer_state_locs] += 1
+            self._full_to_c4_indexer_state_page[full_pages] = indexer_state_pages
+
+        if self._c128_layer_count:
+            c128_pages = self._alloc_component_pages("_free_c128_pages", count, "C128")
+            c128_locs = self._component_locs_from_pages(
+                c128_pages,
+                page_size=self._c128_component_page_size,
+            )
+            self._c128_refcount[c128_locs] += 1
+            self._full_to_c128_page[full_pages] = c128_pages
+
+            c128_state_pages = self._alloc_component_pages(
+                "_free_c128_state_pages",
+                count,
+                "C128 state",
+            )
+            c128_state_locs = self._component_locs_from_pages(
+                c128_state_pages,
+                page_size=self._c128_state_page_size,
+            )
+            self._c128_state_refcount[c128_state_locs] += 1
+            self._full_to_c128_state_page[full_pages] = c128_state_pages
+
+    def _release_component_pages_for_full_pages(
+        self,
+        page_starts: torch.Tensor,
+        page_size: int,
+        *,
+        free_components: bool,
+    ) -> None:
+        page_starts = page_starts.to(device=self.device, dtype=torch.long)
+        if page_starts.numel() == 0:
+            return
+        full_pages = page_starts.div(page_size, rounding_mode="floor")
+        if torch.any(full_pages < 0) or torch.any(full_pages >= self._num_pages):
+            raise RuntimeError("DSV4 component free received out-of-range full pages")
+
+        if free_components:
+            self.release_component_page_handles(
+                DSV4ComponentPageHandles(
+                    length=int(full_pages.numel()) * page_size,
+                    page_size=page_size,
+                    c4_pages=(
+                        self._full_to_c4_page[full_pages].clone()
+                        if self._c4_layer_count
+                        else None
+                    ),
+                    c128_pages=(
+                        self._full_to_c128_page[full_pages].clone()
+                        if self._c128_layer_count
+                        else None
+                    ),
+                    c4_indexer_pages=(
+                        self._full_to_c4_indexer_page[full_pages].clone()
+                        if self._c4_layer_count
+                        else None
+                    ),
+                    c4_state_pages=(
+                        self._full_to_c4_state_page[full_pages].clone()
+                        if self._c4_layer_count
+                        else None
+                    ),
+                    c128_state_pages=(
+                        self._full_to_c128_state_page[full_pages].clone()
+                        if self._c128_layer_count
+                        else None
+                    ),
+                    c4_indexer_state_pages=(
+                        self._full_to_c4_indexer_state_page[full_pages].clone()
+                        if self._c4_layer_count
+                        else None
+                    ),
+                )
+            )
+
+        self._full_to_c4_page[full_pages] = -1
+        self._full_to_c128_page[full_pages] = -1
+        self._full_to_c4_indexer_page[full_pages] = -1
+        self._full_to_c4_state_page[full_pages] = -1
+        self._full_to_c128_state_page[full_pages] = -1
+        self._full_to_c4_indexer_state_page[full_pages] = -1
+
+    def _free_component_pages(
+        self,
+        pages: torch.Tensor,
+        *,
+        refcount: torch.Tensor,
+        page_size: int,
+        free_attr: str,
+        name: str,
+    ) -> None:
+        pages = pages.to(device=self.device, dtype=torch.long)
+        pages = pages[pages >= 0]
+        if pages.numel() == 0:
+            return
+        pages = torch.unique(pages)
+        locs = self._component_locs_from_pages(pages, page_size=page_size)
+        self._decrement_refcount(refcount, locs, name)
+        freed_pages = pages.to(torch.int32)
+        current_free = getattr(self, free_attr)
+        setattr(self, free_attr, torch.cat([current_free, freed_pages]))
+
+    def _component_locs_from_full_locs(
+        self,
+        full_locs: torch.Tensor,
+        ratio: Literal[4, 128],
+        *,
+        component: Literal["compressed", "indexer"],
+    ) -> torch.Tensor:
+        if ratio == 4:
+            component_page_size = self._c4_component_page_size
+            mapping = (
+                self._full_to_c4_indexer_page
+                if component == "indexer"
+                else self._full_to_c4_page
+            )
+        else:
+            component_page_size = self._c128_component_page_size
+            mapping = self._full_to_c128_page
+        full_locs = full_locs.to(device=self.device, dtype=torch.long)
+        full_pages = full_locs.div(self._page_size, rounding_mode="floor")
+        offsets = (full_locs % self._page_size).div(ratio, rounding_mode="floor")
+        valid = (full_locs >= 0) & (full_pages >= 0) & (full_pages < self._num_pages)
+        out = torch.full_like(full_locs, -1)
+        if bool(torch.any(valid)):
+            component_pages = mapping[full_pages[valid]]
+            if torch.any(component_pages < 0):
+                raise RuntimeError(
+                    "DSV4 component loc requested for full locs without active "
+                    f"{component} mapping"
+                )
+            out[valid] = component_pages.to(torch.long) * component_page_size + offsets[valid]
+        return out
 
     def _decrement_refcount(self, refcount: torch.Tensor, locs: torch.Tensor, name: str) -> None:
         if locs.numel() == 0:
@@ -593,9 +1255,30 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             ("C4", self._c4_refcount),
             ("C128", self._c128_refcount),
             ("C4 indexer", self._c4_indexer_refcount),
+            ("C4 state", self._c4_state_refcount),
+            ("C128 state", self._c128_state_refcount),
+            ("C4 indexer state", self._c4_indexer_state_refcount),
         ):
             if torch.any(refcount < 0):
                 raise RuntimeError(f"DSV4 KV cache has negative {name} refcounts")
+        if self._component_loc_ownership_enabled:
+            self._assert_component_free_lists_unique()
+
+    def _assert_component_free_lists_unique(self) -> None:
+        for name, pages, total in (
+            ("C4", self._free_c4_pages, self._c4_component_pages),
+            ("C128", self._free_c128_pages, self._c128_component_pages),
+            ("C4 indexer", self._free_c4_indexer_pages, self._c4_component_pages),
+            ("C4 state", self._free_c4_state_pages, self._num_pages),
+            ("C128 state", self._free_c128_state_pages, self._num_pages),
+            ("C4 indexer state", self._free_c4_indexer_state_pages, self._num_pages),
+        ):
+            if pages.numel() == 0:
+                continue
+            if torch.any(pages < 0) or torch.any(pages >= total):
+                raise RuntimeError(f"DSV4 {name} free list contains out-of-range pages")
+            if torch.unique(pages).numel() != pages.numel():
+                raise RuntimeError(f"DSV4 {name} free list contains duplicate pages")
 
     def k_cache(self, index: int) -> torch.Tensor:
         return self.swa_cache(index)
@@ -722,6 +1405,7 @@ __all__ = [
     "DeepSeekV4KVCache",
     "DSV4AllocationCounts",
     "DSV4CacheLayoutPolicy",
+    "DSV4ComponentPageHandles",
     "DSV4CompressStatePool",
     "DSV4_INDEXER_FP8_CACHE_ENV",
     "DSV4KVAndScore",

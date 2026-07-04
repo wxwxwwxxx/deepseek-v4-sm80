@@ -6,8 +6,9 @@ Phase 1, serving graph bucket policy, CUDA graph memory attribution, prefix
 stability, memory ledger, TARGET 08.19 correctness probing, TARGET 08.195
 slot/page invariance probing, TARGET 08.196 batched attention/indexer probing,
 TARGET 08.197 q-path same-shape/same-input probing, TARGET 08.198 post-layer0
-same-shape drift analysis, and TARGET 08.20 fail-closed V1 design are complete.
-Continue with TARGET 08.21.1 Route B component-loc table preflight.
+same-shape drift analysis, TARGET 08.20 fail-closed V1 design, and TARGET
+08.21.1-08.21.4 Route B component ownership/graph integration are complete.
+Continue with TARGET 08.22 Route B final prefix promotion gate.
 
 TARGET 07 is closed.  The promoted non-prefix path is stable enough to start
 prefix-cache work:
@@ -82,10 +83,12 @@ Run in this order:
 | TARGET 08.198 | `prompts/TARGET_08.198_dsv4_sm80_post_layer0_same_shape_decode_drift.md` | complete guarded | Found tiny later-layer attention/indexer drift amplified by small logits margins; accepted guarded oracle because batch-slot invariance is not guaranteed. |
 | TARGET 08.20 | `prompts/TARGET_08.20_dsv4_sm80_sglang_style_swa_component_retention.md` | complete rejected | Added a fail-closed V1 opt-in and proved runtime V1 is unsafe without component-level ownership. |
 | TARGET 08.21 | `prompts/TARGET_08.21_dsv4_sm80_component_loc_ownership_route_b.md` | route overview | Splits Route B into small executable targets; do not run it as one monolithic implementation. |
-| TARGET 08.21.1 | `prompts/TARGET_08.21.1_dsv4_sm80_component_loc_table_preflight.md` | active next | B0: prove direct C4/C128/indexer/state loc metadata can reproduce phase-1 derived metadata while full pages stay live. |
-| TARGET 08.21.2 | `prompts/TARGET_08.21.2_dsv4_sm80_independent_compressed_indexer_ownership.md` | planned after 08.21.1 | B1: implement independent C4/C128/indexer ownership behind an opt-in. |
-| TARGET 08.21.3 | `prompts/TARGET_08.21.3_dsv4_sm80_compression_state_ownership.md` | planned after 08.21.2 | B2: define and implement compression-state ownership, reconstruction, or safe hit-length guards. |
-| TARGET 08.21.4 | `prompts/TARGET_08.21.4_dsv4_sm80_route_b_graph_deforest_serving.md` | planned after 08.21.3 | B3: integrate Route B with graph metadata copy, deforest, serving benchmarks, and promotion decision. |
+| TARGET 08.21.1 | `prompts/TARGET_08.21.1_dsv4_sm80_component_loc_table_preflight.md` | complete | B0: proved direct C4/C128/indexer/state loc metadata can reproduce phase-1 derived metadata while full pages stay live. |
+| TARGET 08.21.2 | `prompts/TARGET_08.21.2_dsv4_sm80_independent_compressed_indexer_ownership.md` | complete | B1: implemented independent C4/C128/indexer ownership behind an opt-in. |
+| TARGET 08.21.3 | `prompts/TARGET_08.21.3_dsv4_sm80_compression_state_ownership.md` | complete | B2: implemented independent C4/C128/indexer compression-state ownership; SWA-tail guard remains. |
+| TARGET 08.21.4 | `prompts/TARGET_08.21.4_dsv4_sm80_route_b_graph_deforest_serving.md` | complete preferred opt-in candidate | B3: restored Route B graph replay for `[1,2,4,8,16]`; deforest remains guarded; full serving gate still needed. |
+| TARGET 08.22 | `prompts/TARGET_08.22_dsv4_sm80_route_b_final_prefix_promotion_gate.md` | active next | Run the full serving/correctness/capacity gate and decide whether Route B becomes the preferred opt-in. |
+| TARGET 08.23 | `prompts/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md` | conditional after 08.22 | Implement SGLang-aligned independent SWA ownership only if 08.22 shows SWA-tail guard materially blocks promotion. |
 | TARGET 08.30 | `prompts/TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md` | planned | Reprofile after correctness and component-retention decisions, then decide whether to move to TARGET 09 or TARGET 10. |
 
 Rationale:
@@ -119,6 +122,15 @@ Rationale:
   evidence boundary instead of trying to solve the whole cache ownership model
   at once.  Route A retained-store materialization may be used as an oracle
   only, not as the primary runtime path.
+- TARGET 08.21.1-08.21.4 completed the Route B stack: direct component loc
+  tables, independent C4/C128/indexer ownership, independent compression-state
+  ownership, and graph replay for `[1,2,4,8,16]`.  The remaining guard is SWA
+  KV ownership: SWA still lives in the full-token namespace, so Route B keeps a
+  live full/SWA tail.
+- TARGET 08.22 is the final promotion gate.  It should measure the full serving
+  suite before any default/promotion decision.  TARGET 08.23 independent SWA
+  ownership is intentionally conditional; run it only if 08.22 proves the
+  SWA-tail guard is a real serving bottleneck.
 - TARGET 09 remains reserved for low-precision research.  Do not rename
   SGLang-style SWA retention to TARGET 09.
 

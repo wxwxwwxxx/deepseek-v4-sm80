@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Tuple, TypeAlias
 
 import torch
 from minisgl.core import get_global_ctx
+from minisgl.kvcache.deepseek_v4_pool import DSV4ComponentPageHandles
 from minisgl.utils import align_down
 
 from .base import BaseCacheHandle, BasePrefixCache, InsertResult, MatchResult, SizeInfo
@@ -30,12 +31,24 @@ class RadixTreeNode:
         self._key: torch.Tensor
         self._value: torch.Tensor
         self._length: int
+        self._dsv4_component_pages: DSV4ComponentPageHandles | None = None
 
-    def set_key_value(self, key: torch.Tensor, value: torch.Tensor) -> None:
+    def set_key_value(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        dsv4_component_pages: DSV4ComponentPageHandles | None = None,
+    ) -> None:
         assert len(key) == len(value)
+        if dsv4_component_pages is not None and dsv4_component_pages.length != len(key):
+            raise ValueError(
+                "Radix DSV4 component handle length mismatch: "
+                f"key={len(key)}, components={dsv4_component_pages.length}"
+            )
         self._key = key
         self._value = value
         self._length = len(key)
+        self._dsv4_component_pages = dsv4_component_pages
 
     def set_parent(self, parent: RadixTreeNode) -> None:
         self._parent = parent
@@ -71,11 +84,21 @@ class RadixTreeNode:
         parent = self.parent
 
         new_node = RadixTreeNode(self.key_fn, self.timestamp)
-        new_node.set_key_value(self._key[:pos], self._value[:pos])
+        parent_components = (
+            None
+            if self._dsv4_component_pages is None
+            else self._dsv4_component_pages.slice_tokens(0, pos)
+        )
+        child_components = (
+            None
+            if self._dsv4_component_pages is None
+            else self._dsv4_component_pages.slice_tokens(pos, self.length)
+        )
+        new_node.set_key_value(self._key[:pos], self._value[:pos], parent_components)
         new_node.set_parent(parent)
         new_node.ref_count = self.ref_count
 
-        self.set_key_value(self._key[pos:], self._value[pos:])
+        self.set_key_value(self._key[pos:], self._value[pos:], child_components)
         self.set_parent(new_node)
 
         return new_node
@@ -97,6 +120,16 @@ class RadixCacheHandle(BaseCacheHandle):
         value_list.reverse()
         return torch.cat(value_list)
 
+    def get_dsv4_component_pages(self) -> DSV4ComponentPageHandles | None:
+        node = self.node
+        handles: List[DSV4ComponentPageHandles] = []
+        while not node.is_root():
+            if node._dsv4_component_pages is not None:
+                handles.append(node._dsv4_component_pages)
+            node = node.parent
+        handles.reverse()
+        return DSV4ComponentPageHandles.concat(handles)
+
 
 class RadixPrefixCache(BasePrefixCache):
     def __init__(self, device: torch.device):
@@ -109,6 +142,9 @@ class RadixPrefixCache(BasePrefixCache):
         self.protected_size = 0
         self.root_node = RadixTreeNode(self.key_fn)
         self.root_node.ref_count = 1  # root is always protected
+        self.dsv4_component_evict_callback: Callable[[DSV4ComponentPageHandles | None], None] | None
+        self.dsv4_component_evict_callback = None
+        self.dsv4_component_ownership_enabled = False
 
     def lock_handle(self, handle: BaseCacheHandle, unlock: bool = False) -> None:
         assert isinstance(handle, RadixCacheHandle)
@@ -131,15 +167,33 @@ class RadixPrefixCache(BasePrefixCache):
 
     def match_prefix(self, input_ids: torch.Tensor) -> MatchResult:
         node, prefix_len = self._tree_walk(input_ids)
+        if self.dsv4_component_ownership_enabled:
+            node, prefix_len = self._dsv4_safe_match_boundary(node, prefix_len)
         return MatchResult(RadixCacheHandle(prefix_len, node))
 
-    def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor) -> InsertResult:
+    def insert_prefix(
+        self,
+        input_ids: torch.Tensor,
+        indices: torch.Tensor,
+        dsv4_component_pages: DSV4ComponentPageHandles | None = None,
+    ) -> InsertResult:
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, indices = input_ids[:insert_len], indices[:insert_len]
+        if dsv4_component_pages is not None:
+            dsv4_component_pages = dsv4_component_pages.slice_tokens(0, insert_len)
         node, prefix_len = self._tree_walk(input_ids)
         if prefix_len != insert_len:  # NOTE: prefix_len < insert_len
             new_node = RadixTreeNode(self.key_fn)
-            new_node.set_key_value(input_ids[prefix_len:], indices[prefix_len:].clone())
+            new_components = (
+                None
+                if dsv4_component_pages is None
+                else dsv4_component_pages.slice_tokens(prefix_len, insert_len)
+            )
+            new_node.set_key_value(
+                input_ids[prefix_len:],
+                indices[prefix_len:].clone(),
+                new_components,
+            )
             new_node.set_parent(node)
             self.evictable_size += new_node.length
             node = new_node
@@ -166,6 +220,8 @@ class RadixPrefixCache(BasePrefixCache):
             evicted_size += node.length
             evicted_indices.append(node.value)
             self.evictable_size -= node.length
+            if self.dsv4_component_evict_callback is not None:
+                self.dsv4_component_evict_callback(node._dsv4_component_pages)
             parent = node.parent
             del parent.children[self.key_fn(node._key)]
             # NOTE: root is always protected, so won't be evicted
@@ -204,6 +260,14 @@ class RadixPrefixCache(BasePrefixCache):
                         f"Radix cache node {node.uuid} length mismatch: "
                         f"length={node.length}, value={len(node.value)}"
                     )
+                if (
+                    node._dsv4_component_pages is not None
+                    and node._dsv4_component_pages.length != node.length
+                ):
+                    raise RuntimeError(
+                        f"Radix cache node {node.uuid} DSV4 component length mismatch: "
+                        f"node={node.length}, components={node._dsv4_component_pages.length}"
+                    )
                 if node.ref_count < 0:
                     raise RuntimeError(f"Radix cache node {node.uuid} has negative ref_count")
                 if node.ref_count == 0:
@@ -238,6 +302,98 @@ class RadixPrefixCache(BasePrefixCache):
                     nodes.append(child)
 
         return leave_nodes
+
+    def release_dsv4_full_head(
+        self,
+        handle: BaseCacheHandle,
+        *,
+        tail_tokens: int,
+    ) -> torch.Tensor:
+        if not self.dsv4_component_ownership_enabled:
+            return self.empty_tensor
+        assert isinstance(handle, RadixCacheHandle)
+        node = handle.node
+        if node.is_root() or node._dsv4_component_pages is None:
+            return self.empty_tensor
+        tail_tokens = align_down(max(int(tail_tokens), self.page_size), self.page_size)
+        releasable_len = align_down(max(node.length - tail_tokens, 0), self.page_size)
+        if releasable_len <= 0:
+            return self.empty_tensor
+        head = node.value[:releasable_len]
+        if head.numel() == 0:
+            return self.empty_tensor
+        valid_pages = head.view(-1, self.page_size)[:, 0] >= 0
+        if not bool(torch.any(valid_pages)):
+            return self.empty_tensor
+        released = head.view(-1, self.page_size)[valid_pages].reshape(-1).clone()
+        head.view(-1, self.page_size)[valid_pages] = -1
+        return released
+
+    @property
+    def dsv4_evictable_live_full_tokens(self) -> int:
+        if not self.dsv4_component_ownership_enabled:
+            return self.evictable_size
+        total = 0
+        stack: List[RadixTreeNode] = [self.root_node]
+        while stack:
+            node = stack.pop()
+            if not node.is_root() and node.ref_count == 0:
+                total += int(torch.count_nonzero(node.value >= 0).item())
+            stack.extend(node.children.values())
+        return total
+
+    @property
+    def dsv4_evictable_component_tokens(self) -> int:
+        if not self.dsv4_component_ownership_enabled:
+            return self.evictable_size
+        total = 0
+        stack: List[RadixTreeNode] = [self.root_node]
+        while stack:
+            node = stack.pop()
+            if (
+                not node.is_root()
+                and node.ref_count == 0
+                and node._dsv4_component_pages is not None
+            ):
+                total += node.length
+            stack.extend(node.children.values())
+        return total
+
+    def _dsv4_safe_match_boundary(
+        self,
+        node: RadixTreeNode,
+        prefix_len: int,
+    ) -> tuple[RadixTreeNode, int]:
+        while not node.is_root():
+            if (
+                self._dsv4_node_has_live_tail(node)
+                and self._dsv4_path_has_state_or_live_tail(node)
+            ):
+                return node, prefix_len
+            prefix_len -= node.length
+            node = node.parent
+        return node, 0
+
+    def _dsv4_path_has_state_or_live_tail(self, node: RadixTreeNode) -> bool:
+        cur = node
+        while not cur.is_root():
+            if not (
+                self._dsv4_node_has_independent_state(cur)
+                or self._dsv4_node_has_live_tail(cur)
+            ):
+                return False
+            cur = cur.parent
+        return True
+
+    def _dsv4_node_has_independent_state(self, node: RadixTreeNode) -> bool:
+        handles = node._dsv4_component_pages
+        return bool(handles is not None and handles.has_required_state_pages)
+
+    def _dsv4_node_has_live_tail(self, node: RadixTreeNode) -> bool:
+        if node.length <= 0 or len(node.value) < self.page_size:
+            return False
+        tail = node.value[-self.page_size :]
+        return bool(torch.all(tail >= 0).item())
 
     def _tree_walk(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int]:
         prefix_len = 0

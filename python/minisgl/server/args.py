@@ -229,6 +229,17 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
             "performance_milestones/target08_swa_tail_retention_v1/DESIGN.md."
         ),
     )
+    parser.add_argument(
+        "--enable-dsv4-component-loc-ownership",
+        action="store_true",
+        dest="enable_dsv4_component_loc_ownership",
+        help=(
+            "Explicitly enable TARGET 08.21.2 DSV4 Route B C4/C128/indexer "
+            "component loc ownership. Requires --enable-dsv4-radix-prefix-cache "
+            "and keeps decode metadata deforest guarded off while graph replay "
+            "uses direct component metadata copy."
+        ),
+    )
 
     parser.add_argument(
         "--moe-backend",

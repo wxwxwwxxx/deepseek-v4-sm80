@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import pytest
-import torch
+from types import SimpleNamespace
 
 import minisgl.core as core
 import minisgl.distributed.info as dist_info
+import pytest
+import torch
 from minisgl.attention import create_attention_backend
 from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata
 from minisgl.core import Batch, Context, Req, SamplingParams
@@ -85,6 +86,7 @@ def _install_context(
     page_size: int,
     table_bases: list[int],
     max_len: int,
+    enable_component_loc_ownership: bool = False,
 ) -> Context:
     ctx = Context(page_size=page_size)
     ctx.kv_cache = create_kvcache_pool(
@@ -93,6 +95,7 @@ def _install_context(
         page_size=page_size,
         dtype=torch.float16,
         device=torch.device("cpu"),
+        enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
     )
     page_table = torch.full((len(table_bases), max_len), -1, dtype=torch.int32)
     for row, base in enumerate(table_bases):
@@ -444,6 +447,126 @@ def test_dsv4_indexer_select_updates_c4_sparse_metadata():
     assert sorted(meta.c4_sparse_full_indices[0, :2].tolist()) == [7, 11]
     assert meta.c4_sparse_topk_lengths[0].item() == 2
     assert meta.c4_sparse_raw_indices.shape[1] % 64 == 0
+
+
+def test_dsv4_component_loc_ownership_metadata_uses_direct_component_tables():
+    cfg = _tiny_dsv4_config([4, 128])
+    page_size = 128
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0],
+        max_len=384,
+        enable_component_loc_ownership=True,
+    )
+    page_starts = torch.tensor([0, page_size, 2 * page_size], dtype=torch.int32)
+    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
+    prefix_handles = ctx.kv_cache.make_component_page_handles(
+        ctx.page_table[0, : 2 * page_size],
+        page_size,
+    )
+    assert prefix_handles is not None
+    ctx.kv_cache.on_token_indices_freed(
+        ctx.page_table[0, :page_size],
+        page_size,
+        free_components=False,
+    )
+    ctx.page_table[0, :page_size] = -1
+
+    req = _req(0, 0, 258, cached_len=256)
+    req.cache_handle = SimpleNamespace(get_dsv4_component_pages=lambda: prefix_handles)
+    batch = _prepare_batch([req])
+
+    ctx.attn_backend.prepare_metadata(batch)
+    meta = batch.attn_metadata.core_metadata
+
+    assert meta.component_loc_ownership
+    assert meta.c128_page_indices[0, :2].tolist() == [0, 1]
+    assert meta.c128_full_indices[0, :2].tolist() == [-1, 255]
+    assert batch.attn_metadata.indexer_metadata.page_table[0, :3].tolist() == [0, 1, 2]
+
+
+def test_dsv4_component_loc_ownership_capture_replay_copies_direct_component_metadata():
+    cfg = _tiny_dsv4_config([4, 128])
+    page_size = 128
+    base = 1024
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[base],
+        max_len=384,
+        enable_component_loc_ownership=True,
+    )
+    page_starts = torch.tensor([base, base + page_size], dtype=torch.int32)
+    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
+    prefix_handles = ctx.kv_cache.make_component_page_handles(
+        ctx.page_table[0, : 2 * page_size],
+        page_size,
+    )
+    assert prefix_handles is not None
+    ctx.kv_cache.on_token_indices_freed(
+        ctx.page_table[0, :page_size],
+        page_size,
+        free_components=False,
+    )
+    ctx.page_table[0, :page_size] = -1
+
+    req = _req(0, 0, 256, cached_len=255)
+    req.cache_handle = SimpleNamespace(get_dsv4_component_pages=lambda: prefix_handles)
+    batch = _prepare_decode_batch([req])
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+    src = batch.attn_metadata.core_metadata
+
+    assert src.component_loc_ownership
+    assert src.c4_out_loc.tolist() == [63]
+    assert src.c128_out_loc.tolist() == [1]
+    assert src.c4_indexer_out_loc.tolist() == [63]
+    assert int(batch.out_loc[0].item() // 4) == 319
+    assert int(batch.out_loc[0].item() // 128) == 9
+
+    backend.init_capture_graph(max_seq_len=384, bs_list=[1])
+    backend.prepare_for_replay(batch)
+
+    assert backend.capture is not None
+    capture = backend.capture.core_metadata
+    assert capture.component_loc_ownership
+    assert capture.c4_page_table[0, :3].tolist() == [0, 1, -1]
+    assert capture.c128_page_table[0, :3].tolist() == [0, 1, -1]
+    assert capture.c4_indexer_page_table[0, :3].tolist() == [0, 1, -1]
+    assert capture.c4_out_loc.tolist() == [63]
+    assert capture.c128_out_loc.tolist() == [1]
+    assert capture.c4_indexer_out_loc.tolist() == [63]
+    assert capture.c4_indexer_out_loc is not capture.c4_out_loc
+    assert batch.attn_metadata.indexer_metadata.page_table is src.c4_indexer_page_table
+    assert backend.capture.indexer_metadata.page_table is capture.c4_indexer_page_table
+
+
+def test_dsv4_component_loc_ownership_capture_locs_graph_hook_is_guarded(monkeypatch):
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(
+        cfg,
+        page_size=128,
+        table_bases=[0],
+        max_len=256,
+        enable_component_loc_ownership=True,
+    )
+    backend = ctx.attn_backend
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "dsv4_sm80_triton_enabled",
+        lambda toggle: toggle == "MINISGL_DSV4_SM80_COMPRESS_STORE",
+    )
+
+    backend.init_capture_graph(max_seq_len=256, bs_list=[4])
+    backend.bind_capture_graph_inputs(
+        input_ids=torch.empty(4, dtype=torch.int32),
+        out_loc=torch.full((4,), -1, dtype=torch.int32),
+        positions=torch.full((4,), -1, dtype=torch.int32),
+    )
+
+    assert backend.capture_compressed_locs_in_graph_component_guarded
+    assert not backend.capture_compressed_locs_in_graph
 
 
 def test_dsv4_metadata_repeats_page_table_for_multi_request_batch():

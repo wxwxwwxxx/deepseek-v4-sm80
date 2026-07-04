@@ -48,6 +48,7 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
     assert args.page_size == 256
     assert args.enable_dsv4_radix_prefix_cache is False
     assert args.enable_dsv4_swa_tail_retention_v1 is False
+    assert args.enable_dsv4_component_loc_ownership is False
     assert [variant.name for variant in variants] == ["fallback", "v0_bf16", "v1_moe"]
     assert {scenario.name for scenario in scenarios} >= {
         "long_prefill_bs1",
@@ -63,6 +64,9 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
 
     retention_args = bench.parse_args(["--enable-dsv4-swa-tail-retention-v1"])
     assert retention_args.enable_dsv4_swa_tail_retention_v1 is True
+
+    ownership_args = bench.parse_args(["--enable-dsv4-component-loc-ownership"])
+    assert ownership_args.enable_dsv4_component_loc_ownership is True
 
 
 def test_smoke_or_page_size_one_is_not_reported_as_baseline():

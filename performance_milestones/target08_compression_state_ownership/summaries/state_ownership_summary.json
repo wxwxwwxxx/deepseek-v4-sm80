@@ -1,0 +1,18 @@
+{
+  "all_passed": true,
+  "decision": "proceed_to_TARGET_08.21.4_with_swa_tail_guard",
+  "route_b_counts_after_insert": {
+    "c128_slots": 2,
+    "c128_state_slots": 256,
+    "c4_indexer_slots": 64,
+    "c4_indexer_state_slots": 16,
+    "c4_slots": 64,
+    "c4_state_slots": 16,
+    "full_slots": 128
+  },
+  "state_pages_reused_stale": {
+    "c128": false,
+    "c4": false,
+    "c4_indexer": false
+  }
+}

@@ -57,6 +57,20 @@ def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
             "baseline; see performance_milestones/target08_swa_tail_retention_v1/"
             "DESIGN.md."
         )
+    if getattr(config, "enable_dsv4_component_loc_ownership", False):
+        if not config.enable_dsv4_radix_prefix_cache:
+            raise ValueError(
+                "DeepSeek V4 component loc ownership requires the phase-1 radix "
+                "prefix cache opt-in. Add --enable-dsv4-radix-prefix-cache."
+            )
+        window_size = int(getattr(config.model_config, "window_size", 128) or 128)
+        if window_size > config.page_size:
+            raise ValueError(
+                "DeepSeek V4 component loc ownership currently keeps one "
+                "page-aligned SWA/full tail per retained node, so window_size "
+                f"must be <= page_size. Got window_size={window_size}, "
+                f"page_size={config.page_size}."
+            )
     if config.enable_dsv4_radix_prefix_cache:
         if config.page_size % 128 != 0:
             raise ValueError(
@@ -70,6 +84,11 @@ def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
                 f"cache_type='radix', got {cache_type!r}."
             )
         logger.info("Opting in to DeepSeek V4 radix prefix cache.")
+        if getattr(config, "enable_dsv4_component_loc_ownership", False):
+            logger.info(
+                "Opting in to DeepSeek V4 Route B component loc ownership "
+                "for C4/C128/indexer components."
+            )
         return cache_type
 
     if cache_type != "naive":

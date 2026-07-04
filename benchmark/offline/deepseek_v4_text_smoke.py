@@ -1243,6 +1243,7 @@ def run_variant(
             "cuda_graph_bs": runtime_options["cuda_graph_bs"],
             "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
             "enable_dsv4_swa_tail_retention_v1": args.enable_dsv4_swa_tail_retention_v1,
+            "enable_dsv4_component_loc_ownership": args.enable_dsv4_component_loc_ownership,
             "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
             "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
@@ -1306,6 +1307,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
             enable_dsv4_radix_prefix_cache=args.enable_dsv4_radix_prefix_cache,
             enable_dsv4_swa_tail_retention_v1=args.enable_dsv4_swa_tail_retention_v1,
+            enable_dsv4_component_loc_ownership=args.enable_dsv4_component_loc_ownership,
             **llm_kwargs,
         )
         for variant in variants:
@@ -1357,6 +1359,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 ],
                 "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
                 "enable_dsv4_swa_tail_retention_v1": args.enable_dsv4_swa_tail_retention_v1,
+                "enable_dsv4_component_loc_ownership": args.enable_dsv4_component_loc_ownership,
                 "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
                 "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
                 "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
@@ -1421,6 +1424,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Explicitly request TARGET 08.20 DSV4 SWA tail/component retention V1. "
             "The runtime currently fails closed; see the target DESIGN.md."
+        ),
+    )
+    parser.add_argument(
+        "--enable-dsv4-component-loc-ownership",
+        action="store_true",
+        help=(
+            "Explicitly enable TARGET 08.21.2 DSV4 Route B component loc ownership. "
+            "Requires --enable-dsv4-radix-prefix-cache and keeps decode metadata "
+            "deforest guarded off while graph replay uses direct component metadata copy."
         ),
     )
     parser.add_argument(
