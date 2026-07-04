@@ -1,0 +1,117 @@
+{
+  "config": {
+    "actual_scheduler_config": {
+      "enable_chunked_prefill": true,
+      "long_prefill_token_threshold": 0,
+      "max_long_partial_prefills": 1,
+      "max_num_batched_tokens": 4096,
+      "max_num_partial_prefills": 1,
+      "max_num_scheduled_tokens": null,
+      "max_num_seqs": 4
+    },
+    "block_size": 256,
+    "disable_custom_all_reduce": false,
+    "enable_prefix_caching": false,
+    "enforce_eager": false,
+    "max_model_len": 4224,
+    "max_num_seqs": 4,
+    "requested_max_num_batched_tokens": 4096,
+    "tensor_parallel_size": 8,
+    "token_id_range": 1024
+  },
+  "entries": [
+    {
+      "bytes": 1107296256,
+      "count": 1056,
+      "dtype": "bfloat16",
+      "fallback_reason": "TorchDynamo/CUDA graph bypassed Python GroupCoordinator probe for compiled model collectives",
+      "label": "vllm.embedding_all_reduce",
+      "op": "all_reduce",
+      "shape_family": "prefill chunks up to [4096,4096] plus decode batches <= [4,4096]",
+      "source": "static source-derived"
+    },
+    {
+      "bytes": 47613739008,
+      "count": 45408,
+      "dtype": "bfloat16",
+      "fallback_reason": "TorchDynamo/CUDA graph bypassed Python GroupCoordinator probe for compiled model collectives",
+      "label": "vllm.attn.wo_b.row_parallel_projection_all_reduce",
+      "op": "all_reduce",
+      "shape_family": "same token-row family as embedding, repeated for 43 layers",
+      "source": "static source-derived"
+    },
+    {
+      "bytes": 47613739008,
+      "count": 45408,
+      "dtype": "bfloat16",
+      "fallback_reason": "TorchDynamo/CUDA graph bypassed Python GroupCoordinator probe for compiled model collectives; dtype inferred from MXFP4 bf16 activation support and empty_like hidden-state output",
+      "label": "vllm.moe.reduce_once_all_reduce",
+      "op": "all_reduce",
+      "shape_family": "same token-row family as embedding, repeated for 43 layers",
+      "source": "static source-derived"
+    },
+    {
+      "bytes": 4136960,
+      "capture_state": "eager_or_python_capture_call",
+      "count": 16,
+      "dtype": "bfloat16",
+      "fallback_reason": "",
+      "label": "vllm.logits_all_gather",
+      "op": "all_gather",
+      "shape_family": "[1, 16160] -> [1, 129280]",
+      "source": "runtime probe"
+    },
+    {
+      "bytes": 8273920,
+      "capture_state": "eager_or_python_capture_call",
+      "count": 16,
+      "dtype": "bfloat16",
+      "fallback_reason": "",
+      "label": "vllm.logits_all_gather",
+      "op": "all_gather",
+      "shape_family": "[2, 16160] -> [2, 129280]",
+      "source": "runtime probe"
+    },
+    {
+      "bytes": 18616320,
+      "capture_state": "eager_or_python_capture_call",
+      "count": 24,
+      "dtype": "bfloat16",
+      "fallback_reason": "",
+      "label": "vllm.logits_all_gather",
+      "op": "all_gather",
+      "shape_family": "[3, 16160] -> [3, 129280]",
+      "source": "runtime probe"
+    },
+    {
+      "bytes": 1034240000,
+      "capture_state": "eager_or_python_capture_call",
+      "count": 1000,
+      "dtype": "bfloat16",
+      "fallback_reason": "",
+      "label": "vllm.logits_all_gather",
+      "op": "all_gather",
+      "shape_family": "[4, 16160] -> [4, 129280]",
+      "source": "runtime probe"
+    }
+  ],
+  "forward_steps_per_rank_from_logits_probe": 132,
+  "metrics": {
+    "actual_output_tokens": 512,
+    "elapsed_s": 6.229906337335706,
+    "elapsed_s_mean": 6.229906337335706,
+    "elapsed_s_median": 6.229906337335706,
+    "end_to_end_output_tokens_per_s": 82.18422112249009,
+    "end_to_end_total_tokens_per_s": 2712.079297042173,
+    "peak_gpu_memory_allocated_bytes": 0,
+    "peak_gpu_memory_reserved_bytes": 0,
+    "prompt_tokens": 16384,
+    "target_output_tokens": 512
+  },
+  "runtime_observed_total_bytes": 1065267200,
+  "runtime_observed_total_count": 1056,
+  "scenario": "decode_throughput_bs8 / 4096x128 bs4",
+  "source_probe": "performance_milestones/target10_comm_path_parity_vllm/raw/vllm_comm_probe_4096x128_bs4/communication_probe.json",
+  "source_report": "performance_milestones/target10_comm_path_parity_vllm/raw/vllm_comm_probe_4096x128_bs4/reports/000_decode_throughput_bs8__vllm.json",
+  "total_token_rows_for_static_backbone_estimate": 16896
+}

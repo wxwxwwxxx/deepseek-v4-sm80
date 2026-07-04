@@ -36,6 +36,7 @@ DSV4_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
 DSV4_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
 DSV4_MOE_V2_TOGGLE = "MINISGL_DSV4_SM80_MOE_V2"
 DSV4_MOE_VLLM_RUNNER_TOGGLE = "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"
+DSV4_MOE_REDUCE_BF16_TOGGLE = "MINISGL_DSV4_SM80_MOE_REDUCE_BF16"
 DSV4_MOE_EXPERT_BACKEND_ENV = "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"
 DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
 DSV4_HC_TOGGLE = "MINISGL_DSV4_SM80_HC"
@@ -79,6 +80,9 @@ DSV4_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PR
 DSV4_DENSE_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION"
 DSV4_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION"
 DSV4_PROMOTED_ROUTE_B_LIFETIME_VARIANT = "dsv4_sm80_a100_victory_prefix_routeb_lifetime"
+DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_moereducebf16"
+)
 DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
     "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
 )
@@ -847,6 +851,16 @@ VARIANTS: tuple[Variant, ...] = (
             "page-table lifetime caching. Pair with --enable-dsv4-radix-prefix-cache, "
             "--enable-dsv4-component-loc-ownership, --page-size 256, "
             "--num-pages 128, and graph buckets 1 2 4 8 16."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT,
+        {**DSV4_ROUTE_B_LIFETIME_ENV, DSV4_MOE_REDUCE_BF16_TOGGLE: "1"},
+        (
+            "TARGET 10.15 opt-in: promoted Route B lifetime preset plus BF16 "
+            "MoE reduce-once input for vLLM-aligned hidden-state communication."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,

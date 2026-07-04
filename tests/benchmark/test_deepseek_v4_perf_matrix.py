@@ -684,6 +684,36 @@ def test_route_b_lifetime_legacy_variant_aliases_promoted_env():
     assert legacy.cuda_graph_capture_greedy_sample == promoted.cuda_graph_capture_greedy_sample
 
 
+def test_route_b_lifetime_moe_reduce_bf16_variant_extends_promoted_env(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS",
+            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE",
+            "MINISGL_DSV4_SM80_MOE_REDUCE_BF16",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS":
+                return False
+            return os.environ.get(name) in {"1", "true"}
+
+    variants = bench._variant_map()
+    promoted = variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"]
+    opt_in = variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime_moereducebf16"]
+    result = bench.configure_variant(FakeKernel, opt_in)
+
+    assert opt_in.env == {**promoted.env, "MINISGL_DSV4_SM80_MOE_REDUCE_BF16": "1"}
+    assert opt_in.allow_dsv4_cuda_graph == promoted.allow_dsv4_cuda_graph
+    assert opt_in.cuda_graph_capture_greedy_sample == promoted.cuda_graph_capture_greedy_sample
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_REDUCE_BF16"] == "1"
+    assert "MINISGL_DSV4_SM80_MOE_REDUCE_BF16" in result["active_dsv4_toggles"]
+
+
 def test_configure_variant_preserves_route_b_lifetime_verifier(monkeypatch):
     bench = _load_module()
 

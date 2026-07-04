@@ -2184,6 +2184,26 @@ class DSV4SharedExperts(BaseOP):
             )
 
 
+def _dsv4_moe_reduce_once_input(
+    output: torch.Tensor,
+    *,
+    hidden_dtype: torch.dtype,
+    layer_id: int,
+    path: str,
+) -> torch.Tensor:
+    if (
+        hidden_dtype == torch.bfloat16
+        and output.dtype != torch.bfloat16
+        and dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE)
+    ):
+        with dsv4_direct_copy_nvtx(
+            f"moe_shared_expert_staging.{path}_to_bf16_for_reduce.layer{layer_id}",
+            output=output,
+        ):
+            return output.to(torch.bfloat16)
+    return output
+
+
 @dataclass(frozen=True)
 class DSV4FusedMoERunnerPrepareResult:
     weights: torch.Tensor
@@ -2289,9 +2309,16 @@ class DSV4FusedMoERunner:
         output: torch.Tensor,
         *,
         comm: DistributedCommunicator,
+        hidden_dtype: torch.dtype,
         reduce_label: str,
     ) -> torch.Tensor:
         if self._tp_size > 1:
+            output = _dsv4_moe_reduce_once_input(
+                output,
+                hidden_dtype=hidden_dtype,
+                layer_id=self.layer_id,
+                path="runner_output",
+            )
             return comm.all_reduce(output, label=reduce_label)
         return output
 
@@ -2321,6 +2348,7 @@ class DSV4FusedMoERunner:
             y = self.maybe_reduce_final(
                 y,
                 comm=comm,
+                hidden_dtype=flat.dtype,
                 reduce_label=prepared.moe_plan.final_reduce_label,
             )
         with dsv4_direct_copy_nvtx(
@@ -2404,6 +2432,12 @@ class DSV4MoE(BaseOP):
                 y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()
         if reduce_once and self._tp_size > 1:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.reduce_once"):
+                y = _dsv4_moe_reduce_once_input(
+                    y,
+                    hidden_dtype=flat.dtype,
+                    layer_id=self.layer_id,
+                    path="non_runner_output",
+                )
                 y = self._comm.all_reduce(y, label="dsv4.v1_moe_reduce_once_all_reduce")
         return y.to(flat.dtype).view_as(hidden_states)
 

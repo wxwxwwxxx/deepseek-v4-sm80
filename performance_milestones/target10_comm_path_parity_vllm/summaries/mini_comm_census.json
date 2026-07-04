@@ -1,0 +1,573 @@
+[
+  {
+    "entries": [
+      {
+        "bytes": 92341796864,
+        "count": 688,
+        "dtype": "bfloat16",
+        "input_bytes": 134217728,
+        "label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 134217728,
+        "output_shape": [
+          16384,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 2.501024007797241,
+          "count": 3784,
+          "max_rank_total_ms": 2486.338684167713,
+          "owner_label": "dsv4.owner.attn.wo_b.row_parallel_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 16103.329719647765
+        },
+        "shape": [
+          16384,
+          4096
+        ]
+      },
+      {
+        "bytes": 2147483648,
+        "count": 16,
+        "dtype": "bfloat16",
+        "input_bytes": 134217728,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 134217728,
+        "output_shape": [
+          16384,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 0.8542400002479553,
+          "count": 88,
+          "max_rank_total_ms": 1483.036284983158,
+          "owner_label": "dsv4.owner.comm.dsv4.embedding_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 11064.736312860623
+        },
+        "shape": [
+          16384,
+          4096
+        ]
+      },
+      {
+        "bytes": 33095680,
+        "count": 16,
+        "dtype": "float32",
+        "input_bytes": 258560,
+        "label": "dsv4.lm_head_all_gather",
+        "op": "all_gather",
+        "output_bytes": 2068480,
+        "output_shape": [
+          32,
+          16160
+        ],
+        "owner_timing": {
+          "captured_total_ms": 0.05862399935722351,
+          "count": 88,
+          "max_rank_total_ms": 17.996959753334522,
+          "owner_label": "dsv4.owner.comm.dsv4.lm_head_all_gather",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 107.15151979029179
+        },
+        "shape": [
+          4,
+          16160
+        ]
+      },
+      {
+        "bytes": 184683593728,
+        "count": 688,
+        "dtype": "float32",
+        "input_bytes": 268435456,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 268435456,
+        "output_shape": [
+          16384,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 2.2902079932391644,
+          "count": 3784,
+          "max_rank_total_ms": 810.6878466792405,
+          "owner_label": "dsv4.owner.moe.reduce_once_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 4472.466471485794
+        },
+        "shape": [
+          16384,
+          4096
+        ]
+      }
+    ],
+    "graph": {
+      "captured_bs": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "eager_count": 0,
+      "enabled": true,
+      "replay_by_padded_size": {
+        "4": 127
+      },
+      "replay_count": 127,
+      "requested_bs": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ]
+    },
+    "scenario": "historical_4096_128_bs4",
+    "source_report": "performance_milestones/target08_post_prefix_reprofile/raw/macro_promoted_historical_4096_128_bs4_r01/reports/000_historical_4096_128_bs4__dsv4_sm80_a100_victory_prefix_routeb_lifetime.json",
+    "total_bytes": 279205969920,
+    "total_count": 1408
+  },
+  {
+    "entries": [
+      {
+        "bytes": 92341796864,
+        "count": 688,
+        "dtype": "bfloat16",
+        "input_bytes": 134217728,
+        "label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 134217728,
+        "output_shape": [
+          16384,
+          4096
+        ],
+        "owner_timing": null,
+        "shape": [
+          16384,
+          4096
+        ]
+      },
+      {
+        "bytes": 2147483648,
+        "count": 16,
+        "dtype": "bfloat16",
+        "input_bytes": 134217728,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 134217728,
+        "output_shape": [
+          16384,
+          4096
+        ],
+        "owner_timing": null,
+        "shape": [
+          16384,
+          4096
+        ]
+      },
+      {
+        "bytes": 33095680,
+        "count": 16,
+        "dtype": "float32",
+        "input_bytes": 258560,
+        "label": "dsv4.lm_head_all_gather",
+        "op": "all_gather",
+        "output_bytes": 2068480,
+        "output_shape": [
+          32,
+          16160
+        ],
+        "owner_timing": null,
+        "shape": [
+          4,
+          16160
+        ]
+      },
+      {
+        "bytes": 184683593728,
+        "count": 688,
+        "dtype": "float32",
+        "input_bytes": 268435456,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 268435456,
+        "output_shape": [
+          16384,
+          4096
+        ],
+        "owner_timing": null,
+        "shape": [
+          16384,
+          4096
+        ]
+      }
+    ],
+    "graph": {
+      "captured_bs": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "eager_count": 0,
+      "enabled": true,
+      "replay_by_padded_size": {
+        "4": 1023
+      },
+      "replay_count": 1023,
+      "requested_bs": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ]
+    },
+    "scenario": "historical_4096_1024_bs4",
+    "source_report": "performance_milestones/target08_post_prefix_reprofile/raw/macro_promoted_historical_4096_1024_bs4_r01/reports/000_historical_4096_1024_bs4__dsv4_sm80_a100_victory_prefix_routeb_lifetime.json",
+    "total_bytes": 279205969920,
+    "total_count": 1408
+  },
+  {
+    "entries": [
+      {
+        "bytes": 49236934656,
+        "count": 2408,
+        "dtype": "bfloat16",
+        "input_bytes": 20447232,
+        "label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 20447232,
+        "output_shape": [
+          2496,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 13.351519990712404,
+          "count": 5848,
+          "max_rank_total_ms": 3351.604180533439,
+          "owner_label": "dsv4.owner.attn.wo_b.row_parallel_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 19535.624844979495
+        },
+        "shape": [
+          2496,
+          4096
+        ]
+      },
+      {
+        "bytes": 1145044992,
+        "count": 56,
+        "dtype": "bfloat16",
+        "input_bytes": 20447232,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 20447232,
+        "output_shape": [
+          2496,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 2.290624052286148,
+          "count": 136,
+          "max_rank_total_ms": 1492.4248984009027,
+          "owner_label": "dsv4.owner.comm.dsv4.embedding_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 11203.35365893133
+        },
+        "shape": [
+          2496,
+          4096
+        ]
+      },
+      {
+        "bytes": 463339520,
+        "count": 56,
+        "dtype": "float32",
+        "input_bytes": 1034240,
+        "label": "dsv4.lm_head_all_gather",
+        "op": "all_gather",
+        "output_bytes": 8273920,
+        "output_shape": [
+          128,
+          16160
+        ],
+        "owner_timing": {
+          "captured_total_ms": 0.34828799590468407,
+          "count": 136,
+          "max_rank_total_ms": 11.64204803109169,
+          "owner_label": "dsv4.owner.comm.dsv4.lm_head_all_gather",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 66.75465605035424
+        },
+        "shape": [
+          16,
+          16160
+        ]
+      },
+      {
+        "bytes": 98473869312,
+        "count": 2408,
+        "dtype": "float32",
+        "input_bytes": 40894464,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 40894464,
+        "output_shape": [
+          2496,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 11.26876799762249,
+          "count": 5848,
+          "max_rank_total_ms": 1633.5723038166761,
+          "owner_label": "dsv4.owner.moe.reduce_once_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 7777.380869738758
+        },
+        "shape": [
+          2496,
+          4096
+        ]
+      }
+    ],
+    "graph": {
+      "captured_bs": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "eager_count": 0,
+      "enabled": true,
+      "replay_by_padded_size": {
+        "1": 112,
+        "16": 105,
+        "2": 112,
+        "4": 56,
+        "8": 56
+      },
+      "replay_count": 441,
+      "requested_bs": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ]
+    },
+    "scenario": "serving_mixed_112req_wave16",
+    "source_report": "performance_milestones/target08_post_prefix_reprofile/raw/macro_promoted_serving_mixed_112req_wave16_r01/reports/000_serving_mixed_112req_wave16__dsv4_sm80_a100_victory_prefix_routeb_lifetime.json",
+    "total_bytes": 149319188480,
+    "total_count": 4928
+  },
+  {
+    "entries": [
+      {
+        "bytes": 17314086912,
+        "count": 2064,
+        "dtype": "bfloat16",
+        "input_bytes": 8388608,
+        "label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 8388608,
+        "output_shape": [
+          1024,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 2.784415990114212,
+          "count": 5848,
+          "max_rank_total_ms": 3128.104578886181,
+          "owner_label": "dsv4.owner.attn.wo_b.row_parallel_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 20248.869124121964
+        },
+        "shape": [
+          1024,
+          4096
+        ]
+      },
+      {
+        "bytes": 25971130368,
+        "count": 344,
+        "dtype": "bfloat16",
+        "input_bytes": 75497472,
+        "label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 75497472,
+        "output_shape": [
+          9216,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 2.784415990114212,
+          "count": 5848,
+          "max_rank_total_ms": 3128.104578886181,
+          "owner_label": "dsv4.owner.attn.wo_b.row_parallel_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 20248.869124121964
+        },
+        "shape": [
+          9216,
+          4096
+        ]
+      },
+      {
+        "bytes": 402653184,
+        "count": 48,
+        "dtype": "bfloat16",
+        "input_bytes": 8388608,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 8388608,
+        "output_shape": [
+          1024,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 0.3444159924983978,
+          "count": 136,
+          "max_rank_total_ms": 1469.313489049673,
+          "owner_label": "dsv4.owner.comm.dsv4.embedding_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 11077.504968374968
+        },
+        "shape": [
+          1024,
+          4096
+        ]
+      },
+      {
+        "bytes": 603979776,
+        "count": 8,
+        "dtype": "bfloat16",
+        "input_bytes": 75497472,
+        "label": "dsv4.embedding_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 75497472,
+        "output_shape": [
+          9216,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 0.3444159924983978,
+          "count": 136,
+          "max_rank_total_ms": 1469.313489049673,
+          "owner_label": "dsv4.owner.comm.dsv4.embedding_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 11077.504968374968
+        },
+        "shape": [
+          9216,
+          4096
+        ]
+      },
+      {
+        "bytes": 463339520,
+        "count": 56,
+        "dtype": "float32",
+        "input_bytes": 1034240,
+        "label": "dsv4.lm_head_all_gather",
+        "op": "all_gather",
+        "output_bytes": 8273920,
+        "output_shape": [
+          128,
+          16160
+        ],
+        "owner_timing": {
+          "captured_total_ms": 0.11561600118875504,
+          "count": 136,
+          "max_rank_total_ms": 10.788319751620293,
+          "owner_label": "dsv4.owner.comm.dsv4.lm_head_all_gather",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 47.13593574240804
+        },
+        "shape": [
+          16,
+          16160
+        ]
+      },
+      {
+        "bytes": 34628173824,
+        "count": 2064,
+        "dtype": "float32",
+        "input_bytes": 16777216,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 16777216,
+        "output_shape": [
+          1024,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 2.3517760075628757,
+          "count": 5848,
+          "max_rank_total_ms": 1567.6784736588597,
+          "owner_label": "dsv4.owner.moe.reduce_once_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 8003.543519046158
+        },
+        "shape": [
+          1024,
+          4096
+        ]
+      },
+      {
+        "bytes": 51942260736,
+        "count": 344,
+        "dtype": "float32",
+        "input_bytes": 150994944,
+        "label": "dsv4.v1_moe_reduce_once_all_reduce",
+        "op": "all_reduce",
+        "output_bytes": 150994944,
+        "output_shape": [
+          9216,
+          4096
+        ],
+        "owner_timing": {
+          "captured_total_ms": 2.3517760075628757,
+          "count": 5848,
+          "max_rank_total_ms": 1567.6784736588597,
+          "owner_label": "dsv4.owner.moe.reduce_once_all_reduce",
+          "source": "target08 owner_timing.csv profile run",
+          "sum_rank_total_ms": 8003.543519046158
+        },
+        "shape": [
+          9216,
+          4096
+        ]
+      }
+    ],
+    "graph": {
+      "captured_bs": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "eager_count": 0,
+      "enabled": true,
+      "replay_by_padded_size": {
+        "16": 49
+      },
+      "replay_count": 49,
+      "requested_bs": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ]
+    },
+    "scenario": "prefix_multi_112req_wave16",
+    "source_report": "performance_milestones/target08_post_prefix_reprofile/raw/macro_promoted_prefix_multi_112req_wave16_r01/reports/000_prefix_multi_112req_wave16__dsv4_sm80_a100_victory_prefix_routeb_lifetime.json",
+    "total_bytes": 131325624320,
+    "total_count": 4928
+  }
+]

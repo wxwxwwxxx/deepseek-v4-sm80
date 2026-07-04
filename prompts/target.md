@@ -8,6 +8,8 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 - Official/oracle reference: `/models/DeepSeek-V4-Flash/inference`
 - SGLang reference: `/workspace/sglang-main`
 - vLLM DeepSeek V4 reference: `/workspace/vllm-dsv4-docker`
+- vLLM runtime venv: `/workspace/venvs/vllm-dsv4`
+- mini runtime: system Python from `/workspace/mini-sglang`
 - Old abandoned mini branch: `dsv4`
 - Current main route: use SGLang/vLLM design as high-performance references,
   adapt the parts that are valid on sm80, and avoid re-implementing slow local
@@ -46,7 +48,10 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
 | TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime` as the prefix-cache baseline; detailed prompts archived under `prompts/archive/target08/`. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
-| TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | recommended next | Post-prefix profiles point to decode-forward communication/all-reduce owners as the next evidence-based surface. |
+| TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | recommended family | Post-prefix profiles point to decode-forward communication/all-reduce owners as the next evidence-based surface. |
+| TARGET 10.1 | `prompts/TARGET_10.1_dsv4_sm80_comm_path_parity_vllm.md` | completed | Compared mini and vLLM communication owner boundaries; found matching boundaries but a high-severity MoE reduce-once fp32-vs-BF16 dtype/bytes mismatch. |
+| TARGET 10.15 | `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md` | next | Isolate mini MoE reduce-once BF16 parity against vLLM, with correctness, communication-byte, profile, and macro gates. |
+| TARGET 10.2 | `prompts/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md` | after 10.15 | Test PyTorch/NCCL, mini PyNCCL, symmetric-memory workspace, and per-owner backend routing with micro-first and no-weight replay gates before full-model A/B. |
 
 ## Current Milestones
 
@@ -89,7 +94,7 @@ Decision:
 
 ```text
 TARGET 08 is closed as a prefix-cache baseline.
-Recommended next: TARGET 10 decode-forward communication/all-reduce attribution.
+Recommended next: TARGET 10.15 MoE reduce-once BF16 parity with vLLM.
 TARGET 09 remains planned for low-precision research after the communication
 surface is either exploited or disproven.
 ```
@@ -97,7 +102,11 @@ surface is either exploited or disproven.
 Rationale: prefix metadata/runtime is no longer the first bottleneck.  The
 post-prefix owner timing points to decode forward and communication/all-reduce
 owners such as attention `wo_b` row-parallel all-reduce, MoE reduce-once
-all-reduce, and embedding all-reduce.
+all-reduce, and embedding all-reduce. TARGET 10.1 found that the communication
+owner boundaries largely match vLLM, but mini currently reduces the combined
+MoE output in fp32 while vLLM's SM80 source path indicates a BF16 hidden-state
+reduce. TARGET 10.15 fixes or rejects that dtype/bytes mismatch before any
+PyNCCL or symmetric-memory tuning in TARGET 10.2.
 
 ## Archive Policy
 
