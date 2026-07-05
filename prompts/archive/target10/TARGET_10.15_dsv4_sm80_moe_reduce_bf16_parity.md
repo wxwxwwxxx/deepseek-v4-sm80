@@ -36,7 +36,7 @@ dtype immediately after the reduce in the current mini path.
 Read first:
 
 - `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md`
-- `prompts/TARGET_10.1_dsv4_sm80_comm_path_parity_vllm.md`
+- `prompts/archive/target10/TARGET_10.1_dsv4_sm80_comm_path_parity_vllm.md`
 - `performance_milestones/target10_comm_path_parity_vllm/README.md`
 
 Mini references:

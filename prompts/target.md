@@ -48,13 +48,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
 | TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime` as the prefix-cache baseline; detailed prompts archived under `prompts/archive/target08/`. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
-| TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | recommended family | Post-prefix profiles point to decode-forward communication/all-reduce owners as the next evidence-based surface. |
-| TARGET 10.1 | `prompts/TARGET_10.1_dsv4_sm80_comm_path_parity_vllm.md` | completed | Compared mini and vLLM communication owner boundaries; found matching boundaries but a high-severity MoE reduce-once fp32-vs-BF16 dtype/bytes mismatch. |
-| TARGET 10.15 | `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md` | completed | Implemented BF16 MoE reduce-once as an explicit opt-in; hot fp32 all-reduce disappeared, but promotion awaits repeat-stable evidence. |
-| TARGET 10.2 | `prompts/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md` | completed | Tested Torch/NCCL, mini PyNCCL, symmetric-memory workspace, and no-weight replay; best candidate was PyNCCL threshold32m opt-in, not yet promoted. |
-| TARGET 10.25 | `prompts/TARGET_10.25_dsv4_sm80_comm_size_owner_routing.md` | completed | Repeat-gated PyNCCL threshold32m as a positive opt-in; explicit owner/size routing did not beat the global threshold cheap gate. |
-| TARGET 10.26 | `prompts/TARGET_10.26_dsv4_sm80_pynccl_threshold32m_promotion_gate.md` | completed | PyNCCL threshold32m became the recommended opt-in: repeat-stable macro wins and zero-eager graph replay, but default promotion was blocked by an `lm_head_all_gather` owner-timing anomaly and a full serving Nsight capture without CUDA activity. |
-| TARGET 10.27 | `prompts/TARGET_10.27_dsv4_sm80_pynccl_default_promotion_blockers.md` | completed | Resolved the `lm_head_all_gather` owner-timing artifact and full-model Nsight evidence gap; PyNCCL threshold32m is now the default A100/sm80 DSV4 communication path. |
+| TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 
 ## Current Milestones
 
@@ -127,16 +121,19 @@ Completed detailed execution prompts live in:
 ```text
 prompts/archive/target07/
 prompts/archive/target08/
+prompts/archive/target10/
 ```
 
 For new child threads, start from:
 
 1. `prompts/target.md`
-2. the active target prompt, usually TARGET 10 or TARGET 09
+2. the active target prompt, usually TARGET 09 or a future TARGET 10 follow-up
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
    milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache history and
    deferred cache work
+5. `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` for the
+   closed communication default and rollback policy
 
 Do not ask new threads to read every archived prompt unless they need exact
 historical commands or stop conditions.

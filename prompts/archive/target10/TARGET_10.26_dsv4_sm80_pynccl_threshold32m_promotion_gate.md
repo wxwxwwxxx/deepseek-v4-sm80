@@ -35,9 +35,9 @@ without breaking text correctness or CUDA graph replay?
 Read first:
 
 - `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md`
-- `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md`
-- `prompts/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md`
-- `prompts/TARGET_10.25_dsv4_sm80_comm_size_owner_routing.md`
+- `prompts/archive/target10/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md`
+- `prompts/archive/target10/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md`
+- `prompts/archive/target10/TARGET_10.25_dsv4_sm80_comm_size_owner_routing.md`
 - `performance_milestones/target10_moe_reduce_bf16_parity/README.md`
 - `performance_milestones/target10_comm_stack_backend_experiments/README.md`
 - `performance_milestones/target10_comm_size_owner_routing/README.md`

@@ -44,7 +44,7 @@ The final decision must be one of:
 Read first:
 
 - `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md`
-- `prompts/TARGET_10.26_dsv4_sm80_pynccl_threshold32m_promotion_gate.md`
+- `prompts/archive/target10/TARGET_10.26_dsv4_sm80_pynccl_threshold32m_promotion_gate.md`
 - `performance_milestones/target10_pynccl_threshold32m_promotion_gate/README.md`
 
 Mini references:

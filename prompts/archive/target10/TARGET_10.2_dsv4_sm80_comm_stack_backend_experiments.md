@@ -43,8 +43,8 @@ BF16 unless a remaining fp32 collective is explicitly justified.
 Read first:
 
 - `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md`
-- `prompts/TARGET_10.1_dsv4_sm80_comm_path_parity_vllm.md`
-- `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md`
+- `prompts/archive/target10/TARGET_10.1_dsv4_sm80_comm_path_parity_vllm.md`
+- `prompts/archive/target10/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md`
 - `performance_milestones/target10_comm_path_parity_vllm/README.md`
 - `performance_milestones/target10_moe_reduce_bf16_parity/README.md`
 
