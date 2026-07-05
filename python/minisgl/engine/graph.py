@@ -246,6 +246,7 @@ class GraphRunner:
             free_memory=free_memory,
         )
         self.attn_backend = attn_backend
+        self.model = model
         self.max_graph_bs = max(cuda_graph_bs) if cuda_graph_bs else 0
         self.graph_bs_list = sorted(cuda_graph_bs)
         self.dummy_req = dummy_req
@@ -447,6 +448,9 @@ class GraphRunner:
                 gc.collect()
                 torch.cuda.empty_cache()
                 record_stage("after_gc_empty_cache", bs)
+            self._audit_marlin_wna16_cache_integrity(
+                f"after_graph_capture_bs{int(bs)}_empty_cache"
+            )
             bs_end_free_memory = get_free_memory(self.device)
             bs_end_allocated = torch.cuda.memory_allocated(self.device)
             bs_end_reserved = torch.cuda.memory_reserved(self.device)
@@ -482,6 +486,7 @@ class GraphRunner:
             torch.cuda.max_memory_reserved(self.device)
         )
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
+        self._audit_marlin_wna16_cache_integrity("after_graph_capture_all")
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
         if not batch.is_decode or batch.size > self.max_graph_bs:
@@ -527,6 +532,10 @@ class GraphRunner:
         ) + copied_bytes
         self._increment_status_counter("replay_count_by_batch_size", batch.size)
         self._increment_status_counter("replay_count_by_padded_size", batch.padded_size)
+        if int(self.capture_status["replay_count"]) <= 2:
+            self._audit_marlin_wna16_cache_integrity(
+                f"after_graph_replay_{int(self.capture_status['replay_count'])}"
+            )
 
     def replay(self, batch: Batch) -> torch.Tensor:
         self._replay_to_buffer(batch)
@@ -557,3 +566,8 @@ class GraphRunner:
     def destroy_cuda_graphs(self) -> None:
         del self.graph_map
         gc.collect()
+
+    def _audit_marlin_wna16_cache_integrity(self, stage: str) -> None:
+        audit = getattr(self.model, "audit_marlin_wna16_cache_integrity", None)
+        if callable(audit):
+            audit(stage)

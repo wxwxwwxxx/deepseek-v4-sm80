@@ -39,6 +39,10 @@ DSV4_MOE_VLLM_RUNNER_TOGGLE = "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"
 DSV4_MOE_REDUCE_BF16_TOGGLE = "MINISGL_DSV4_SM80_MOE_REDUCE_BF16"
 DSV4_MOE_EXPERT_BACKEND_ENV = "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"
 DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
+DSV4_MARLIN_WNA16_PREBUILD_ENV = "MINISGL_DSV4_MARLIN_WNA16_PREBUILD"
+DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+)
 DSV4_HC_TOGGLE = "MINISGL_DSV4_SM80_HC"
 DSV4_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_RMSNORM"
 DSV4_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_FP8_GEMM"
@@ -86,11 +90,31 @@ DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT = (
 DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
     "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
 )
+DSV4_A100_MARLIN_PREBUILD_VARIANT = "dsv4_sm80_a100_victory_marlin_prebuild"
+DSV4_A100_MARLIN_RELEASE_VARIANT = "dsv4_sm80_a100_victory_marlin_release"
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release"
+)
 DSV4_ROUTE_B_LIFETIME_ENV = {
     DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
     DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
     DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "c4",
     DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE: "1",
+}
+DSV4_A100_MARLIN_PREBUILD_ENV = {
+    DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+    DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+    DSV4_MARLIN_WNA16_PREBUILD_ENV: "1",
+}
+DSV4_A100_MARLIN_RELEASE_ENV = {
+    **DSV4_A100_MARLIN_PREBUILD_ENV,
+    DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV: "1",
+}
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_ENV = {
+    **DSV4_ROUTE_B_LIFETIME_ENV,
+    DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+    DSV4_MARLIN_WNA16_PREBUILD_ENV: "1",
+    DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV: "1",
 }
 BASELINE_TP_SIZE = 8
 
@@ -747,6 +771,31 @@ VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        DSV4_A100_MARLIN_PREBUILD_VARIANT,
+        dict(DSV4_A100_MARLIN_PREBUILD_ENV),
+        (
+            "TARGET 08.35 smoke diagnostic: dsv4_sm80_a100_victory with "
+            "backend fixed to marlin_wna16 and routed expert Marlin WNA16 "
+            "caches prebuilt before KV capacity planning, retaining original "
+            "routed FP4 expert tensors."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        DSV4_A100_MARLIN_RELEASE_VARIANT,
+        dict(DSV4_A100_MARLIN_RELEASE_ENV),
+        (
+            "TARGET 08.35 smoke high-memory-efficiency preset: "
+            "dsv4_sm80_a100_victory with backend fixed to marlin_wna16, "
+            "routed expert caches prebuilt before KV capacity planning, and "
+            "original routed FP4 expert weights/scales released after full "
+            "prebuild succeeds."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         "dsv4_sm80_a100_victory_fp8marlinproj",
         {
             DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
@@ -851,6 +900,19 @@ VARIANTS: tuple[Variant, ...] = (
             "page-table lifetime caching. Pair with --enable-dsv4-radix-prefix-cache, "
             "--enable-dsv4-component-loc-ownership, --page-size 256, "
             "--num-pages 128, and graph buckets 1 2 4 8 16."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT,
+        dict(DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_ENV),
+        (
+            "TARGET 08.35 prefix smoke high-memory-efficiency preset: "
+            "promoted Route B lifetime prefix preset plus backend fixed to "
+            "marlin_wna16, MoE Marlin WNA16 prebuild before KV capacity "
+            "planning, and original routed FP4 expert weights/scales release "
+            "after successful prebuild."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
@@ -1002,7 +1064,7 @@ def configure_variant(dsv4_kernel, variant: Variant) -> dict[str, Any]:
         "raw_dsv4_sm80_env": {
             name: os.environ[name]
             for name in sorted(os.environ)
-            if name.startswith("MINISGL_DSV4_SM80_")
+            if name.startswith("MINISGL_DSV4_")
         },
     }
 
@@ -1186,9 +1248,15 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
             "--allow-dsv4-cuda-graph."
         )
     allow_dsv4_cuda_graph = bool(args.allow_dsv4_cuda_graph or variant_graph)
+    if getattr(args, "disable_dsv4_cuda_graph", False):
+        allow_dsv4_cuda_graph = False
     cuda_graph_bs = args.cuda_graph_bs
     if allow_dsv4_cuda_graph and cuda_graph_bs is None:
         cuda_graph_bs = [1, 2, 4]
+    if not allow_dsv4_cuda_graph:
+        cuda_graph_bs = []
+    if getattr(args, "disable_cuda_graph_greedy_sample", False):
+        variant_graph_greedy_sample = False
     return {
         "use_pynccl": bool(args.use_pynccl or variant_pynccl),
         "allow_dsv4_cuda_graph": allow_dsv4_cuda_graph,
@@ -1369,8 +1437,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
     ]
     variants = [_variant_map()[name] for name in (args.variants or ["fallback", "v0_bf16"])]
     runtime_options = _runtime_options(args, variants)
-    if runtime_options["allow_dsv4_cuda_graph"]:
-        configure_variant(dsv4_kernel, _graph_init_variant(variants))
+    configure_variant(dsv4_kernel, _graph_init_variant(variants))
 
     llm = None
     reports: list[dict[str, Any]] = []
@@ -1499,6 +1566,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--allow-dsv4-cuda-graph",
         action="store_true",
         help="Opt in to DeepSeek V4 decode CUDA graph capture. Defaults to sizes 1,2,4.",
+    )
+    parser.add_argument(
+        "--disable-dsv4-cuda-graph",
+        action="store_true",
+        help="Diagnostic override: disable DSV4 decode CUDA graph even for graph preset variants.",
+    )
+    parser.add_argument(
+        "--disable-cuda-graph-greedy-sample",
+        action="store_true",
+        help=(
+            "Diagnostic override: capture decode CUDA graphs but keep greedy sampling "
+            "outside the graph so logits remain observable."
+        ),
     )
     parser.add_argument(
         "--enable-dsv4-radix-prefix-cache",

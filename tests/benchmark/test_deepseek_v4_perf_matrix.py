@@ -16,14 +16,14 @@ def _restore_dsv4_sm80_env():
     original = {
         name: value
         for name, value in os.environ.items()
-        if name.startswith("MINISGL_DSV4_SM80_")
+        if name.startswith("MINISGL_DSV4_")
     }
     for name in tuple(os.environ):
-        if name.startswith("MINISGL_DSV4_SM80_"):
+        if name.startswith("MINISGL_DSV4_"):
             os.environ.pop(name, None)
     yield
     for name in tuple(os.environ):
-        if name.startswith("MINISGL_DSV4_SM80_"):
+        if name.startswith("MINISGL_DSV4_"):
             os.environ.pop(name, None)
     os.environ.update(original)
 
@@ -712,6 +712,105 @@ def test_route_b_lifetime_moe_reduce_bf16_variant_extends_promoted_env(monkeypat
     assert opt_in.cuda_graph_capture_greedy_sample == promoted.cuda_graph_capture_greedy_sample
     assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_REDUCE_BF16"] == "1"
     assert "MINISGL_DSV4_SM80_MOE_REDUCE_BF16" in result["active_dsv4_toggles"]
+
+
+def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS",
+            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE",
+            "MINISGL_DSV4_MARLIN_WNA16_PREBUILD",
+            "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name in {
+                "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+                "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS",
+            }:
+                return False
+            return os.environ.get(name) in {"1", "true"}
+
+    variants = bench._variant_map()
+    prebuild = variants["dsv4_sm80_a100_victory_marlin_prebuild"]
+    release = variants["dsv4_sm80_a100_victory_marlin_release"]
+    prefix_release = variants[
+        "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release"
+    ]
+
+    assert prebuild.env == {
+        "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE": "1",
+        "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND": "marlin_wna16",
+        "MINISGL_DSV4_MARLIN_WNA16_PREBUILD": "1",
+    }
+    assert release.env == {
+        **prebuild.env,
+        "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS": "1",
+    }
+    assert prefix_release.env == {
+        **variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"].env,
+        "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND": "marlin_wna16",
+        "MINISGL_DSV4_MARLIN_WNA16_PREBUILD": "1",
+        "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS": "1",
+    }
+
+    result = bench.configure_variant(FakeKernel, release)
+
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"] == "marlin_wna16"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_MARLIN_WNA16_PREBUILD"] == "1"
+    assert (
+        result["raw_dsv4_sm80_env"][
+            "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+        ]
+        == "1"
+    )
+    assert "MINISGL_DSV4_MARLIN_WNA16_PREBUILD" in result["active_dsv4_toggles"]
+    assert (
+        "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+        in result["active_dsv4_toggles"]
+    )
+    assert release.allow_dsv4_cuda_graph is True
+    assert prefix_release.allow_dsv4_cuda_graph is True
+
+
+def test_marlin_release_env_is_not_preserved_across_variants(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_MARLIN_WNA16_PREBUILD",
+            "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            return os.environ.get(name) in {"1", "true"}
+
+    monkeypatch.setenv("MINISGL_DSV4_MARLIN_WNA16_PREBUILD", "1")
+    monkeypatch.setenv("MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS", "1")
+
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()["dsv4_sm80_a100_victory"],
+    )
+
+    assert "MINISGL_DSV4_MARLIN_WNA16_PREBUILD" not in result["preserved_dsv4_sm80_env"]
+    assert (
+        "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+        not in result["preserved_dsv4_sm80_env"]
+    )
+    assert "MINISGL_DSV4_MARLIN_WNA16_PREBUILD" not in result["raw_dsv4_sm80_env"]
+    assert (
+        "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+        not in result["raw_dsv4_sm80_env"]
+    )
 
 
 def test_configure_variant_preserves_route_b_lifetime_verifier(monkeypatch):

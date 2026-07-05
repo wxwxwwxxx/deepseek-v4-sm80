@@ -10,6 +10,8 @@ prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
 prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
 prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
+prompts/TARGET_08.35_dsv4_sm80_marlin_wna16_release_preset_promotion.md
+prompts/TARGET_08.36_dsv4_sm80_marlin_wna16_release_correctness_attribution.md
 ```
 
 TARGET 08.31 is about SGLang-aligned SWA lifecycle and memory ownership.  It is
@@ -33,6 +35,19 @@ memory jump happens during warmup `model.forward()` before the actual
 weight repack is lazily creating about `17-18 GiB/rank` of persistent backend
 state, and whether that cache should be prebuilt and accounted before KV
 capacity planning.
+
+TARGET 08.35 is the promotion gate after TARGET 08.34.  TARGET 08.34 proved
+that prebuild fixes lifecycle/accounting and that releasing original routed FP4
+expert weights can recover about `17.13 GiB/rank`.  TARGET 08.35 should turn
+prebuild+release into a named high-memory-efficiency preset, not a loose manual
+opt-in, and prove fail-closed backend semantics plus correctness/performance
+gates.
+
+TARGET 08.36 is the correctness follow-up after TARGET 08.35 rejected
+promotion.  TARGET 08.35 landed the preset naming, release ledger, and
+fail-closed behavior, but TP8 text smoke showed stable corrupted output only
+after raw routed FP4 expert weights/scales were released.  TARGET 08.36 should
+attribute that blocker before any release preset is promoted.
 
 Milestone tag:
 
@@ -243,7 +258,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.31, TARGET 08.34, or
+3. the active future target prompt, currently TARGET 08.31, TARGET 08.36, or
    a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
@@ -297,8 +312,9 @@ for all traffic.
 
 ### CUDA Graph Memory Pool
 
-Status: active follow-up as TARGET 08.34 after the broad TARGET 08.32 probe and
-the focused TARGET 08.33 indexer audit.
+Status: active follow-up as TARGET 08.36 after the broad TARGET 08.32 probe,
+the focused TARGET 08.33 indexer audit, TARGET 08.34 MoE lifecycle
+attribution, and TARGET 08.35 release-preset promotion gate.
 
 Graph capture delta is large and repeatable.  TARGET 08.06/08.07 found it is
 not primarily caused by BF16 caches, metadata, bucket count, greedy sample,
@@ -335,12 +351,37 @@ target is therefore:
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
 ```
 
-TARGET 08.34 should audit whether the default `marlin_wna16` MoE backend lazily
-repacked and retained all routed expert weights on first forward.  Rough memory
-math puts raw FP4 expert weights plus scales at about `0.398 GiB/layer/rank`,
-or `~17.1 GiB/rank` for 43 layers, which is close to the observed warmup jump.
-If confirmed, prebuild/account the cache before KV capacity planning and
-evaluate opt-in original-weight release.
+TARGET 08.34 audited the default `marlin_wna16` MoE backend and confirmed that
+lazy routed-expert repack fully explains the warmup jump.  Prebuild moved the
+large cost before KV capacity planning, and release of original routed FP4
+expert weights recovered about `17.13 GiB/rank`, equivalent to about `400` DSV4
+KV pages or `102k` tokens per rank at page size `256`.
+
+The next focused target is:
+
+```text
+prompts/TARGET_08.35_dsv4_sm80_marlin_wna16_release_preset_promotion.md
+```
+
+TARGET 08.35 should make prebuild+release a named high-memory-efficiency
+`marlin_wna16` preset rather than a loose opt-in, while proving correctness,
+graph replay, macro performance, KV capacity accounting, and fail-closed
+backend semantics.
+
+TARGET 08.35 result: preset naming, env expansion, two-stage prebuild/release,
+memory reporting, and fail-closed backend semantics landed, but promotion was
+rejected because TP8 text smoke produced corrupted text only for the release
+variant.  Baseline and prebuild-only text smoke passed; release recovered
+`17.1328 GiB/rank` but failed correctness.  The next focused target is:
+
+```text
+prompts/TARGET_08.36_dsv4_sm80_marlin_wna16_release_correctness_attribution.md
+```
+
+TARGET 08.36 should not run broad macros until text sanity is fixed or the
+release path is rejected.  It should isolate whether the failure belongs to
+CUDA graph replay, decode progression, MoE packed-cache lifetime, raw tensor
+storage release, or a runtime branch change after raw attributes are removed.
 
 Old reports:
 
@@ -349,6 +390,8 @@ performance_milestones/target08_cuda_graph_memory_attribution/README.md
 performance_milestones/target08_bf16_cache_graph_memory_attribution/README.md
 performance_milestones/target08_cuda_graph_private_pool_micro_attribution/README.md
 performance_milestones/target08_indexer_capture_static_width_audit/README.md
+performance_milestones/target08_moe_marlin_wna16_cache_lifecycle/README.md
+performance_milestones/target08_marlin_wna16_release_preset_promotion/README.md
 ```
 
 ### Broader Serving Benchmark

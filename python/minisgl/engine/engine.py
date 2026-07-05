@@ -14,6 +14,7 @@ from minisgl.models import create_model, load_weight
 from minisgl.moe import create_moe_backend
 from minisgl.utils import (
     dsv4_direct_copy_nvtx,
+    dsv4_memory_debug,
     dsv4_prefix_debug,
     init_logger,
     is_sm90_supported,
@@ -66,9 +67,11 @@ class Engine:
             self.model_prepare_report = prepare_for_cuda_graph_capture()
         else:
             self.model_prepare_report = {}
+        self._audit_marlin_wna16_cache_integrity("after_model_prepare")
 
         # ======================= KV cache initialization ========================
         self.num_pages = self._determine_num_pages(init_free_memory, config)
+        self._audit_marlin_wna16_cache_integrity("after_kv_capacity_empty_cache")
         num_tokens = self.num_pages * config.page_size
         self.ctx.kv_cache = self.kv_cache = create_kvcache_pool(
             model_config=config.model_config,
@@ -131,6 +134,19 @@ class Engine:
             capture_fail_open=config.cuda_graph_capture_fail_open,
             capture_greedy_sample=config.cuda_graph_capture_greedy_sample,
         )
+        if dsv4_memory_debug.env_flag(
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_AFTER_GRAPH_CAPTURE"
+        ):
+            release_after_capture = getattr(
+                self.model,
+                "release_marlin_wna16_original_expert_weights",
+                None,
+            )
+            if callable(release_after_capture):
+                self.model_prepare_report[
+                    "moe_marlin_wna16_after_graph_capture_release"
+                ] = release_after_capture(stage_label="after_graph_capture_release")
+        self._audit_marlin_wna16_cache_integrity("after_graph_runner_init")
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         init_method = config.distributed_init_method or config.distributed_addr
@@ -209,6 +225,11 @@ class Engine:
             raise RuntimeError("Memory across TP ranks are imbalanced")
 
         return min_free_memory, max_free_memory
+
+    def _audit_marlin_wna16_cache_integrity(self, stage: str) -> None:
+        audit = getattr(self.model, "audit_marlin_wna16_cache_integrity", None)
+        if callable(audit):
+            audit(stage)
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream

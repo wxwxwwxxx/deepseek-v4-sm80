@@ -13,6 +13,12 @@ TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
 DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
 DSV4_MARLIN_WNA16_CACHE_DEBUG_ENV = "MINISGL_DSV4_MARLIN_WNA16_CACHE_DEBUG"
+DSV4_MARLIN_WNA16_CACHE_INTEGRITY_DEBUG_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_DEBUG"
+)
+DSV4_MARLIN_WNA16_CACHE_INTEGRITY_SAMPLE_SIZE_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_SAMPLE_SIZE"
+)
 DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV = "MINISGL_DSV4_WARMUP_FORWARD_MEMORY_DEBUG"
 DEFAULT_AUDIT_LOG_DIR = "performance_milestones/target08_moe_marlin_wna16_cache_lifecycle/raw"
 
@@ -34,6 +40,7 @@ def tensor_summary(tensor: torch.Tensor | None) -> dict[str, Any]:
         return {"present": False}
     return {
         "present": True,
+        "data_ptr": int(tensor.data_ptr()),
         "shape": [int(dim) for dim in tensor.shape],
         "stride": [int(dim) for dim in tensor.stride()],
         "dtype": str(tensor.dtype),
@@ -44,6 +51,67 @@ def tensor_summary(tensor: torch.Tensor | None) -> dict[str, Any]:
         "is_contiguous": bool(tensor.is_contiguous()),
         "storage_offset": int(tensor.storage_offset()),
     }
+
+
+def tensor_integrity_summary(
+    tensor: torch.Tensor | None,
+    *,
+    sample_size: int | None = None,
+) -> dict[str, Any]:
+    summary = tensor_summary(tensor)
+    if tensor is None:
+        return summary
+    if sample_size is None:
+        sample_size = _env_int(DSV4_MARLIN_WNA16_CACHE_INTEGRITY_SAMPLE_SIZE_ENV, 4096)
+    sample_size = max(1, int(sample_size))
+    summary["sample_size_requested"] = sample_size
+    if tensor.numel() == 0:
+        summary.update(
+            {
+                "sample_count": 0,
+                "finite_ratio": 1.0,
+                "sample_checksum": 0,
+                "sample_abs_max": 0.0,
+            }
+        )
+        return summary
+    if tensor.is_cuda and _cuda_graph_capture_active():
+        summary["sample_skipped"] = "cuda_graph_capture_active"
+        return summary
+
+    try:
+        flat = tensor.detach().reshape(-1)
+        if flat.numel() <= sample_size:
+            sample = flat
+        else:
+            indices = torch.linspace(
+                0,
+                flat.numel() - 1,
+                steps=sample_size,
+                device=flat.device,
+                dtype=torch.float64,
+            ).to(torch.int64)
+            sample = flat.index_select(0, indices)
+        sample_cpu = sample.contiguous().cpu()
+        sample_for_math = _sample_for_math(sample_cpu)
+        if torch.is_floating_point(sample_for_math) or sample_for_math.is_complex():
+            finite = torch.isfinite(sample_for_math)
+            finite_ratio = float(finite.float().mean().item())
+        else:
+            finite_ratio = 1.0
+        sample_abs_max = float(sample_for_math.float().abs().max().item())
+        checksum = _sample_checksum(sample_cpu)
+        summary.update(
+            {
+                "sample_count": int(sample_cpu.numel()),
+                "finite_ratio": finite_ratio,
+                "sample_checksum": checksum,
+                "sample_abs_max": sample_abs_max,
+            }
+        )
+    except Exception as exc:
+        summary["sample_error"] = f"{type(exc).__name__}: {exc}"
+    return summary
 
 
 def cuda_memory_snapshot(
@@ -177,6 +245,44 @@ def _memory_deltas(
             after.get("memory_reserved_bytes", 0) - before.get("memory_reserved_bytes", 0)
         ),
     }
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _cuda_graph_capture_active() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
+
+
+def _sample_for_math(sample: torch.Tensor) -> torch.Tensor:
+    if sample.dtype in (getattr(torch, "float8_e8m0fnu", None), getattr(torch, "float8_e4m3fn", None)):
+        return sample.float()
+    if sample.dtype == torch.uint8 or sample.dtype == torch.int8:
+        return sample.to(torch.float32)
+    return sample
+
+
+def _sample_checksum(sample: torch.Tensor) -> int:
+    try:
+        byte_view = sample.contiguous().view(torch.uint8).reshape(-1).to(torch.int64)
+    except Exception:
+        byte_view = _sample_for_math(sample).float().reshape(-1).cpu().view(torch.uint8).to(torch.int64)
+    if byte_view.numel() == 0:
+        return 0
+    weights = (torch.arange(byte_view.numel(), dtype=torch.int64) % 251) + 1
+    return int(torch.sum(byte_view.cpu() * weights).item() % ((1 << 63) - 1))
 
 
 def _rank() -> int:

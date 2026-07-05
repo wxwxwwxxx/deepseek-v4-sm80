@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import minisgl.core as core
 import minisgl.distributed.info as dist_info
+import pytest
 import torch
 import torch.nn.functional as F
 from minisgl.attention import create_attention_backend
@@ -15,6 +16,7 @@ from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
 from minisgl.models.deepseek_v4 import (
+    DeepseekV4Model,
     DSV4FusedRoutedExperts,
     DSV4MoE,
     DSV4MoEGate,
@@ -68,6 +70,13 @@ def _reset_globals(*, tp_rank: int = 0, tp_size: int = 1) -> None:
     core._GLOBAL_CTX = None
     dist_info._TP_INFO = None
     set_tp_info(tp_rank, tp_size)
+
+
+@pytest.fixture(autouse=True)
+def _clear_deepseek_v4_test_globals():
+    yield
+    core._GLOBAL_CTX = None
+    dist_info._TP_INFO = None
 
 
 def _clear_dsv4_sm80_env(monkeypatch) -> None:
@@ -333,6 +342,170 @@ def test_deepseek_v4_grouped_routed_experts_all_reduce_tp_sharded_output(monkeyp
     assert len(fake_comm.calls) == 1
     assert fake_comm.calls[0].dtype is torch.float32
     assert torch.equal(out, torch.full_like(hidden, 23.0))
+
+
+class _FakeMarlinWNA16Cache:
+    def __init__(self, experts: DSV4FusedRoutedExperts) -> None:
+        self.w13 = torch.empty(experts.w13_weight.shape[0], 1, dtype=torch.int8)
+        self.w2 = torch.empty(experts.w2_weight.shape[0], 1, dtype=torch.int8)
+        self.w13_scale = torch.empty(experts.w13_weight.shape[0], 1, dtype=torch.uint8)
+        self.w2_scale = torch.empty(experts.w2_weight.shape[0], 1, dtype=torch.uint8)
+
+    def matches(
+        self,
+        w13_weight: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_weight: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> bool:
+        del w13_weight, w13_scale, w2_weight, w2_scale
+        return True
+
+
+def test_deepseek_v4_marlin_release_report_is_idempotent():
+    _reset_globals()
+    cfg = _tiny_dsv4_config()
+    experts = DSV4FusedRoutedExperts(cfg)
+    expected_source_bytes = sum(
+        getattr(experts, name).numel() * getattr(experts, name).element_size()
+        for name in experts._raw_expert_weight_names()
+    )
+    experts._marlin_wna16_weights = _FakeMarlinWNA16Cache(experts)
+
+    report = experts.release_marlin_wna16_original_expert_weights()
+
+    assert report["source_bytes"] == expected_source_bytes
+    assert report["released_original_bytes"] == expected_source_bytes
+    assert report["released_original_this_call_bytes"] == expected_source_bytes
+    assert report["raw_weights_available_after"] is False
+    assert report["runtime_policy"] == "marlin_wna16_prepacked_only"
+    assert dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR in report["fallback_error"]
+    assert all(not hasattr(experts, name) for name in experts._raw_expert_weight_names())
+    state = experts.state_dict(prefix="experts")
+    assert all(name not in state for name in ("experts.w13_weight", "experts.w2_weight"))
+
+    second = experts.release_marlin_wna16_original_expert_weights()
+
+    assert second["source_bytes"] == expected_source_bytes
+    assert second["released_original_bytes"] == expected_source_bytes
+    assert second["released_original_this_call_bytes"] == 0
+    assert second["raw_weights_available_after"] is False
+
+
+def test_deepseek_v4_marlin_release_fail_closed_for_grouped_backend(monkeypatch):
+    _reset_globals()
+    cfg = _tiny_dsv4_config()
+    experts = DSV4FusedRoutedExperts(cfg)
+    experts._marlin_wna16_weights = _FakeMarlinWNA16Cache(experts)
+    experts.release_marlin_wna16_original_expert_weights()
+    monkeypatch.setenv(
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
+    )
+
+    hidden = torch.zeros(2, cfg.hidden_size, dtype=torch.bfloat16)
+    weights = torch.ones(2, 1, dtype=torch.float32)
+    indices = torch.zeros(2, 1, dtype=torch.long)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Marlin WNA16 release preset has released raw routed expert weights",
+    ):
+        experts.forward(hidden, weights, indices)
+
+
+def test_deepseek_v4_prepare_releases_marlin_weights_after_all_prebuilds(monkeypatch):
+    _reset_globals()
+    cfg = replace(_tiny_dsv4_config(), num_layers=3)
+    model = DeepseekV4Model(cfg)
+    calls: list[tuple[str, int]] = []
+
+    for idx, layer in enumerate(model.layers.op_list):
+        def fake_prepare(*, release_original=False, idx=idx):
+            assert release_original is False
+            calls.append(("prebuild", idx))
+            return {
+                "persistent_bytes": 11,
+                "source_bytes": 22,
+                "released_original_bytes": 0,
+            }
+
+        def fake_release(idx=idx):
+            calls.append(("release", idx))
+            return {
+                "persistent_bytes": 11,
+                "source_bytes": 22,
+                "released_original_bytes": 22,
+            }
+
+        layer.mlp.experts.prepare_marlin_wna16_weight_cache = fake_prepare
+        layer.mlp.experts.release_marlin_wna16_original_expert_weights = fake_release
+
+    monkeypatch.setenv(
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+    )
+    monkeypatch.setenv(dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV, "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV, "1")
+
+    report = model.prepare_for_cuda_graph_capture()
+
+    assert calls == [
+        ("prebuild", 0),
+        ("prebuild", 1),
+        ("prebuild", 2),
+        ("release", 0),
+        ("release", 1),
+        ("release", 2),
+    ]
+    moe_report = report["moe_marlin_wna16_cache"]
+    assert moe_report["layers_cached"] == 3
+    assert moe_report["total_persistent_bytes"] == 33
+    assert moe_report["total_source_bytes"] == 66
+    assert moe_report["total_released_original_bytes"] == 66
+    assert moe_report["release_runtime_policy"] == "marlin_wna16_prepacked_only"
+
+
+def test_deepseek_v4_prepare_does_not_release_after_prebuild_failure(monkeypatch):
+    _reset_globals()
+    cfg = replace(_tiny_dsv4_config(), num_layers=3)
+    model = DeepseekV4Model(cfg)
+    calls: list[tuple[str, int]] = []
+
+    for idx, layer in enumerate(model.layers.op_list):
+        def fake_prepare(*, release_original=False, idx=idx):
+            assert release_original is False
+            calls.append(("prebuild", idx))
+            if idx == 1:
+                raise RuntimeError("prebuild failed")
+            return {
+                "persistent_bytes": 11,
+                "source_bytes": 22,
+                "released_original_bytes": 0,
+            }
+
+        def fake_release(idx=idx):
+            calls.append(("release", idx))
+            return {
+                "persistent_bytes": 11,
+                "source_bytes": 22,
+                "released_original_bytes": 22,
+            }
+
+        layer.mlp.experts.prepare_marlin_wna16_weight_cache = fake_prepare
+        layer.mlp.experts.release_marlin_wna16_original_expert_weights = fake_release
+
+    monkeypatch.setenv(
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
+        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+    )
+    monkeypatch.setenv(dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV, "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV, "1")
+
+    with pytest.raises(RuntimeError, match="prebuild failed"):
+        model.prepare_for_cuda_graph_capture()
+
+    assert calls == [("prebuild", 0), ("prebuild", 1)]
 
 
 def test_deepseek_v4_moe_v2_workspace_is_decode_sized(monkeypatch):

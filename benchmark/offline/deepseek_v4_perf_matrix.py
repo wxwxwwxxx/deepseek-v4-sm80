@@ -34,6 +34,10 @@ DSV4_MOE_EXPERT_BACKEND_ENV = "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"
 DSV4_MOE_EXPERT_BACKEND_MARLIN = "marlin_mxfp4_w4a16"
 DSV4_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE = "vllm_marlin_bridge"
 DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
+DSV4_MARLIN_WNA16_PREBUILD_ENV = "MINISGL_DSV4_MARLIN_WNA16_PREBUILD"
+DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+)
 DSV4_HC_TOGGLE = "MINISGL_DSV4_SM80_HC"
 DSV4_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_RMSNORM"
 DSV4_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_FP8_GEMM"
@@ -81,11 +85,31 @@ DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT = (
 DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
     "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
 )
+DSV4_A100_MARLIN_PREBUILD_VARIANT = "dsv4_sm80_a100_victory_marlin_prebuild"
+DSV4_A100_MARLIN_RELEASE_VARIANT = "dsv4_sm80_a100_victory_marlin_release"
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release"
+)
 DSV4_ROUTE_B_LIFETIME_ENV = {
     DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
     DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
     DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "c4",
     DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE: "1",
+}
+DSV4_A100_MARLIN_PREBUILD_ENV = {
+    DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
+    DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+    DSV4_MARLIN_WNA16_PREBUILD_ENV: "1",
+}
+DSV4_A100_MARLIN_RELEASE_ENV = {
+    **DSV4_A100_MARLIN_PREBUILD_ENV,
+    DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV: "1",
+}
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_ENV = {
+    **DSV4_ROUTE_B_LIFETIME_ENV,
+    DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
+    DSV4_MARLIN_WNA16_PREBUILD_ENV: "1",
+    DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV: "1",
 }
 
 
@@ -1118,6 +1142,30 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        name=DSV4_A100_MARLIN_PREBUILD_VARIANT,
+        env=dict(DSV4_A100_MARLIN_PREBUILD_ENV),
+        description=(
+            "TARGET 08.35 diagnostic: dsv4_sm80_a100_victory with the MoE "
+            "expert backend fixed to marlin_wna16 and all routed expert "
+            "Marlin WNA16 caches prebuilt before KV capacity planning, while "
+            "retaining original routed FP4 expert tensors."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=DSV4_A100_MARLIN_RELEASE_VARIANT,
+        env=dict(DSV4_A100_MARLIN_RELEASE_ENV),
+        description=(
+            "TARGET 08.35 high-memory-efficiency preset: dsv4_sm80_a100_victory "
+            "with backend fixed to marlin_wna16, routed expert caches prebuilt "
+            "before KV capacity planning, and original routed FP4 expert "
+            "weights/scales released after successful full-model prebuild."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         name="dsv4_sm80_a100_victory_fp8marlinproj",
         env={
             DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
@@ -1238,6 +1286,18 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
             "page-table lifetime caching. Pair with --enable-dsv4-radix-prefix-cache, "
             "--enable-dsv4-component-loc-ownership, --page-size 256, "
             "--num-pages 128, and graph buckets 1 2 4 8 16."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT,
+        env=dict(DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_ENV),
+        description=(
+            "TARGET 08.35 prefix high-memory-efficiency preset: promoted Route B "
+            "lifetime prefix preset plus backend fixed to marlin_wna16, MoE "
+            "Marlin WNA16 prebuild before KV capacity planning, and original "
+            "routed FP4 expert weights/scales release after successful prebuild."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
@@ -1530,16 +1590,6 @@ def _preserved_dsv4_sm80_env_names(dsv4_kernel) -> tuple[str, ...]:
             "DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV",
             "MINISGL_DSV4_WARMUP_FORWARD_MEMORY_DEBUG",
         ),
-        getattr(
-            dsv4_kernel,
-            "DSV4_MARLIN_WNA16_PREBUILD_ENV",
-            "MINISGL_DSV4_MARLIN_WNA16_PREBUILD",
-        ),
-        getattr(
-            dsv4_kernel,
-            "DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV",
-            "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS",
-        ),
     )
 
 
@@ -1574,7 +1624,7 @@ def raw_dsv4_env() -> dict[str, str]:
     return {
         name: os.environ[name]
         for name in sorted(os.environ)
-        if name.startswith("MINISGL_DSV4_SM80_")
+        if name.startswith("MINISGL_DSV4_")
     }
 
 
