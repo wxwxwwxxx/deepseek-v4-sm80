@@ -46,7 +46,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | Added v0 BF16 E2E smoke and basic correctness gates. |
 | TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | Added TP8 benchmark harness and text smoke; fixed early correctness issues. |
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
-| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline plus active capacity children | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime`; TARGET 08.31 handles SGLang-aligned SWA lifecycle before FP8 cache E2E, and TARGET 08.37 continues the Marlin WNA16 release route by finding the unsafe storage-reuse owner. |
+| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline plus active capacity children | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime`; TARGET 08.31 handles SGLang-aligned SWA lifecycle before FP8 cache E2E, and TARGET 08.40 productionizes the Marlin WNA16 raw-expert release component-clear fix. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | active research | Low-precision research after TARGET 10: INT8 MoE W8A8 and FP8 KV/cache are the two primary lanes; TARGET 09.5 is deferred until TARGET 08.31 proves real SWA lifecycle/capacity value. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 
@@ -129,7 +129,7 @@ to about `4` to `16` tail pages, making SWA-only FP8 much smaller
 `1 GiB/rank` of persistent headroom.  Prove that lifecycle and its runtime
 counters before reopening FP8 KV/cache E2E.
 
-TARGET 08.32-08.37 CUDA graph / warmup memory follow-up:
+TARGET 08.32-08.40 CUDA graph / warmup memory follow-up:
 
 ```text
 prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
@@ -138,6 +138,9 @@ prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
 prompts/TARGET_08.35_dsv4_sm80_marlin_wna16_release_preset_promotion.md
 prompts/TARGET_08.36_dsv4_sm80_marlin_wna16_release_correctness_attribution.md
 prompts/TARGET_08.37_dsv4_sm80_marlin_wna16_release_storage_reuse_owner.md
+prompts/TARGET_08.38_dsv4_sm80_marlin_wna16_safe_release_arena_capacity.md
+prompts/TARGET_08.39_dsv4_sm80_marlin_wna16_old_address_root_cause.md
+prompts/TARGET_08.40_dsv4_sm80_marlin_wna16_release_component_clear_promotion.md
 ```
 
 Rationale: TARGET 08.06/08.07 proved the `~19 GiB/rank` first-graph CUDA graph
@@ -176,6 +179,37 @@ release of large expert-weight storages and likely allocator reuse by a later
 KV/cache/warmup/graph/attention/indexer owner.  TARGET 08.37 should identify
 that owner or the earliest safe release boundary.
 
+TARGET 08.37 result: the unsafe owner was identified as the DSV4 KV/component
+allocation phase after immediate release.  KV/component tensors reused released
+raw expert-weight ranges; releasing after KV allocation passes but does not
+provide pre-KV capacity-planning headroom.  TARGET 08.38 should repair this by
+planning with a release credit while using an arena/guard/allocation-order
+policy to keep live KV/component buffers off unsafe released ranges.
+
+TARGET 08.38 result: a `before_kv_alloc` release with a `3.1875 GiB/rank`
+deterministic guard arena passed short text smokes, graph replay, and the
+historical 4096x128 / 4096x1024 macro shapes.  Auto-planned capacity improved
+from `1,826` to `2,602` pages at page size `256`.  The guard recovered most of
+the `17.1328 GiB/rank` raw-expert release value, but it is still empirical: in
+rank-0 records it maps to the first 32 released items, layers `0-7` with
+`w13_weight`, `w13_weight_scale_inv`, `w2_weight`, and
+`w2_weight_scale_inv`.  TARGET 08.39 should now chase the root cause with old
+expert address NaN/byte poison, KV-as-sentinel probes, stage/layer bisection,
+and stream-lifetime controls, aiming for unguarded release where KV/component
+can safely use the formerly raw expert-weight ranges.
+
+TARGET 08.39 result: the bug was attributed to an uninitialized DSV4 component
+cache read after allocator reuse of old raw expert-weight storage.  The
+effective fix is component-slot clear on page allocation: `clear=component`
+passes, while `clear=none`, `clear=full`, and `clear=state` fail or warn.
+`CUDA_LAUNCH_BLOCKING=1 + clear=none` still fails, making stream lifetime
+unlikely as the root.  Fixed unguarded release passes eager/graph text smoke,
+uses `0` guard bytes, still lets KV/component overlap old raw expert ranges,
+and auto-plans `2,779` pages at page size `256`.  TARGET 08.40 should now
+productionize the fix, add regression coverage, measure page-allocation clear
+overhead, run macro/prefix/serving gates, and decide whether to promote the
+Marlin WNA16 release preset.
+
 ## Archive Policy
 
 Completed detailed execution prompts live in:
@@ -189,7 +223,7 @@ prompts/archive/target10/
 For new child threads, start from:
 
 1. `prompts/target.md`
-2. the active target prompt, currently TARGET 08.31, TARGET 08.37, or a
+2. the active target prompt, currently TARGET 08.31, TARGET 08.40, or a
    TARGET 09 child
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
    milestone history

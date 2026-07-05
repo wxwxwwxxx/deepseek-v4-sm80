@@ -58,6 +58,15 @@ _MARLIN_WNA16_QUARANTINE_BYTES_ENV = (
 _MARLIN_WNA16_QUARANTINE_PATTERN_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
 )
+_MARLIN_WNA16_POISON_THEN_FREE_ENV = (
+    dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV
+)
+_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV = (
+    dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV
+)
+_MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV = (
+    dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV
+)
 _MARLIN_WNA16_CACHE_INTEGRITY_LAYERS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS"
 )
@@ -134,6 +143,9 @@ def _marlin_wna16_release_timing() -> str:
         "after_prebuild": "model_prepare",
         "after_full_model_prebuild": "model_prepare",
         "model_prepare": "model_prepare",
+        "before_kv": "before_kv_alloc",
+        "before_kv_alloc": "before_kv_alloc",
+        "before_kv_allocation": "before_kv_alloc",
         "after_kv": "after_kv_alloc",
         "after_kv_alloc": "after_kv_alloc",
         "after_kv_allocation": "after_kv_alloc",
@@ -338,6 +350,17 @@ def _owner_timing_prefix(owner_label: str) -> str:
     if owner_label.endswith(".shared_experts.down_proj") or ".shared_experts.down_proj" in owner_label:
         return "dsv4.owner.shared_down"
     return f"dsv4.owner.{owner_label}"
+
+
+def _marlin_wna16_released_items(
+    release_reports: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    released_items: list[dict[str, object]] = []
+    for report in release_reports:
+        for item in report.get("released", []):
+            if isinstance(item, dict) and int(item.get("bytes", 0) or 0) > 0:
+                released_items.append(item)
+    return released_items
 
 
 def _cached_hc_bf16_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
@@ -3248,6 +3271,7 @@ class DeepseekV4Model(BaseOP):
         self._hc_head_fn_bf16: torch.Tensor | None = None
         self._hc_head_fn_bf16_meta: tuple | None = None
         self._marlin_wna16_release_quarantine_tensors: list[torch.Tensor] = []
+        self._marlin_wna16_release_quarantine_records: list[dict[str, object]] = []
 
     def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
         fused_wqa_wkv_reports: list[dict[str, object]] = []
@@ -3630,6 +3654,10 @@ class DeepseekV4Model(BaseOP):
                     skipped_layers.append(int(layer_id))
                 continue
             release_reports.append(experts.release_marlin_wna16_original_expert_weights())
+        poison_then_free_report = self._maybe_poison_then_free_marlin_wna16_released_blocks(
+            release_reports,
+            stage_label=stage_label,
+        )
         quarantine_report = self._maybe_quarantine_marlin_wna16_released_blocks(
             release_reports,
             stage_label=stage_label,
@@ -3662,7 +3690,99 @@ class DeepseekV4Model(BaseOP):
             "total_hidden_ref_bytes": int(
                 sum(int(report.get("hidden_ref_bytes", 0)) for report in release_reports)
             ),
+            "poison_then_free": poison_then_free_report,
             "quarantine": quarantine_report,
+        }
+
+    def _maybe_poison_then_free_marlin_wna16_released_blocks(
+        self,
+        release_reports: list[dict[str, object]],
+        *,
+        stage_label: str,
+    ) -> dict[str, object]:
+        if not dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_POISON_THEN_FREE_ENV):
+            return {"enabled": False}
+        released_items = _marlin_wna16_released_items(release_reports)
+        total_released = int(sum(int(item.get("bytes", 0) or 0) for item in released_items))
+        target_bytes = _env_bytes(_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV, total_released)
+        if target_bytes is None:
+            target_bytes = total_released
+        target_bytes = max(0, min(int(target_bytes), total_released))
+        pattern = os.environ.get(
+            _MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV,
+            "nan_byte",
+        ).strip().lower()
+        device = self._marlin_wna16_release_device()
+        if device is None or device.type != "cuda":
+            return {
+                "enabled": True,
+                "allocated_bytes": 0,
+                "target_bytes": target_bytes,
+                "pattern": pattern,
+                "error": "no_cuda_device_found",
+            }
+
+        poison_tensors: list[torch.Tensor] = []
+        poison_tensor: torch.Tensor | None = None
+        records: list[dict[str, object]] = []
+        allocated = 0
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+        try:
+            for idx, item in enumerate(released_items):
+                if allocated >= target_bytes:
+                    break
+                requested = min(int(item.get("bytes", 0) or 0), target_bytes - allocated)
+                if requested <= 0:
+                    continue
+                poison_tensor = torch.empty((requested,), dtype=torch.uint8, device=device)
+                self._fill_poison_then_free_tensor(poison_tensor, pattern, idx)
+                poison_tensors.append(poison_tensor)
+                allocated += requested
+                owner = (
+                    f"marlin_wna16.poison_then_free.layer{item.get('layer_id')}"
+                    f".{item.get('component', item.get('attribute', idx))}"
+                )
+                record = dsv4_memory_debug.record_owner_tensor(
+                    owner_label=owner,
+                    stage=f"{stage_label}:poison_then_free_allocated",
+                    tensor=poison_tensor,
+                    include_integrity=True,
+                    extra={
+                        "pattern": pattern,
+                        "source_released_item": item,
+                        "poison_index": idx,
+                    },
+                )
+                if record is not None:
+                    records.append(record)
+            torch.cuda.synchronize(device)
+        finally:
+            poison_count = len(poison_tensors)
+            poison_tensor = None
+            poison_tensors.clear()
+            torch.cuda.synchronize(device)
+        dsv4_memory_debug.append_jsonl(
+            "marlin_wna16_poison_then_free",
+            {
+                "event": "dsv4_marlin_wna16_poison_then_free_released",
+                "stage": f"{stage_label}:poison_then_free_released",
+                "pattern": pattern,
+                "target_bytes": int(target_bytes),
+                "allocated_bytes": int(allocated),
+                "tensor_count": int(poison_count),
+                "source_item_count": len(released_items),
+            },
+        )
+        return {
+            "enabled": True,
+            "stage_label": stage_label,
+            "pattern": pattern,
+            "target_bytes": int(target_bytes),
+            "allocated_bytes": int(allocated),
+            "allocated_gib": allocated / float(1 << 30),
+            "tensor_count": int(poison_count),
+            "records": records,
         }
 
     def _maybe_quarantine_marlin_wna16_released_blocks(
@@ -3673,11 +3793,7 @@ class DeepseekV4Model(BaseOP):
     ) -> dict[str, object]:
         if not dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV):
             return {"enabled": False}
-        released_items: list[dict[str, object]] = []
-        for report in release_reports:
-            for item in report.get("released", []):
-                if isinstance(item, dict) and int(item.get("bytes", 0) or 0) > 0:
-                    released_items.append(item)
+        released_items = _marlin_wna16_released_items(release_reports)
         total_released = int(sum(int(item.get("bytes", 0) or 0) for item in released_items))
         target_bytes = _env_bytes(_MARLIN_WNA16_QUARANTINE_BYTES_ENV, total_released)
         if target_bytes is None:
@@ -3686,14 +3802,7 @@ class DeepseekV4Model(BaseOP):
         pattern = os.environ.get(_MARLIN_WNA16_QUARANTINE_PATTERN_ENV, "zero").strip().lower()
         records: list[dict[str, object]] = []
         allocated = 0
-        device: torch.device | None = None
-        for layer in self.layers.op_list:
-            experts = getattr(layer.mlp, "experts", None)
-            cache = getattr(experts, "_marlin_wna16_weights", None)
-            tensor = getattr(cache, "w13", None)
-            if isinstance(tensor, torch.Tensor):
-                device = tensor.device
-                break
+        device = self._marlin_wna16_release_device()
         if device is None or device.type != "cuda":
             return {
                 "enabled": True,
@@ -3721,14 +3830,34 @@ class DeepseekV4Model(BaseOP):
                 owner_label=owner,
                 stage=f"{stage_label}:quarantine",
                 tensor=tensor,
-                include_integrity=False,
+                include_integrity=dsv4_memory_debug.env_flag(
+                    dsv4_memory_debug.DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV
+                ),
                 extra={
                     "pattern": pattern,
                     "source_released_item": item,
                     "quarantine_index": idx,
                 },
             )
+            guard_record: dict[str, object] = {
+                "owner": owner,
+                "stage": f"{stage_label}:quarantine",
+                "pattern": pattern,
+                "quarantine_index": idx,
+                "tensor_index": len(self._marlin_wna16_release_quarantine_tensors) - 1,
+                "source_released_item": item,
+                "tensor": dsv4_memory_debug.tensor_summary(tensor),
+            }
+            if dsv4_memory_debug.env_flag(
+                dsv4_memory_debug.DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV
+            ):
+                guard_record["initial_integrity"] = dsv4_memory_debug.tensor_integrity_summary(
+                    tensor
+                )
+            self._marlin_wna16_release_quarantine_records.append(guard_record)
             if record is not None:
+                if "initial_integrity" in guard_record:
+                    record["initial_integrity"] = guard_record["initial_integrity"]
                 records.append(record)
         return {
             "enabled": True,
@@ -3740,6 +3869,16 @@ class DeepseekV4Model(BaseOP):
             "tensor_count": len(records),
             "records": records,
         }
+
+    def _marlin_wna16_release_device(self) -> torch.device | None:
+        for layer in self.layers.op_list:
+            experts = getattr(layer.mlp, "experts", None)
+            cache = getattr(experts, "_marlin_wna16_weights", None)
+            for name in ("w13", "w2", "w13_scale", "w2_scale"):
+                tensor = getattr(cache, name, None)
+                if isinstance(tensor, torch.Tensor):
+                    return tensor.device
+        return None
 
     def _fill_quarantine_tensor(self, tensor: torch.Tensor, pattern: str, index: int) -> None:
         with torch.no_grad():
@@ -3753,6 +3892,82 @@ class DeepseekV4Model(BaseOP):
                 tensor.fill_(int(pattern.split(":", 1)[1], 0) % 256)
             else:
                 tensor.fill_(127)
+
+    def _fill_poison_then_free_tensor(
+        self,
+        tensor: torch.Tensor,
+        pattern: str,
+        index: int,
+    ) -> None:
+        with torch.no_grad():
+            if pattern in {"zero", "zeros"}:
+                tensor.fill_(0)
+            elif pattern in {"one", "ones"}:
+                tensor.fill_(1)
+            elif pattern in {"index", "deterministic"}:
+                tensor.fill_((int(index) * 37 + 17) % 251)
+            elif pattern in {"nan", "nan_byte", "ff", "0xff"}:
+                tensor.fill_(0xFF)
+            elif pattern in {"7f", "0x7f"}:
+                tensor.fill_(0x7F)
+            elif pattern in {"a5", "0xa5"}:
+                tensor.fill_(0xA5)
+            elif pattern.startswith("value:"):
+                tensor.fill_(int(pattern.split(":", 1)[1], 0) % 256)
+            else:
+                tensor.fill_(0xFF)
+
+    def check_marlin_wna16_release_guards(self, stage: str) -> dict[str, object]:
+        enabled = dsv4_memory_debug.env_flag(
+            dsv4_memory_debug.DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV
+        )
+        if not enabled or not self._marlin_wna16_release_quarantine_records:
+            return {
+                "enabled": enabled,
+                "stage": stage,
+                "guard_count": len(self._marlin_wna16_release_quarantine_records),
+                "mutated_count": 0,
+            }
+        records: list[dict[str, object]] = []
+        mutated_count = 0
+        for guard in self._marlin_wna16_release_quarantine_records:
+            tensor_index = int(guard.get("tensor_index", -1))
+            tensor = (
+                self._marlin_wna16_release_quarantine_tensors[tensor_index]
+                if 0 <= tensor_index < len(self._marlin_wna16_release_quarantine_tensors)
+                else None
+            )
+            current = dsv4_memory_debug.tensor_integrity_summary(tensor)
+            initial = guard.get("initial_integrity")
+            mutated = False
+            if isinstance(initial, dict):
+                for key in ("sample_checksum", "finite_ratio", "sample_abs_max"):
+                    if current.get(key) != initial.get(key):
+                        mutated = True
+                        break
+            if mutated:
+                mutated_count += 1
+            record = {
+                "event": "dsv4_marlin_wna16_release_guard_check",
+                "stage": stage,
+                "owner": guard.get("owner"),
+                "quarantine_index": guard.get("quarantine_index"),
+                "tensor_index": tensor_index,
+                "pattern": guard.get("pattern"),
+                "mutated": bool(mutated),
+                "initial_integrity": initial,
+                "current_integrity": current,
+                "source_released_item": guard.get("source_released_item"),
+            }
+            dsv4_memory_debug.append_jsonl("marlin_wna16_release_guards", record)
+            records.append(record)
+        return {
+            "enabled": True,
+            "stage": stage,
+            "guard_count": len(records),
+            "mutated_count": mutated_count,
+            "records": records,
+        }
 
     def audit_marlin_wna16_cache_integrity(self, stage: str) -> None:
         if not dsv4_memory_debug.env_flag(
@@ -3844,8 +4059,14 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
     ) -> dict[str, object]:
         return self.model.release_marlin_wna16_original_expert_weights(stage_label=stage_label)
 
+    def check_marlin_wna16_release_guards(self, stage: str) -> dict[str, object]:
+        return self.model.check_marlin_wna16_release_guards(stage)
+
     def audit_marlin_wna16_cache_integrity(self, stage: str) -> None:
         return self.model.audit_marlin_wna16_cache_integrity(stage)
+
+    def record_marlin_wna16_owner_allocations(self, stage: str) -> None:
+        return self.model.record_marlin_wna16_owner_allocations(stage)
 
     def forward(self):
         batch = get_global_ctx().batch

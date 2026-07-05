@@ -17,13 +17,7 @@ __pycache__/
 *.sqlite
 
 # performance milestone records
-!performance_milestones/**/*.json
-!performance_milestones/**/*.jsonl
-!performance_milestones/**/*.csv
-performance_milestones/**/raw/
-performance_milestones/**/*.nsys-rep
-performance_milestones/**/*.ncu-rep
-performance_milestones/**/*.sqlite
+performance_milestones/
 
 # binaries
 build/

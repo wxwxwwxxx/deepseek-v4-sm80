@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from math import gcd
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from minisgl.utils import div_ceil, dsv4_memory_debug
@@ -12,6 +12,16 @@ from .base import BaseKVCachePool
 
 DSV4CacheLayout = Literal["bf16_flat", "flashmla_fp8_packed"]
 DSV4_INDEXER_FP8_CACHE_ENV = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
+DSV4_MARLIN_WNA16_KV_SENTINEL_BYTES_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_KV_SENTINEL_BYTES"
+)
+DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV = (
+    "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC"
+)
+DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+)
+DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV = "MINISGL_DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -30,6 +40,78 @@ def _lcm(a: int, b: int) -> int:
 
 def _align_up(value: int, alignment: int) -> int:
     return div_ceil(value, alignment) * alignment
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _clear_allocated_kv_modes() -> set[str]:
+    explicit = DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV in os.environ
+    raw = os.environ.get(DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV, "").strip().lower()
+    release_enabled = dsv4_memory_debug.env_flag(
+        DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV
+    )
+    unsafe_no_clear_allowed = dsv4_memory_debug.env_flag(DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV)
+    if raw in {"0", "false", "no", "off", "none"}:
+        if release_enabled and not unsafe_no_clear_allowed:
+            raise RuntimeError(
+                f"{DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV}=none is unsafe with "
+                f"{DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV}=1. "
+                f"Use component clearing for production, or set "
+                f"{DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV}=1 for diagnostics only."
+            )
+        return set()
+    if raw == "" and not explicit:
+        if release_enabled:
+            return {"component"}
+        return set()
+    if raw == "":
+        if release_enabled and not unsafe_no_clear_allowed:
+            raise RuntimeError(
+                f"Explicit empty {DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV} is unsafe with "
+                f"{DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV}=1. "
+                f"Use component clearing for production, or set "
+                f"{DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV}=1 for diagnostics only."
+            )
+        return set()
+    modes = {part.strip() for part in raw.split(",") if part.strip()}
+    valid_modes = {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "all",
+        "full",
+        "component",
+        "state",
+        "kv",
+    }
+    unknown = modes - valid_modes
+    if unknown:
+        raise ValueError(
+            f"Unsupported {DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV} mode(s): "
+            f"{', '.join(sorted(unknown))}"
+        )
+    if modes & {"1", "true", "yes", "on", "all"}:
+        return {"full", "component", "state"}
+    selected = modes & {"full", "component", "state"}
+    if "kv" in modes:
+        selected.update({"full", "component"})
+    if release_enabled and not selected and not unsafe_no_clear_allowed:
+        raise RuntimeError(
+            f"{DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV}={raw!r} leaves Marlin WNA16 "
+            f"raw-expert release without component-slot initialization. Use component "
+            f"clearing for production, or set {DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV}=1 "
+            "for diagnostics only."
+        )
+    return selected
 
 
 @dataclass(frozen=True)
@@ -256,6 +338,19 @@ class DSV4CompressStatePool:
         self.kv_score_buffer[state_loc] = value
         self.kv_score_buffer[-1].clear()
 
+    def clear_state_locs(self, state_locs: torch.Tensor) -> None:
+        if state_locs.numel() == 0:
+            return
+        buffer = self.kv_score_buffer.kv_score
+        locs = torch.unique(state_locs.to(device=buffer.device, dtype=torch.long))
+        locs = locs[(locs >= 0) & (locs < self.kv_score_buffer.kv_score.shape[0])]
+        if locs.numel() == 0:
+            return
+        item_size = self.kv_score_buffer._item_size
+        buffer.index_fill_(0, locs, 0)
+        buffer[:, item_size:].index_fill_(0, locs, float("-inf"))
+        self.kv_score_buffer[-1].clear()
+
 
 class DeepSeekV4KVCache(BaseKVCachePool):
     """DSV4-specific KV pool with radix prefix reuse intentionally disabled.
@@ -418,6 +513,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._indexer_compress_state_pools: list[DSV4CompressStatePool | None] = [
             None
         ] * self._num_layers
+        self._marlin_wna16_kv_sentinel_records: list[dict[str, Any]] = []
         for mapping in self._layer_mapping:
             if mapping.compress_ratio == 4:
                 self._compress_state_pools[mapping.layer_id] = DSV4CompressStatePool(
@@ -451,6 +547,138 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                     device=device,
                     page_size=page_size,
                 )
+        self._maybe_install_marlin_wna16_kv_sentinels("after_kv_alloc")
+
+    def _maybe_install_marlin_wna16_kv_sentinels(self, stage: str) -> None:
+        if not dsv4_memory_debug.env_flag(
+            dsv4_memory_debug.DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG_ENV
+        ):
+            return
+        max_bytes = _env_int(DSV4_MARLIN_WNA16_KV_SENTINEL_BYTES_ENV, 1 << 20)
+        max_bytes = max(1, int(max_bytes))
+        sentinel_index = 0
+        for owner, tensor in self._marlin_wna16_kv_sentinel_candidates().items():
+            if tensor is None or tensor.numel() == 0:
+                continue
+            summary = dsv4_memory_debug.tensor_summary(tensor)
+            overlaps = dsv4_memory_debug.find_marlin_wna16_freed_range_overlaps(summary)
+            if not overlaps:
+                continue
+            tensor_start = int(summary.get("start", 0) or 0)
+            for overlap in overlaps:
+                offset = int(overlap.get("overlap_start", 0) or 0) - tensor_start
+                overlap_bytes = int(overlap.get("overlap_bytes", 0) or 0)
+                length = min(overlap_bytes, max_bytes)
+                if offset < 0 or length <= 0:
+                    continue
+                try:
+                    byte_slice = tensor.view(torch.uint8).reshape(-1).narrow(0, offset, length)
+                except Exception as exc:
+                    dsv4_memory_debug.append_jsonl(
+                        "marlin_wna16_kv_sentinels",
+                        {
+                            "event": "dsv4_marlin_wna16_kv_sentinel_install_error",
+                            "stage": stage,
+                            "owner": owner,
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "tensor": summary,
+                            "overlap": overlap,
+                        },
+                    )
+                    continue
+                pattern = (sentinel_index * 37 + 17) % 251
+                with torch.no_grad():
+                    byte_slice.fill_(pattern)
+                initial = dsv4_memory_debug.tensor_integrity_summary(byte_slice)
+                record = {
+                    "owner": owner,
+                    "stage": stage,
+                    "sentinel_index": sentinel_index,
+                    "pattern": int(pattern),
+                    "source_overlap": overlap,
+                    "tensor": summary,
+                    "slice_offset_bytes": int(offset),
+                    "slice_bytes": int(length),
+                    "slice_tensor": byte_slice,
+                    "initial_integrity": initial,
+                }
+                self._marlin_wna16_kv_sentinel_records.append(record)
+                dsv4_memory_debug.append_jsonl(
+                    "marlin_wna16_kv_sentinels",
+                    {
+                        "event": "dsv4_marlin_wna16_kv_sentinel_install",
+                        **{k: v for k, v in record.items() if k != "slice_tensor"},
+                    },
+                )
+                sentinel_index += 1
+
+    def _marlin_wna16_kv_sentinel_candidates(self) -> dict[str, torch.Tensor | None]:
+        tensors: dict[str, torch.Tensor | None] = {
+            "kvcache.dsv4.swa_buffer": self._swa_buffer,
+            "kvcache.dsv4.c4_buffer": self._c4_buffer,
+            "kvcache.dsv4.c128_buffer": self._c128_buffer,
+            "kvcache.dsv4.c4_indexer_buffer": self._c4_indexer_buffer,
+            "kvcache.dsv4.c4_indexer_fp8_paged_cache": self._c4_indexer_fp8_paged_cache,
+        }
+        for layer_id, pool in enumerate(self._compress_state_pools):
+            if pool is not None:
+                tensors[f"kvcache.dsv4.layer{layer_id}.compress_state.kv_score_buffer"] = (
+                    pool.kv_score_buffer.kv_score
+                )
+        for layer_id, pool in enumerate(self._indexer_compress_state_pools):
+            if pool is not None:
+                tensors[f"kvcache.dsv4.layer{layer_id}.indexer_state.kv_score_buffer"] = (
+                    pool.kv_score_buffer.kv_score
+                )
+        return tensors
+
+    def check_marlin_wna16_kv_sentinels(self, stage: str) -> dict[str, object]:
+        enabled = dsv4_memory_debug.env_flag(
+            dsv4_memory_debug.DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG_ENV
+        )
+        if not enabled or not self._marlin_wna16_kv_sentinel_records:
+            return {
+                "enabled": enabled,
+                "stage": stage,
+                "sentinel_count": len(self._marlin_wna16_kv_sentinel_records),
+                "mutated_count": 0,
+            }
+        records: list[dict[str, object]] = []
+        mutated_count = 0
+        for sentinel in self._marlin_wna16_kv_sentinel_records:
+            current = dsv4_memory_debug.tensor_integrity_summary(
+                sentinel.get("slice_tensor")  # type: ignore[arg-type]
+            )
+            initial = sentinel.get("initial_integrity")
+            mutated = False
+            if isinstance(initial, dict):
+                for key in ("sample_checksum", "finite_ratio", "sample_abs_max"):
+                    if current.get(key) != initial.get(key):
+                        mutated = True
+                        break
+            if mutated:
+                mutated_count += 1
+            record = {
+                "event": "dsv4_marlin_wna16_kv_sentinel_check",
+                "stage": stage,
+                "owner": sentinel.get("owner"),
+                "sentinel_index": sentinel.get("sentinel_index"),
+                "mutated": bool(mutated),
+                "initial_integrity": initial,
+                "current_integrity": current,
+                "source_overlap": sentinel.get("source_overlap"),
+                "slice_offset_bytes": sentinel.get("slice_offset_bytes"),
+                "slice_bytes": sentinel.get("slice_bytes"),
+            }
+            dsv4_memory_debug.append_jsonl("marlin_wna16_kv_sentinels", record)
+            records.append(record)
+        return {
+            "enabled": True,
+            "stage": stage,
+            "sentinel_count": len(records),
+            "mutated_count": mutated_count,
+            "records": records,
+        }
 
     def record_marlin_wna16_owner_allocations(self, stage: str) -> None:
         tensors: dict[str, torch.Tensor | None] = {
@@ -707,20 +935,189 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             self._dtype
         )
 
+    def _clear_full_locs(self, locs: torch.Tensor) -> None:
+        locs = self._sanitize_locs(locs, self._num_tokens)
+        if locs.numel() == 0:
+            return
+        self._swa_buffer.view(self._num_layers, self._num_tokens, self._head_dim).index_fill_(
+            1,
+            locs,
+            0,
+        )
+        self._record_alloc_clear("kvcache.dsv4.swa_buffer", locs.numel())
+
+    def _clear_c4_component_locs(self, locs: torch.Tensor) -> None:
+        locs = self._sanitize_locs(locs, self._c4_slots)
+        if locs.numel() == 0:
+            return
+        self._c4_buffer.index_fill_(1, locs, 0)
+        self._record_alloc_clear("kvcache.dsv4.c4_buffer", locs.numel())
+
+    def _clear_c4_indexer_component_locs(
+        self,
+        locs: torch.Tensor,
+        pages: torch.Tensor | None = None,
+    ) -> None:
+        locs = self._sanitize_locs(locs, self._c4_slots)
+        if locs.numel() == 0:
+            return
+        self._c4_indexer_buffer.index_fill_(1, locs, 0)
+        self._record_alloc_clear("kvcache.dsv4.c4_indexer_buffer", locs.numel())
+        if self._c4_indexer_fp8_paged_cache is not None:
+            if pages is None:
+                pages = torch.unique(locs // max(self._c4_indexer_fp8_page_size, 1))
+            pages = self._sanitize_locs(pages, self._c4_indexer_fp8_num_pages)
+            if pages.numel() > 0:
+                self._c4_indexer_fp8_paged_cache.index_fill_(1, pages, 0)
+                self._record_alloc_clear(
+                    "kvcache.dsv4.c4_indexer_fp8_paged_cache",
+                    pages.numel(),
+                )
+        if self._c4_indexer_fp8_values is not None:
+            self._c4_indexer_fp8_values.index_fill_(1, locs, 0)
+            self._record_alloc_clear("kvcache.dsv4.c4_indexer_fp8_values", locs.numel())
+        if self._c4_indexer_fp8_scales is not None:
+            self._c4_indexer_fp8_scales.index_fill_(1, locs, 0)
+            self._record_alloc_clear("kvcache.dsv4.c4_indexer_fp8_scales", locs.numel())
+
+    def _clear_c128_component_locs(self, locs: torch.Tensor) -> None:
+        locs = self._sanitize_locs(locs, self._c128_slots)
+        if locs.numel() == 0:
+            return
+        self._c128_buffer.index_fill_(1, locs, 0)
+        self._record_alloc_clear("kvcache.dsv4.c128_buffer", locs.numel())
+
+    def _clear_c4_state_locs(self, locs: torch.Tensor) -> None:
+        locs = self._sanitize_locs(locs, self._num_pages * self._c4_state_page_size)
+        if locs.numel() == 0:
+            return
+        for pool in self._compress_state_pools:
+            if pool is not None and pool.ratio == 4:
+                pool.clear_state_locs(locs)
+        self._record_alloc_clear("kvcache.dsv4.c4_state", locs.numel())
+
+    def _clear_c4_indexer_state_locs(self, locs: torch.Tensor) -> None:
+        locs = self._sanitize_locs(locs, self._num_pages * self._c4_state_page_size)
+        if locs.numel() == 0:
+            return
+        for pool in self._indexer_compress_state_pools:
+            if pool is not None and pool.ratio == 4:
+                pool.clear_state_locs(locs)
+        self._record_alloc_clear("kvcache.dsv4.c4_indexer_state", locs.numel())
+
+    def _clear_c128_state_locs(self, locs: torch.Tensor) -> None:
+        locs = self._sanitize_locs(locs, self._num_pages * self._c128_state_page_size)
+        if locs.numel() == 0:
+            return
+        for pool in self._compress_state_pools:
+            if pool is not None and pool.ratio == 128:
+                pool.clear_state_locs(locs)
+        self._record_alloc_clear("kvcache.dsv4.c128_state", locs.numel())
+
+    def _sanitize_locs(self, locs: torch.Tensor, upper_bound: int) -> torch.Tensor:
+        if locs.numel() == 0:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        locs = torch.unique(locs.to(device=self.device, dtype=torch.long))
+        return locs[(locs >= 0) & (locs < int(upper_bound))]
+
+    def _record_alloc_clear(self, owner: str, loc_count: int) -> None:
+        dsv4_memory_debug.append_jsonl(
+            "dsv4_kv_alloc_clear",
+            {
+                "event": "dsv4_kv_alloc_clear",
+                "owner": owner,
+                "loc_count": int(loc_count),
+                "estimated_bytes_cleared": int(
+                    self._estimated_alloc_clear_bytes(owner, loc_count)
+                ),
+                "mode": os.environ.get(DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV, ""),
+                "effective_modes": sorted(_clear_allocated_kv_modes()),
+            },
+        )
+
+    def _estimated_alloc_clear_bytes(self, owner: str, loc_count: int) -> int:
+        loc_count = max(0, int(loc_count))
+        dtype_size = int(self._dtype.itemsize)
+        state_dtype_size = int(self._policy.compress_state_dtype.itemsize)
+        if owner == "kvcache.dsv4.swa_buffer":
+            return self._num_layers * loc_count * self._head_dim * dtype_size
+        if owner == "kvcache.dsv4.c4_buffer":
+            return self._c4_layer_count * loc_count * self._head_dim * dtype_size
+        if owner == "kvcache.dsv4.c128_buffer":
+            return self._c128_layer_count * loc_count * self._head_dim * dtype_size
+        if owner == "kvcache.dsv4.c4_indexer_buffer":
+            return self._c4_layer_count * loc_count * self._index_head_dim * dtype_size
+        if owner == "kvcache.dsv4.c4_indexer_fp8_paged_cache":
+            width = self._c4_indexer_fp8_page_size * (self._index_head_dim + 4)
+            return self._c4_layer_count * loc_count * width
+        if owner == "kvcache.dsv4.c4_indexer_fp8_values":
+            return self._c4_layer_count * loc_count * self._index_head_dim
+        if owner == "kvcache.dsv4.c4_indexer_fp8_scales":
+            return self._c4_layer_count * loc_count * 4
+        if owner == "kvcache.dsv4.c4_state":
+            layers = sum(1 for pool in self._compress_state_pools if pool is not None and pool.ratio == 4)
+            return layers * loc_count * 4 * self._head_dim * state_dtype_size
+        if owner == "kvcache.dsv4.c4_indexer_state":
+            layers = sum(
+                1
+                for pool in self._indexer_compress_state_pools
+                if pool is not None and pool.ratio == 4
+            )
+            return layers * loc_count * 4 * self._index_head_dim * state_dtype_size
+        if owner == "kvcache.dsv4.c128_state":
+            layers = sum(
+                1 for pool in self._compress_state_pools if pool is not None and pool.ratio == 128
+            )
+            return layers * loc_count * 2 * self._head_dim * state_dtype_size
+        return 0
+
     def on_pages_allocated(self, page_starts: torch.Tensor, page_size: int) -> None:
         full_locs = self._expand_page_starts(page_starts, page_size)
         if full_locs.numel() == 0:
             return
+        clear_modes = _clear_allocated_kv_modes()
         self._full_refcount[full_locs] += 1
+        if "full" in clear_modes:
+            self._clear_full_locs(full_locs)
         if self._component_loc_ownership_enabled:
-            self._allocate_component_pages_for_full_pages(page_starts, page_size)
+            self._allocate_component_pages_for_full_pages(
+                page_starts,
+                page_size,
+                clear_modes=clear_modes,
+            )
             return
         if self._c4_layer_count:
             c4_locs = torch.unique(full_locs // 4)
             self._c4_refcount[c4_locs] += 1
             self._c4_indexer_refcount[c4_locs] += 1
+            if "component" in clear_modes:
+                self._clear_c4_component_locs(c4_locs)
+                self._clear_c4_indexer_component_locs(c4_locs)
+            if "state" in clear_modes:
+                state_locs = self.state_locs_from_full_locs(
+                    full_locs,
+                    4,
+                    component="attention",
+                )
+                indexer_state_locs = self.state_locs_from_full_locs(
+                    full_locs,
+                    4,
+                    component="indexer",
+                )
+                self._clear_c4_state_locs(state_locs)
+                self._clear_c4_indexer_state_locs(indexer_state_locs)
         if self._c128_layer_count:
-            self._c128_refcount[torch.unique(full_locs // 128)] += 1
+            c128_locs = torch.unique(full_locs // 128)
+            self._c128_refcount[c128_locs] += 1
+            if "component" in clear_modes:
+                self._clear_c128_component_locs(c128_locs)
+            if "state" in clear_modes:
+                state_locs = self.state_locs_from_full_locs(
+                    full_locs,
+                    128,
+                    component="attention",
+                )
+                self._clear_c128_state_locs(state_locs)
 
     def on_token_indices_freed(
         self,
@@ -1107,7 +1504,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self,
         page_starts: torch.Tensor,
         page_size: int,
+        *,
+        clear_modes: set[str] | None = None,
     ) -> None:
+        clear_modes = clear_modes or set()
         page_starts = page_starts.to(device=self.device, dtype=torch.long)
         if page_starts.numel() == 0:
             return
@@ -1132,6 +1532,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
             self._c4_refcount[c4_locs] += 1
             self._full_to_c4_page[full_pages] = c4_pages
+            if "component" in clear_modes:
+                self._clear_c4_component_locs(c4_locs)
 
             indexer_pages = self._alloc_component_pages(
                 "_free_c4_indexer_pages",
@@ -1144,6 +1546,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
             self._c4_indexer_refcount[indexer_locs] += 1
             self._full_to_c4_indexer_page[full_pages] = indexer_pages
+            if "component" in clear_modes:
+                self._clear_c4_indexer_component_locs(indexer_locs, indexer_pages)
 
             c4_state_pages = self._alloc_component_pages(
                 "_free_c4_state_pages",
@@ -1156,6 +1560,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
             self._c4_state_refcount[c4_state_locs] += 1
             self._full_to_c4_state_page[full_pages] = c4_state_pages
+            if "state" in clear_modes:
+                self._clear_c4_state_locs(c4_state_locs)
 
             indexer_state_pages = self._alloc_component_pages(
                 "_free_c4_indexer_state_pages",
@@ -1168,6 +1574,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
             self._c4_indexer_state_refcount[indexer_state_locs] += 1
             self._full_to_c4_indexer_state_page[full_pages] = indexer_state_pages
+            if "state" in clear_modes:
+                self._clear_c4_indexer_state_locs(indexer_state_locs)
 
         if self._c128_layer_count:
             c128_pages = self._alloc_component_pages("_free_c128_pages", count, "C128")
@@ -1177,6 +1585,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
             self._c128_refcount[c128_locs] += 1
             self._full_to_c128_page[full_pages] = c128_pages
+            if "component" in clear_modes:
+                self._clear_c128_component_locs(c128_locs)
 
             c128_state_pages = self._alloc_component_pages(
                 "_free_c128_state_pages",
@@ -1189,6 +1599,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
             self._c128_state_refcount[c128_state_locs] += 1
             self._full_to_c128_state_page[full_pages] = c128_state_pages
+            if "state" in clear_modes:
+                self._clear_c128_state_locs(c128_state_locs)
 
     def _release_component_pages_for_full_pages(
         self,

@@ -161,6 +161,9 @@ def _marlin_wna16_release_timing() -> str:
         "after_prebuild": "model_prepare",
         "after_full_model_prebuild": "model_prepare",
         "model_prepare": "model_prepare",
+        "before_kv": "before_kv_alloc",
+        "before_kv_alloc": "before_kv_alloc",
+        "before_kv_allocation": "before_kv_alloc",
         "after_kv": "after_kv_alloc",
         "after_kv_alloc": "after_kv_alloc",
         "after_kv_allocation": "after_kv_alloc",
@@ -174,6 +177,10 @@ def _marlin_wna16_release_timing() -> str:
         "after_decode_step1": "after_first_decode",
     }
     return aliases.get(raw, raw)
+
+
+def _sanitize_report_key(stage: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in stage).strip("_") or "stage"
 
 
 def _audit_rank() -> int:
@@ -365,11 +372,24 @@ class GraphRunner:
         report = release(stage_label=stage_label)
         self._marlin_wna16_debug_release_done = True
         self.capture_status[f"moe_marlin_wna16_{stage_label}"] = report
+        self._check_marlin_wna16_release_guards(f"{stage_label}:after")
 
     def record_marlin_wna16_owner_allocations(self, stage: str) -> None:
         buffer = getattr(self, "buffer", None)
         if buffer is not None:
             buffer.record_marlin_wna16_owner_allocations(stage)
+
+    def _check_marlin_wna16_release_guards(self, stage: str) -> None:
+        check = getattr(self.model, "check_marlin_wna16_release_guards", None)
+        if not callable(check):
+            return
+        report = check(stage)
+        if not isinstance(report, dict) or not report.get("enabled", False):
+            return
+        key = f"moe_marlin_wna16_guard_{_sanitize_report_key(stage)}"
+        self.capture_status[key] = {
+            k: v for k, v in report.items() if k != "records"
+        }
 
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
@@ -482,12 +502,18 @@ class GraphRunner:
                     timing="before_warmup_forward",
                     stage_label=f"before_warmup_forward_bs{int(bs)}_release",
                 )
+                self._check_marlin_wna16_release_guards(
+                    f"before_warmup_forward_bs{int(bs)}"
+                )
                 with dsv4_memory_debug.warmup_forward_context(
                     label="graph_capture_warmup_model_forward",
                     batch_size=bs,
                     device=self.device,
                 ):
                     self.buffer.logits[:bs] = model.forward()
+                self._check_marlin_wna16_release_guards(
+                    f"after_warmup_forward_bs{int(bs)}"
+                )
                 self._maybe_release_marlin_wna16_for_timing(
                     timing="after_warmup_forward",
                     stage_label=f"after_warmup_forward_bs{int(bs)}_release",
@@ -508,6 +534,9 @@ class GraphRunner:
                             self.buffer.logits[:bs], dim=-1
                         ).to(torch.int32)
             record_stage("after_actual_cuda_graph_capture", bs)
+            self._check_marlin_wna16_release_guards(
+                f"after_actual_cuda_graph_capture_bs{int(bs)}"
+            )
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
                 self.capture_status["capture_graph_pool_reuse_anchor_bs"] = int(bs)

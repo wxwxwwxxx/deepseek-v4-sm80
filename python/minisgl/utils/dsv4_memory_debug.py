@@ -28,6 +28,21 @@ DSV4_MARLIN_WNA16_OWNER_LEDGER_INTEGRITY_ENV = (
 DSV4_MARLIN_WNA16_LAYER2_OWNER_PROBE_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_LAYER2_OWNER_PROBE"
 )
+DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG"
+)
+DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG"
+)
+DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_THEN_FREE"
+)
+DSV4_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_THEN_FREE_BYTES"
+)
+DSV4_MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_THEN_FREE_PATTERN"
+)
 DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV = "MINISGL_DSV4_WARMUP_FORWARD_MEMORY_DEBUG"
 DEFAULT_AUDIT_LOG_DIR = "performance_milestones/target08_moe_marlin_wna16_cache_lifecycle/raw"
 
@@ -412,9 +427,15 @@ def _freed_range_brief(record: dict[str, Any], *, distance_bytes: int | None = N
 
 
 def _find_freed_range_overlap(summary: dict[str, Any]) -> dict[str, Any] | None:
+    overlaps = find_marlin_wna16_freed_range_overlaps(summary)
+    return overlaps[0] if overlaps else None
+
+
+def find_marlin_wna16_freed_range_overlaps(summary: dict[str, Any]) -> list[dict[str, Any]]:
     tensor_range = _range_from_summary(summary)
     if tensor_range is None:
-        return None
+        return []
+    overlaps: list[dict[str, Any]] = []
     for freed in _marlin_wna16_freed_ranges:
         freed_range = _range_from_summary(freed)
         if freed_range is not None and _ranges_overlap(tensor_range, freed_range):
@@ -424,8 +445,14 @@ def _find_freed_range_overlap(summary: dict[str, Any]) -> dict[str, Any] | None:
             brief["overlap_start"] = int(overlap_start)
             brief["overlap_end"] = int(overlap_end)
             brief["overlap_bytes"] = int(overlap_end - overlap_start)
-            return brief
-    return None
+            overlaps.append(brief)
+    return overlaps
+
+
+def tensor_marlin_wna16_freed_range_overlaps(tensor: torch.Tensor | None) -> list[dict[str, Any]]:
+    if tensor is None:
+        return []
+    return find_marlin_wna16_freed_range_overlaps(tensor_summary(tensor))
 
 
 def _nearest_freed_range(summary: dict[str, Any]) -> dict[str, Any] | None:

@@ -726,6 +726,13 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
             "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE",
             "MINISGL_DSV4_MARLIN_WNA16_PREBUILD",
             "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING",
+            "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN",
+            "MINISGL_DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG",
+            "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC",
         )
 
         @staticmethod
@@ -740,8 +747,12 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
     variants = bench._variant_map()
     prebuild = variants["dsv4_sm80_a100_victory_marlin_prebuild"]
     release = variants["dsv4_sm80_a100_victory_marlin_release"]
+    safe_arena = variants["dsv4_sm80_a100_victory_marlin_release_safe_arena"]
     prefix_release = variants[
         "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release"
+    ]
+    prefix_safe_arena = variants[
+        "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
     ]
 
     assert prebuild.env == {
@@ -752,15 +763,27 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
     assert release.env == {
         **prebuild.env,
         "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS": "1",
+        "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING": "before_kv_alloc",
+        "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT": "1",
+        "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC": "component",
+    }
+    assert safe_arena.env == {
+        **release.env,
+        "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS": "1",
+        "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES": "3.1875GiB",
+        "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN": "deterministic",
+        "MINISGL_DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG": "1",
     }
     assert prefix_release.env == {
         **variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"].env,
-        "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND": "marlin_wna16",
-        "MINISGL_DSV4_MARLIN_WNA16_PREBUILD": "1",
-        "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS": "1",
+        **release.env,
+    }
+    assert prefix_safe_arena.env == {
+        **variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"].env,
+        **safe_arena.env,
     }
 
-    result = bench.configure_variant(FakeKernel, release)
+    result = bench.configure_variant(FakeKernel, safe_arena)
 
     assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"] == "marlin_wna16"
     assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_MARLIN_WNA16_PREBUILD"] == "1"
@@ -770,13 +793,22 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
         ]
         == "1"
     )
+    assert (
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING"]
+        == "before_kv_alloc"
+    )
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT"] == "1"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC"] == "component"
     assert "MINISGL_DSV4_MARLIN_WNA16_PREBUILD" in result["active_dsv4_toggles"]
     assert (
         "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
         in result["active_dsv4_toggles"]
     )
+    assert "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT" in result["active_dsv4_toggles"]
     assert release.allow_dsv4_cuda_graph is True
+    assert safe_arena.allow_dsv4_cuda_graph is True
     assert prefix_release.allow_dsv4_cuda_graph is True
+    assert prefix_safe_arena.allow_dsv4_cuda_graph is True
 
 
 def test_marlin_release_env_is_not_preserved_across_variants(monkeypatch):
@@ -850,6 +882,42 @@ def test_configure_variant_preserves_route_b_lifetime_verifier(monkeypatch):
     assert (
         "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY"
         in result["active_dsv4_toggles"]
+    )
+
+
+def test_configure_variant_preserves_marlin_release_layer_filter(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_MARLIN_WNA16_RELEASE_LAYER_FILTER_ENV = (
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER"
+        )
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            return os.environ.get(name) in {"1", "true"}
+
+    monkeypatch.setenv("MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER", "0-7")
+    result = bench.configure_variant(
+        FakeKernel,
+        bench._variant_map()["dsv4_sm80_a100_victory_marlin_release"],
+    )
+
+    assert result["preserved_dsv4_sm80_env"] == {
+        "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER": "0-7"
+    }
+    assert (
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER"]
+        == "0-7"
+    )
+    assert (
+        "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER"
+        not in result["active_dsv4_toggles"]
     )
 
 

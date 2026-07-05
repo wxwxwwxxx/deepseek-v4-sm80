@@ -8,6 +8,7 @@ import minisgl.distributed.info as dist_info
 import pytest
 import torch
 import torch.nn.functional as F
+from minisgl.utils import dsv4_memory_debug
 from minisgl.attention import create_attention_backend
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
@@ -412,6 +413,40 @@ def test_deepseek_v4_marlin_release_fail_closed_for_grouped_backend(monkeypatch)
         match="Marlin WNA16 release preset has released raw routed expert weights",
     ):
         experts.forward(hidden, weights, indices)
+
+
+def test_deepseek_v4_release_guard_integrity_reports_mutation(monkeypatch, tmp_path):
+    _reset_globals()
+    cfg = _tiny_dsv4_config()
+    model = DeepseekV4Model(cfg)
+    guard = torch.empty(64, dtype=torch.uint8)
+    guard.fill_(7)
+    initial = dsv4_memory_debug.tensor_integrity_summary(guard)
+    model._marlin_wna16_release_quarantine_tensors = [guard]
+    model._marlin_wna16_release_quarantine_records = [
+        {
+            "owner": "test.guard",
+            "stage": "test",
+            "pattern": "deterministic",
+            "quarantine_index": 0,
+            "tensor_index": 0,
+            "source_released_item": {"layer_id": 0, "component": "w13_weight"},
+            "initial_integrity": initial,
+        }
+    ]
+    monkeypatch.setenv(
+        dsv4_memory_debug.DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV,
+        "1",
+    )
+    monkeypatch.setenv(dsv4_memory_debug.DSV4_AUDIT_LOG_DIR_ENV, str(tmp_path))
+
+    clean = model.check_marlin_wna16_release_guards("before")
+    guard[0] = 9
+    mutated = model.check_marlin_wna16_release_guards("after")
+
+    assert clean["mutated_count"] == 0
+    assert mutated["mutated_count"] == 1
+    assert mutated["records"][0]["mutated"] is True
 
 
 def test_deepseek_v4_prepare_releases_marlin_weights_after_all_prebuilds(monkeypatch):

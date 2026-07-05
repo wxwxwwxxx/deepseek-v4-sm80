@@ -1,6 +1,0 @@
-mode,scenario,runs,output_tok_s_mean,decode_prepare_s_mean,decode_forward_s_mean,replay,eager,source
-phase1 prefix on,serving_mixed_112req_wave16,3,169.73810544431487,0.9403043414155642,9.975746252263585,441,0,08.27/08.26 frozen summary
-Route B graph baseline,serving_mixed_112req_wave16,3,136.23732239370517,4.479807327811916,10.089711573595801,441,0,08.27/08.26 frozen summary
-Route B direct C4,serving_mixed_112req_wave16,3,138.12812023047562,4.206715962539117,10.129748129596313,441,0,08.27/08.26 frozen summary
-Route B direct C4 + lifetime cache,serving_mixed_112req_wave16,3,162.47257961845625,1.1415871760497491,10.007659922043482,441,0,08.27/08.26 frozen summary
-08.28 Route B direct C4 + lifetime cache,serving_mixed_112req_wave16,3,163.72195753619525,1.1358899287879467,9.892713996892175,441,0,08.28 current gate

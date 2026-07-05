@@ -1,6 +1,0 @@
-rank,bucket,evidence,seconds_or_ms,share,interpretation
-1,decode forward,serving_mixed phase total,9.762444363286098,0.5696895305980867,dominant remaining E2E bucket; owner timing points to comm/attention work inside it
-2,communication / all-reduce owners,"owner timing profile, attribution only",6489.2434307821095,0.37868118951047147,"wo_b row-parallel, MoE reduce-once, and embedding all-reduce are top owner labels"
-3,prefill forward / TTFT base cost,serving_mixed phase total,4.783209844181935,0.27912523436568104,not helped unless workload has real prefix hits
-4,decode prepare / prefix metadata runtime,serving_mixed phase total plus owner timing,1.091879177838564,0.06371684315374643,post-lifetime-cache tax; compare against 08.28 and owner rows
-5,component page-table lifetime cache owner,"owner timing profile, attribution only",356.1024974286556,0.020780437465832646,metadata owner is now small relative to decode forward

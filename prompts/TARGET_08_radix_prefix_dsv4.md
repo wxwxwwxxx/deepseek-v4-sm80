@@ -13,6 +13,9 @@ prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
 prompts/TARGET_08.35_dsv4_sm80_marlin_wna16_release_preset_promotion.md
 prompts/TARGET_08.36_dsv4_sm80_marlin_wna16_release_correctness_attribution.md
 prompts/TARGET_08.37_dsv4_sm80_marlin_wna16_release_storage_reuse_owner.md
+prompts/TARGET_08.38_dsv4_sm80_marlin_wna16_safe_release_arena_capacity.md
+prompts/TARGET_08.39_dsv4_sm80_marlin_wna16_old_address_root_cause.md
+prompts/TARGET_08.40_dsv4_sm80_marlin_wna16_release_component_clear_promotion.md
 ```
 
 TARGET 08.31 is about SGLang-aligned SWA lifecycle and memory ownership.  It is
@@ -56,6 +59,27 @@ as primary cause, and sampled Marlin cache corruption.  Its strongest evidence
 points to early physical release of large expert-weight storages interacting
 with later KV/cache/warmup/graph/attention/indexer allocations.  TARGET 08.37
 should identify the concrete storage-reuse owner or safe release boundary.
+
+TARGET 08.38 is the repair target after TARGET 08.37.  TARGET 08.37 found that
+the immediate-release failure is triggered when DSV4 KV/component pools reuse
+released raw expert-weight ranges.  TARGET 08.38 should implement a safe
+release arena / capacity-planning policy that keeps live KV/component buffers
+off unsafe released ranges while preserving meaningful KV headroom.
+
+TARGET 08.39 is the root-cause target after TARGET 08.38.  TARGET 08.38 proved
+that a `3.1875 GiB/rank` guard arena can make `before_kv_alloc` release useful
+and correctness-clean, but it did not identify the owner that makes unguarded
+reuse unsafe.  TARGET 08.39 should map that guard to source expert ranges,
+poison old expert regions, bisect stages/layers/kernels, and try to fix the
+underlying stale-address, uninitialized-read, stream-lifetime, or OOB issue so
+KV/component tensors can safely use the recovered raw-expert capacity.
+
+TARGET 08.40 is the promotion target after TARGET 08.39.  TARGET 08.39 found
+that the release bug is an uninitialized DSV4 component-cache read after
+allocator reuse of old raw expert ranges, and that component-slot clear on page
+allocation makes unguarded release pass.  TARGET 08.40 should productionize
+that fix, add regression coverage, run macro/prefix/serving gates, and decide
+whether to promote the release preset.
 
 Milestone tag:
 
@@ -266,7 +290,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.31, TARGET 08.37, or
+3. the active future target prompt, currently TARGET 08.31, TARGET 08.40, or
    a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
@@ -320,10 +344,12 @@ for all traffic.
 
 ### CUDA Graph Memory Pool
 
-Status: active follow-up as TARGET 08.37 after the broad TARGET 08.32 probe,
+Status: active follow-up as TARGET 08.40 after the broad TARGET 08.32 probe,
 the focused TARGET 08.33 indexer audit, TARGET 08.34 MoE lifecycle
 attribution, TARGET 08.35 release-preset promotion gate, and TARGET 08.36
-release-correctness attribution.
+release-correctness attribution, and TARGET 08.37 storage-reuse owner
+attribution, TARGET 08.38 safe-arena capacity validation, and TARGET 08.39
+old-address root-cause attribution.
 
 Graph capture delta is large and repeatable.  TARGET 08.06/08.07 found it is
 not primarily caused by BF16 caches, metadata, bucket count, greedy sample,
@@ -413,6 +439,61 @@ allocation ledger, release timing ladder, poison/quarantine probes, and a
 layer2 indexer/attention owner probe to identify the concrete unsafe owner or
 the earliest safe release boundary.
 
+TARGET 08.37 result: the unsafe owner is the DSV4 KV/component allocation phase
+after immediate model-prepare release.  Owner ledgers show `after_kv_alloc`
+overlaps in `kvcache.dsv4.c4_buffer`, `c4_indexer_buffer`,
+`c4_indexer_fp8_paged_cache`, `c128_buffer`, and per-layer
+`compress_state` / `indexer_state` buffers.  Releasing after KV allocation
+passes eager and graph smokes but is capacity-neutral.  Freed-block quarantine
+passes, showing the issue follows allocator ownership of released ranges, not
+raw weight contents.  The next target is:
+
+```text
+prompts/TARGET_08.38_dsv4_sm80_marlin_wna16_safe_release_arena_capacity.md
+```
+
+TARGET 08.38 should repair the release route by separating capacity accounting
+from unsafe address reuse.  It should plan with a Marlin release credit while
+using an arena/guard/allocation-order policy to keep live KV/component buffers
+off unsafe released expert-weight ranges.
+
+TARGET 08.38 result: a `before_kv_alloc` release with a `3.1875 GiB/rank`
+deterministic guard arena passed short text smokes, graph replay, and the
+historical 4096x128 / 4096x1024 macro shapes.  Auto-planned capacity improved
+from `1,826` to `2,602` pages at page size `256`, a gain of `198,656` planned
+tokens.  The guard is 32 tensors and, in the rank-0 safe-arena record, maps to
+layers `0-7` and four raw expert components per layer.  This is not yet proof
+that layers `0-7` are semantically special; it may reflect release-ledger or
+allocator order.  The next target is:
+
+```text
+prompts/TARGET_08.39_dsv4_sm80_marlin_wna16_old_address_root_cause.md
+```
+
+TARGET 08.39 should stop treating the guard as the final answer.  It should
+use old expert address traps, NaN/byte poison, KV-as-sentinel probes,
+stage/layer bisection, and stream-lifetime controls to find the root cause.
+The preferred success condition is unguarded early release passing while
+KV/component tensors safely use the formerly raw expert-weight ranges.
+
+TARGET 08.39 result: the release bug was attributed to uninitialized DSV4
+component-cache reads after allocator reuse of old raw expert-weight storage.
+`clear=component` passes, while `clear=none`, `clear=full`, and `clear=state`
+do not.  `CUDA_LAUNCH_BLOCKING=1 + clear=none` still fails, making a
+stream-lifetime race unlikely.  Fixed unguarded release passes eager and graph
+text smokes, records `0` guard bytes, still lets KV/component owners overlap
+old raw expert ranges, and auto-plans `2,779` pages at page size `256`.  The
+next target is:
+
+```text
+prompts/TARGET_08.40_dsv4_sm80_marlin_wna16_release_component_clear_promotion.md
+```
+
+TARGET 08.40 should productionize the component-slot clear fix, add regression
+tests, run macro/prefix/serving performance gates, measure page-allocation
+clear overhead, and decide whether to promote the Marlin WNA16 raw-expert
+release preset.
+
 Old reports:
 
 ```text
@@ -423,6 +504,9 @@ performance_milestones/target08_indexer_capture_static_width_audit/README.md
 performance_milestones/target08_moe_marlin_wna16_cache_lifecycle/README.md
 performance_milestones/target08_marlin_wna16_release_preset_promotion/README.md
 performance_milestones/target08_marlin_wna16_release_correctness_attribution/README.md
+performance_milestones/target08_marlin_wna16_release_storage_reuse_owner/README.md
+performance_milestones/target08_marlin_wna16_safe_release_arena_capacity/README.md
+performance_milestones/target08_marlin_wna16_old_address_root_cause/README.md
 ```
 
 ### Broader Serving Benchmark

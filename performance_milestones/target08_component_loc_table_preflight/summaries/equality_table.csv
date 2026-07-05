@@ -1,9 +1,0 @@
-scenario,phase,hit_style,active_rows,swa_page_indices,c4_sparse_page_indices,c128_page_indices,c4_out_loc,c128_out_loc,c4_indexer_out_loc,indexer_page_table,indexer_loc_table_gather,c4_state_loc_from_swa,c128_state_loc_from_swa,c4_indexer_state_loc_from_swa,all_equal
-full_hit_decode_page257,decode,full hit,1,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass
-partial_hit_suffix_prefill_256_to_258,prefill,partial hit,2,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass
-miss_style_prefill_258,prefill,miss style,258,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass
-page_boundaries_255_256_257_258_decode,decode,boundary,4,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass
-c4_boundaries_decode,decode,C4 boundary,5,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass
-c128_boundaries_decode,decode,C128 boundary,5,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass
-swa_127_128_129_decode,decode,SWA boundary,3,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass
-batched_same_layout_rows,prefill,batched same-layout,4,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass,pass

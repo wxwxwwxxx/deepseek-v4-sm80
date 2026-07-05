@@ -1,9 +1,0 @@
-{
-  "target_08_20_decision": "GO_WITH_GUARDRAILS",
-  "reason": "Phase-1 full-page retention crosses the 20-30% KV-pool threshold in 08.10 sustained traffic and reaches 112/128 pages under eviction pressure.",
-  "guardrails": [
-    "Do not promote prefix cache by default before the 08.10 synthetic token mismatch is resolved.",
-    "Keep 08.20 scoped to independent SWA/component retention; do not add low-precision cache or graph allocator work.",
-    "Require component-level metrics and correctness tests for full/SWA/C4/C128/indexer/compress-state ownership."
-  ]
-}

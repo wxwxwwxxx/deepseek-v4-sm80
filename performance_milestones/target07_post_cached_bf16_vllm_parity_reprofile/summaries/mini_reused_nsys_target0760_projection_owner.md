@@ -1,1 +1,0 @@
-../../target07_cached_bf16_indexer_wq_b_projection_backend/summaries/nsys_target0760_qwqb_wob_idxwqb_projection_owner_4096x128_bs4_np128_rank0_projection_owner.md

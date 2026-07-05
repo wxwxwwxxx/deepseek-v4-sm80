@@ -35,6 +35,16 @@ _MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMI
 _MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_AFTER_GRAPH_CAPTURE"
 )
+_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT"
+)
+_MARLIN_WNA16_RELEASE_CREDIT_SAFETY_MARGIN_BYTES_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CREDIT_SAFETY_MARGIN_BYTES"
+)
+_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
+)
+_MARLIN_WNA16_QUARANTINE_BYTES_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
 
 
 class ForwardOutput(NamedTuple):
@@ -56,6 +66,7 @@ class Engine:
         torch.cuda.set_stream(self.stream)
         self.dtype = config.dtype
         self._marlin_wna16_debug_release_done = False
+        self._marlin_wna16_decode_guard_checks = 0
         self.ctx = Context(config.page_size)
         set_global_ctx(self.ctx)
 
@@ -75,10 +86,16 @@ class Engine:
             self.model_prepare_report = {}
         self._record_marlin_wna16_owner_allocations("after_model_prepare")
         self._audit_marlin_wna16_cache_integrity("after_model_prepare")
+        self._check_marlin_wna16_release_guards("after_model_prepare")
 
         # ======================= KV cache initialization ========================
         self.num_pages = self._determine_num_pages(init_free_memory, config)
         self._audit_marlin_wna16_cache_integrity("after_kv_capacity_empty_cache")
+        self._maybe_release_marlin_wna16_for_timing(
+            timing="before_kv_alloc",
+            stage_label="before_kv_alloc_release",
+        )
+        self._check_marlin_wna16_release_guards("after_before_kv_alloc_release")
         num_tokens = self.num_pages * config.page_size
         self.ctx.kv_cache = self.kv_cache = create_kvcache_pool(
             model_config=config.model_config,
@@ -91,6 +108,8 @@ class Engine:
             ),
         )
         self._record_marlin_wna16_owner_allocations("after_kv_alloc")
+        self._check_marlin_wna16_release_guards("after_kv_alloc")
+        self._check_marlin_wna16_kv_sentinels("after_kv_alloc")
         self._maybe_release_marlin_wna16_for_timing(
             timing="after_kv_alloc",
             stage_label="after_kv_alloc_release",
@@ -115,6 +134,8 @@ class Engine:
                 "aligned_max_seq_len": int(aligned_max_seq_len),
             },
         )
+        self._check_marlin_wna16_release_guards("after_page_table_alloc")
+        self._check_marlin_wna16_kv_sentinels("after_page_table_alloc")
 
         # ======================= Attention & MoE backend initialization ========================
         self.ctx.attn_backend = self.attn_backend = create_attention_backend(
@@ -122,6 +143,8 @@ class Engine:
         )
         if config.model_config.is_moe:
             self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
+        self._check_marlin_wna16_release_guards("after_attention_backend_init")
+        self._check_marlin_wna16_kv_sentinels("after_attention_backend_init")
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
@@ -162,6 +185,8 @@ class Engine:
             stage_label="after_graph_capture_release",
         )
         self._audit_marlin_wna16_cache_integrity("after_graph_runner_init")
+        self._check_marlin_wna16_release_guards("after_graph_runner_init")
+        self._check_marlin_wna16_kv_sentinels("after_graph_runner_init")
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         init_method = config.distributed_init_method or config.distributed_addr
@@ -199,6 +224,9 @@ class Engine:
             "after_prebuild": "model_prepare",
             "after_full_model_prebuild": "model_prepare",
             "model_prepare": "model_prepare",
+            "before_kv": "before_kv_alloc",
+            "before_kv_alloc": "before_kv_alloc",
+            "before_kv_allocation": "before_kv_alloc",
             "after_kv": "after_kv_alloc",
             "after_kv_alloc": "after_kv_alloc",
             "after_kv_allocation": "after_kv_alloc",
@@ -227,6 +255,44 @@ class Engine:
         self._marlin_wna16_debug_release_done = True
         self.model_prepare_report[f"moe_marlin_wna16_{stage_label}"] = report
         self._record_marlin_wna16_owner_allocations(f"{stage_label}:after")
+        self._check_marlin_wna16_release_guards(f"{stage_label}:after")
+
+    def _check_marlin_wna16_release_guards(self, stage: str) -> None:
+        check = getattr(self.model, "check_marlin_wna16_release_guards", None)
+        if not callable(check):
+            return
+        report = check(stage)
+        if not isinstance(report, dict) or not report.get("enabled", False):
+            return
+        key = f"moe_marlin_wna16_guard_{_sanitize_report_key(stage)}"
+        self.model_prepare_report[key] = {
+            k: v for k, v in report.items() if k != "records"
+        }
+        mutated = int(report.get("mutated_count", 0) or 0)
+        if mutated:
+            logger.error(
+                "Marlin WNA16 release guard mutation detected at "
+                f"{stage}: mutated_count={mutated}"
+            )
+
+    def _check_marlin_wna16_kv_sentinels(self, stage: str) -> None:
+        kv_cache = getattr(self, "kv_cache", None)
+        check = getattr(kv_cache, "check_marlin_wna16_kv_sentinels", None)
+        if not callable(check):
+            return
+        report = check(stage)
+        if not isinstance(report, dict) or not report.get("enabled", False):
+            return
+        key = f"moe_marlin_wna16_kv_sentinel_{_sanitize_report_key(stage)}"
+        self.model_prepare_report[key] = {
+            k: v for k, v in report.items() if k != "records"
+        }
+        mutated = int(report.get("mutated_count", 0) or 0)
+        if mutated:
+            logger.error(
+                "Marlin WNA16 KV sentinel mutation detected at "
+                f"{stage}: mutated_count={mutated}"
+            )
 
     def _record_marlin_wna16_owner_allocations(self, stage: str) -> None:
         if not dsv4_memory_debug.marlin_wna16_release_ledger_enabled():
@@ -270,16 +336,108 @@ class Engine:
             tp_size=config.tp_info.size,
         )
         num_pages = config.num_page_override
+        credit_report = self._marlin_wna16_release_capacity_credit_report(
+            config=config,
+            cache_per_page=cache_per_page,
+        )
         if num_pages is None:
             model_memory = old_free_memory - new_free_memory
             available_memory = int(config.memory_ratio * old_free_memory) - model_memory
+            credit_bytes = int(credit_report.get("net_release_credit_bytes", 0) or 0)
+            if bool(credit_report.get("applied_to_num_pages", False)):
+                available_memory += credit_bytes
             num_pages = available_memory // cache_per_page
 
         assert num_pages > 1, "Not enough memory for KV cache, try reducing --num-pages"
         num_tokens = num_pages * config.page_size
         real_kv_size = num_pages * cache_per_page
+        credit_report["planned_num_pages"] = int(num_pages)
+        credit_report["planned_num_tokens"] = int(num_tokens)
+        credit_report["planned_kv_bytes"] = int(real_kv_size)
+        self.kv_capacity_plan_report = {
+            "old_free_memory_bytes": int(old_free_memory),
+            "new_free_memory_bytes": int(new_free_memory),
+            "memory_ratio": float(config.memory_ratio),
+            "cache_per_page_bytes": int(cache_per_page),
+            "num_page_override": config.num_page_override,
+            "release_credit": credit_report,
+        }
+        if bool(credit_report.get("applied_to_num_pages", False)):
+            logger.info_rank0(
+                "Applied Marlin WNA16 release credit before KV allocation: "
+                f"{mem_GB(int(credit_report['net_release_credit_bytes']))}, "
+                f"equivalent_pages={credit_report.get('net_release_credit_pages')}"
+            )
         logger.info(f"Allocating {num_tokens} tokens for KV cache, K + V = {mem_GB(real_kv_size)}")
         return num_pages
+
+    def _marlin_wna16_release_capacity_credit_report(
+        self,
+        *,
+        config: EngineConfig,
+        cache_per_page: int,
+    ) -> dict[str, Any]:
+        requested = dsv4_memory_debug.env_flag(_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV)
+        release_requested = dsv4_memory_debug.env_flag(_MARLIN_WNA16_RELEASE_ENV)
+        timing = self._marlin_wna16_release_timing()
+        moe_report = {}
+        if isinstance(self.model_prepare_report, dict):
+            maybe_report = self.model_prepare_report.get("moe_marlin_wna16_cache", {})
+            if isinstance(maybe_report, dict):
+                moe_report = maybe_report
+        source_bytes = int(moe_report.get("total_source_bytes", 0) or 0)
+        guard_bytes = self._planned_marlin_wna16_guard_bytes(source_bytes)
+        safety_margin = _env_bytes(_MARLIN_WNA16_RELEASE_CREDIT_SAFETY_MARGIN_BYTES_ENV, 0) or 0
+        gross_credit = max(0, source_bytes)
+        net_credit = max(0, gross_credit - guard_bytes - int(safety_margin))
+        eligible = (
+            bool(config.model_config.is_deepseek_v4)
+            and requested
+            and release_requested
+            and timing == "before_kv_alloc"
+            and source_bytes > 0
+        )
+        applied = bool(eligible and config.num_page_override is None and net_credit > 0)
+        return {
+            "requested": bool(requested),
+            "release_requested": bool(release_requested),
+            "timing": timing,
+            "eligible": bool(eligible),
+            "applied_to_num_pages": applied,
+            "ineligible_reason": None
+            if eligible
+            else _marlin_wna16_credit_ineligible_reason(
+                config=config,
+                requested=requested,
+                release_requested=release_requested,
+                timing=timing,
+                source_bytes=source_bytes,
+            ),
+            "source_bytes": source_bytes,
+            "gross_release_credit_bytes": gross_credit,
+            "planned_guard_or_reserved_bytes": int(guard_bytes),
+            "safety_margin_bytes": int(safety_margin),
+            "net_release_credit_bytes": int(net_credit if eligible else 0),
+            "theoretical_release_credit_pages": (
+                float(gross_credit) / float(cache_per_page) if cache_per_page else 0.0
+            ),
+            "net_release_credit_pages": (
+                float(net_credit) / float(cache_per_page) if cache_per_page else 0.0
+            ),
+            "net_release_credit_tokens": (
+                int(net_credit // cache_per_page) * int(config.page_size)
+                if cache_per_page
+                else 0
+            ),
+        }
+
+    def _planned_marlin_wna16_guard_bytes(self, source_bytes: int) -> int:
+        if source_bytes <= 0 or not dsv4_memory_debug.env_flag(_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV):
+            return 0
+        raw = _env_bytes(_MARLIN_WNA16_QUARANTINE_BYTES_ENV, None)
+        if raw is None:
+            return int(source_bytes)
+        return max(0, min(int(raw), int(source_bytes)))
 
     def _sync_get_memory(self) -> Tuple[int, int]:
         """Get the min and max free memory across TP ranks."""
@@ -313,6 +471,14 @@ class Engine:
         logits: torch.Tensor | None = None
         forward_source = "unknown"
         with self.ctx.forward_batch(batch):
+            if batch.is_decode:
+                self._marlin_wna16_decode_guard_checks += 1
+                self._check_marlin_wna16_release_guards(
+                    f"before_decode_step_{self._marlin_wna16_decode_guard_checks}"
+                )
+                self._check_marlin_wna16_kv_sentinels(
+                    f"before_decode_step_{self._marlin_wna16_decode_guard_checks}"
+                )
             if args.temperatures is None and self.graph_runner.can_replay_greedy_sample(batch):
                 forward_source = "cuda_graph_greedy_sample"
                 next_tokens_gpu = self.graph_runner.replay_greedy_sample(batch)
@@ -378,6 +544,12 @@ class Engine:
                 graph_runner=getattr(self.graph_runner, "capture_status", {}),
             )
         if batch.is_decode:
+            self._check_marlin_wna16_release_guards(
+                f"after_decode_step_{self._marlin_wna16_decode_guard_checks}"
+            )
+            self._check_marlin_wna16_kv_sentinels(
+                f"after_decode_step_{self._marlin_wna16_decode_guard_checks}"
+            )
             self._maybe_release_marlin_wna16_for_timing(
                 timing="after_first_decode",
                 stage_label="after_first_decode_release",
@@ -413,6 +585,58 @@ class Engine:
 
 def _align_up(num: int, multiple: int) -> int:
     return (num + multiple - 1) // multiple * multiple
+
+
+def _sanitize_report_key(stage: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in stage).strip("_") or "stage"
+
+
+def _env_bytes(name: str, default: int | None = None) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    token = raw.strip().lower()
+    multipliers = {
+        "kib": 1 << 10,
+        "kb": 1 << 10,
+        "mib": 1 << 20,
+        "mb": 1 << 20,
+        "gib": 1 << 30,
+        "gb": 1 << 30,
+    }
+    for suffix, multiplier in multipliers.items():
+        if token.endswith(suffix):
+            try:
+                return int(float(token[: -len(suffix)]) * multiplier)
+            except ValueError:
+                return default
+    try:
+        return int(token)
+    except ValueError:
+        return default
+
+
+def _marlin_wna16_credit_ineligible_reason(
+    *,
+    config: EngineConfig,
+    requested: bool,
+    release_requested: bool,
+    timing: str,
+    source_bytes: int,
+) -> str:
+    if not config.model_config.is_deepseek_v4:
+        return "not_deepseek_v4"
+    if not requested:
+        return "release_credit_not_requested"
+    if not release_requested:
+        return "release_not_requested"
+    if timing == "model_prepare":
+        return "model_prepare_release_already_reflected_in_free_memory"
+    if timing != "before_kv_alloc":
+        return "release_timing_cannot_back_pre_kv_pages"
+    if source_bytes <= 0:
+        return "no_releasable_source_bytes_reported"
+    return "unknown"
 
 
 def _pynccl_max_buffer_bytes(config: EngineConfig, dtype: torch.dtype) -> int:

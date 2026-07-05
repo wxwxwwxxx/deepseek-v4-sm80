@@ -5,7 +5,14 @@ import pytest
 import torch
 from minisgl.core import Req, SamplingParams
 from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
-from minisgl.kvcache.deepseek_v4_pool import DSV4_INDEXER_FP8_CACHE_ENV, DeepSeekV4KVCache
+from minisgl.kvcache.deepseek_v4_pool import (
+    DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV,
+    DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV,
+    DSV4_INDEXER_FP8_CACHE_ENV,
+    DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV,
+    DeepSeekV4KVCache,
+    _clear_allocated_kv_modes,
+)
 from minisgl.models.config import ModelConfig, RotaryConfig
 from minisgl.scheduler.cache import CacheManager
 from minisgl.scheduler.utils import PendingReq
@@ -230,6 +237,113 @@ def test_deepseek_v4_indexer_fp8_side_cache_is_opt_in(monkeypatch):
     assert values.dtype is torch.uint8
     assert scales.dtype is torch.uint8
     assert fp8_pool.indexer_cache(0).dtype is torch.bfloat16
+
+
+def test_deepseek_v4_allocated_page_clear_defaults_follow_release_env(monkeypatch):
+    monkeypatch.delenv(DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV, raising=False)
+    monkeypatch.delenv(DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV, raising=False)
+    monkeypatch.delenv(DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV, raising=False)
+
+    assert _clear_allocated_kv_modes() == set()
+
+    monkeypatch.setenv(DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV, "1")
+    assert _clear_allocated_kv_modes() == {"component"}
+
+    monkeypatch.setenv(DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV, "none")
+    with pytest.raises(RuntimeError, match="unsafe with"):
+        _clear_allocated_kv_modes()
+
+    monkeypatch.setenv(DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV, "1")
+    assert _clear_allocated_kv_modes() == set()
+
+
+@pytest.mark.parametrize("enable_component_loc_ownership", [False, True])
+def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_slots(
+    monkeypatch,
+    enable_component_loc_ownership: bool,
+):
+    monkeypatch.setenv(DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV, "component")
+    monkeypatch.setenv(DSV4_INDEXER_FP8_CACHE_ENV, "1")
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=4,
+        page_size=256,
+        enable_component_loc_ownership=enable_component_loc_ownership,
+    )
+
+    pool.swa_cache(2).fill_(3)
+    pool.c4_cache(0).fill_(4)
+    pool.c128_cache(1).fill_(5)
+    pool.indexer_cache(0).fill_(6)
+    fp8_paged = pool.indexer_fp8_paged_cache(0)
+    fp8_values, fp8_scales = pool.indexer_fp8_cache(0)
+    fp8_paged.fill_(10)
+    fp8_values.fill_(11)
+    fp8_scales.fill_(12)
+    c4_state = pool.attention_compress_state(0).kv_score_buffer.kv_score
+    c128_state = pool.attention_compress_state(1).kv_score_buffer.kv_score
+    indexer_state = pool.indexer_compress_state(0).kv_score_buffer.kv_score
+    c4_state.fill_(7)
+    c128_state.fill_(8)
+    indexer_state.fill_(9)
+
+    pool.on_pages_allocated(torch.tensor([0], dtype=torch.int32), page_size=256)
+
+    assert torch.all(pool.swa_cache(2) == 3)
+    assert torch.all(pool.c4_cache(0)[:64] == 0)
+    assert torch.all(pool.c4_cache(0)[64:] == 4)
+    assert torch.all(pool.indexer_cache(0)[:64] == 0)
+    assert torch.all(pool.indexer_cache(0)[64:] == 6)
+    assert torch.all(pool.c128_cache(1)[:2] == 0)
+    assert torch.all(pool.c128_cache(1)[2:] == 5)
+    assert torch.all(fp8_paged[0] == 0)
+    assert torch.all(fp8_paged[1:] == 10)
+    assert torch.all(fp8_values[:64] == 0)
+    assert torch.all(fp8_values[64:] == 11)
+    assert torch.all(fp8_scales[:64] == 0)
+    assert torch.all(fp8_scales[64:] == 12)
+    assert torch.all(c4_state == 7)
+    assert torch.all(c128_state == 8)
+    assert torch.all(indexer_state == 9)
+
+
+def test_deepseek_v4_allocated_page_clear_resets_live_buffers(monkeypatch):
+    monkeypatch.setenv("MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC", "all")
+    pool = _make_dsv4_pool([4, 128, 0], num_pages=4, page_size=4)
+
+    pool.swa_cache(0).fill_(3)
+    pool.c4_cache(0).fill_(4)
+    pool.c128_cache(1).fill_(5)
+    pool.indexer_cache(0).fill_(6)
+    c4_state = pool.attention_compress_state(0).kv_score_buffer.kv_score
+    c128_state = pool.attention_compress_state(1).kv_score_buffer.kv_score
+    indexer_state = pool.indexer_compress_state(0).kv_score_buffer.kv_score
+    c4_state.fill_(7)
+    c128_state.fill_(8)
+    indexer_state.fill_(9)
+
+    pool.on_pages_allocated(torch.tensor([0], dtype=torch.int32), page_size=4)
+
+    assert torch.all(pool.swa_cache(0)[:4] == 0)
+    assert torch.all(pool.swa_cache(0)[4:] == 3)
+    assert torch.all(pool.c4_cache(0)[:1] == 0)
+    assert torch.all(pool.c4_cache(0)[1:] == 4)
+    assert torch.all(pool.c128_cache(1)[:1] == 0)
+    assert torch.all(pool.indexer_cache(0)[:1] == 0)
+    assert torch.all(pool.indexer_cache(0)[1:] == 6)
+
+    c4_item_size = c4_state.shape[-1] // 2
+    c128_item_size = c128_state.shape[-1] // 2
+    indexer_item_size = indexer_state.shape[-1] // 2
+    assert torch.all(c4_state[:4, :c4_item_size] == 0)
+    assert torch.all(torch.isneginf(c4_state[:4, c4_item_size:]))
+    assert torch.all(c4_state[4:-1] == 7)
+    assert torch.all(c128_state[:4, :c128_item_size] == 0)
+    assert torch.all(torch.isneginf(c128_state[:4, c128_item_size:]))
+    assert torch.all(c128_state[4:-1] == 8)
+    assert torch.all(indexer_state[:4, :indexer_item_size] == 0)
+    assert torch.all(torch.isneginf(indexer_state[:4, indexer_item_size:]))
+    assert torch.all(indexer_state[4:-1] == 9)
 
 
 def test_deepseek_v4_pool_can_write_and_read_all_cache_components():

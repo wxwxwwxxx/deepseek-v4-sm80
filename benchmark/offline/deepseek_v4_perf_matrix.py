@@ -38,6 +38,23 @@ DSV4_MARLIN_WNA16_PREBUILD_ENV = "MINISGL_DSV4_MARLIN_WNA16_PREBUILD"
 DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
 )
+DSV4_MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING"
+DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT"
+)
+DSV4_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
+)
+DSV4_MARLIN_WNA16_QUARANTINE_BYTES_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
+)
+DSV4_MARLIN_WNA16_QUARANTINE_PATTERN_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
+)
+DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG"
+)
+DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV = "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC"
 DSV4_HC_TOGGLE = "MINISGL_DSV4_SM80_HC"
 DSV4_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_RMSNORM"
 DSV4_FP8_GEMM_TOGGLE = "MINISGL_DSV4_SM80_FP8_GEMM"
@@ -87,8 +104,14 @@ DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
 )
 DSV4_A100_MARLIN_PREBUILD_VARIANT = "dsv4_sm80_a100_victory_marlin_prebuild"
 DSV4_A100_MARLIN_RELEASE_VARIANT = "dsv4_sm80_a100_victory_marlin_release"
+DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_VARIANT = (
+    "dsv4_sm80_a100_victory_marlin_release_safe_arena"
+)
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release"
+)
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
 )
 DSV4_ROUTE_B_LIFETIME_ENV = {
     DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
@@ -104,12 +127,24 @@ DSV4_A100_MARLIN_PREBUILD_ENV = {
 DSV4_A100_MARLIN_RELEASE_ENV = {
     **DSV4_A100_MARLIN_PREBUILD_ENV,
     DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV: "1",
+    DSV4_MARLIN_WNA16_RELEASE_TIMING_ENV: "before_kv_alloc",
+    DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV: "1",
+    DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV: "component",
+}
+DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_ENV = {
+    **DSV4_A100_MARLIN_RELEASE_ENV,
+    DSV4_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV: "1",
+    DSV4_MARLIN_WNA16_QUARANTINE_BYTES_ENV: "3.1875GiB",
+    DSV4_MARLIN_WNA16_QUARANTINE_PATTERN_ENV: "deterministic",
+    DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG_ENV: "1",
 }
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_ENV = {
     **DSV4_ROUTE_B_LIFETIME_ENV,
-    DSV4_MOE_EXPERT_BACKEND_ENV: DSV4_MOE_EXPERT_BACKEND_MARLIN_WNA16,
-    DSV4_MARLIN_WNA16_PREBUILD_ENV: "1",
-    DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV: "1",
+    **DSV4_A100_MARLIN_RELEASE_ENV,
+}
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_ENV = {
+    **DSV4_ROUTE_B_LIFETIME_ENV,
+    **DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_ENV,
 }
 
 
@@ -1166,6 +1201,17 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        name=DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_VARIANT,
+        env=dict(DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_ENV),
+        description=(
+            "TARGET 08.38 candidate: Marlin WNA16 prebuild plus before-KV "
+            "release capacity credit, with a 3.1875 GiB/rank sentinel guard "
+            "arena held out of the released ranges."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         name="dsv4_sm80_a100_victory_fp8marlinproj",
         env={
             DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
@@ -1298,6 +1344,17 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
             "lifetime prefix preset plus backend fixed to marlin_wna16, MoE "
             "Marlin WNA16 prebuild before KV capacity planning, and original "
             "routed FP4 expert weights/scales release after successful prebuild."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
+        name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_VARIANT,
+        env=dict(DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_ENV),
+        description=(
+            "TARGET 08.38 prefix candidate: Route B lifetime prefix preset plus "
+            "Marlin WNA16 before-KV release capacity credit and a 3.1875 "
+            "GiB/rank sentinel guard arena."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
@@ -1589,6 +1646,41 @@ def _preserved_dsv4_sm80_env_names(dsv4_kernel) -> tuple[str, ...]:
             dsv4_kernel,
             "DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV",
             "MINISGL_DSV4_WARMUP_FORWARD_MEMORY_DEBUG",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG_ENV",
+            "MINISGL_DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_MARLIN_WNA16_KV_SENTINEL_BYTES_ENV",
+            "MINISGL_DSV4_MARLIN_WNA16_KV_SENTINEL_BYTES",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_THEN_FREE",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_THEN_FREE_BYTES",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_THEN_FREE_PATTERN",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_MARLIN_WNA16_RELEASE_LAYER_FILTER_ENV",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV",
+            "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC",
         ),
     )
 
@@ -3260,6 +3352,7 @@ def run_case(
             "enable_dsv4_component_loc_ownership": args.enable_dsv4_component_loc_ownership,
             "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
+            "kv_capacity_plan_report": getattr(llm.engine, "kv_capacity_plan_report", {}),
         },
         "load_init": load_init,
         "runtime_environment_rank0": runtime_environment,
@@ -3425,6 +3518,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "token_id_range": args.token_id_range,
                         "model_prepare_report_rank0": getattr(
                             llm.engine, "model_prepare_report", {}
+                        ),
+                        "kv_capacity_plan_report": getattr(
+                            llm.engine, "kv_capacity_plan_report", {}
                         ),
                     },
                     "load_init": load_init,
