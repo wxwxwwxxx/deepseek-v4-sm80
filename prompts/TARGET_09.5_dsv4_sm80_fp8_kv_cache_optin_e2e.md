@@ -2,13 +2,19 @@
 
 ## Status
 
-Conditional.  Run only if TARGET 09.4 proves a minimal FP8 cache slice is
-correct, graph-compatible, and worth E2E integration.
+Conditional.  Run only if TARGET 09.45 selects an FP8 KV/cache E2E scope after
+recomputing memory ROI, speed ROI, and SGLang-aligned SWA lifecycle effects.
+
+TARGET 09.4 proved the SWA packed MLA boundary is correct and graph-safe, but
+its separated store/gather kernels were slower than the BF16 boundary.  Do not
+assume SWA-only E2E is the next step unless TARGET 09.45 confirms that its
+capacity value survives the SWA lifecycle reset.
 
 ## Goal
 
-Integrate the selected FP8 KV/cache path as an opt-in E2E feature and classify
-it as a throughput feature, capacity feature, or rejected experiment.
+Integrate the FP8 KV/cache path selected by TARGET 09.45 as an opt-in E2E
+feature and classify it as a throughput feature, capacity feature, or rejected
+experiment.
 
 ## Opt-In Surface
 
@@ -26,9 +32,9 @@ that public surface and avoid duplicate knobs.
 
 1. Full selected-path integration
 
-   Extend the minimal slice to the full selected component set from TARGET 09.4.
-   Do not expand to unrelated cache components unless the report updates the
-   capacity and correctness gates.
+   Extend only the component set selected by TARGET 09.45.  Do not expand to
+   unrelated cache components unless the report updates the capacity, speed, and
+   correctness gates.
 
 2. Correctness and quality
 
@@ -104,4 +110,3 @@ Include:
 - capacity ledger;
 - known limitations;
 - rollback instructions.
-

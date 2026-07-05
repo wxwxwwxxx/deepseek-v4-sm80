@@ -137,7 +137,8 @@ Run in this order unless a fresh profile strongly changes the bottleneck:
 | TARGET 09.25 | `prompts/TARGET_09.25_dsv4_sm80_int8_comm_boundary_feasibility.md` | optional research | INT8 communication feasibility for TP reduce boundaries; prove scale/overflow semantics and microbench value before any E2E integration. |
 | TARGET 09.3 | `prompts/TARGET_09.3_dsv4_sm80_fp8_kv_cache_parity_ledger.md` | ready | FP8 KV/cache source parity and capacity ledger: map SGLang/vLLM layouts, cast points, components, and prefix/graph constraints. |
 | TARGET 09.4 | `prompts/TARGET_09.4_dsv4_sm80_minimal_fp8_kv_cache_slice.md` | conditional | Minimal FP8 KV/cache slice: store/quant + gather/dequant microbench against mini BF16 cache and SGLang/vLLM behavior. |
-| TARGET 09.5 | `prompts/TARGET_09.5_dsv4_sm80_fp8_kv_cache_optin_e2e.md` | conditional | FP8 KV/cache opt-in E2E if 09.4 proves a capacity or performance win. |
+| TARGET 09.45 | `prompts/TARGET_09.45_dsv4_sm80_fp8_cache_roi_sglang_lifecycle.md` | ready after 09.4 | FP8 cache ROI reset: recompute memory and speed value after SGLang-aligned SWA lifetime, then select whether 09.5 should be SWA-only, broader MLA/indexer, lifecycle-first, or stopped. |
+| TARGET 09.5 | `prompts/TARGET_09.5_dsv4_sm80_fp8_kv_cache_optin_e2e.md` | conditional | FP8 KV/cache opt-in E2E only after 09.45 selects the exact scope and promotion bar. |
 | TARGET 09.6 | `prompts/TARGET_09.6_dsv4_sm80_quantized_projection_cache_boundary_fusion.md` | optional later | Quantized projection/cache-boundary fusion only if fresh evidence shows projection/cache traffic is again material. |
 
 Do not implement INT8 MoE and FP8 KV/cache in the same child thread.  They have
