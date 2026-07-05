@@ -11,7 +11,7 @@ from .mp import (
     ZmqSubQueue,
 )
 from .registry import Registry
-from . import dsv4_owner_timing
+from . import dsv4_memory_debug, dsv4_owner_timing
 from .torch_utils import dsv4_direct_copy_nvtx, dsv4_direct_copy_nvtx_enabled, nvtx_annotate, torch_dtype
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     "dsv4_direct_copy_nvtx",
     "dsv4_direct_copy_nvtx_enabled",
     "dsv4_owner_timing",
+    "dsv4_memory_debug",
     "Registry",
     "ZmqPushQueue",
     "ZmqPullQueue",

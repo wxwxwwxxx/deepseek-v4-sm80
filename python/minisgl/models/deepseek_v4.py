@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -17,6 +18,7 @@ from minisgl.utils import (
     div_ceil,
     div_even,
     dsv4_direct_copy_nvtx,
+    dsv4_memory_debug,
     dsv4_owner_timing,
     dsv4_prefix_debug,
 )
@@ -33,6 +35,21 @@ def _dsv4_capture_nvtx(name: str):
     if not torch.cuda.is_available():
         return nullcontext()
     return torch.cuda.nvtx.range(f"dsv4.{name}")
+
+
+def _record_warmup_memory(
+    owner: str,
+    stage: str,
+    *,
+    layer_id: int | None = None,
+    extra: dict[str, object] | None = None,
+) -> None:
+    dsv4_memory_debug.record_warmup_memory(
+        owner=owner,
+        stage=stage,
+        layer_id=layer_id,
+        extra=extra,
+    )
 
 
 def _debug_activations_enabled() -> bool:
@@ -1891,8 +1908,9 @@ class DSV4MoEGate(BaseOP):
 
 
 class DSV4FusedRoutedExperts(BaseOP):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, *, layer_id: int | None = None):
         tp = get_tp_info()
+        self.layer_id = layer_id
         self._tp_size = tp.size
         self._comm = DistributedCommunicator()
         local_intermediate = div_even(config.moe_intermediate_size, tp.size)
@@ -1925,6 +1943,158 @@ class DSV4FusedRoutedExperts(BaseOP):
         )
         self._moe_v2_workspace = dsv4_kernel.DSV4MoEWorkspace()
         self._marlin_wna16_weights = None
+        self._marlin_wna16_released_original_expert_weights = False
+
+    @property
+    def _marlin_owner_label(self) -> str:
+        if self.layer_id is None:
+            return "moe.routed_experts.marlin_wna16"
+        return f"layer{self.layer_id}.moe.routed_experts.marlin_wna16"
+
+    def _raw_expert_weight_names(self) -> tuple[str, str, str, str]:
+        return (
+            "w13_weight",
+            "w13_weight_scale_inv",
+            "w2_weight",
+            "w2_weight_scale_inv",
+        )
+
+    def _missing_raw_expert_weights(self) -> list[str]:
+        return [name for name in self._raw_expert_weight_names() if not hasattr(self, name)]
+
+    def _raw_expert_weight_tensors(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        missing = self._missing_raw_expert_weights()
+        if missing:
+            raise RuntimeError(
+                f"{self._marlin_owner_label} original FP4 expert weights were released "
+                f"or are unavailable; missing={missing}. Keep "
+                f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV}=0 "
+                "unless the selected backend is marlin_wna16 and the prebuilt cache is valid."
+            )
+        return (
+            self.w13_weight,
+            self.w13_weight_scale_inv,
+            self.w2_weight,
+            self.w2_weight_scale_inv,
+        )
+
+    def _marlin_cache_report(
+        self,
+        *,
+        source_bytes: int,
+        released: list[dict[str, object]],
+        already_present: bool,
+        signature_match_before: bool | None,
+        elapsed_ms: float,
+    ) -> dict[str, object]:
+        cache = self._marlin_wna16_weights
+        cache_tensors = {
+            "w13": getattr(cache, "w13", None),
+            "w13_scale": getattr(cache, "w13_scale", None),
+            "w2": getattr(cache, "w2", None),
+            "w2_scale": getattr(cache, "w2_scale", None),
+        }
+        persistent_bytes = int(
+            sum(dsv4_memory_debug.tensor_nbytes(tensor) for tensor in cache_tensors.values())
+        )
+        return {
+            "owner": self._marlin_owner_label,
+            "layer_id": self.layer_id,
+            "already_present": bool(already_present),
+            "signature_match_before": signature_match_before,
+            "elapsed_ms": elapsed_ms,
+            "persistent_bytes": persistent_bytes,
+            "source_bytes": int(source_bytes),
+            "released_original_bytes": int(sum(int(item["bytes"]) for item in released)),
+            "released_original": bool(released),
+            "raw_weights_available_after": not self._missing_raw_expert_weights(),
+            "cache_tensors": {
+                name: dsv4_memory_debug.tensor_summary(tensor)
+                for name, tensor in cache_tensors.items()
+            },
+            "released": released,
+        }
+
+    def prepare_marlin_wna16_weight_cache(
+        self,
+        *,
+        release_original: bool = False,
+    ) -> dict[str, object]:
+        from minisgl.kernel import marlin_wna16
+
+        existing_cache = self._marlin_wna16_weights
+        raw_available = not self._missing_raw_expert_weights()
+        if not raw_available:
+            if existing_cache is None:
+                raise RuntimeError(
+                    f"{self._marlin_owner_label} cannot prebuild Marlin WNA16 cache because "
+                    "original FP4 expert weights are missing and no cache exists."
+                )
+            return self._marlin_cache_report(
+                source_bytes=0,
+                released=[],
+                already_present=True,
+                signature_match_before=None,
+                elapsed_ms=0.0,
+            )
+
+        w13_weight, w13_scale, w2_weight, w2_scale = self._raw_expert_weight_tensors()
+        source_tensors = {
+            "w13_weight": w13_weight,
+            "w13_weight_scale_inv": w13_scale,
+            "w2_weight": w2_weight,
+            "w2_weight_scale_inv": w2_scale,
+        }
+        source_bytes = int(
+            sum(dsv4_memory_debug.tensor_nbytes(tensor) for tensor in source_tensors.values())
+        )
+        signature_match_before = (
+            existing_cache.matches(w13_weight, w13_scale, w2_weight, w2_scale)
+            if existing_cache is not None
+            else False
+        )
+        start_s = time.perf_counter()
+        if existing_cache is None or not signature_match_before:
+            self._marlin_wna16_weights = marlin_wna16.prepare_moe_mxfp4_weights(
+                w13_weight,
+                w13_scale,
+                w2_weight,
+                w2_scale,
+                params_dtype=torch.bfloat16,
+                owner_label=self._marlin_owner_label,
+                cache_was_present=existing_cache is not None,
+                cache_signature_match=signature_match_before,
+            )
+        elapsed_ms = (time.perf_counter() - start_s) * 1000.0
+
+        released: list[dict[str, object]] = []
+        if release_original:
+            if self._marlin_wna16_weights is None:
+                raise RuntimeError(
+                    f"{self._marlin_owner_label} cannot release original expert weights "
+                    "before Marlin WNA16 cache is built."
+                )
+            for name, tensor in list(source_tensors.items()):
+                released.append(
+                    {
+                        "attribute": name,
+                        "shape": [int(dim) for dim in tensor.shape],
+                        "dtype": str(tensor.dtype),
+                        "bytes": dsv4_memory_debug.tensor_nbytes(tensor),
+                    }
+                )
+                delattr(self, name)
+            self._marlin_wna16_released_original_expert_weights = True
+
+        return self._marlin_cache_report(
+            source_bytes=source_bytes,
+            released=released,
+            already_present=existing_cache is not None,
+            signature_match_before=signature_match_before,
+            elapsed_ms=elapsed_ms,
+        )
 
     def _expert_forward(
         self, local_idx: int, x: torch.Tensor, weights: torch.Tensor
@@ -1969,18 +2139,43 @@ class DSV4FusedRoutedExperts(BaseOP):
         moe_plan: dsv4_kernel.DSV4MoEExecutionPlan | None = None,
     ) -> torch.Tensor:
         backend = dsv4_kernel.require_supported_moe_expert_backend()
-        if backend == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16:
-            grouped, self._marlin_wna16_weights = dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16(
-                hidden_states,
-                weights,
-                indices,
-                self.w13_weight,
-                self.w13_weight_scale_inv,
-                self.w2_weight,
-                self.w2_weight_scale_inv,
-                swiglu_limit=self.swiglu_limit,
-                cache=self._marlin_wna16_weights,
+        missing_raw_weights = self._missing_raw_expert_weights()
+        if missing_raw_weights and backend != dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16:
+            raise RuntimeError(
+                f"{self._marlin_owner_label} original FP4 expert weights were released, "
+                f"so backend={backend!r} cannot run. Recreate the engine or disable "
+                f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV}."
             )
+        if backend == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16:
+            if missing_raw_weights:
+                if self._marlin_wna16_weights is None:
+                    raise RuntimeError(
+                        f"{self._marlin_owner_label} original FP4 expert weights were released "
+                        "but the Marlin WNA16 cache is missing."
+                    )
+                grouped = dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16_prepacked(
+                    hidden_states,
+                    weights,
+                    indices,
+                    self._marlin_wna16_weights,
+                    swiglu_limit=self.swiglu_limit,
+                )
+            else:
+                w13_weight, w13_scale, w2_weight, w2_scale = self._raw_expert_weight_tensors()
+                grouped, self._marlin_wna16_weights = (
+                    dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16(
+                        hidden_states,
+                        weights,
+                        indices,
+                        w13_weight,
+                        w13_scale,
+                        w2_weight,
+                        w2_scale,
+                        swiglu_limit=self.swiglu_limit,
+                        cache=self._marlin_wna16_weights,
+                        owner_label=self._marlin_owner_label,
+                    )
+                )
             if reduce and self._tp_size > 1:
                 with dsv4_direct_copy_nvtx(
                     "moe_shared_expert_staging.routed_grouped_to_fp32_for_reduce",
@@ -2004,14 +2199,15 @@ class DSV4FusedRoutedExperts(BaseOP):
             and moe_plan.route_plan.route_count <= dsv4_kernel.DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES
         ):
             workspace = self._moe_v2_workspace
+        w13_weight, w13_scale, w2_weight, w2_scale = self._raw_expert_weight_tensors()
         grouped = dsv4_kernel.moe_route_dispatch_bf16_grouped(
             hidden_states,
             weights,
             indices,
-            self.w13_weight,
-            self.w13_weight_scale_inv,
-            self.w2_weight,
-            self.w2_weight_scale_inv,
+            w13_weight,
+            w13_scale,
+            w2_weight,
+            w2_scale,
             swiglu_limit=self.swiglu_limit,
             moe_plan=moe_plan,
             workspace=workspace,
@@ -2257,11 +2453,20 @@ class DSV4FusedMoERunner:
         weights: torch.Tensor,
         indices: torch.Tensor,
     ) -> DSV4FusedMoERunnerPrepareResult:
+        if hasattr(self.experts, "w13_weight"):
+            num_experts = self.experts.w13_weight.shape[0]
+        elif self.experts._marlin_wna16_weights is not None:
+            num_experts = self.experts._marlin_wna16_weights.w13.shape[0]
+        else:
+            raise RuntimeError(
+                f"layer{self.layer_id}.moe runner cannot build a route plan because "
+                "original expert weights were released and Marlin WNA16 cache is missing."
+            )
         moe_plan = dsv4_kernel.build_moe_v2_execution_plan(
             flat,
             weights,
             indices,
-            num_experts=self.experts.w13_weight.shape[0],
+            num_experts=num_experts,
             block_size_m=16,
             reduce_once=True,
         )
@@ -2332,18 +2537,29 @@ class DSV4FusedMoERunner:
     ) -> torch.Tensor:
         flat = hidden_states.view(-1, hidden_states.shape[-1])
         flat_input_ids = input_ids.view(-1)
+        _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.route"):
             weights, indices = self.route(flat, flat_input_ids, hash_topk=hash_topk)
+        _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
+        _record_warmup_memory("moe.route_plan", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.prepare"):
             prepared = self.prepare(flat, weights, indices)
+        _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
+        _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.experts"):
             routed = self.apply_experts(flat, prepared)
+        _record_warmup_memory("moe.routed_experts", "after", layer_id=self.layer_id)
+        _record_warmup_memory("moe.finalize_routed", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.finalize"):
             y = self.finalize_routed(routed)
+        _record_warmup_memory("moe.finalize_routed", "after", layer_id=self.layer_id)
+        _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.shared"):
             shared = self.apply_shared(flat)
             if shared is not None:
                 y = y + shared
+        _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
+        _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.reduce_once"):
             y = self.maybe_reduce_final(
                 y,
@@ -2351,6 +2567,7 @@ class DSV4FusedMoERunner:
                 hidden_dtype=flat.dtype,
                 reduce_label=prepared.moe_plan.final_reduce_label,
             )
+        _record_warmup_memory("moe.reduce_once", "after", layer_id=self.layer_id)
         with dsv4_direct_copy_nvtx(
             f"moe_shared_expert_staging.runner_output_to_flat_dtype.layer{self.layer_id}",
             y=y,
@@ -2371,7 +2588,7 @@ class DSV4MoE(BaseOP):
         self.gate = DSV4MoEGate(config, has_correction_bias=not is_hash_layer)
         if is_hash_layer:
             self.topk = DSV4TopK(config)
-        self.experts = DSV4FusedRoutedExperts(config)
+        self.experts = DSV4FusedRoutedExperts(config, layer_id=layer_id)
         if config.n_shared_experts > 0:
             self.shared_experts = DSV4SharedExperts(config, layer_id=layer_id)
         self._runner = DSV4FusedMoERunner(
@@ -2395,6 +2612,7 @@ class DSV4MoE(BaseOP):
             )
 
         flat = hidden_states.view(-1, hidden_states.shape[-1])
+        _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.gate"):
             weights, indices = self.gate.forward(
                 flat,
@@ -2404,18 +2622,31 @@ class DSV4MoE(BaseOP):
                 routed_scaling_factor=self.routed_scaling_factor,
                 hash_topk=getattr(self, "topk", None),
             )
+        _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
         moe_v2 = dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE)
         reduce_once = moe_v2 or dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
         moe_plan = None
         if moe_v2:
+            if hasattr(self.experts, "w13_weight"):
+                num_experts = self.experts.w13_weight.shape[0]
+            elif self.experts._marlin_wna16_weights is not None:
+                num_experts = self.experts._marlin_wna16_weights.w13.shape[0]
+            else:
+                raise RuntimeError(
+                    f"layer{self.layer_id}.moe cannot build a route plan because original "
+                    "expert weights were released and Marlin WNA16 cache is missing."
+                )
+            _record_warmup_memory("moe.route_plan", "before", layer_id=self.layer_id)
             moe_plan = dsv4_kernel.build_moe_v2_execution_plan(
                 flat,
                 weights,
                 indices,
-                num_experts=self.experts.w13_weight.shape[0],
+                num_experts=num_experts,
                 block_size_m=16,
                 reduce_once=reduce_once,
             )
+            _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
+        _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.routed"):
             if moe_plan is None:
                 y = self.experts.forward(flat, weights, indices, reduce=not reduce_once).float()
@@ -2427,10 +2658,14 @@ class DSV4MoE(BaseOP):
                     reduce=not reduce_once,
                     moe_plan=moe_plan,
                 ).float()
+        _record_warmup_memory("moe.routed_experts", "after", layer_id=self.layer_id)
         if hasattr(self, "shared_experts"):
+            _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.shared"):
                 y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()
+            _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
         if reduce_once and self._tp_size > 1:
+            _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.reduce_once"):
                 y = _dsv4_moe_reduce_once_input(
                     y,
@@ -2439,6 +2674,7 @@ class DSV4MoE(BaseOP):
                     path="non_runner_output",
                 )
                 y = self._comm.all_reduce(y, label="dsv4.v1_moe_reduce_once_all_reduce")
+            _record_warmup_memory("moe.reduce_once", "after", layer_id=self.layer_id)
         return y.to(flat.dtype).view_as(hidden_states)
 
 
@@ -2498,29 +2734,47 @@ class DeepseekV4DecoderLayer(BaseOP):
         _capture_debug_activation(f"layer{layer_id}.input", x)
         residual = x
         attn_fn = _cached_hc_bf16_weight(self, "_hc_attn_fn_bf16", self.hc_attn_fn)
+        _record_warmup_memory("layer.hc_attn_pre", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_pre"):
             y, post, comb = self._hc_pre(x, attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        _record_warmup_memory("layer.hc_attn_pre", "after", layer_id=layer_id)
+        _record_warmup_memory("layer.attn_input_norm", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.attn_input_norm"):
             y = self.input_layernorm.forward(y)
             _capture_debug_activation(f"layer{layer_id}.attention_input", y)
+        _record_warmup_memory("layer.attn_input_norm", "after", layer_id=layer_id)
+        _record_warmup_memory("layer.attention", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.attn"):
             y = self.self_attn.forward(y)
             _capture_debug_activation(f"layer{layer_id}.attention_output", y)
+        _record_warmup_memory("layer.attention", "after", layer_id=layer_id)
+        _record_warmup_memory("layer.hc_attn_post", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_post"):
             x = self._hc_post(y, residual, post, comb)
+        _record_warmup_memory("layer.hc_attn_post", "after", layer_id=layer_id)
 
         residual = x
         ffn_fn = _cached_hc_bf16_weight(self, "_hc_ffn_fn_bf16", self.hc_ffn_fn)
+        _record_warmup_memory("layer.hc_ffn_pre", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_ffn_pre"):
             y, post, comb = self._hc_pre(x, ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        _record_warmup_memory("layer.hc_ffn_pre", "after", layer_id=layer_id)
+        _record_warmup_memory("layer.mlp_input_norm", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.mlp_input_norm"):
             y = self.post_attention_layernorm.forward(y)
             _capture_debug_activation(f"layer{layer_id}.moe_input", y)
+        _record_warmup_memory("layer.mlp_input_norm", "after", layer_id=layer_id)
+        _record_warmup_memory("layer.moe", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.mlp"):
             y = self.mlp.forward(y, input_ids)
             _capture_debug_activation(f"layer{layer_id}.moe_output", y)
+        _record_warmup_memory("layer.moe", "after", layer_id=layer_id)
+        _record_warmup_memory("layer.hc_ffn_post", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_ffn_post"):
-            return self._hc_post(y, residual, post, comb)
+            output = self._hc_post(y, residual, post, comb)
+        _record_warmup_memory("layer.hc_ffn_post", "after", layer_id=layer_id)
+        _record_warmup_memory("layer.output", "after", layer_id=layer_id)
+        return output
 
 
 class DeepseekV4Model(BaseOP):
@@ -2597,6 +2851,39 @@ class DeepseekV4Model(BaseOP):
                     report = shared_experts.prepare_down_marlin_weight_cache()
                     if report is not None:
                         shared_down_marlin_reports.append(report)
+        moe_marlin_wna16_reports: list[dict[str, object]] = []
+        moe_marlin_backend = dsv4_kernel.dsv4_moe_expert_backend()
+        moe_marlin_prebuild_enabled = dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV
+        )
+        moe_marlin_release_original = dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV
+        )
+        if moe_marlin_release_original and not moe_marlin_prebuild_enabled:
+            raise RuntimeError(
+                f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV}=1 "
+                f"requires {dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV}=1 so the "
+                "Marlin WNA16 cache exists before original expert weights are released."
+            )
+        if (
+            moe_marlin_release_original
+            and moe_marlin_backend != dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
+        ):
+            raise RuntimeError(
+                f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV}=1 "
+                f"requires backend={dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16!r}, "
+                f"got {moe_marlin_backend!r}."
+            )
+        if (
+            moe_marlin_prebuild_enabled
+            and moe_marlin_backend == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
+        ):
+            for layer in self.layers.op_list:
+                moe_marlin_wna16_reports.append(
+                    layer.mlp.experts.prepare_marlin_wna16_weight_cache(
+                        release_original=moe_marlin_release_original,
+                    )
+                )
         total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
         total_wo_b_bytes = int(sum(int(report["bytes"]) for report in wo_b_reports))
         total_indexer_wq_b_bytes = int(sum(int(report["bytes"]) for report in indexer_wq_b_reports))
@@ -2623,6 +2910,15 @@ class DeepseekV4Model(BaseOP):
                 for report in marlin_reports
                 for released in report.get("released", [])
             )
+        )
+        total_moe_marlin_wna16_persistent_bytes = int(
+            sum(int(report["persistent_bytes"]) for report in moe_marlin_wna16_reports)
+        )
+        total_moe_marlin_wna16_source_bytes = int(
+            sum(int(report["source_bytes"]) for report in moe_marlin_wna16_reports)
+        )
+        total_moe_marlin_wna16_released_bytes = int(
+            sum(int(report["released_original_bytes"]) for report in moe_marlin_wna16_reports)
         )
         total_pretransposed_bytes = int(
             sum(int(report.get("pretransposed_bytes", 0)) for report in fused_wqa_wkv_reports)
@@ -2785,6 +3081,21 @@ class DeepseekV4Model(BaseOP):
                     "entries": shared_down_marlin_reports,
                 },
             },
+            "moe_marlin_wna16_cache": {
+                "enabled": bool(moe_marlin_wna16_reports),
+                "backend": moe_marlin_backend,
+                "prebuild_toggle": dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV,
+                "prebuild_requested": bool(moe_marlin_prebuild_enabled),
+                "release_original_toggle": (
+                    dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV
+                ),
+                "release_original_requested": bool(moe_marlin_release_original),
+                "layers_cached": len(moe_marlin_wna16_reports),
+                "total_persistent_bytes": total_moe_marlin_wna16_persistent_bytes,
+                "total_source_bytes": total_moe_marlin_wna16_source_bytes,
+                "total_released_original_bytes": total_moe_marlin_wna16_released_bytes,
+                "entries": moe_marlin_wna16_reports,
+            },
             "bf16_small_gemm_pretranspose_cache_total": {
                 "enabled": total_pretransposed_bytes > 0,
                 "toggle": dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE,
@@ -2812,18 +3123,29 @@ class DeepseekV4Model(BaseOP):
         )
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        _record_warmup_memory("model.embed", "before")
         with _dsv4_capture_nvtx("model.embed"):
             x = self.embed_tokens.forward(input_ids)
             _capture_debug_activation("embedding", x)
+        _record_warmup_memory("model.embed", "after")
+        _record_warmup_memory("model.hc_expand", "before")
         with _dsv4_capture_nvtx("model.hc_expand"):
             x = x.unsqueeze(1).repeat(1, self.hc_mult, 1)
+        _record_warmup_memory("model.hc_expand", "after")
         for layer in self.layers.op_list:
+            layer_id = int(getattr(layer.self_attn, "layer_id", -1))
+            _record_warmup_memory("decoder_layer", "before", layer_id=layer_id)
             x = layer.forward(x, input_ids)
+            _record_warmup_memory("decoder_layer", "after", layer_id=layer_id)
+        _record_warmup_memory("model.hc_head", "before")
         with _dsv4_capture_nvtx("model.hc_head"):
             x = self._hc_head(x)
+        _record_warmup_memory("model.hc_head", "after")
+        _record_warmup_memory("model.final_norm", "before")
         with _dsv4_capture_nvtx("model.final_norm"):
             x = self.norm.forward(x)
             _capture_debug_activation("final_norm", x)
+            _record_warmup_memory("model.final_norm", "after")
             return x
 
 
@@ -2838,12 +3160,16 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
 
     def forward(self):
         batch = get_global_ctx().batch
+        _record_warmup_memory("model", "before")
         output = self.model.forward(batch.input_ids)
+        _record_warmup_memory("model", "after")
         if batch.is_prefill:
             output = output[batch.attn_metadata.get_last_indices(batch.size)].contiguous()
+        _record_warmup_memory("lm_head", "before")
         with _dsv4_capture_nvtx("lm_head"):
             logits = self.lm_head.linear(output)
             _capture_debug_activation("lm_head_logits", logits)
+            _record_warmup_memory("lm_head", "after")
             return logits
 
 

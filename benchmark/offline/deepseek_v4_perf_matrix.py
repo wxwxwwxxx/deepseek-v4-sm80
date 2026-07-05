@@ -1243,6 +1243,20 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         cuda_graph_capture_greedy_sample=True,
     ),
     Variant(
+        name="dsv4_sm80_a100_victory_prefix_routeb_lifetime_groupedfp4",
+        env={
+            **DSV4_ROUTE_B_LIFETIME_ENV,
+            DSV4_MOE_EXPERT_BACKEND_ENV: "grouped_fp4",
+        },
+        description=(
+            "TARGET 08.34 diagnostic A/B preset: promoted Route B lifetime preset "
+            "with the routed expert backend forced to grouped_fp4 instead of "
+            "the A100 victory default marlin_wna16."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+    ),
+    Variant(
         name=DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT,
         env={**DSV4_ROUTE_B_LIFETIME_ENV, DSV4_MOE_REDUCE_BF16_TOGGLE: "1"},
         description=(
@@ -1505,6 +1519,26 @@ def _preserved_dsv4_sm80_env_names(dsv4_kernel) -> tuple[str, ...]:
             dsv4_kernel,
             "DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE",
             "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_MARLIN_WNA16_CACHE_DEBUG_ENV",
+            "MINISGL_DSV4_MARLIN_WNA16_CACHE_DEBUG",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV",
+            "MINISGL_DSV4_WARMUP_FORWARD_MEMORY_DEBUG",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_MARLIN_WNA16_PREBUILD_ENV",
+            "MINISGL_DSV4_MARLIN_WNA16_PREBUILD",
+        ),
+        getattr(
+            dsv4_kernel,
+            "DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV",
+            "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS",
         ),
     )
 

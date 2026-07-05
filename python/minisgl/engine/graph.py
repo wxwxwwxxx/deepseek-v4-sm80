@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Dict, List
 import torch
 from minisgl.core import Batch, Req, get_global_ctx
 from minisgl.distributed import get_tp_info
-from minisgl.utils import dsv4_direct_copy_nvtx, init_logger
+from minisgl.utils import dsv4_direct_copy_nvtx, dsv4_memory_debug, init_logger
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -413,7 +413,12 @@ class GraphRunner:
                 if stage_capture_metadata is not None:
                     stage_capture_metadata(batch)
                 record_stage("after_stage_capture_metadata", bs)
-                self.buffer.logits[:bs] = model.forward()
+                with dsv4_memory_debug.warmup_forward_context(
+                    label="graph_capture_warmup_model_forward",
+                    batch_size=bs,
+                    device=self.device,
+                ):
+                    self.buffer.logits[:bs] = model.forward()
                 if self.capture_greedy_sample:
                     assert self.buffer.next_tokens is not None
                     self.buffer.next_tokens[:bs] = torch.argmax(

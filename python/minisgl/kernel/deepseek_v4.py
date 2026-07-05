@@ -73,6 +73,12 @@ DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_WIDTH_MODE"
 DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE"
 DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
 DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
+DSV4_MARLIN_WNA16_CACHE_DEBUG_ENV = "MINISGL_DSV4_MARLIN_WNA16_CACHE_DEBUG"
+DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV = "MINISGL_DSV4_WARMUP_FORWARD_MEMORY_DEBUG"
+DSV4_MARLIN_WNA16_PREBUILD_ENV = "MINISGL_DSV4_MARLIN_WNA16_PREBUILD"
+DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+)
 DSV4_INDEXER_CAPTURE_WIDTH_MODES = ("current", "table_width", "seq_len_aligned")
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
@@ -200,6 +206,10 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE,
     DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE,
     DSV4_SM80_MOE_REDUCE_BF16_TOGGLE,
+    DSV4_MARLIN_WNA16_CACHE_DEBUG_ENV,
+    DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV,
+    DSV4_MARLIN_WNA16_PREBUILD_ENV,
+    DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV,
 )
 DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_V0_BF16_TOGGLE,
@@ -962,6 +972,7 @@ def moe_route_dispatch_bf16_marlin_wna16(
     *,
     swiglu_limit: float = 0.0,
     cache=None,
+    owner_label: str | None = None,
 ) -> tuple[torch.Tensor, object]:
     if hidden_states.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError(f"Marlin WNA16 expects fp16/bf16 hidden states, got {hidden_states.dtype}")
@@ -980,7 +991,72 @@ def moe_route_dispatch_bf16_marlin_wna16(
 
     from minisgl.kernel import marlin_wna16
 
-    experts = w13_weight.shape[0]
+    cache_was_present = cache is not None
+    cache_signature_match = bool(
+        cache is not None and cache.matches(w13_weight, w13_scale, w2_weight, w2_scale)
+    )
+    if not cache_signature_match:
+        cache = marlin_wna16.prepare_moe_mxfp4_weights(
+            w13_weight,
+            w13_scale,
+            w2_weight,
+            w2_scale,
+            params_dtype=hidden_states.dtype,
+            owner_label=owner_label,
+            cache_was_present=cache_was_present,
+            cache_signature_match=cache_signature_match,
+        )
+    output = _run_moe_bf16_marlin_wna16_prepacked(
+        hidden_states,
+        weights,
+        indices,
+        cache,
+        swiglu_limit=swiglu_limit,
+    )
+    return output, cache
+
+
+def moe_route_dispatch_bf16_marlin_wna16_prepacked(
+    hidden_states: torch.Tensor,
+    weights: torch.Tensor,
+    indices: torch.Tensor,
+    cache,
+    *,
+    swiglu_limit: float = 0.0,
+) -> torch.Tensor:
+    return _run_moe_bf16_marlin_wna16_prepacked(
+        hidden_states,
+        weights,
+        indices,
+        cache,
+        swiglu_limit=swiglu_limit,
+    )
+
+
+def _run_moe_bf16_marlin_wna16_prepacked(
+    hidden_states: torch.Tensor,
+    weights: torch.Tensor,
+    indices: torch.Tensor,
+    cache,
+    *,
+    swiglu_limit: float,
+) -> torch.Tensor:
+    if hidden_states.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(f"Marlin WNA16 expects fp16/bf16 hidden states, got {hidden_states.dtype}")
+    if not hidden_states.is_cuda:
+        raise ValueError("Marlin WNA16 requires CUDA hidden states")
+    if hidden_states.ndim != 2 or weights.shape != indices.shape or indices.ndim != 2:
+        raise ValueError(
+            "Marlin WNA16 expects hidden [tokens, hidden] and matching weights/indices [tokens, topk]"
+        )
+    if cache is None:
+        raise RuntimeError("Marlin WNA16 prepacked dispatch requires a prepared weight cache.")
+    if not all(hasattr(cache, name) for name in ("w13", "w2", "w13_scale", "w2_scale")):
+        raise RuntimeError("Marlin WNA16 prepacked dispatch received an invalid cache object.")
+
+    from minisgl.kernel import marlin_wna16
+
+    experts = cache.w13.shape[0]
     block_size_m = marlin_wna16.choose_block_size(
         tokens=hidden_states.shape[0],
         topk=indices.shape[1],
@@ -992,14 +1068,6 @@ def moe_route_dispatch_bf16_marlin_wna16(
         num_experts=experts,
         block_size_m=block_size_m,
     )
-    if cache is None or not cache.matches(w13_weight, w13_scale, w2_weight, w2_scale):
-        cache = marlin_wna16.prepare_moe_mxfp4_weights(
-            w13_weight,
-            w13_scale,
-            w2_weight,
-            w2_scale,
-            params_dtype=hidden_states.dtype,
-        )
     output = marlin_wna16.run_moe(
         hidden_states,
         weights,
@@ -1010,7 +1078,7 @@ def moe_route_dispatch_bf16_marlin_wna16(
         block_size_m=route_plan.block_size_m,
         swiglu_limit=swiglu_limit,
     )
-    return output, cache
+    return output
 
 
 def dsv4_sm80_cuda_enabled(toggle: str) -> bool:
@@ -4706,6 +4774,7 @@ __all__ = [
     "moe_gate_fallback",
     "moe_route_dispatch_bf16_grouped",
     "moe_route_dispatch_bf16_marlin_wna16",
+    "moe_route_dispatch_bf16_marlin_wna16_prepacked",
     "norm_rope_inplace_fallback",
     "paged_mqa_attention_fallback",
     "plan_topk_v2_fallback",
