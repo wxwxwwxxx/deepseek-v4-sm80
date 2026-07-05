@@ -47,7 +47,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | Added TP8 benchmark harness and text smoke; fixed early correctness issues. |
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
 | TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime` as the prefix-cache baseline; detailed prompts archived under `prompts/archive/target08/`. |
-| TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | planned | Low-precision research: FP8 KV/cache/indexer, INT8 MoE, quantized projection/cache fusion. |
+| TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | recommended next | Low-precision research after TARGET 10: INT8 MoE W8A8 and FP8 KV/cache are the two primary lanes; quantized projection/cache fusion is lower priority. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 
 ## Current Milestones

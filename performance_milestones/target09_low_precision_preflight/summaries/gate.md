@@ -1,0 +1,10 @@
+| check | result |
+| --- | --- |
+| macro_all_pass | True |
+| graph_enabled_all_scenarios | True |
+| captured_bs_1_2_4_8_16_all_scenarios | True |
+| graph_eager_decode_count_zero_all_scenarios | True |
+| use_pynccl_true_all_reports | True |
+| pynccl_threshold32m_default_log_seen | True |
+| owner_timing_enabled_all_single_scenario_runs | True |
+| gate | PASS |
