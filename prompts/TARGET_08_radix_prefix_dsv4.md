@@ -12,6 +12,7 @@ prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
 prompts/TARGET_08.35_dsv4_sm80_marlin_wna16_release_preset_promotion.md
 prompts/TARGET_08.36_dsv4_sm80_marlin_wna16_release_correctness_attribution.md
+prompts/TARGET_08.37_dsv4_sm80_marlin_wna16_release_storage_reuse_owner.md
 ```
 
 TARGET 08.31 is about SGLang-aligned SWA lifecycle and memory ownership.  It is
@@ -48,6 +49,13 @@ promotion.  TARGET 08.35 landed the preset naming, release ledger, and
 fail-closed behavior, but TP8 text smoke showed stable corrupted output only
 after raw routed FP4 expert weights/scales were released.  TARGET 08.36 should
 attribute that blocker before any release preset is promoted.
+
+TARGET 08.37 continues the release route after TARGET 08.36.  TARGET 08.36
+ruled out prebuild, prepacked branch, normal attribute deletion, graph replay
+as primary cause, and sampled Marlin cache corruption.  Its strongest evidence
+points to early physical release of large expert-weight storages interacting
+with later KV/cache/warmup/graph/attention/indexer allocations.  TARGET 08.37
+should identify the concrete storage-reuse owner or safe release boundary.
 
 Milestone tag:
 
@@ -258,7 +266,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.31, TARGET 08.36, or
+3. the active future target prompt, currently TARGET 08.31, TARGET 08.37, or
    a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
@@ -312,9 +320,10 @@ for all traffic.
 
 ### CUDA Graph Memory Pool
 
-Status: active follow-up as TARGET 08.36 after the broad TARGET 08.32 probe,
+Status: active follow-up as TARGET 08.37 after the broad TARGET 08.32 probe,
 the focused TARGET 08.33 indexer audit, TARGET 08.34 MoE lifecycle
-attribution, and TARGET 08.35 release-preset promotion gate.
+attribution, TARGET 08.35 release-preset promotion gate, and TARGET 08.36
+release-correctness attribution.
 
 Graph capture delta is large and repeatable.  TARGET 08.06/08.07 found it is
 not primarily caused by BF16 caches, metadata, bucket count, greedy sample,
@@ -383,6 +392,27 @@ release path is rejected.  It should isolate whether the failure belongs to
 CUDA graph replay, decode progression, MoE packed-cache lifetime, raw tensor
 storage release, or a runtime branch change after raw attributes are removed.
 
+TARGET 08.36 result: release remains blocked, but the release route is still
+worth investigating.  Baseline and prebuild-only pass.  Release fails in both
+graph and eager/no-graph modes, so graph replay is not the primary owner.
+`force-prepacked-with-raw-present`, `keep-hidden-ref`, and
+`release-after-capture` pass; `weights-only` fails while `scales-only` passes;
+partial release shows a failure threshold between about `3.1875` and
+`6.3750 GiB/rank`.  Sampled Marlin packed-cache tensors and MoE micro-parity
+remain stable.  The first observed full-model symptom is around
+`layer2.indexer_select.logits`, but the likely root is early physical release
+of large expert-weight storage and subsequent allocator reuse.  The next target
+is:
+
+```text
+prompts/TARGET_08.37_dsv4_sm80_marlin_wna16_release_storage_reuse_owner.md
+```
+
+TARGET 08.37 should build a freed-range ledger, owner-tagged post-release
+allocation ledger, release timing ladder, poison/quarantine probes, and a
+layer2 indexer/attention owner probe to identify the concrete unsafe owner or
+the earliest safe release boundary.
+
 Old reports:
 
 ```text
@@ -392,6 +422,7 @@ performance_milestones/target08_cuda_graph_private_pool_micro_attribution/README
 performance_milestones/target08_indexer_capture_static_width_audit/README.md
 performance_milestones/target08_moe_marlin_wna16_cache_lifecycle/README.md
 performance_milestones/target08_marlin_wna16_release_preset_promotion/README.md
+performance_milestones/target08_marlin_wna16_release_correctness_attribution/README.md
 ```
 
 ### Broader Serving Benchmark

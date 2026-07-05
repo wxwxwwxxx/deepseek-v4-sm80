@@ -24,6 +24,11 @@ DSV4_CUDA_GRAPH_EXACT_BS_ONLY_ENV = "MINISGL_DSV4_CUDA_GRAPH_EXACT_BS_ONLY"
 DSV4_GRAPH_CAPTURE_STAGE_DEBUG_ENV = "MINISGL_DSV4_GRAPH_CAPTURE_STAGE_DEBUG"
 DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
 DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
+_MARLIN_WNA16_RELEASE_ENV = "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+_MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING"
+_MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_AFTER_GRAPH_CAPTURE"
+)
 
 
 @dataclass
@@ -71,6 +76,19 @@ class GraphCaptureBuffer:
         if self.next_tokens is not None:
             total += self.next_tokens.numel() * self.next_tokens.element_size()
         return int(total)
+
+    def record_marlin_wna16_owner_allocations(self, stage: str) -> None:
+        dsv4_memory_debug.record_owner_tensors(
+            owner_prefix="graph.capture_buffer",
+            stage=stage,
+            tensors={
+                "input_ids": self.input_ids,
+                "out_loc": self.out_loc,
+                "positions": self.positions,
+                "logits": self.logits,
+                "next_tokens": self.next_tokens,
+            },
+        )
 
     def copy_from(self, batch: Batch) -> int:
         _slice = slice(batch.padded_size)
@@ -131,6 +149,31 @@ def get_free_memory(device: torch.device) -> int:
 
 def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _marlin_wna16_release_timing() -> str:
+    if dsv4_memory_debug.env_flag(_MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV):
+        return "after_graph_capture"
+    raw = os.environ.get(_MARLIN_WNA16_RELEASE_TIMING_ENV, "model_prepare").strip().lower()
+    aliases = {
+        "": "model_prepare",
+        "immediate": "model_prepare",
+        "after_prebuild": "model_prepare",
+        "after_full_model_prebuild": "model_prepare",
+        "model_prepare": "model_prepare",
+        "after_kv": "after_kv_alloc",
+        "after_kv_alloc": "after_kv_alloc",
+        "after_kv_allocation": "after_kv_alloc",
+        "before_warmup": "before_warmup_forward",
+        "before_warmup_forward": "before_warmup_forward",
+        "after_warmup": "after_warmup_forward",
+        "after_warmup_forward": "after_warmup_forward",
+        "after_graph": "after_graph_capture",
+        "after_graph_capture": "after_graph_capture",
+        "after_first_decode": "after_first_decode",
+        "after_decode_step1": "after_first_decode",
+    }
+    return aliases.get(raw, raw)
 
 
 def _audit_rank() -> int:
@@ -254,6 +297,7 @@ class GraphRunner:
         self.device = device
         self.capture_fail_open = capture_fail_open
         self.capture_greedy_sample = capture_greedy_sample
+        self._marlin_wna16_debug_release_done = False
         self.exact_bs_only = (
             os.environ.get(DSV4_CUDA_GRAPH_EXACT_BS_ONLY_ENV, "").strip().lower()
             in _TRUE_ENV_VALUES
@@ -308,6 +352,25 @@ class GraphRunner:
                 logger.error(f"CUDA graph capture failed: {type(exc).__name__}: {exc}")
                 raise
 
+    def _maybe_release_marlin_wna16_for_timing(self, *, timing: str, stage_label: str) -> None:
+        if self._marlin_wna16_debug_release_done:
+            return
+        if not dsv4_memory_debug.env_flag(_MARLIN_WNA16_RELEASE_ENV):
+            return
+        if _marlin_wna16_release_timing() != timing:
+            return
+        release = getattr(self.model, "release_marlin_wna16_original_expert_weights", None)
+        if not callable(release):
+            return
+        report = release(stage_label=stage_label)
+        self._marlin_wna16_debug_release_done = True
+        self.capture_status[f"moe_marlin_wna16_{stage_label}"] = report
+
+    def record_marlin_wna16_owner_allocations(self, stage: str) -> None:
+        buffer = getattr(self, "buffer", None)
+        if buffer is not None:
+            buffer.record_marlin_wna16_owner_allocations(stage)
+
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
         if self.max_graph_bs == 0:
@@ -360,6 +423,7 @@ class GraphRunner:
             self.device,
             capture_greedy_sample=self.capture_greedy_sample,
         )
+        self.buffer.record_marlin_wna16_owner_allocations("after_GraphCaptureBuffer.init")
         record_stage("after_GraphCaptureBuffer.init")
         self.capture_status["capture_buffer_bytes"] = self.buffer.nbytes()
         bind_capture_graph_inputs = getattr(
@@ -414,12 +478,20 @@ class GraphRunner:
                 if stage_capture_metadata is not None:
                     stage_capture_metadata(batch)
                 record_stage("after_stage_capture_metadata", bs)
+                self._maybe_release_marlin_wna16_for_timing(
+                    timing="before_warmup_forward",
+                    stage_label=f"before_warmup_forward_bs{int(bs)}_release",
+                )
                 with dsv4_memory_debug.warmup_forward_context(
                     label="graph_capture_warmup_model_forward",
                     batch_size=bs,
                     device=self.device,
                 ):
                     self.buffer.logits[:bs] = model.forward()
+                self._maybe_release_marlin_wna16_for_timing(
+                    timing="after_warmup_forward",
+                    stage_label=f"after_warmup_forward_bs{int(bs)}_release",
+                )
                 if self.capture_greedy_sample:
                     assert self.buffer.next_tokens is not None
                     self.buffer.next_tokens[:bs] = torch.argmax(

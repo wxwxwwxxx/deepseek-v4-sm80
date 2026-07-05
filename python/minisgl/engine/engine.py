@@ -30,6 +30,11 @@ logger = init_logger(__name__)
 
 _PYNCCL_MAX_BUFFER_SIZE_ENV = "MINISGL_PYNCCL_MAX_BUFFER_SIZE"
 _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES = 32 * 1024 * 1024
+_MARLIN_WNA16_RELEASE_ENV = "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
+_MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING"
+_MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_AFTER_GRAPH_CAPTURE"
+)
 
 
 class ForwardOutput(NamedTuple):
@@ -50,6 +55,7 @@ class Engine:
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
         self.dtype = config.dtype
+        self._marlin_wna16_debug_release_done = False
         self.ctx = Context(config.page_size)
         set_global_ctx(self.ctx)
 
@@ -67,6 +73,7 @@ class Engine:
             self.model_prepare_report = prepare_for_cuda_graph_capture()
         else:
             self.model_prepare_report = {}
+        self._record_marlin_wna16_owner_allocations("after_model_prepare")
         self._audit_marlin_wna16_cache_integrity("after_model_prepare")
 
         # ======================= KV cache initialization ========================
@@ -83,6 +90,11 @@ class Engine:
                 getattr(config, "enable_dsv4_component_loc_ownership", False)
             ),
         )
+        self._record_marlin_wna16_owner_allocations("after_kv_alloc")
+        self._maybe_release_marlin_wna16_for_timing(
+            timing="after_kv_alloc",
+            stage_label="after_kv_alloc_release",
+        )
 
         # ======================= Page table initialization ========================
         # NOTE: 1. aligned to 128 bytes; 2. store raw locations instead of pages
@@ -92,6 +104,16 @@ class Engine:
             (config.max_running_req + 1, aligned_max_seq_len),
             dtype=torch.int32,
             device=self.device,
+        )
+        dsv4_memory_debug.record_owner_tensor(
+            owner_label="engine.page_table",
+            stage="after_page_table_alloc",
+            tensor=self.page_table,
+            include_integrity=False,
+            extra={
+                "max_seq_len": int(self.max_seq_len),
+                "aligned_max_seq_len": int(aligned_max_seq_len),
+            },
         )
 
         # ======================= Attention & MoE backend initialization ========================
@@ -134,18 +156,11 @@ class Engine:
             capture_fail_open=config.cuda_graph_capture_fail_open,
             capture_greedy_sample=config.cuda_graph_capture_greedy_sample,
         )
-        if dsv4_memory_debug.env_flag(
-            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_AFTER_GRAPH_CAPTURE"
-        ):
-            release_after_capture = getattr(
-                self.model,
-                "release_marlin_wna16_original_expert_weights",
-                None,
-            )
-            if callable(release_after_capture):
-                self.model_prepare_report[
-                    "moe_marlin_wna16_after_graph_capture_release"
-                ] = release_after_capture(stage_label="after_graph_capture_release")
+        self._record_marlin_wna16_owner_allocations("after_graph_runner_init")
+        self._maybe_release_marlin_wna16_for_timing(
+            timing="after_graph_capture",
+            stage_label="after_graph_capture_release",
+        )
         self._audit_marlin_wna16_cache_integrity("after_graph_runner_init")
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
@@ -173,6 +188,67 @@ class Engine:
             tp_cpu_group = torch.distributed.new_group(backend="gloo")
             assert tp_cpu_group is not None
         return tp_cpu_group
+
+    def _marlin_wna16_release_timing(self) -> str:
+        if dsv4_memory_debug.env_flag(_MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV):
+            return "after_graph_capture"
+        raw = os.environ.get(_MARLIN_WNA16_RELEASE_TIMING_ENV, "model_prepare").strip().lower()
+        aliases = {
+            "": "model_prepare",
+            "immediate": "model_prepare",
+            "after_prebuild": "model_prepare",
+            "after_full_model_prebuild": "model_prepare",
+            "model_prepare": "model_prepare",
+            "after_kv": "after_kv_alloc",
+            "after_kv_alloc": "after_kv_alloc",
+            "after_kv_allocation": "after_kv_alloc",
+            "before_warmup": "before_warmup_forward",
+            "before_warmup_forward": "before_warmup_forward",
+            "after_warmup": "after_warmup_forward",
+            "after_warmup_forward": "after_warmup_forward",
+            "after_graph": "after_graph_capture",
+            "after_graph_capture": "after_graph_capture",
+            "after_first_decode": "after_first_decode",
+            "after_decode_step1": "after_first_decode",
+        }
+        return aliases.get(raw, raw)
+
+    def _maybe_release_marlin_wna16_for_timing(self, *, timing: str, stage_label: str) -> None:
+        if self._marlin_wna16_debug_release_done:
+            return
+        if not dsv4_memory_debug.env_flag(_MARLIN_WNA16_RELEASE_ENV):
+            return
+        if self._marlin_wna16_release_timing() != timing:
+            return
+        release = getattr(self.model, "release_marlin_wna16_original_expert_weights", None)
+        if not callable(release):
+            return
+        report = release(stage_label=stage_label)
+        self._marlin_wna16_debug_release_done = True
+        self.model_prepare_report[f"moe_marlin_wna16_{stage_label}"] = report
+        self._record_marlin_wna16_owner_allocations(f"{stage_label}:after")
+
+    def _record_marlin_wna16_owner_allocations(self, stage: str) -> None:
+        if not dsv4_memory_debug.marlin_wna16_release_ledger_enabled():
+            return
+        model_record = getattr(self.model, "record_marlin_wna16_owner_allocations", None)
+        if callable(model_record):
+            model_record(stage)
+        kv_cache = getattr(self, "kv_cache", None)
+        kv_record = getattr(kv_cache, "record_marlin_wna16_owner_allocations", None)
+        if callable(kv_record):
+            kv_record(stage)
+        page_table = getattr(self, "page_table", None)
+        if isinstance(page_table, torch.Tensor):
+            dsv4_memory_debug.record_owner_tensor(
+                owner_label="engine.page_table",
+                stage=stage,
+                tensor=page_table,
+            )
+        graph_runner = getattr(self, "graph_runner", None)
+        graph_record = getattr(graph_runner, "record_marlin_wna16_owner_allocations", None)
+        if callable(graph_record):
+            graph_record(stage)
 
     def _load_weight_state_dict(self, config: EngineConfig) -> Dict[str, torch.Tensor]:
         if config.use_dummy_weight:
@@ -249,6 +325,26 @@ class Engine:
                 logits = self.model.forward()
 
         debug_recorder = dsv4_prefix_debug.get_dsv4_prefix_debug_recorder()
+        forward_stage = (
+            f"{batch.phase}_bs{int(batch.size)}"
+            f"_padded{int(getattr(batch, 'padded_size', batch.size))}_{forward_source}"
+        )
+        if logits is not None:
+            dsv4_memory_debug.record_owner_tensor(
+                owner_label="engine.forward.logits",
+                stage=forward_stage,
+                tensor=logits[: batch.size],
+                include_integrity=False,
+            )
+        dsv4_memory_debug.record_owner_tensors(
+            owner_prefix="engine.sampler.args",
+            stage=forward_stage,
+            tensors={
+                "temperatures": args.temperatures,
+                "top_k": args.top_k,
+                "top_p": args.top_p,
+            },
+        )
         debug_snapshot = (
             debug_recorder.capture_pre_sample(
                 batch=batch,
@@ -269,11 +365,22 @@ class Engine:
             ):
                 assert logits is not None
                 next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
+        dsv4_memory_debug.record_owner_tensor(
+            owner_label="engine.sampler.next_tokens_gpu",
+            stage=forward_stage,
+            tensor=next_tokens_gpu,
+            include_integrity=False,
+        )
         if debug_recorder is not None:
             debug_recorder.finish(
                 debug_snapshot,
                 next_tokens=next_tokens_gpu,
                 graph_runner=getattr(self.graph_runner, "capture_status", {}),
+            )
+        if batch.is_decode:
+            self._maybe_release_marlin_wna16_for_timing(
+                timing="after_first_decode",
+                stage_label="after_first_decode_release",
             )
         with dsv4_direct_copy_nvtx(
             f"sampler_logits_staging.next_tokens_to_cpu.bs{batch.size}",

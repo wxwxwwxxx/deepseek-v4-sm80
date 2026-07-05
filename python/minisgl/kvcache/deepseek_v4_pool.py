@@ -6,7 +6,7 @@ from math import gcd
 from typing import Literal
 
 import torch
-from minisgl.utils import div_ceil
+from minisgl.utils import div_ceil, dsv4_memory_debug
 
 from .base import BaseKVCachePool
 
@@ -451,6 +451,65 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                     device=device,
                     page_size=page_size,
                 )
+
+    def record_marlin_wna16_owner_allocations(self, stage: str) -> None:
+        tensors: dict[str, torch.Tensor | None] = {
+            "swa_buffer": self._swa_buffer,
+            "c4_buffer": self._c4_buffer,
+            "c128_buffer": self._c128_buffer,
+            "c4_indexer_buffer": self._c4_indexer_buffer,
+            "c4_indexer_fp8_paged_cache": self._c4_indexer_fp8_paged_cache,
+            "c4_indexer_fp8_values": self._c4_indexer_fp8_values,
+            "c4_indexer_fp8_scales": self._c4_indexer_fp8_scales,
+            "full_refcount": self._full_refcount,
+            "c4_refcount": self._c4_refcount,
+            "c128_refcount": self._c128_refcount,
+            "c4_indexer_refcount": self._c4_indexer_refcount,
+            "c4_state_refcount": self._c4_state_refcount,
+            "c128_state_refcount": self._c128_state_refcount,
+            "c4_indexer_state_refcount": self._c4_indexer_state_refcount,
+            "full_to_c4_page": self._full_to_c4_page,
+            "full_to_c128_page": self._full_to_c128_page,
+            "full_to_c4_indexer_page": self._full_to_c4_indexer_page,
+            "full_to_c4_state_page": self._full_to_c4_state_page,
+            "full_to_c128_state_page": self._full_to_c128_state_page,
+            "full_to_c4_indexer_state_page": self._full_to_c4_indexer_state_page,
+            "free_c4_pages": self._free_c4_pages,
+            "free_c128_pages": self._free_c128_pages,
+            "free_c4_indexer_pages": self._free_c4_indexer_pages,
+            "free_c4_state_pages": self._free_c4_state_pages,
+            "free_c128_state_pages": self._free_c128_state_pages,
+            "free_c4_indexer_state_pages": self._free_c4_indexer_state_pages,
+        }
+        dsv4_memory_debug.record_owner_tensors(
+            owner_prefix="kvcache.dsv4",
+            stage=stage,
+            tensors=tensors,
+            extra={
+                "num_pages": int(self._num_pages),
+                "page_size": int(self._page_size),
+                "num_tokens": int(self._num_tokens),
+                "component_loc_ownership": bool(self._component_loc_ownership_enabled),
+            },
+        )
+        for layer_id, pool in enumerate(self._compress_state_pools):
+            if pool is None:
+                continue
+            dsv4_memory_debug.record_owner_tensor(
+                owner_label=f"kvcache.dsv4.layer{layer_id}.compress_state.kv_score_buffer",
+                stage=stage,
+                tensor=pool.kv_score_buffer.kv_score,
+                extra={"ratio": int(pool.ratio), "kind": "attention"},
+            )
+        for layer_id, pool in enumerate(self._indexer_compress_state_pools):
+            if pool is None:
+                continue
+            dsv4_memory_debug.record_owner_tensor(
+                owner_label=f"kvcache.dsv4.layer{layer_id}.indexer_state.kv_score_buffer",
+                stage=stage,
+                tensor=pool.kv_score_buffer.kv_score,
+                extra={"ratio": int(pool.ratio), "kind": "indexer"},
+            )
 
     @property
     def indexer_fp8_page_size(self) -> int:

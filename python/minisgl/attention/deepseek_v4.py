@@ -9,7 +9,13 @@ import torch.nn.functional as F
 from minisgl.core import Batch, get_global_ctx
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
-from minisgl.utils import div_ceil, dsv4_direct_copy_nvtx, dsv4_owner_timing, dsv4_prefix_debug
+from minisgl.utils import (
+    div_ceil,
+    dsv4_direct_copy_nvtx,
+    dsv4_memory_debug,
+    dsv4_owner_timing,
+    dsv4_prefix_debug,
+)
 
 from .base import BaseAttnBackend, BaseAttnMetadata
 
@@ -107,6 +113,15 @@ def _record_metadata_counter(
 def _debug_activations_enabled() -> bool:
     recorder = dsv4_prefix_debug.get_dsv4_prefix_debug_recorder()
     return recorder is not None and bool(getattr(recorder, "capture_activations", False))
+
+
+def _cuda_graph_capture_active() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
 
 
 def _debug_attention_components_enabled() -> bool:
@@ -546,6 +561,29 @@ class DSV4AttentionBackend(BaseAttnBackend):
         seq_lens: torch.Tensor,
         page_table: torch.Tensor,
     ) -> None:
+        if (
+            dsv4_memory_debug.marlin_wna16_layer2_owner_probe_enabled()
+            and int(layer_id) == 2
+            and not _cuda_graph_capture_active()
+        ):
+            stage = "layer2_indexer_select"
+            tensors = {
+                "seq_lens": seq_lens,
+                "page_table": page_table,
+                "logits": out.logits,
+                "topk_raw_indices": out.topk.raw_indices,
+                "topk_page_indices": out.topk.page_indices,
+                "topk_full_indices": out.topk.full_indices,
+                "topk_lens": out.topk.topk_lens,
+                "topk_scores": _debug_topk_scores(out.logits, out.topk.raw_indices),
+            }
+            dsv4_memory_debug.record_owner_tensors(
+                owner_prefix="dsv4.layer2_owner_probe.indexer_select",
+                stage=stage,
+                tensors=tensors,
+                include_integrity=True,
+                extra={"layer_id": int(layer_id), "backend": out.backend},
+            )
         if not _debug_activations_enabled():
             return
         prefix = f"layer{layer_id}.indexer_select"
@@ -964,6 +1002,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             c128_source_elided_for_graph=c128_source_elided,
         )
         self._record_metadata_build_bytes(batch, core)
+        self._record_marlin_wna16_metadata_owners(batch, core)
 
         indexer_metadata = (
             DSV4IndexerMetadata(
@@ -1266,6 +1305,21 @@ class DSV4AttentionBackend(BaseAttnBackend):
             else None
         )
         self._component_page_table_cache_signatures.clear()
+        dsv4_memory_debug.record_owner_tensors(
+            owner_prefix="attention.dsv4.component_page_table_cache",
+            stage="ensure_component_page_table_cache",
+            tensors={
+                "c4": self._component_page_table_cache_c4,
+                "c128": self._component_page_table_cache_c128,
+                "indexer": self._component_page_table_cache_indexer,
+            },
+            extra={
+                "rows": int(rows),
+                "width": int(width),
+                "has_c4": bool(has_c4),
+                "has_c128": bool(has_c128),
+            },
+        )
 
     def _component_page_table_cache_signature(self, req) -> tuple[int, ...]:
         handle = getattr(req, "cache_handle", None)
@@ -1524,6 +1578,61 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 field=field,
                 stable=stable,
             )
+
+    def _record_marlin_wna16_metadata_owners(
+        self,
+        batch: Batch,
+        core: DSV4CoreAttentionMetadata,
+    ) -> None:
+        if not dsv4_memory_debug.marlin_wna16_release_ledger_enabled():
+            return
+        stage = (
+            f"attention_metadata_{batch.phase}"
+            f"_bs{int(batch.size)}"
+            f"_padded{int(getattr(batch, 'padded_size', batch.size))}"
+        )
+        dsv4_memory_debug.record_owner_tensors(
+            owner_prefix="attention.dsv4.metadata",
+            stage=stage,
+            tensors={
+                "raw_out_loc": core.raw_out_loc,
+                "page_table": core.page_table,
+                "cu_seqlens_q": core.cu_seqlens_q,
+                "seq_lens": core.seq_lens,
+                "req_seq_lens": core.req_seq_lens,
+                "extend_lens": core.extend_lens,
+                "positions": core.positions,
+                "req_table_indices": core.req_table_indices,
+                "swa_page_indices": core.swa_page_indices,
+                "swa_topk_lengths": core.swa_topk_lengths,
+                "c4_out_loc": core.c4_out_loc,
+                "c128_out_loc": core.c128_out_loc,
+                "c4_indexer_out_loc": core.c4_indexer_out_loc,
+                "c4_topk_lengths_raw": core.c4_topk_lengths_raw,
+                "c4_topk_lengths_clamp1": core.c4_topk_lengths_clamp1,
+                "c4_sparse_topk_lengths": core.c4_sparse_topk_lengths,
+                "c4_sparse_raw_indices": core.c4_sparse_raw_indices,
+                "c4_sparse_page_indices": core.c4_sparse_page_indices,
+                "c4_sparse_full_indices": core.c4_sparse_full_indices,
+                "c128_topk_lengths_clamp1": core.c128_topk_lengths_clamp1,
+                "c128_raw_indices": core.c128_raw_indices,
+                "c128_page_indices": core.c128_page_indices,
+                "c128_full_indices": core.c128_full_indices,
+                "c4_page_table": core.c4_page_table,
+                "c128_page_table": core.c128_page_table,
+                "c4_indexer_page_table": core.c4_indexer_page_table,
+            },
+            extra={
+                "component_loc_ownership": bool(core.component_loc_ownership),
+                "max_seqlen_q": int(core.max_seqlen_q),
+                "max_seqlen_k": int(core.max_seqlen_k),
+                "swa_source_elided_for_graph": bool(core.swa_source_elided_for_graph),
+                "c4_sparse_source_elided_for_graph": bool(
+                    core.c4_sparse_source_elided_for_graph
+                ),
+                "c128_source_elided_for_graph": bool(core.c128_source_elided_for_graph),
+            },
+        )
 
     def _record_replay_copy_bytes(
         self,

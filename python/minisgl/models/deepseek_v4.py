@@ -45,6 +45,19 @@ _MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV = (
 _MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_AFTER_GRAPH_CAPTURE"
 )
+_MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING"
+_MARLIN_WNA16_POISON_HIDDEN_REF_PATTERN_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_HIDDEN_REF_PATTERN"
+)
+_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
+)
+_MARLIN_WNA16_QUARANTINE_BYTES_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
+)
+_MARLIN_WNA16_QUARANTINE_PATTERN_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
+)
 _MARLIN_WNA16_CACHE_INTEGRITY_LAYERS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS"
 )
@@ -84,6 +97,60 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _env_bytes(name: str, default: int | None = None) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    token = raw.strip().lower()
+    multipliers = {
+        "kib": 1 << 10,
+        "kb": 1 << 10,
+        "mib": 1 << 20,
+        "mb": 1 << 20,
+        "gib": 1 << 30,
+        "gb": 1 << 30,
+    }
+    for suffix, multiplier in multipliers.items():
+        if token.endswith(suffix):
+            try:
+                return int(float(token[: -len(suffix)]) * multiplier)
+            except ValueError:
+                return default
+    try:
+        return int(token)
+    except ValueError:
+        return default
+
+
+def _marlin_wna16_release_timing() -> str:
+    if dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV):
+        return "after_graph_capture"
+    raw = os.environ.get(_MARLIN_WNA16_RELEASE_TIMING_ENV, "model_prepare").strip().lower()
+    aliases = {
+        "": "model_prepare",
+        "immediate": "model_prepare",
+        "after_prebuild": "model_prepare",
+        "after_full_model_prebuild": "model_prepare",
+        "model_prepare": "model_prepare",
+        "after_kv": "after_kv_alloc",
+        "after_kv_alloc": "after_kv_alloc",
+        "after_kv_allocation": "after_kv_alloc",
+        "before_warmup": "before_warmup_forward",
+        "before_warmup_forward": "before_warmup_forward",
+        "after_warmup": "after_warmup_forward",
+        "after_warmup_forward": "after_warmup_forward",
+        "after_graph": "after_graph_capture",
+        "after_graph_capture": "after_graph_capture",
+        "after_first_decode": "after_first_decode",
+        "after_decode_step1": "after_first_decode",
+    }
+    return aliases.get(raw, raw)
+
+
+def _marlin_wna16_release_deferred_from_model_prepare() -> bool:
+    return _marlin_wna16_release_timing() != "model_prepare"
 
 
 def _parse_int_filter(raw: str | None) -> set[int] | None:
@@ -136,6 +203,25 @@ def _capture_debug_activation(
         batch = get_global_ctx().batch
     except Exception:
         batch = None
+    if (
+        dsv4_memory_debug.marlin_wna16_layer2_owner_probe_enabled()
+        and (name.startswith("layer2.") or name in {"embedding", "final_norm", "lm_head_logits"})
+        and not _cuda_graph_capture_active()
+    ):
+        stage = "unknown"
+        if batch is not None:
+            stage = (
+                f"{getattr(batch, 'phase', 'unknown')}"
+                f"_bs{int(getattr(batch, 'size', 0))}"
+                f"_padded{int(getattr(batch, 'padded_size', getattr(batch, 'size', 0)))}"
+            )
+        dsv4_memory_debug.record_owner_tensor(
+            owner_label=f"dsv4.layer2_owner_probe.{name}",
+            stage=stage,
+            tensor=tensor,
+            include_integrity=True,
+            extra={"activation_name": name},
+        )
     dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
 
 
@@ -2296,15 +2382,42 @@ class DSV4FusedRoutedExperts(BaseOP):
             self._marlin_wna16_hidden_original_expert_refs.extend(
                 tensor for name, tensor in source_tensors.items() if name in release_names
             )
+            self._maybe_poison_hidden_original_expert_refs(source_tensors, release_names)
         for name, tensor in list(source_tensors.items()):
+            freed_record = dsv4_memory_debug.register_marlin_wna16_freed_tensor(
+                tensor=tensor,
+                layer_id=self.layer_id,
+                component=name,
+                owner=self._marlin_owner_label,
+                released=name in release_names,
+                stage="before_release_original",
+                extra={
+                    "weights_only": dsv4_kernel.dsv4_env_flag(
+                        _MARLIN_WNA16_RELEASE_WEIGHTS_ONLY_ENV
+                    ),
+                    "scales_only": dsv4_kernel.dsv4_env_flag(
+                        _MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV
+                    ),
+                    "keep_hidden_ref": dsv4_kernel.dsv4_env_flag(
+                        _MARLIN_WNA16_KEEP_HIDDEN_REF_ENV
+                    ),
+                },
+            )
             if name not in release_names:
                 continue
             released.append(
                 {
                     "attribute": name,
-                    "shape": [int(dim) for dim in tensor.shape],
-                    "dtype": str(tensor.dtype),
-                    "bytes": dsv4_memory_debug.tensor_nbytes(tensor),
+                    "component": name,
+                    "layer_id": self.layer_id,
+                    "data_ptr": int(freed_record.get("data_ptr", 0) or 0),
+                    "start": int(freed_record.get("start", 0) or 0),
+                    "end": int(freed_record.get("end", 0) or 0),
+                    "shape": list(freed_record.get("shape", [])),
+                    "stride": list(freed_record.get("stride", [])),
+                    "dtype": str(freed_record.get("dtype")),
+                    "bytes": int(freed_record.get("bytes", 0) or 0),
+                    "released": True,
                 }
             )
             delattr(self, name)
@@ -2329,6 +2442,83 @@ class DSV4FusedRoutedExperts(BaseOP):
         if scales_only and not weights_only:
             return {"w13_weight_scale_inv", "w2_weight_scale_inv"}
         return set(self._raw_expert_weight_names())
+
+    def _maybe_poison_hidden_original_expert_refs(
+        self,
+        source_tensors: dict[str, torch.Tensor],
+        release_names: set[str],
+    ) -> None:
+        pattern = os.environ.get(_MARLIN_WNA16_POISON_HIDDEN_REF_PATTERN_ENV, "").strip().lower()
+        if not pattern or pattern in {"none", "off", "0", "false", "no"}:
+            return
+        for name, tensor in source_tensors.items():
+            if name not in release_names:
+                continue
+            with torch.no_grad():
+                if pattern in {"zero", "zeros"}:
+                    tensor.fill_(0)
+                elif pattern in {"one", "ones"}:
+                    tensor.fill_(1)
+                elif pattern in {"neg1", "negative_one", "-1"}:
+                    tensor.fill_(-1)
+                elif pattern in {"nan", "nans"} and torch.is_floating_point(tensor):
+                    tensor.fill_(float("nan"))
+                elif pattern in {"nan", "nans"}:
+                    tensor.fill_(127)
+                elif pattern.startswith("value:"):
+                    value = int(pattern.split(":", 1)[1], 0)
+                    tensor.fill_(value)
+                else:
+                    tensor.fill_(127)
+            dsv4_memory_debug.append_jsonl(
+                "marlin_wna16_poison",
+                {
+                    "event": "dsv4_marlin_wna16_hidden_ref_poison",
+                    "owner": self._marlin_owner_label,
+                    "layer_id": self.layer_id,
+                    "component": name,
+                    "pattern": pattern,
+                    "tensor": dsv4_memory_debug.tensor_summary(tensor),
+                },
+            )
+
+    def _record_moe_owner_tensors(
+        self,
+        *,
+        stage: str,
+        hidden_states: torch.Tensor | None = None,
+        weights: torch.Tensor | None = None,
+        indices: torch.Tensor | None = None,
+        grouped: torch.Tensor | None = None,
+        moe_plan: dsv4_kernel.DSV4MoEExecutionPlan | None = None,
+    ) -> None:
+        if not dsv4_memory_debug.marlin_wna16_release_ledger_enabled():
+            return
+        tensors: dict[str, torch.Tensor | None] = {
+            "hidden_states": hidden_states,
+            "route_weights": weights,
+            "route_indices": indices,
+            "grouped_output": grouped,
+        }
+        if moe_plan is not None:
+            route_plan = moe_plan.route_plan
+            tensors.update(
+                {
+                    "moe_plan.route_weights": moe_plan.route_weights,
+                    "moe_plan.sorted_route_ids": route_plan.sorted_route_ids,
+                    "moe_plan.expert_ids": route_plan.expert_ids,
+                    "moe_plan.num_tokens_post_padded": route_plan.num_tokens_post_padded,
+                }
+            )
+        workspace_buffers = getattr(self._moe_v2_workspace, "_buffers", {})
+        for name, tensor in workspace_buffers.items():
+            tensors[f"workspace.{name}"] = tensor
+        dsv4_memory_debug.record_owner_tensors(
+            owner_prefix=f"{self._marlin_owner_label}.moe_forward",
+            stage=stage,
+            tensors=tensors,
+            extra={"layer_id": self.layer_id},
+        )
 
     def _expert_forward(
         self, local_idx: int, x: torch.Tensor, weights: torch.Tensor
@@ -2373,6 +2563,13 @@ class DSV4FusedRoutedExperts(BaseOP):
         moe_plan: dsv4_kernel.DSV4MoEExecutionPlan | None = None,
     ) -> torch.Tensor:
         backend = dsv4_kernel.require_supported_moe_expert_backend()
+        self._record_moe_owner_tensors(
+            stage=f"layer{self.layer_id}.moe_forward.input",
+            hidden_states=hidden_states,
+            weights=weights,
+            indices=indices,
+            moe_plan=moe_plan,
+        )
         missing_raw_weights = self._missing_raw_expert_weights()
         if missing_raw_weights and backend != dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16:
             raise RuntimeError(
@@ -2421,6 +2618,11 @@ class DSV4FusedRoutedExperts(BaseOP):
                         owner_label=self._marlin_owner_label,
                     )
                 )
+            self._record_moe_owner_tensors(
+                stage=f"layer{self.layer_id}.moe_forward.marlin_output",
+                grouped=grouped,
+                moe_plan=moe_plan,
+            )
             if reduce and self._tp_size > 1:
                 with dsv4_direct_copy_nvtx(
                     "moe_shared_expert_staging.routed_grouped_to_fp32_for_reduce",
@@ -2456,6 +2658,11 @@ class DSV4FusedRoutedExperts(BaseOP):
             swiglu_limit=self.swiglu_limit,
             moe_plan=moe_plan,
             workspace=workspace,
+        )
+        self._record_moe_owner_tensors(
+            stage=f"layer{self.layer_id}.moe_forward.grouped_output",
+            grouped=grouped,
+            moe_plan=moe_plan,
         )
         if grouped is not None:
             if reduce and self._tp_size > 1:
@@ -3040,6 +3247,7 @@ class DeepseekV4Model(BaseOP):
         self.hc_head_scale = torch.empty(1, dtype=torch.float32)
         self._hc_head_fn_bf16: torch.Tensor | None = None
         self._hc_head_fn_bf16_meta: tuple | None = None
+        self._marlin_wna16_release_quarantine_tensors: list[torch.Tensor] = []
 
     def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
         fused_wqa_wkv_reports: list[dict[str, object]] = []
@@ -3111,6 +3319,8 @@ class DeepseekV4Model(BaseOP):
         moe_marlin_release_after_graph_capture = dsv4_kernel.dsv4_env_flag(
             _MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV
         )
+        moe_marlin_release_timing = _marlin_wna16_release_timing()
+        moe_marlin_release_deferred = _marlin_wna16_release_deferred_from_model_prepare()
         if moe_marlin_release_original and not moe_marlin_prebuild_enabled:
             raise RuntimeError(
                 f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV}=1 "
@@ -3138,7 +3348,7 @@ class DeepseekV4Model(BaseOP):
                 )
             moe_marlin_wna16_reports = moe_marlin_wna16_prebuild_reports
             self.audit_marlin_wna16_cache_integrity("after_full_model_prebuild")
-            if moe_marlin_release_original and not moe_marlin_release_after_graph_capture:
+            if moe_marlin_release_original and not moe_marlin_release_deferred:
                 moe_marlin_wna16_release_reports = self.release_marlin_wna16_original_expert_weights(
                     stage_label="model_prepare_release",
                 )["entries"]
@@ -3352,6 +3562,8 @@ class DeepseekV4Model(BaseOP):
                 "release_after_graph_capture_requested": bool(
                     moe_marlin_release_after_graph_capture
                 ),
+                "debug_release_timing": moe_marlin_release_timing,
+                "debug_release_deferred_from_model_prepare": bool(moe_marlin_release_deferred),
                 "release_layer_filter": os.environ.get(
                     _MARLIN_WNA16_RELEASE_LAYER_FILTER_ENV,
                     "all",
@@ -3371,7 +3583,11 @@ class DeepseekV4Model(BaseOP):
                 "total_released_original_bytes": total_moe_marlin_wna16_released_bytes,
                 "release_runtime_policy": (
                     "marlin_wna16_prepacked_only"
-                    if moe_marlin_release_original and bool(moe_marlin_wna16_reports)
+                    if (
+                        moe_marlin_release_original
+                        and not moe_marlin_release_deferred
+                        and bool(moe_marlin_wna16_reports)
+                    )
                     else None
                 ),
                 "fail_closed_error": (
@@ -3414,6 +3630,10 @@ class DeepseekV4Model(BaseOP):
                     skipped_layers.append(int(layer_id))
                 continue
             release_reports.append(experts.release_marlin_wna16_original_expert_weights())
+        quarantine_report = self._maybe_quarantine_marlin_wna16_released_blocks(
+            release_reports,
+            stage_label=stage_label,
+        )
         self.audit_marlin_wna16_cache_integrity(f"{stage_label}:after")
 
         def _released_this_call(report: dict[str, object]) -> int:
@@ -3442,7 +3662,97 @@ class DeepseekV4Model(BaseOP):
             "total_hidden_ref_bytes": int(
                 sum(int(report.get("hidden_ref_bytes", 0)) for report in release_reports)
             ),
+            "quarantine": quarantine_report,
         }
+
+    def _maybe_quarantine_marlin_wna16_released_blocks(
+        self,
+        release_reports: list[dict[str, object]],
+        *,
+        stage_label: str,
+    ) -> dict[str, object]:
+        if not dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV):
+            return {"enabled": False}
+        released_items: list[dict[str, object]] = []
+        for report in release_reports:
+            for item in report.get("released", []):
+                if isinstance(item, dict) and int(item.get("bytes", 0) or 0) > 0:
+                    released_items.append(item)
+        total_released = int(sum(int(item.get("bytes", 0) or 0) for item in released_items))
+        target_bytes = _env_bytes(_MARLIN_WNA16_QUARANTINE_BYTES_ENV, total_released)
+        if target_bytes is None:
+            target_bytes = total_released
+        target_bytes = max(0, min(int(target_bytes), total_released))
+        pattern = os.environ.get(_MARLIN_WNA16_QUARANTINE_PATTERN_ENV, "zero").strip().lower()
+        records: list[dict[str, object]] = []
+        allocated = 0
+        device: torch.device | None = None
+        for layer in self.layers.op_list:
+            experts = getattr(layer.mlp, "experts", None)
+            cache = getattr(experts, "_marlin_wna16_weights", None)
+            tensor = getattr(cache, "w13", None)
+            if isinstance(tensor, torch.Tensor):
+                device = tensor.device
+                break
+        if device is None or device.type != "cuda":
+            return {
+                "enabled": True,
+                "allocated_bytes": 0,
+                "target_bytes": target_bytes,
+                "error": "no_cuda_device_found",
+            }
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+        for idx, item in enumerate(released_items):
+            if allocated >= target_bytes:
+                break
+            requested = min(int(item.get("bytes", 0) or 0), target_bytes - allocated)
+            if requested <= 0:
+                continue
+            tensor = torch.empty((requested,), dtype=torch.uint8, device=device)
+            self._fill_quarantine_tensor(tensor, pattern, idx)
+            self._marlin_wna16_release_quarantine_tensors.append(tensor)
+            allocated += requested
+            owner = (
+                f"marlin_wna16.release_quarantine.layer{item.get('layer_id')}"
+                f".{item.get('component', item.get('attribute', idx))}"
+            )
+            record = dsv4_memory_debug.record_owner_tensor(
+                owner_label=owner,
+                stage=f"{stage_label}:quarantine",
+                tensor=tensor,
+                include_integrity=False,
+                extra={
+                    "pattern": pattern,
+                    "source_released_item": item,
+                    "quarantine_index": idx,
+                },
+            )
+            if record is not None:
+                records.append(record)
+        return {
+            "enabled": True,
+            "stage_label": stage_label,
+            "pattern": pattern,
+            "target_bytes": target_bytes,
+            "allocated_bytes": allocated,
+            "allocated_gib": allocated / float(1 << 30),
+            "tensor_count": len(records),
+            "records": records,
+        }
+
+    def _fill_quarantine_tensor(self, tensor: torch.Tensor, pattern: str, index: int) -> None:
+        with torch.no_grad():
+            if pattern in {"zero", "zeros"}:
+                tensor.fill_(0)
+            elif pattern in {"one", "ones"}:
+                tensor.fill_(1)
+            elif pattern in {"index", "deterministic"}:
+                tensor.fill_(int(index) % 251)
+            elif pattern.startswith("value:"):
+                tensor.fill_(int(pattern.split(":", 1)[1], 0) % 256)
+            else:
+                tensor.fill_(127)
 
     def audit_marlin_wna16_cache_integrity(self, stage: str) -> None:
         if not dsv4_memory_debug.env_flag(
@@ -3453,6 +3763,32 @@ class DeepseekV4Model(BaseOP):
             experts = getattr(layer.mlp, "experts", None)
             if experts is not None:
                 experts._audit_marlin_wna16_cache_integrity(stage)
+
+    def record_marlin_wna16_owner_allocations(self, stage: str) -> None:
+        if not dsv4_memory_debug.marlin_wna16_release_ledger_enabled():
+            return
+        for layer in self.layers.op_list:
+            experts = getattr(layer.mlp, "experts", None)
+            if experts is None:
+                continue
+            dsv4_memory_debug.record_owner_tensors(
+                owner_prefix=f"{experts._marlin_owner_label}.packed_cache",
+                stage=stage,
+                tensors=experts._marlin_cache_tensors(),
+                extra={
+                    "layer_id": experts.layer_id,
+                    "released_original": bool(
+                        experts._marlin_wna16_released_original_expert_weights
+                    ),
+                },
+            )
+        for idx, tensor in enumerate(self._marlin_wna16_release_quarantine_tensors):
+            dsv4_memory_debug.record_owner_tensor(
+                owner_label=f"marlin_wna16.release_quarantine.live.{idx}",
+                stage=stage,
+                tensor=tensor,
+                extra={"quarantine_index": idx},
+            )
 
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
         hc_head_fn = _cached_hc_bf16_weight(self, "_hc_head_fn_bf16", self.hc_head_fn)

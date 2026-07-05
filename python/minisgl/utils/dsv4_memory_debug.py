@@ -19,10 +19,20 @@ DSV4_MARLIN_WNA16_CACHE_INTEGRITY_DEBUG_ENV = (
 DSV4_MARLIN_WNA16_CACHE_INTEGRITY_SAMPLE_SIZE_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_SAMPLE_SIZE"
 )
+DSV4_MARLIN_WNA16_RELEASE_LEDGER_DEBUG_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_LEDGER_DEBUG"
+)
+DSV4_MARLIN_WNA16_OWNER_LEDGER_INTEGRITY_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_OWNER_LEDGER_INTEGRITY"
+)
+DSV4_MARLIN_WNA16_LAYER2_OWNER_PROBE_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_LAYER2_OWNER_PROBE"
+)
 DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV = "MINISGL_DSV4_WARMUP_FORWARD_MEMORY_DEBUG"
 DEFAULT_AUDIT_LOG_DIR = "performance_milestones/target08_moe_marlin_wna16_cache_lifecycle/raw"
 
 _warmup_context: dict[str, Any] | None = None
+_marlin_wna16_freed_ranges: list[dict[str, Any]] = []
 
 
 def env_flag(name: str) -> bool:
@@ -38,16 +48,20 @@ def tensor_nbytes(tensor: torch.Tensor | None) -> int:
 def tensor_summary(tensor: torch.Tensor | None) -> dict[str, Any]:
     if tensor is None:
         return {"present": False}
+    start = int(tensor.data_ptr()) if tensor.device.type == "cuda" else 0
+    nbytes = tensor_nbytes(tensor)
     return {
         "present": True,
-        "data_ptr": int(tensor.data_ptr()),
+        "data_ptr": start,
+        "start": start,
+        "end": int(start + nbytes) if start else 0,
         "shape": [int(dim) for dim in tensor.shape],
         "stride": [int(dim) for dim in tensor.stride()],
         "dtype": str(tensor.dtype),
         "device": str(tensor.device),
         "numel": int(tensor.numel()),
         "element_size": int(tensor.element_size()),
-        "bytes": tensor_nbytes(tensor),
+        "bytes": nbytes,
         "is_contiguous": bool(tensor.is_contiguous()),
         "storage_offset": int(tensor.storage_offset()),
     }
@@ -152,6 +166,116 @@ def append_jsonl(kind: str, payload: dict[str, Any]) -> None:
         return
 
 
+def marlin_wna16_release_ledger_enabled() -> bool:
+    return env_flag(DSV4_MARLIN_WNA16_RELEASE_LEDGER_DEBUG_ENV)
+
+
+def marlin_wna16_layer2_owner_probe_enabled() -> bool:
+    return env_flag(DSV4_MARLIN_WNA16_LAYER2_OWNER_PROBE_ENV)
+
+
+def reset_marlin_wna16_freed_ranges() -> None:
+    _marlin_wna16_freed_ranges.clear()
+
+
+def register_marlin_wna16_freed_tensor(
+    *,
+    tensor: torch.Tensor,
+    layer_id: int | None,
+    component: str,
+    owner: str,
+    released: bool,
+    stage: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = tensor_summary(tensor)
+    record: dict[str, Any] = {
+        "event": "dsv4_marlin_wna16_freed_range",
+        "stage": stage,
+        "owner": owner,
+        "layer_id": None if layer_id is None else int(layer_id),
+        "component": component,
+        "released": bool(released),
+        **summary,
+    }
+    if extra:
+        record["extra"] = extra
+    if released and summary.get("present") and int(summary.get("bytes", 0)) > 0:
+        _marlin_wna16_freed_ranges.append(dict(record))
+    if marlin_wna16_release_ledger_enabled():
+        append_jsonl("marlin_wna16_freed_ranges", record)
+    return record
+
+
+def get_marlin_wna16_freed_ranges() -> list[dict[str, Any]]:
+    return list(_marlin_wna16_freed_ranges)
+
+
+def record_owner_tensor(
+    *,
+    owner_label: str,
+    stage: str,
+    tensor: torch.Tensor | None,
+    include_integrity: bool = False,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not marlin_wna16_release_ledger_enabled() and not include_integrity:
+        return None
+    if tensor is None:
+        record = {
+            "event": "dsv4_marlin_wna16_owner_allocation",
+            "owner": owner_label,
+            "stage": stage,
+            "tensor": {"present": False},
+            "overlaps_freed_range": False,
+        }
+        if extra:
+            record["extra"] = extra
+        append_jsonl("marlin_wna16_owner_ledger", record)
+        return record
+
+    summary = tensor_integrity_summary(tensor) if include_integrity else tensor_summary(tensor)
+    overlap = _find_freed_range_overlap(summary)
+    nearest = _nearest_freed_range(summary)
+    record = {
+        "event": "dsv4_marlin_wna16_owner_allocation",
+        "owner": owner_label,
+        "stage": stage,
+        "tensor": summary,
+        "overlaps_freed_range": overlap is not None,
+        "overlap_freed_range": overlap,
+        "nearest_freed_range": nearest,
+    }
+    if extra:
+        record["extra"] = extra
+    append_jsonl("marlin_wna16_owner_ledger", record)
+    return record
+
+
+def record_owner_tensors(
+    *,
+    owner_prefix: str,
+    stage: str,
+    tensors: dict[str, torch.Tensor | None],
+    include_integrity: bool = False,
+    extra: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if not marlin_wna16_release_ledger_enabled() and not include_integrity:
+        return records
+    for name, tensor in tensors.items():
+        record = record_owner_tensor(
+            owner_label=f"{owner_prefix}.{name}",
+            stage=stage,
+            tensor=tensor,
+            include_integrity=include_integrity,
+            extra=extra,
+        )
+        if record is not None:
+            records.append(record)
+    return records
+
+
 @contextlib.contextmanager
 def warmup_forward_context(
     *,
@@ -245,6 +369,82 @@ def _memory_deltas(
             after.get("memory_reserved_bytes", 0) - before.get("memory_reserved_bytes", 0)
         ),
     }
+
+
+def _range_from_summary(summary: dict[str, Any]) -> tuple[int, int] | None:
+    if not summary.get("present", False):
+        return None
+    start = int(summary.get("start") or summary.get("data_ptr") or 0)
+    nbytes = int(summary.get("bytes", 0))
+    if start <= 0 or nbytes <= 0:
+        return None
+    return start, start + nbytes
+
+
+def _ranges_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    return max(a[0], b[0]) < min(a[1], b[1])
+
+
+def _range_distance(a: tuple[int, int], b: tuple[int, int]) -> int:
+    if _ranges_overlap(a, b):
+        return 0
+    if a[1] <= b[0]:
+        return int(b[0] - a[1])
+    return int(a[0] - b[1])
+
+
+def _freed_range_brief(record: dict[str, Any], *, distance_bytes: int | None = None) -> dict[str, Any]:
+    brief: dict[str, Any] = {
+        "owner": record.get("owner"),
+        "layer_id": record.get("layer_id"),
+        "component": record.get("component"),
+        "data_ptr": int(record.get("data_ptr", 0) or 0),
+        "start": int(record.get("start", 0) or 0),
+        "end": int(record.get("end", 0) or 0),
+        "bytes": int(record.get("bytes", 0) or 0),
+        "dtype": record.get("dtype"),
+        "shape": record.get("shape"),
+        "stage": record.get("stage"),
+    }
+    if distance_bytes is not None:
+        brief["distance_bytes"] = int(distance_bytes)
+    return brief
+
+
+def _find_freed_range_overlap(summary: dict[str, Any]) -> dict[str, Any] | None:
+    tensor_range = _range_from_summary(summary)
+    if tensor_range is None:
+        return None
+    for freed in _marlin_wna16_freed_ranges:
+        freed_range = _range_from_summary(freed)
+        if freed_range is not None and _ranges_overlap(tensor_range, freed_range):
+            overlap_start = max(tensor_range[0], freed_range[0])
+            overlap_end = min(tensor_range[1], freed_range[1])
+            brief = _freed_range_brief(freed, distance_bytes=0)
+            brief["overlap_start"] = int(overlap_start)
+            brief["overlap_end"] = int(overlap_end)
+            brief["overlap_bytes"] = int(overlap_end - overlap_start)
+            return brief
+    return None
+
+
+def _nearest_freed_range(summary: dict[str, Any]) -> dict[str, Any] | None:
+    tensor_range = _range_from_summary(summary)
+    if tensor_range is None or not _marlin_wna16_freed_ranges:
+        return None
+    best: tuple[int, dict[str, Any]] | None = None
+    for freed in _marlin_wna16_freed_ranges:
+        freed_range = _range_from_summary(freed)
+        if freed_range is None:
+            continue
+        distance = _range_distance(tensor_range, freed_range)
+        if best is None or distance < best[0]:
+            best = (distance, freed)
+            if distance == 0:
+                break
+    if best is None:
+        return None
+    return _freed_range_brief(best[1], distance_bytes=best[0])
 
 
 def _env_int(name: str, default: int) -> int:
