@@ -46,8 +46,8 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | Added v0 BF16 E2E smoke and basic correctness gates. |
 | TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | Added TP8 benchmark harness and text smoke; fixed early correctness issues. |
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
-| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime` as the prefix-cache baseline; detailed prompts archived under `prompts/archive/target08/`. |
-| TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | recommended next | Low-precision research after TARGET 10: INT8 MoE W8A8 and FP8 KV/cache are the two primary lanes; quantized projection/cache fusion is lower priority. |
+| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline plus active capacity children | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime`; TARGET 08.31 handles SGLang-aligned SWA lifecycle before FP8 cache E2E, and TARGET 08.34 follows TARGET 08.33 by auditing MoE Marlin WNA16 lazy expert-cache memory. |
+| TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | active research | Low-precision research after TARGET 10: INT8 MoE W8A8 and FP8 KV/cache are the two primary lanes; TARGET 09.5 is deferred until TARGET 08.31 proves real SWA lifecycle/capacity value. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 
 ## Current Milestones
@@ -114,6 +114,42 @@ repeat-stable positive with zero-eager graph replay. TARGET 10.27 explained the
 cost, not a hot-path regression, and captured rank-scoped full-model Nsight
 traces with CUDA kernel/memcpy/NCCL/graph activity.
 
+TARGET 09.45 result:
+
+```text
+Do not run TARGET 09.5 yet.  Run
+prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md first.
+```
+
+Rationale: current mini keeps SWA as a full 43-layer, 128-page BF16 pool, so
+SWA-only FP8 appears to save about `0.576 GiB/rank`.  A SGLang-aligned
+independent SWA lifecycle may reduce real long-prefix/prefix-wave SWA retention
+to about `4` to `16` tail pages, making SWA-only FP8 much smaller
+(`0.018` to `0.072 GiB/rank`) while BF16 lifecycle itself can recover around
+`1 GiB/rank` of persistent headroom.  Prove that lifecycle and its runtime
+counters before reopening FP8 KV/cache E2E.
+
+TARGET 08.32-08.34 CUDA graph / warmup memory follow-up:
+
+```text
+prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
+prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
+prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
+```
+
+Rationale: TARGET 08.06/08.07 proved the `~19 GiB/rank` first-graph CUDA graph
+private-pool cost is real and not explained by graph input buffers, greedy
+sampling, captured compressed-loc metadata, `max_seq_len`, `num_pages`, bucket
+count, or BF16 projection/shared-expert caches.  This is likely one of the
+largest remaining capacity/headroom opportunities.  TARGET 08.32 ruled out many
+synthetic owners but did not find the full-model source.  TARGET 08.33 falsified
+the DSV4 C4 indexer-width hypothesis and showed the large movement happens
+during warmup `model.forward()`, before the actual `torch.cuda.graph` block.
+TARGET 08.34 is the next focused investigation: audit whether the default
+`marlin_wna16` MoE backend lazily repacks and retains routed expert weights on
+first forward, creating roughly `17-18 GiB/rank` of persistent backend state
+that should be prebuilt/accounted before KV capacity planning.
+
 ## Archive Policy
 
 Completed detailed execution prompts live in:
@@ -127,7 +163,8 @@ prompts/archive/target10/
 For new child threads, start from:
 
 1. `prompts/target.md`
-2. the active target prompt, usually TARGET 09 or a future TARGET 10 follow-up
+2. the active target prompt, currently TARGET 08.31, TARGET 08.34, or a
+   TARGET 09 child
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
    milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache history and

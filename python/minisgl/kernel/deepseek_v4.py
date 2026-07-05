@@ -9,6 +9,7 @@ into model or attention code.
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import os
 from dataclasses import dataclass
@@ -67,6 +68,12 @@ DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = (
 DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
 DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION"
 DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION"
+DSV4_INDEXER_CAPTURE_WIDTH_DEBUG_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_WIDTH_DEBUG"
+DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_WIDTH_MODE"
+DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE"
+DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
+DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
+DSV4_INDEXER_CAPTURE_WIDTH_MODES = ("current", "table_width", "seq_len_aligned")
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
     DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
@@ -2127,6 +2134,185 @@ def _cuda_graph_capture_active(device: torch.device) -> bool:
         return False
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _audit_rank() -> int:
+    try:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return int(torch.distributed.get_rank())
+    except Exception:
+        pass
+    for name in ("RANK", "LOCAL_RANK"):
+        raw = os.environ.get(name)
+        if raw is not None:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+    return 0
+
+
+def _audit_log_dir() -> str:
+    return os.environ.get(
+        DSV4_AUDIT_LOG_DIR_ENV,
+        "performance_milestones/target08_indexer_capture_static_width_audit/raw",
+    )
+
+
+def _audit_run_label() -> str:
+    raw = os.environ.get(DSV4_AUDIT_RUN_LABEL_ENV, "run").strip()
+    return raw or "run"
+
+
+def _append_audit_jsonl(kind: str, payload: dict) -> None:
+    try:
+        directory = _audit_log_dir()
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(
+            directory,
+            f"{kind}_{_audit_run_label()}_rank{_audit_rank()}.jsonl",
+        )
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
+    except Exception:
+        return
+
+
+def _indexer_capture_width_mode() -> str:
+    raw = os.environ.get(DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV, "current").strip().lower()
+    mode = "current" if raw in {"", "default"} else raw
+    if mode not in DSV4_INDEXER_CAPTURE_WIDTH_MODES:
+        valid = ", ".join(DSV4_INDEXER_CAPTURE_WIDTH_MODES)
+        raise ValueError(
+            f"Unsupported {DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV}={raw!r}; "
+            f"valid values: {valid}."
+        )
+    return mode
+
+
+def _indexer_capture_seq_len_override() -> int | None:
+    raw = os.environ.get(DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV, "").strip()
+    if not raw:
+        return None
+    value = int(raw)
+    if value < 0:
+        raise ValueError(f"{DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV} must be non-negative")
+    return value
+
+
+def _seq_len_aligned_width_for_capture(page_size: int) -> int | None:
+    override = _indexer_capture_seq_len_override()
+    if override is None:
+        return None
+    if page_size <= 0:
+        return override
+    return div_ceil(max(override, 0), page_size) * page_size
+
+
+def _indexer_capture_static_max_seq_len(
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    page_size: int,
+    capture_active: bool,
+) -> tuple[int | None, str, str | None]:
+    del seq_lens
+    if not capture_active:
+        return None, "eager_dynamic_seq_lens", None
+    table_width = int(page_table.shape[1])
+    current = table_width * int(page_size)
+    mode = _indexer_capture_width_mode()
+    if mode == "current":
+        return current, mode, None
+    if mode == "table_width":
+        return table_width, mode, "diagnostic_only_may_truncate_page_based_tables"
+    seq_len_aligned = _seq_len_aligned_width_for_capture(int(page_size))
+    if seq_len_aligned is None:
+        raise RuntimeError(
+            f"{DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV}=seq_len_aligned requires "
+            f"{DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV}; reading CUDA seq_lens "
+            "with .item() during graph capture would break capture."
+        )
+    return seq_len_aligned, mode, "uses_env_seq_len_override"
+
+
+def _indexer_width_candidates(
+    rows: int,
+    page_table: torch.Tensor,
+    page_size: int,
+) -> tuple[dict[str, int | None], dict[str, int | None], str]:
+    table_width = int(page_table.shape[1])
+    table_times_page = table_width * int(page_size)
+    seq_len_aligned = _seq_len_aligned_width_for_capture(int(page_size))
+    widths: dict[str, int | None] = {
+        "page_table_width": table_width,
+        "seq_lens_max": None,
+        "page_table_width_times_page_size": table_times_page,
+        "seq_len_aligned": seq_len_aligned,
+    }
+    bytes_by_candidate = {
+        name: None if width is None else int(rows) * int(width) * 4
+        for name, width in widths.items()
+    }
+    seq_lens_status = (
+        "not_read_during_cuda_graph_capture"
+        if seq_len_aligned is None
+        else "seq_len_override_env"
+    )
+    return widths, bytes_by_candidate, seq_lens_status
+
+
+def _record_indexer_capture_width_event(
+    *,
+    function_name: str,
+    backend_path: str,
+    q: torch.Tensor,
+    cache_shape,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    page_size: int,
+    static_max_seq_len: int | None,
+    layer_id: int | None,
+    width_mode: str,
+    width_mode_note: str | None,
+) -> None:
+    if not _truthy_env(DSV4_INDEXER_CAPTURE_WIDTH_DEBUG_ENV):
+        return
+    rows = int(q.shape[0]) if q.ndim > 0 else 0
+    widths, implied_bytes, seq_lens_status = _indexer_width_candidates(
+        rows,
+        page_table,
+        int(page_size),
+    )
+    payload = {
+        "event": "dsv4_indexer_capture_width",
+        "function": function_name,
+        "backend_path": backend_path,
+        "layer_id": None if layer_id is None else int(layer_id),
+        "call_index": None,
+        "rank": _audit_rank(),
+        "pid": os.getpid(),
+        "rows": rows,
+        "q_shape": list(q.shape),
+        "cache_shape": cache_shape,
+        "seq_lens_shape": list(seq_lens.shape),
+        "seq_lens_min": None,
+        "seq_lens_max": None,
+        "seq_lens_status": seq_lens_status,
+        "page_table_shape": list(page_table.shape),
+        "page_size": int(page_size),
+        "capture_width_mode": width_mode,
+        "capture_width_mode_note": width_mode_note,
+        "current_static_max_seq_len": None
+        if static_max_seq_len is None
+        else int(static_max_seq_len),
+        "candidate_widths": widths,
+        "implied_fp32_logits_bytes": implied_bytes,
+    }
+    _append_audit_jsonl("indexer_capture_width", payload)
+
+
 def indexer_bf16_logits_fallback(
     q: torch.Tensor,
     cache: torch.Tensor,
@@ -2136,6 +2322,7 @@ def indexer_bf16_logits_fallback(
     page_size: int,
     weights: torch.Tensor | None = None,
     _backend: list[str] | None = None,
+    layer_id: int | None = None,
 ) -> torch.Tensor:
     if q.ndim != 3:
         raise ValueError(f"DSV4 indexer q expects shape [rows, heads, dim], got {q.shape}")
@@ -2157,7 +2344,12 @@ def indexer_bf16_logits_fallback(
         )
 
     capture_active = _cuda_graph_capture_active(q.device)
-    static_max_seq_len = page_table.shape[1] * page_size if capture_active else None
+    static_max_seq_len, width_mode, width_mode_note = _indexer_capture_static_max_seq_len(
+        seq_lens,
+        page_table,
+        page_size,
+        capture_active,
+    )
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_BF16") and weights is not None:
         try:
             logits = _triton_dsv4_ops().indexer_bf16_logits(
@@ -2172,6 +2364,20 @@ def indexer_bf16_logits_fallback(
             if logits is not None:
                 if _backend is not None:
                     _backend.append("triton")
+                if capture_active:
+                    _record_indexer_capture_width_event(
+                        function_name="indexer_bf16_logits_fallback",
+                        backend_path="triton",
+                        q=q,
+                        cache_shape=list(cache.shape),
+                        seq_lens=seq_lens,
+                        page_table=page_table,
+                        page_size=page_size,
+                        static_max_seq_len=static_max_seq_len,
+                        layer_id=layer_id,
+                        width_mode=width_mode,
+                        width_mode_note=width_mode_note,
+                    )
                 return logits
             if capture_active:
                 raise RuntimeError(
@@ -2228,6 +2434,20 @@ def indexer_bf16_logits_fallback(
         logits[row, :length] = row_scores
     if _backend is not None:
         _backend.append("torch")
+    if capture_active:
+        _record_indexer_capture_width_event(
+            function_name="indexer_bf16_logits_fallback",
+            backend_path="torch",
+            q=q,
+            cache_shape=list(cache.shape),
+            seq_lens=seq_lens,
+            page_table=page_table,
+            page_size=page_size,
+            static_max_seq_len=static_max_seq_len,
+            layer_id=layer_id,
+            width_mode=width_mode,
+            width_mode_note=width_mode_note,
+        )
     return logits
 
 
@@ -2241,6 +2461,7 @@ def indexer_fp8_logits_fallback(
     page_size: int,
     weights: torch.Tensor,
     _backend: list[str] | None = None,
+    layer_id: int | None = None,
 ) -> torch.Tensor:
     if q_values.ndim != 3:
         raise ValueError(
@@ -2277,7 +2498,12 @@ def indexer_fp8_logits_fallback(
         )
 
     capture_active = _cuda_graph_capture_active(q_values.device)
-    static_max_seq_len = page_table.shape[1] * page_size if capture_active else None
+    static_max_seq_len, width_mode, width_mode_note = _indexer_capture_static_max_seq_len(
+        seq_lens,
+        page_table,
+        page_size,
+        capture_active,
+    )
     if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
         try:
             logits = _triton_dsv4_ops().indexer_fp8_logits(
@@ -2293,6 +2519,23 @@ def indexer_fp8_logits_fallback(
             if logits is not None:
                 if _backend is not None:
                     _backend.append("triton_fp8")
+                if capture_active:
+                    _record_indexer_capture_width_event(
+                        function_name="indexer_fp8_logits_fallback",
+                        backend_path="triton_fp8",
+                        q=q_values,
+                        cache_shape={
+                            "values": list(cache_values.shape),
+                            "scales": list(cache_scales.shape),
+                        },
+                        seq_lens=seq_lens,
+                        page_table=page_table,
+                        page_size=page_size,
+                        static_max_seq_len=static_max_seq_len,
+                        layer_id=layer_id,
+                        width_mode=width_mode,
+                        width_mode_note=width_mode_note,
+                    )
                 return logits
             if capture_active:
                 raise RuntimeError(
@@ -2348,6 +2591,23 @@ def indexer_fp8_logits_fallback(
         logits[row, :length] = row_scores
     if _backend is not None:
         _backend.append("torch_fp8")
+    if capture_active:
+        _record_indexer_capture_width_event(
+            function_name="indexer_fp8_logits_fallback",
+            backend_path="torch_fp8",
+            q=q_values,
+            cache_shape={
+                "values": list(cache_values.shape),
+                "scales": list(cache_scales.shape),
+            },
+            seq_lens=seq_lens,
+            page_table=page_table,
+            page_size=page_size,
+            static_max_seq_len=static_max_seq_len,
+            layer_id=layer_id,
+            width_mode=width_mode,
+            width_mode_note=width_mode_note,
+        )
     return logits
 
 
@@ -2360,6 +2620,7 @@ def indexer_fp8_paged_logits_fallback(
     page_size: int,
     weights: torch.Tensor,
     _backend: list[str] | None = None,
+    layer_id: int | None = None,
 ) -> torch.Tensor:
     if q_values.ndim != 3:
         raise ValueError(
@@ -2390,7 +2651,12 @@ def indexer_fp8_paged_logits_fallback(
         )
 
     capture_active = _cuda_graph_capture_active(q_values.device)
-    static_max_seq_len = page_table.shape[1] * page_size if capture_active else None
+    static_max_seq_len, width_mode, width_mode_note = _indexer_capture_static_max_seq_len(
+        seq_lens,
+        page_table,
+        page_size,
+        capture_active,
+    )
     if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
         try:
             logits = _triton_dsv4_ops().indexer_fp8_paged_logits(
@@ -2405,6 +2671,20 @@ def indexer_fp8_paged_logits_fallback(
             if logits is not None:
                 if _backend is not None:
                     _backend.append("triton_fp8_paged_vllm")
+                if capture_active:
+                    _record_indexer_capture_width_event(
+                        function_name="indexer_fp8_paged_logits_fallback",
+                        backend_path="triton_fp8_paged_vllm",
+                        q=q_values,
+                        cache_shape=list(packed_cache.shape),
+                        seq_lens=seq_lens,
+                        page_table=page_table,
+                        page_size=page_size,
+                        static_max_seq_len=static_max_seq_len,
+                        layer_id=layer_id,
+                        width_mode=width_mode,
+                        width_mode_note=width_mode_note,
+                    )
                 return logits
             if capture_active:
                 raise RuntimeError(
@@ -2465,6 +2745,20 @@ def indexer_fp8_paged_logits_fallback(
         logits[row, :length] = row_scores
     if _backend is not None:
         _backend.append("torch_fp8_paged")
+    if capture_active:
+        _record_indexer_capture_width_event(
+            function_name="indexer_fp8_paged_logits_fallback",
+            backend_path="torch_fp8_paged",
+            q=q_values,
+            cache_shape=list(packed_cache.shape),
+            seq_lens=seq_lens,
+            page_table=page_table,
+            page_size=page_size,
+            static_max_seq_len=static_max_seq_len,
+            layer_id=layer_id,
+            width_mode=width_mode,
+            width_mode_note=width_mode_note,
+        )
     return logits
 
 
@@ -2478,6 +2772,7 @@ def indexer_select_fp8_paged_fallback(
     page_size: int,
     width: int = 512,
     ratio: int = 4,
+    layer_id: int | None = None,
 ) -> DSV4IndexerSelectOutput:
     logits_backend: list[str] = []
     logits = indexer_fp8_paged_logits_fallback(
@@ -2488,6 +2783,7 @@ def indexer_select_fp8_paged_fallback(
         page_size=page_size,
         weights=weights,
         _backend=logits_backend,
+        layer_id=layer_id,
     )
     topk = topk_transform_512_full_fallback(
         logits,
@@ -2512,6 +2808,7 @@ def indexer_select_fp8_fallback(
     page_size: int,
     width: int = 512,
     ratio: int = 4,
+    layer_id: int | None = None,
 ) -> DSV4IndexerSelectOutput:
     logits_backend: list[str] = []
     logits = indexer_fp8_logits_fallback(
@@ -2523,6 +2820,7 @@ def indexer_select_fp8_fallback(
         page_size=page_size,
         weights=weights,
         _backend=logits_backend,
+        layer_id=layer_id,
     )
     topk = topk_transform_512_full_fallback(
         logits,
@@ -2546,6 +2844,7 @@ def indexer_select_bf16_fallback(
     page_size: int,
     width: int = 512,
     ratio: int = 4,
+    layer_id: int | None = None,
 ) -> DSV4IndexerSelectOutput:
     logits_backend: list[str] = []
     logits = indexer_bf16_logits_fallback(
@@ -2556,6 +2855,7 @@ def indexer_select_bf16_fallback(
         page_size=page_size,
         weights=weights,
         _backend=logits_backend,
+        layer_id=layer_id,
     )
     topk = topk_transform_512_full_fallback(
         logits,

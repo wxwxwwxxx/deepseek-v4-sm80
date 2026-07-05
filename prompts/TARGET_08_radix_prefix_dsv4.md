@@ -2,7 +2,37 @@
 
 ## Status
 
-Closed as the current prefix-cache baseline.
+Closed as the current prefix-cache baseline, with active capacity follow-up
+children:
+
+```text
+prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
+prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
+prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
+prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
+```
+
+TARGET 08.31 is about SGLang-aligned SWA lifecycle and memory ownership.  It is
+not a low-precision target, but it should run before reopening TARGET 09.5
+because it changes the real memory denominator for SWA-only FP8 cache.
+
+TARGET 08.32 is about CUDA graph private-pool memory attribution.  It should
+avoid full model weight loading at first and instead use synthetic/partial
+decode graph probes to explain the `~19 GiB/rank` graph capture cost.
+
+TARGET 08.33 is the focused follow-up after TARGET 08.32.  TARGET 08.32 ruled
+out many synthetic owners but did not explain the full-model cost.  TARGET
+08.33 audits the real DSV4 C4 indexer logits capture width, especially whether
+`page_table.shape[1] * page_size` accidentally over-expands a mini token-slot
+table by `256x`.
+
+TARGET 08.34 is the focused follow-up after TARGET 08.33.  TARGET 08.33
+falsified the indexer-width hypothesis, but its stage ledger showed the large
+memory jump happens during warmup `model.forward()` before the actual
+`torch.cuda.graph` block.  TARGET 08.34 audits whether MoE Marlin WNA16 expert
+weight repack is lazily creating about `17-18 GiB/rank` of persistent backend
+state, and whether that cache should be prebuilt and accounted before KV
+capacity planning.
 
 Milestone tag:
 
@@ -213,7 +243,8 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, usually TARGET 10 or TARGET 09
+3. the active future target prompt, currently TARGET 08.31, TARGET 08.34, or
+   a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
 
@@ -223,26 +254,37 @@ The archive contains implementation history, not active todos.
 
 ### Independent SWA Ownership
 
-Status: deferred conditional.
+Status: active follow-up as TARGET 08.31.
 
 SWA KV is still effectively protected by the conservative full/SWA tail rule.
 This costs retained memory and can reduce useful prefix capacity, but TARGET
 08.30 did not show it as the active bottleneck for the measured `--num-pages
 128` workloads.
 
-Revisit only if a future serving workload shows:
+TARGET 09.45 reopened this item from a capacity/low-precision ROI angle.  It
+found that current mini's full 128-page SWA BF16 pool makes SWA-only FP8 appear
+more valuable than it may be after SGLang-aligned lifecycle.  The next step is
+therefore to prove independent SWA lifecycle and runtime SWA tail occupancy
+before deciding whether TARGET 09.5 should implement FP8 cache.
 
-- SWA/full-tail retention materially reduces prefix hit rate;
-- retained SWA memory becomes a capacity blocker;
-- exact page-multiple shortening loses enough saved-prefill tokens to matter;
-- SGLang's independent SWA component design can be adapted without adding
-  large hit-time materialization copies.
+Active prompt:
+
+```text
+prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
+```
 
 Historical prompt:
 
 ```text
 prompts/archive/target08/TARGET_08.23_dsv4_sm80_independent_swa_ownership.md
 ```
+
+TARGET 08.31 should still respect the old guardrails:
+
+- do not invalidate C4/C128/indexer/state locs when freeing SWA;
+- avoid large hit-time materialization copies as the production design;
+- keep Route B component loc ownership and lifetime-cache verification;
+- preserve CUDA graph replay.
 
 ### Prefix Cache Default Promotion
 
@@ -255,12 +297,59 @@ for all traffic.
 
 ### CUDA Graph Memory Pool
 
-Status: observed, not solved in TARGET 08.
+Status: active follow-up as TARGET 08.34 after the broad TARGET 08.32 probe and
+the focused TARGET 08.33 indexer audit.
 
 Graph capture delta is large and repeatable.  TARGET 08.06/08.07 found it is
 not primarily caused by BF16 caches, metadata, bucket count, greedy sample,
 `max_seq_len`, or `num_pages`.  Treat this as future runtime/capacity work, not
 as a prefix-cache blocker.
+
+TARGET 08.32 reopened this from a capacity/headroom angle without repeating the
+old full-model A/B matrix.  It used no-weight and synthetic partial-model graph
+probes.  Its important negative result was that simple graph overhead, BF16
+matmul/cuBLAS workspace, synthetic SWA/C4/C128 attention, synthetic C4
+indexer/topk, metadata helpers, and NCCL controls did not explain the
+multi-GiB cost:
+
+```text
+prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
+```
+
+The first focused target was:
+
+```text
+prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
+```
+
+TARGET 08.33 audited real full-model indexer logits call-site shapes and
+falsified the indexer-width hypothesis.  It found the real C4/indexer width is
+`128 * 64 = 8192`, which is expected and explains only about `0.010 GiB/rank`.
+
+The more important TARGET 08.33 result was the stage ledger: the large
+`~18 GiB/rank` movement appears after warmup `model.forward()`, while the
+actual `torch.cuda.graph` capture block adds almost nothing.  The next focused
+target is therefore:
+
+```text
+prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
+```
+
+TARGET 08.34 should audit whether the default `marlin_wna16` MoE backend lazily
+repacked and retained all routed expert weights on first forward.  Rough memory
+math puts raw FP4 expert weights plus scales at about `0.398 GiB/layer/rank`,
+or `~17.1 GiB/rank` for 43 layers, which is close to the observed warmup jump.
+If confirmed, prebuild/account the cache before KV capacity planning and
+evaluate opt-in original-weight release.
+
+Old reports:
+
+```text
+performance_milestones/target08_cuda_graph_memory_attribution/README.md
+performance_milestones/target08_bf16_cache_graph_memory_attribution/README.md
+performance_milestones/target08_cuda_graph_private_pool_micro_attribution/README.md
+performance_milestones/target08_indexer_capture_static_width_audit/README.md
+```
 
 ### Broader Serving Benchmark
 

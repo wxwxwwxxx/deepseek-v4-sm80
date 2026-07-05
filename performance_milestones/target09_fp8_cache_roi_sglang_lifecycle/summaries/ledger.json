@@ -1,0 +1,462 @@
+{
+  "constants": {
+    "c128_layers": 20,
+    "c4_layers": 21,
+    "num_layers": 43,
+    "num_pages": 128,
+    "page_size": 256,
+    "sliding_window": 128
+  },
+  "current": {
+    "c128_bf16": {
+      "bytes_per_page": 40960,
+      "evidence": "source-derived"
+    },
+    "c128_state_bf16": {
+      "bytes_per_page": 5242880,
+      "evidence": "source-derived"
+    },
+    "c4_bf16": {
+      "bytes_per_page": 1376256,
+      "evidence": "source-derived"
+    },
+    "c4_indexer_bf16": {
+      "bytes_per_page": 344064,
+      "evidence": "source-derived"
+    },
+    "c4_indexer_fp8_side_cache": {
+      "bytes_per_page": 177408,
+      "evidence": "runtime-active in promoted bundle, source-derived size"
+    },
+    "c4_indexer_state_bf16": {
+      "bytes_per_page": 172032,
+      "evidence": "source-derived"
+    },
+    "c4_state_bf16": {
+      "bytes_per_page": 688128,
+      "evidence": "source-derived"
+    },
+    "state_total": {
+      "bytes_per_page": 6103040,
+      "evidence": "source-derived"
+    },
+    "swa_bf16": {
+      "bytes_per_page": 11272192,
+      "evidence": "source-derived"
+    },
+    "total_with_fp8_side": {
+      "bytes_at_128_pages": 2472181760,
+      "bytes_per_page": 19313920,
+      "evidence": "source-derived formula; matches promoted indexer FP8 side mode"
+    },
+    "total_without_fp8_side": {
+      "bytes_at_128_pages": 2449473536,
+      "bytes_per_page": 19136512,
+      "evidence": "source-derived formula"
+    }
+  },
+  "fp8": {
+    "c128_fp8_page": 34560,
+    "c4_fp8_page": 786240,
+    "full_source_aligned_replacement_page": 13540928,
+    "indexer_fp8_replacement_page": 177408,
+    "layout": {
+      "c128_page_bytes_per_layer": 1728,
+      "c4_page_bytes_per_layer": 37440,
+      "indexer_fp8_slot_bytes": 132,
+      "mla_slot_bytes": 576,
+      "mla_token_bytes_unpadded": 584,
+      "swa_page_bytes_per_layer": 149760
+    },
+    "mla_only_with_indexer_bf16_page": 13707584,
+    "swa_fp8_page": 6439680,
+    "swa_only_with_existing_side_page": 14481408,
+    "swa_only_without_side_page": 14304000
+  },
+  "lifecycle": [
+    {
+      "assumption": "bs4 long prompts; one page-aligned SWA tail per active/retained branch",
+      "bf16_lifecycle_bytes": 1074429952,
+      "bound": "low",
+      "evidence": "estimated",
+      "retained_pages_current": 124,
+      "scenario": "historical_4096_1024_bs4",
+      "swa_only_fp8_value_bytes": 19330048,
+      "tail_swa_pages": 4,
+      "tail_swa_tokens": 1024
+    },
+    {
+      "assumption": "bs4 long prompts; one page-aligned SWA tail per active/retained branch",
+      "bf16_lifecycle_bytes": 1074429952,
+      "bound": "high",
+      "evidence": "estimated",
+      "retained_pages_current": 124,
+      "scenario": "historical_4096_1024_bs4",
+      "swa_only_fp8_value_bytes": 19330048,
+      "tail_swa_pages": 4,
+      "tail_swa_tokens": 1024
+    },
+    {
+      "assumption": "wave16 active-tail lower bound; short no-share branch retention upper bound",
+      "bf16_lifecycle_bytes": 1209696256,
+      "bound": "low",
+      "evidence": "estimated",
+      "retained_pages_current": 106,
+      "scenario": "serving_mixed_112req_wave16",
+      "swa_only_fp8_value_bytes": 77320192,
+      "tail_swa_pages": 16,
+      "tail_swa_tokens": 4096
+    },
+    {
+      "assumption": "wave16 active-tail lower bound; short no-share branch retention upper bound",
+      "bf16_lifecycle_bytes": 2224193536,
+      "bound": "high",
+      "evidence": "estimated",
+      "retained_pages_current": 106,
+      "scenario": "serving_mixed_112req_wave16",
+      "swa_only_fp8_value_bytes": 512246272,
+      "tail_swa_pages": 106,
+      "tail_swa_tokens": 27136
+    },
+    {
+      "assumption": "eight shared 512-token prefixes lower bound; wave16 active tails upper bound",
+      "bf16_lifecycle_bytes": 1119518720,
+      "bound": "low",
+      "evidence": "estimated",
+      "retained_pages_current": 87,
+      "scenario": "prefix_multi_112req_wave16",
+      "swa_only_fp8_value_bytes": 38660096,
+      "tail_swa_pages": 8,
+      "tail_swa_tokens": 2048
+    },
+    {
+      "assumption": "eight shared 512-token prefixes lower bound; wave16 active tails upper bound",
+      "bf16_lifecycle_bytes": 1209696256,
+      "bound": "high",
+      "evidence": "estimated",
+      "retained_pages_current": 87,
+      "scenario": "prefix_multi_112req_wave16",
+      "swa_only_fp8_value_bytes": 77320192,
+      "tail_swa_pages": 16,
+      "tail_swa_tokens": 4096
+    },
+    {
+      "assumption": "synthetic higher-concurrency wave64 serving estimate",
+      "bf16_lifecycle_bytes": 1750761472,
+      "bound": "low",
+      "evidence": "estimated",
+      "retained_pages_current": "estimated",
+      "scenario": "serving_mixed_256req_wave64_est",
+      "swa_only_fp8_value_bytes": 309280768,
+      "tail_swa_pages": 64,
+      "tail_swa_tokens": 16384
+    },
+    {
+      "assumption": "synthetic higher-concurrency wave64 serving estimate",
+      "bf16_lifecycle_bytes": 1750761472,
+      "bound": "high",
+      "evidence": "estimated",
+      "retained_pages_current": "estimated",
+      "scenario": "serving_mixed_256req_wave64_est",
+      "swa_only_fp8_value_bytes": 309280768,
+      "tail_swa_pages": 64,
+      "tail_swa_tokens": 16384
+    }
+  ],
+  "roi": [
+    {
+      "bytes": 2472181760,
+      "current_page_equiv": 0.0,
+      "current_token_equiv": 0.0,
+      "evidence": "runtime-proven",
+      "headroom_delta_gib": 0.0,
+      "latency": "baseline",
+      "name": "current mini BF16 + additive indexer FP8 side",
+      "persistent_gib": 2.302398681640625,
+      "risk": "low; runtime-proven promoted path",
+      "scope": "none"
+    },
+    {
+      "bytes": 1853620224,
+      "current_page_equiv": 32.0267214527139,
+      "current_token_equiv": 8198.840691894758,
+      "evidence": "estimated/source-derived",
+      "headroom_delta_gib": 0.576080322265625,
+      "latency": "+0.016 ms/boundary if separated; needs fusion",
+      "name": "current mini + SWA-only FP8",
+      "persistent_gib": 1.726318359375,
+      "risk": "medium quality/latency; correctness slice passed",
+      "scope": "replace SWA cache only; keep C4/C128/indexer/state"
+    },
+    {
+      "bytes": 1733238784,
+      "current_page_equiv": 38.25960633574127,
+      "current_token_equiv": 9794.459221949764,
+      "evidence": "estimated/source-derived",
+      "headroom_delta_gib": 0.6881942749023438,
+      "latency": "unknown; likely worse until fused/integrated",
+      "name": "current mini + full source-aligned MLA/indexer FP8",
+      "persistent_gib": 1.6142044067382812,
+      "risk": "high; C4/C128/indexer/prefix ownership not integrated",
+      "scope": "SWA+C4+C128 MLA FP8 and indexer replacement"
+    },
+    {
+      "bytes": 1209696256,
+      "current_page_equiv": 65.36661143879647,
+      "current_token_equiv": 16733.852528331896,
+      "evidence": "estimated/source-derived",
+      "headroom_delta_gib": 1.17578125,
+      "latency": "near baseline or slight metadata cost",
+      "name": "SGLang lifecycle + BF16",
+      "persistent_gib": 1.126617431640625,
+      "risk": "medium correctness; lifecycle not runtime-proven in mini",
+      "scope": "independent SWA pool, 16 tail pages, BF16 cache dtype"
+    },
+    {
+      "bytes": 1132376064,
+      "current_page_equiv": 69.3699516203857,
+      "current_token_equiv": 17758.70761481874,
+      "evidence": "estimated/source-derived",
+      "headroom_delta_gib": 1.2477912902832031,
+      "latency": "estimated +0.006-0.012 ms/boundary if fused store + selected gather",
+      "name": "SGLang lifecycle + SWA-only FP8",
+      "persistent_gib": 1.0546073913574219,
+      "risk": "medium-high; combines lifecycle and FP8",
+      "scope": "lifecycle plus FP8 SWA tail pool (16 pages)"
+    },
+    {
+      "bytes": 1011994624,
+      "current_page_equiv": 75.60283650341309,
+      "current_token_equiv": 19354.32614487375,
+      "evidence": "estimated/source-derived",
+      "headroom_delta_gib": 1.3599052429199219,
+      "latency": "unknown; attention-integrated dequant may be needed",
+      "name": "SGLang lifecycle + broader MLA/indexer FP8",
+      "persistent_gib": 0.9424934387207031,
+      "risk": "highest; broad source layout plus ownership rewrite",
+      "scope": "lifecycle plus SWA/C4/C128/indexer FP8 replacement"
+    }
+  ],
+  "speed": {
+    "delta_max_ms": 0.017544641494750976,
+    "delta_mean_ms": 0.0166263370513916,
+    "delta_min_ms": 0.015833439826965327,
+    "gather_delta_mean_ms": 0.007377439975738526,
+    "graph_safety": [
+      {
+        "allocated_after_capture_bytes": 19884544,
+        "allocated_before_capture_bytes": 19883520,
+        "bucket_bs": 1,
+        "capture_alloc_delta_bytes": 1024,
+        "capture_error": null,
+        "captured": true,
+        "dynamic_allocation_during_replay": false,
+        "eager_fallback_count": 0,
+        "max_replay_alloc_delta_bytes": 0,
+        "replay_count": 5,
+        "workspace_bytes": 131072,
+        "workspace_preallocated": true
+      },
+      {
+        "allocated_after_capture_bytes": 20165120,
+        "allocated_before_capture_bytes": 20164096,
+        "bucket_bs": 2,
+        "capture_alloc_delta_bytes": 1024,
+        "capture_error": null,
+        "captured": true,
+        "dynamic_allocation_during_replay": false,
+        "eager_fallback_count": 0,
+        "max_replay_alloc_delta_bytes": 0,
+        "replay_count": 5,
+        "workspace_bytes": 262144,
+        "workspace_preallocated": true
+      },
+      {
+        "allocated_after_capture_bytes": 20726272,
+        "allocated_before_capture_bytes": 20725248,
+        "bucket_bs": 4,
+        "capture_alloc_delta_bytes": 1024,
+        "capture_error": null,
+        "captured": true,
+        "dynamic_allocation_during_replay": false,
+        "eager_fallback_count": 0,
+        "max_replay_alloc_delta_bytes": 0,
+        "replay_count": 5,
+        "workspace_bytes": 524288,
+        "workspace_preallocated": true
+      },
+      {
+        "allocated_after_capture_bytes": 21848576,
+        "allocated_before_capture_bytes": 21847552,
+        "bucket_bs": 8,
+        "capture_alloc_delta_bytes": 1024,
+        "capture_error": null,
+        "captured": true,
+        "dynamic_allocation_during_replay": false,
+        "eager_fallback_count": 0,
+        "max_replay_alloc_delta_bytes": 0,
+        "replay_count": 5,
+        "workspace_bytes": 1048576,
+        "workspace_preallocated": true
+      },
+      {
+        "allocated_after_capture_bytes": 24093696,
+        "allocated_before_capture_bytes": 24092672,
+        "bucket_bs": 16,
+        "capture_alloc_delta_bytes": 1024,
+        "capture_error": null,
+        "captured": true,
+        "dynamic_allocation_during_replay": false,
+        "eager_fallback_count": 0,
+        "max_replay_alloc_delta_bytes": 0,
+        "replay_count": 5,
+        "workspace_bytes": 2097152,
+        "workspace_preallocated": true
+      }
+    ],
+    "microbench": [
+      {
+        "bf16_combined_store_gather_bytes": 264192,
+        "bf16_combined_store_gather_effective_gbps": 5.8894863827039305,
+        "bf16_combined_store_gather_ms": 0.044858241081237794,
+        "bf16_selected_gather_bytes": 262144,
+        "bf16_selected_gather_effective_gbps": 12.09838760046672,
+        "bf16_selected_gather_ms": 0.021667680740356444,
+        "bf16_store_bytes": 2048,
+        "bf16_store_effective_gbps": 0.0945577535636656,
+        "bf16_store_ms": 0.021658720970153807,
+        "bucket_bs": 1,
+        "fp8_combined_store_gather_dequant_bytes": 207304,
+        "fp8_combined_store_gather_dequant_effective_gbps": 3.415690534482802,
+        "fp8_combined_store_gather_dequant_ms": 0.06069168090820312,
+        "fp8_packed_store_quant_bytes": 1608,
+        "fp8_packed_store_quant_effective_gbps": 0.05348732005119982,
+        "fp8_packed_store_quant_ms": 0.03006319999694824,
+        "fp8_selected_gather_dequant_bytes": 205696,
+        "fp8_selected_gather_dequant_effective_gbps": 7.107513986672581,
+        "fp8_selected_gather_dequant_ms": 0.02894063949584961,
+        "head_dim": 512,
+        "num_pages": 128,
+        "page_size": 256,
+        "selected_rows": 128,
+        "store_rows": 1,
+        "window_size": 128,
+        "workspace_bytes": 131072
+      },
+      {
+        "bf16_combined_store_gather_bytes": 528384,
+        "bf16_combined_store_gather_effective_gbps": 12.303061497989166,
+        "bf16_combined_store_gather_ms": 0.04294735908508301,
+        "bf16_selected_gather_bytes": 524288,
+        "bf16_selected_gather_effective_gbps": 24.931334745965536,
+        "bf16_selected_gather_ms": 0.021029279232025147,
+        "bf16_store_bytes": 4096,
+        "bf16_store_effective_gbps": 0.19038836401291195,
+        "bf16_store_ms": 0.021513919830322265,
+        "bucket_bs": 2,
+        "fp8_combined_store_gather_dequant_bytes": 414608,
+        "fp8_combined_store_gather_dequant_effective_gbps": 6.853931032630064,
+        "fp8_combined_store_gather_dequant_ms": 0.060492000579833984,
+        "fp8_packed_store_quant_bytes": 3216,
+        "fp8_packed_store_quant_effective_gbps": 0.10838091492485544,
+        "fp8_packed_store_quant_ms": 0.029673120975494384,
+        "fp8_selected_gather_dequant_bytes": 411392,
+        "fp8_selected_gather_dequant_effective_gbps": 14.365931641001051,
+        "fp8_selected_gather_dequant_ms": 0.02863663911819458,
+        "head_dim": 512,
+        "num_pages": 128,
+        "page_size": 256,
+        "selected_rows": 256,
+        "store_rows": 2,
+        "window_size": 128,
+        "workspace_bytes": 262144
+      },
+      {
+        "bf16_combined_store_gather_bytes": 1056768,
+        "bf16_combined_store_gather_effective_gbps": 23.822371959080442,
+        "bf16_combined_store_gather_ms": 0.04436031818389893,
+        "bf16_selected_gather_bytes": 1048576,
+        "bf16_selected_gather_effective_gbps": 49.575999057457274,
+        "bf16_selected_gather_ms": 0.021150879859924317,
+        "bf16_store_bytes": 8192,
+        "bf16_store_effective_gbps": 0.38978636649409,
+        "bf16_store_ms": 0.02101664066314697,
+        "bucket_bs": 4,
+        "fp8_combined_store_gather_dequant_bytes": 829216,
+        "fp8_combined_store_gather_dequant_effective_gbps": 13.544146275833299,
+        "fp8_combined_store_gather_dequant_ms": 0.061223201751708985,
+        "fp8_packed_store_quant_bytes": 6432,
+        "fp8_packed_store_quant_effective_gbps": 0.21577520572528355,
+        "fp8_packed_store_quant_ms": 0.0298088002204895,
+        "fp8_selected_gather_dequant_bytes": 822784,
+        "fp8_selected_gather_dequant_effective_gbps": 28.53100496448512,
+        "fp8_selected_gather_dequant_ms": 0.02883824110031128,
+        "head_dim": 512,
+        "num_pages": 128,
+        "page_size": 256,
+        "selected_rows": 512,
+        "store_rows": 4,
+        "window_size": 128,
+        "workspace_bytes": 524288
+      },
+      {
+        "bf16_combined_store_gather_bytes": 2113536,
+        "bf16_combined_store_gather_effective_gbps": 46.98684456573591,
+        "bf16_combined_store_gather_ms": 0.044981441497802734,
+        "bf16_selected_gather_bytes": 2097152,
+        "bf16_selected_gather_effective_gbps": 99.18801130262275,
+        "bf16_selected_gather_ms": 0.021143200397491454,
+        "bf16_store_bytes": 16384,
+        "bf16_store_effective_gbps": 0.7747538879029016,
+        "bf16_store_ms": 0.02114736080169678,
+        "bucket_bs": 8,
+        "fp8_combined_store_gather_dequant_bytes": 1658432,
+        "fp8_combined_store_gather_dequant_effective_gbps": 26.875059726687574,
+        "fp8_combined_store_gather_dequant_ms": 0.06170896053314209,
+        "fp8_packed_store_quant_bytes": 12864,
+        "fp8_packed_store_quant_effective_gbps": 0.4330309863210735,
+        "fp8_packed_store_quant_ms": 0.029706881046295167,
+        "fp8_selected_gather_dequant_bytes": 1645568,
+        "fp8_selected_gather_dequant_effective_gbps": 57.6263228141299,
+        "fp8_selected_gather_dequant_ms": 0.02855583906173706,
+        "head_dim": 512,
+        "num_pages": 128,
+        "page_size": 256,
+        "selected_rows": 1024,
+        "store_rows": 8,
+        "window_size": 128,
+        "workspace_bytes": 1048576
+      },
+      {
+        "bf16_combined_store_gather_bytes": 4227072,
+        "bf16_combined_store_gather_effective_gbps": 93.84684610701498,
+        "bf16_combined_store_gather_ms": 0.04504223823547363,
+        "bf16_selected_gather_bytes": 4194304,
+        "bf16_selected_gather_effective_gbps": 196.17446055009228,
+        "bf16_selected_gather_ms": 0.02138047933578491,
+        "bf16_store_bytes": 32768,
+        "bf16_store_effective_gbps": 1.50327376309017,
+        "bf16_store_ms": 0.021797759532928465,
+        "bucket_bs": 16,
+        "fp8_combined_store_gather_dequant_bytes": 3316864,
+        "fp8_combined_store_gather_dequant_effective_gbps": 54.19230747192734,
+        "fp8_combined_store_gather_dequant_ms": 0.06120543956756592,
+        "fp8_packed_store_quant_bytes": 25728,
+        "fp8_packed_store_quant_effective_gbps": 0.8785109121778529,
+        "fp8_packed_store_quant_ms": 0.029285919666290284,
+        "fp8_selected_gather_dequant_bytes": 3291136,
+        "fp8_selected_gather_dequant_effective_gbps": 116.34652092875778,
+        "fp8_selected_gather_dequant_ms": 0.02828736066818237,
+        "head_dim": 512,
+        "num_pages": 128,
+        "page_size": 256,
+        "selected_rows": 2048,
+        "store_rows": 16,
+        "window_size": 128,
+        "workspace_bytes": 2097152
+      }
+    ],
+    "store_delta_mean_ms": 0.008280704021453858,
+    "worst_43_layer_separated_delta_ms": 0.754419584274292
+  }
+}

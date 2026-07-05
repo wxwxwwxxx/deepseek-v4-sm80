@@ -441,6 +441,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             page_size=indexer_metadata.c4_page_size,
             width=max(self.index_topk, 1),
             ratio=4,
+            layer_id=layer_id,
         )
         self._capture_indexer_select_debug(layer_id, out, seq_lens, page_table)
         core = metadata.core_metadata
@@ -501,6 +502,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 page_size=indexer_metadata.c4_page_size,
                 width=max(self.index_topk, 1),
                 ratio=4,
+                layer_id=layer_id,
             )
         else:
             cache_values, cache_scales = self.kvcache.indexer_fp8_cache(layer_id)
@@ -514,6 +516,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 page_size=indexer_metadata.c4_page_size,
                 width=max(self.index_topk, 1),
                 ratio=4,
+                layer_id=layer_id,
             )
         self._capture_indexer_select_debug(layer_id, out, seq_lens, page_table)
         core = metadata.core_metadata

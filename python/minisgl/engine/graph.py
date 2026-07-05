@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import time
 import traceback
@@ -20,6 +21,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 DSV4_CUDA_GRAPH_EXACT_BS_ONLY_ENV = "MINISGL_DSV4_CUDA_GRAPH_EXACT_BS_ONLY"
+DSV4_GRAPH_CAPTURE_STAGE_DEBUG_ENV = "MINISGL_DSV4_GRAPH_CAPTURE_STAGE_DEBUG"
+DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
+DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
 
 
 @dataclass
@@ -125,6 +129,101 @@ def get_free_memory(device: torch.device) -> int:
     return torch.cuda.mem_get_info(device)[0]
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _audit_rank() -> int:
+    try:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return int(torch.distributed.get_rank())
+    except Exception:
+        pass
+    for name in ("RANK", "LOCAL_RANK"):
+        raw = os.environ.get(name)
+        if raw is not None:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+    return 0
+
+
+def _audit_log_dir() -> str:
+    return os.environ.get(
+        DSV4_AUDIT_LOG_DIR_ENV,
+        "performance_milestones/target08_indexer_capture_static_width_audit/raw",
+    )
+
+
+def _audit_run_label() -> str:
+    raw = os.environ.get(DSV4_AUDIT_RUN_LABEL_ENV, "run").strip()
+    return raw or "run"
+
+
+def _append_audit_jsonl(kind: str, payload: dict) -> None:
+    try:
+        directory = _audit_log_dir()
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(
+            directory,
+            f"{kind}_{_audit_run_label()}_rank{_audit_rank()}.jsonl",
+        )
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
+    except Exception:
+        return
+
+
+def _capture_stage_snapshot(
+    device: torch.device,
+    *,
+    stage: str,
+    batch_size: int | None,
+    previous: dict | None,
+    baseline: dict | None,
+) -> dict:
+    free_memory, total_memory = torch.cuda.mem_get_info(device)
+    allocated = torch.cuda.memory_allocated(device)
+    reserved = torch.cuda.memory_reserved(device)
+    max_allocated = torch.cuda.max_memory_allocated(device)
+    max_reserved = torch.cuda.max_memory_reserved(device)
+    payload = {
+        "event": "dsv4_graph_capture_stage_memory",
+        "stage": stage,
+        "batch_size": None if batch_size is None else int(batch_size),
+        "rank": _audit_rank(),
+        "pid": os.getpid(),
+        "free_memory_bytes": int(free_memory),
+        "total_memory_bytes": int(total_memory),
+        "memory_allocated_bytes": int(allocated),
+        "memory_reserved_bytes": int(reserved),
+        "max_memory_allocated_bytes": int(max_allocated),
+        "max_memory_reserved_bytes": int(max_reserved),
+    }
+    if previous is not None:
+        payload["free_delta_from_previous_bytes"] = int(
+            previous["free_memory_bytes"] - free_memory
+        )
+        payload["memory_allocated_delta_from_previous_bytes"] = int(
+            allocated - previous["memory_allocated_bytes"]
+        )
+        payload["memory_reserved_delta_from_previous_bytes"] = int(
+            reserved - previous["memory_reserved_bytes"]
+        )
+    if baseline is not None:
+        payload["free_delta_from_baseline_bytes"] = int(
+            baseline["free_memory_bytes"] - free_memory
+        )
+        payload["memory_allocated_delta_from_baseline_bytes"] = int(
+            allocated - baseline["memory_allocated_bytes"]
+        )
+        payload["memory_reserved_delta_from_baseline_bytes"] = int(
+            reserved - baseline["memory_reserved_bytes"]
+        )
+    return payload
+
+
 class GraphRunner:
     def __init__(
         self,
@@ -175,6 +274,7 @@ class GraphRunner:
             "capture_peak_memory_allocated_bytes": None,
             "capture_peak_memory_reserved_bytes": None,
             "capture_buffer_bytes": None,
+            "capture_stage_memory_ledger": [],
             "capture_graph_pool_reuse_enabled": False,
             "capture_graph_pool_reuse_anchor_bs": None,
             "capture_by_batch_size": {},
@@ -212,11 +312,33 @@ class GraphRunner:
         if self.max_graph_bs == 0:
             return logger.info_rank0("CUDA graph is disabled.")
 
+        stage_debug = _truthy_env(DSV4_GRAPH_CAPTURE_STAGE_DEBUG_ENV)
+        stage_ledger: list[dict] = self.capture_status["capture_stage_memory_ledger"]
+
+        def record_stage(stage: str, batch_size: int | None = None) -> None:
+            if not stage_debug:
+                return
+            torch.cuda.synchronize(self.device)
+            baseline = stage_ledger[0] if stage_ledger else None
+            previous = stage_ledger[-1] if stage_ledger else None
+            payload = _capture_stage_snapshot(
+                self.device,
+                stage=stage,
+                batch_size=batch_size,
+                previous=previous,
+                baseline=baseline,
+            )
+            stage_ledger.append(payload)
+            _append_audit_jsonl("graph_capture_stage", payload)
+
+        record_stage("before_attn_backend.init_capture_graph")
         self.attn_backend.init_capture_graph(max_seq_len=max_seq_len, bs_list=self.graph_bs_list)
+        record_stage("after_attn_backend.init_capture_graph")
 
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
+        record_stage("before_GraphCaptureBuffer.init")
 
         logger.info_rank0(f"Start capturing CUDA graphs with sizes: {self.graph_bs_list}")
         free_memory = get_free_memory(self.device)
@@ -237,6 +359,7 @@ class GraphRunner:
             self.device,
             capture_greedy_sample=self.capture_greedy_sample,
         )
+        record_stage("after_GraphCaptureBuffer.init")
         self.capture_status["capture_buffer_bytes"] = self.buffer.nbytes()
         bind_capture_graph_inputs = getattr(
             self.attn_backend, "bind_capture_graph_inputs", None
@@ -282,17 +405,21 @@ class GraphRunner:
             graph = torch.cuda.CUDAGraph()
             batch = Batch(reqs=[self.dummy_req] * bs, phase="decode")
             batch.padded_reqs = batch.reqs
+            record_stage("before_prepare_for_capture", bs)
             self.attn_backend.prepare_for_capture(batch)
             self.buffer.set_batch(batch)
+            record_stage("after_prepare_for_capture", bs)
             with get_global_ctx().forward_batch(batch):
                 if stage_capture_metadata is not None:
                     stage_capture_metadata(batch)
+                record_stage("after_stage_capture_metadata", bs)
                 self.buffer.logits[:bs] = model.forward()
                 if self.capture_greedy_sample:
                     assert self.buffer.next_tokens is not None
                     self.buffer.next_tokens[:bs] = torch.argmax(
                         self.buffer.logits[:bs], dim=-1
                     ).to(torch.int32)
+                record_stage("after_warmup_model.forward", bs)
                 with torch.cuda.graph(graph, pool=pool, stream=self.stream):
                     if stage_capture_metadata is not None:
                         stage_capture_metadata(batch)
@@ -302,6 +429,7 @@ class GraphRunner:
                         self.buffer.next_tokens[:bs] = torch.argmax(
                             self.buffer.logits[:bs], dim=-1
                         ).to(torch.int32)
+            record_stage("after_actual_cuda_graph_capture", bs)
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
                 self.capture_status["capture_graph_pool_reuse_anchor_bs"] = int(bs)
@@ -310,6 +438,10 @@ class GraphRunner:
             self.graph_map[bs] = graph
             self.capture_status["captured_bs"].append(bs)
             torch.cuda.synchronize(self.device)
+            if stage_debug:
+                gc.collect()
+                torch.cuda.empty_cache()
+                record_stage("after_gc_empty_cache", bs)
             bs_end_free_memory = get_free_memory(self.device)
             bs_end_allocated = torch.cuda.memory_allocated(self.device)
             bs_end_reserved = torch.cuda.memory_reserved(self.device)
