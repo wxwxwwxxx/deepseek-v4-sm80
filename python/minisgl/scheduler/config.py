@@ -18,6 +18,7 @@ class SchedulerConfig(EngineConfig):
     enable_dsv4_radix_prefix_cache: bool = False
     enable_dsv4_swa_tail_retention_v1: bool = False
     enable_dsv4_component_loc_ownership: bool = False
+    enable_dsv4_swa_independent_lifecycle: bool = False
     offline_mode: bool = False
 
     # networking config

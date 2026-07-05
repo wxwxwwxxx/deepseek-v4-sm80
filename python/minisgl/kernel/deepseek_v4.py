@@ -75,6 +75,7 @@ DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
 DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
 DSV4_MARLIN_WNA16_CACHE_DEBUG_ENV = "MINISGL_DSV4_MARLIN_WNA16_CACHE_DEBUG"
 DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV = "MINISGL_DSV4_WARMUP_FORWARD_MEMORY_DEBUG"
+DSV4_CACHE_BOUNDS_DEBUG_ENV = "MINISGL_DSV4_CACHE_BOUNDS_DEBUG"
 DSV4_MARLIN_WNA16_PREBUILD_ENV = "MINISGL_DSV4_MARLIN_WNA16_PREBUILD"
 DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
@@ -3788,10 +3789,47 @@ def plan_topk_v2_fallback(
     return {"lengths": lengths.to(torch.int32), "width": width}
 
 
+def _debug_check_store_loc_bounds(
+    cache: torch.Tensor,
+    loc: torch.Tensor,
+    *,
+    cache_type: str,
+    layer_id: int,
+) -> None:
+    if os.environ.get(DSV4_CACHE_BOUNDS_DEBUG_ENV, "").strip().lower() not in _TRUE_ENV_VALUES:
+        return
+    if loc.numel() == 0:
+        return
+    loc_flat = loc.reshape(-1)
+    valid = loc_flat >= 0
+    if not bool(torch.any(valid).item()):
+        return
+    valid_locs = loc_flat[valid]
+    bad = valid_locs >= int(cache.shape[0])
+    if not bool(torch.any(bad).item()):
+        return
+    bad_locs = valid_locs[bad]
+    raise RuntimeError(
+        "DSV4 cache store loc out of bounds before fused store: "
+        f"cache_type={cache_type}, layer={layer_id}, "
+        f"value={int(bad_locs[0].item())}, cache_rows={int(cache.shape[0])}"
+    )
+
+
 def store_swa_fallback(kvcache, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
+    store_loc = out_loc
+    translate = getattr(kvcache, "translate_full_locs_to_swa_locs", None)
+    if callable(translate) and bool(getattr(kvcache, "swa_independent_lifecycle_enabled", False)):
+        store_loc = translate(out_loc)
+    _debug_check_store_loc_bounds(
+        kvcache.swa_cache(layer_id),
+        store_loc,
+        cache_type="swa",
+        layer_id=layer_id,
+    )
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_STORE_CACHE"):
         try:
-            if _triton_dsv4_ops().store_cache(kvcache.swa_cache(layer_id), kv, out_loc):
+            if _triton_dsv4_ops().store_cache(kvcache.swa_cache(layer_id), kv, store_loc):
                 return
         except Exception:
             pass
@@ -3805,6 +3843,12 @@ def store_compressed_fallback(
     loc: torch.Tensor,
 ) -> None:
     loc_flat = loc.reshape(-1)
+    _debug_check_store_loc_bounds(
+        kvcache.component_cache(layer_id),
+        loc,
+        cache_type="component",
+        layer_id=layer_id,
+    )
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
         try:
             if _triton_dsv4_ops().store_cache(kvcache.component_cache(layer_id), kv, loc):
@@ -3822,6 +3866,12 @@ def store_compressed_fallback(
 
 def store_indexer_fallback(kvcache, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
     loc_flat = loc.reshape(-1)
+    _debug_check_store_loc_bounds(
+        kvcache.indexer_cache(layer_id),
+        loc,
+        cache_type="indexer",
+        layer_id=layer_id,
+    )
     if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
         try:
             if _triton_dsv4_ops().store_cache(kvcache.indexer_cache(layer_id), kv, loc):

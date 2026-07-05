@@ -11,6 +11,7 @@ from minisgl.kvcache.deepseek_v4_pool import (
     DSV4_INDEXER_FP8_CACHE_ENV,
     DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV,
     DeepSeekV4KVCache,
+    DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV,
     _clear_allocated_kv_modes,
 )
 from minisgl.models.config import ModelConfig, RotaryConfig
@@ -73,6 +74,8 @@ def _make_dsv4_pool(
     num_pages: int = 8,
     page_size: int = 4,
     enable_component_loc_ownership: bool = False,
+    enable_swa_independent_lifecycle: bool = False,
+    max_running_req: int | None = None,
 ) -> DeepSeekV4KVCache:
     pool = create_kvcache_pool(
         _tiny_dsv4_config(compress_ratios),
@@ -81,6 +84,8 @@ def _make_dsv4_pool(
         dtype=torch.float16,
         device=torch.device("cpu"),
         enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
+        enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
+        max_running_req=max_running_req,
     )
     assert isinstance(pool, DeepSeekV4KVCache)
     return pool
@@ -175,6 +180,7 @@ def _evict_all_prefix(cm: CacheManager, pool: DeepSeekV4KVCache, page_size: int)
             valid,
             page_size,
             free_components=not pool.component_loc_ownership_enabled,
+            free_swa=not pool.swa_independent_lifecycle_enabled,
         )
         cm.free_slots = torch.cat([cm.free_slots, valid[::page_size]])
     cm.check_integrity()
@@ -603,6 +609,172 @@ def test_dsv4_component_loc_ownership_retains_state_but_keeps_swa_safe_boundary(
     assert handles.c4_indexer_state_pages.tolist() == [0, 1]
 
     _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_swa_independent_lifecycle_tombstones_swa_without_component_invalidation():
+    page_size = 256
+    num_pages = 8
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=3,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    prompt = torch.arange(513, dtype=torch.int32)
+    _cache_finished_prompt(cm, 0, prompt)
+
+    snapshot = cm.prefix_metrics_snapshot()
+    counts = pool.allocation_counts
+    assert counts.full_slots == page_size
+    assert counts.swa_pages == 1
+    assert counts.c4_slots == 2 * (page_size // 4)
+    assert counts.c128_slots == 2 * (page_size // 128)
+    assert snapshot["dsv4_swa_lifecycle"]["current_swa_tail_pages"] == 1
+    assert snapshot["dsv4_swa_lifecycle"]["retained_prefix_swa_pages"] == 1
+    assert snapshot["dsv4_swa_lifecycle"]["swa_pages_tombstoned_total"] == 1
+    assert snapshot["dsv4_component_ownership"]["live_full_pages"] == 1
+    assert snapshot["dsv4_component_ownership"]["available_component_pages"] == num_pages - 2
+
+    handle = cm.match_req(PendingReq(1, prompt, SamplingParams(max_tokens=1))).cuda_handle
+    assert handle.cached_len == 2 * page_size
+    matched = handle.get_matched_indices()
+    assert torch.all(matched[:page_size] < 0)
+    assert torch.all(matched[page_size:] >= 0)
+    component_pages = handle.get_dsv4_component_pages()
+    swa_pages = handle.get_dsv4_swa_pages()
+    assert component_pages is not None and component_pages.has_required_state_pages
+    assert swa_pages is not None and swa_pages.swa_pages is not None
+    assert swa_pages.swa_pages.tolist()[0] == -1
+    assert swa_pages.swa_pages.tolist()[1] >= 0
+
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+    assert pool.runtime_swa_counters()["current_swa_tail_pages"] == 0
+
+
+def test_dsv4_swa_capacity_pressure_can_release_prefix_swa_only():
+    page_size = 256
+    num_pages = 8
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=3,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    prompts = [torch.arange(257, dtype=torch.int32) + i * 1000 for i in range(3)]
+    for uid, prompt in enumerate(prompts):
+        _cache_finished_prompt(cm, uid, prompt)
+
+    before = pool.allocation_counts
+    assert before.full_slots == 3 * page_size
+    assert before.swa_pages == 3
+    assert before.c4_slots == 3 * (page_size // 4)
+    assert before.c128_slots == 3 * (page_size // 128)
+
+    released = cm.prefix_cache.release_dsv4_evictable_swa_pages(2)
+    assert released == 2
+    after = pool.allocation_counts
+    assert after.full_slots == before.full_slots
+    assert after.c4_slots == before.c4_slots
+    assert after.c128_slots == before.c128_slots
+    assert after.swa_pages == 1
+    assert pool.runtime_swa_counters()["swa_pages_tombstoned_total"] == 2
+
+    snapshot = cm.prefix_metrics_snapshot()
+    assert snapshot["dsv4_swa_lifecycle"]["evictable_prefix_swa_pages"] == 1
+    guarded = cm.match_req(PendingReq(99, prompts[0], SamplingParams(max_tokens=1))).cuda_handle
+    assert guarded.cached_len == 0
+
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_active_swa_release_preserves_component_mappings():
+    page_size = 256
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=8,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=3,
+    )
+    page_starts = torch.tensor([0, page_size, page_size * 2], dtype=torch.int32)
+    pool.on_pages_allocated(page_starts, page_size)
+
+    before = pool.allocation_counts
+    assert before.full_slots == 3 * page_size
+    assert before.swa_pages == 3
+    assert before.c4_slots == 3 * (page_size // 4)
+    assert before.c128_slots == 3 * (page_size // 128)
+
+    pool.release_swa_for_full_indices(
+        torch.arange(0, page_size * 2, dtype=torch.int32),
+        page_size,
+        tombstone=True,
+    )
+
+    after = pool.allocation_counts
+    assert after.full_slots == before.full_slots
+    assert after.c4_slots == before.c4_slots
+    assert after.c128_slots == before.c128_slots
+    assert after.c4_indexer_slots == before.c4_indexer_slots
+    assert after.swa_pages == 1
+    assert pool.runtime_swa_counters()["swa_pages_tombstoned_total"] == 2
+    swa_pages = pool.swa_pages_from_full_page_starts(page_starts, page_size)
+    assert swa_pages is not None
+    assert swa_pages.tolist()[:2] == [-1, -1]
+    assert swa_pages.tolist()[2] >= 0
+    c4_pages, c128_pages, indexer_pages = pool.component_pages_from_full_page_starts(
+        page_starts,
+        page_size,
+    )
+    assert c4_pages is not None and torch.all(c4_pages >= 0)
+    assert c128_pages is not None and torch.all(c128_pages >= 0)
+    assert indexer_pages is not None and torch.all(indexer_pages >= 0)
+
+    pool.on_token_indices_freed(
+        torch.arange(0, page_size * 3, dtype=torch.int32),
+        page_size,
+    )
+    pool.assert_no_leak()
+
+
+def test_dsv4_swa_independent_dummy_full_sentinel_maps_to_swa_dummy_only():
+    page_size = 4
+    pool = _make_dsv4_pool(
+        [0, 4, 128],
+        num_pages=8,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=2,
+    )
+    dummy_full_loc = torch.tensor([pool.num_tokens], dtype=torch.int32)
+
+    swa_locs = pool.translate_full_locs_to_swa_locs(dummy_full_loc)
+    assert swa_locs.tolist() == [(pool.runtime_swa_counters()["swa_capacity_pages"] - 1) * page_size]
+
+    swa_pages = pool.swa_pages_from_full_page_starts(dummy_full_loc, page_size)
+    assert swa_pages is not None
+    assert swa_pages.tolist() == [pool.runtime_swa_counters()["swa_capacity_pages"] - 1]
+
+    c4_pages, c128_pages, indexer_pages = pool.component_pages_from_full_page_starts(
+        dummy_full_loc,
+        page_size,
+    )
+    assert c4_pages is not None and c4_pages.tolist() == [-1]
+    assert c128_pages is not None and c128_pages.tolist() == [-1]
+    assert indexer_pages is not None and indexer_pages.tolist() == [-1]
     pool.assert_no_leak()
 
 

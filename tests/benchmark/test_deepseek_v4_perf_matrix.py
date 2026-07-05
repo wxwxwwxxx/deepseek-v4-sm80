@@ -49,6 +49,7 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
     assert args.enable_dsv4_radix_prefix_cache is False
     assert args.enable_dsv4_swa_tail_retention_v1 is False
     assert args.enable_dsv4_component_loc_ownership is False
+    assert args.enable_dsv4_swa_independent_lifecycle is False
     assert [variant.name for variant in variants] == ["fallback", "v0_bf16", "v1_moe"]
     assert {scenario.name for scenario in scenarios} >= {
         "long_prefill_bs1",
@@ -67,6 +68,9 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
 
     ownership_args = bench.parse_args(["--enable-dsv4-component-loc-ownership"])
     assert ownership_args.enable_dsv4_component_loc_ownership is True
+
+    swa_args = bench.parse_args(["--enable-dsv4-swa-independent-lifecycle"])
+    assert swa_args.enable_dsv4_swa_independent_lifecycle is True
 
 
 def test_smoke_or_page_size_one_is_not_reported_as_baseline():
@@ -751,6 +755,9 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
     prefix_release = variants[
         "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release"
     ]
+    prefix_release_swa = variants[
+        "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent"
+    ]
     prefix_safe_arena = variants[
         "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
     ]
@@ -777,6 +784,10 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
     assert prefix_release.env == {
         **variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"].env,
         **release.env,
+    }
+    assert prefix_release_swa.env == {
+        **prefix_release.env,
+        "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE": "1",
     }
     assert prefix_safe_arena.env == {
         **variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"].env,
@@ -808,7 +819,17 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
     assert release.allow_dsv4_cuda_graph is True
     assert safe_arena.allow_dsv4_cuda_graph is True
     assert prefix_release.allow_dsv4_cuda_graph is True
+    assert prefix_release_swa.allow_dsv4_cuda_graph is True
+    assert prefix_release_swa.enable_dsv4_radix_prefix_cache is True
+    assert prefix_release_swa.enable_dsv4_component_loc_ownership is True
+    assert prefix_release_swa.enable_dsv4_swa_independent_lifecycle is True
     assert prefix_safe_arena.allow_dsv4_cuda_graph is True
+    swa_result = bench.configure_variant(FakeKernel, prefix_release_swa)
+    assert swa_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"] == "1"
+    assert (
+        swa_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC"]
+        == "component"
+    )
 
 
 def test_marlin_release_env_is_not_preserved_across_variants(monkeypatch):

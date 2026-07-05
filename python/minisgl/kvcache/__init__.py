@@ -31,6 +31,9 @@ def create_kvcache_pool(
     dtype: torch.dtype,
     device: torch.device,
     enable_dsv4_component_loc_ownership: bool = False,
+    enable_dsv4_swa_independent_lifecycle: bool = False,
+    max_running_req: int | None = None,
+    dsv4_swa_num_pages: int | None = None,
 ) -> BaseKVCachePool:
     if model_config.is_deepseek_v4:
         from .deepseek_v4_pool import DeepSeekV4KVCache
@@ -42,6 +45,9 @@ def create_kvcache_pool(
             device=device,
             dtype=dtype,
             enable_component_loc_ownership=enable_dsv4_component_loc_ownership,
+            enable_swa_independent_lifecycle=enable_dsv4_swa_independent_lifecycle,
+            max_running_req=max_running_req,
+            swa_num_pages=dsv4_swa_num_pages,
         )
 
     from .mha_pool import MHAKVCache

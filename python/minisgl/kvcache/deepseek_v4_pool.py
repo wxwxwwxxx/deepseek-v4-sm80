@@ -22,6 +22,8 @@ DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
 )
 DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV = "MINISGL_DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR"
+DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV = "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"
+DSV4_SWA_INDEPENDENT_NUM_PAGES_ENV = "MINISGL_DSV4_SWA_INDEPENDENT_NUM_PAGES"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -166,6 +168,8 @@ class DSV4LayerCacheMapping:
 @dataclass(frozen=True)
 class DSV4AllocationCounts:
     full_slots: int
+    swa_slots: int
+    swa_pages: int
     c4_slots: int
     c128_slots: int
     c4_indexer_slots: int
@@ -176,15 +180,108 @@ class DSV4AllocationCounts:
     @property
     def any_allocated(self) -> bool:
         return any(
-            (
-                self.full_slots,
-                self.c4_slots,
-                self.c128_slots,
-                self.c4_indexer_slots,
+                (
+                    self.full_slots,
+                    self.swa_slots,
+                    self.swa_pages,
+                    self.c4_slots,
+                    self.c128_slots,
+                    self.c4_indexer_slots,
                 self.c4_state_slots,
                 self.c128_state_slots,
                 self.c4_indexer_state_slots,
             )
+        )
+
+
+@dataclass(frozen=True)
+class DSV4SWAPageHandles:
+    length: int
+    page_size: int
+    swa_pages: torch.Tensor | None = None
+
+    @property
+    def num_pages(self) -> int:
+        return div_ceil(self.length, self.page_size) if self.length else 0
+
+    @property
+    def live_pages(self) -> int:
+        if self.swa_pages is None:
+            return 0
+        return int(torch.count_nonzero(self.swa_pages >= 0).item())
+
+    @property
+    def tombstoned_pages(self) -> int:
+        if self.swa_pages is None:
+            return self.num_pages
+        return int(torch.count_nonzero(self.swa_pages < 0).item())
+
+    @property
+    def has_live_tail(self) -> bool:
+        return bool(
+            self.swa_pages is not None
+            and self.swa_pages.numel() > 0
+            and int(self.swa_pages[-1].item()) >= 0
+        )
+
+    def slice_tokens(self, start: int, end: int) -> DSV4SWAPageHandles:
+        start = int(start)
+        end = int(end)
+        if start < 0 or end < start or end > self.length:
+            raise ValueError(
+                "Invalid DSV4 SWA handle slice: "
+                f"start={start}, end={end}, length={self.length}"
+            )
+        if start % self.page_size != 0 or end % self.page_size != 0:
+            raise ValueError(
+                "DSV4 SWA handles can only be sliced on page boundaries: "
+                f"start={start}, end={end}, page_size={self.page_size}"
+            )
+        page_start = start // self.page_size
+        page_end = end // self.page_size
+        pages = None if self.swa_pages is None else self.swa_pages[page_start:page_end].clone()
+        return DSV4SWAPageHandles(
+            length=end - start,
+            page_size=self.page_size,
+            swa_pages=pages,
+        )
+
+    def tombstone_tokens(self, start: int, end: int) -> tuple[DSV4SWAPageHandles, DSV4SWAPageHandles]:
+        released = self.slice_tokens(start, end)
+        if self.swa_pages is None or released.num_pages == 0:
+            return self, released
+        pages = self.swa_pages.clone()
+        page_start = start // self.page_size
+        page_end = end // self.page_size
+        pages[page_start:page_end] = -1
+        return (
+            DSV4SWAPageHandles(
+                length=self.length,
+                page_size=self.page_size,
+                swa_pages=pages,
+            ),
+            released,
+        )
+
+    @staticmethod
+    def concat(handles: list[DSV4SWAPageHandles]) -> DSV4SWAPageHandles | None:
+        handles = [h for h in handles if h.length > 0]
+        if not handles:
+            return None
+        page_size = handles[0].page_size
+        if any(h.page_size != page_size for h in handles):
+            raise ValueError("Cannot concatenate DSV4 SWA handles with mixed page sizes")
+        if any(h.swa_pages is None for h in handles):
+            if all(h.swa_pages is None for h in handles):
+                pages = None
+            else:
+                raise ValueError("Mixed DSV4 SWA handle field presence")
+        else:
+            pages = torch.cat([h.swa_pages for h in handles if h.swa_pages is not None])
+        return DSV4SWAPageHandles(
+            length=sum(h.length for h in handles),
+            page_size=page_size,
+            swa_pages=pages,
         )
 
 
@@ -374,6 +471,9 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         dtype: torch.dtype | None = None,
         policy: DSV4CacheLayoutPolicy | None = None,
         enable_component_loc_ownership: bool = False,
+        enable_swa_independent_lifecycle: bool = False,
+        max_running_req: int | None = None,
+        swa_num_pages: int | None = None,
     ) -> None:
         del dtype
         self._policy = policy or DSV4CacheLayoutPolicy()
@@ -385,9 +485,18 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._num_pages = num_pages
         self._page_size = page_size
         self._num_tokens = num_pages * page_size
+        self._window_size = int(getattr(model_config, "window_size", 128) or 128)
+        self._component_loc_ownership_enabled = bool(enable_component_loc_ownership)
+        self._swa_independent_lifecycle_enabled = bool(
+            enable_swa_independent_lifecycle
+            or dsv4_memory_debug.env_flag(DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV)
+        )
+        if self._swa_independent_lifecycle_enabled and not self._component_loc_ownership_enabled:
+            raise ValueError(
+                "DSV4 SWA independent lifecycle requires Route B component loc ownership."
+            )
         self._c4_slots = div_ceil(self._num_tokens, 4)
         self._c128_slots = div_ceil(self._num_tokens, 128)
-        self._component_loc_ownership_enabled = bool(enable_component_loc_ownership)
         self._c4_component_page_size = max(div_ceil(page_size, 4), 1)
         self._c128_component_page_size = max(div_ceil(page_size, 128), 1)
         self._c4_state_page_size = self.C4_STATE_RING_SIZE
@@ -403,7 +512,22 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._c4_layer_count = sum(m.compress_ratio == 4 for m in self._layer_mapping)
         self._c128_layer_count = sum(m.compress_ratio == 128 for m in self._layer_mapping)
 
-        shape = (self._num_layers, num_pages, page_size, self._head_dim)
+        self._swa_tail_pages_per_req = max(div_ceil(self._window_size, page_size), 1)
+        env_swa_pages = _env_int(DSV4_SWA_INDEPENDENT_NUM_PAGES_ENV, -1)
+        if swa_num_pages is not None:
+            planned_swa_pages = int(swa_num_pages)
+        elif env_swa_pages > 0:
+            planned_swa_pages = env_swa_pages
+        elif self._swa_independent_lifecycle_enabled:
+            running_req = max(int(max_running_req or 1), 1)
+            planned_swa_pages = running_req * (self._swa_tail_pages_per_req + 1) + 1
+        else:
+            planned_swa_pages = num_pages
+        self._swa_num_pages = max(1, min(num_pages, planned_swa_pages))
+        self._swa_num_tokens = self._swa_num_pages * page_size
+        self._swa_dummy_page = self._swa_num_pages - 1
+
+        shape = (self._num_layers, self._swa_num_pages, page_size, self._head_dim)
         self._swa_buffer = torch.empty(shape, dtype=self._dtype, device=device)
         self._c4_buffer = torch.empty(
             (self._c4_layer_count, self._c4_slots, self._head_dim),
@@ -453,6 +577,33 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             self._c4_indexer_fp8_scales = None
 
         self._full_refcount = torch.zeros(self._num_tokens, dtype=torch.int16, device=device)
+        self._swa_page_refcount = torch.zeros(
+            self._swa_num_pages,
+            dtype=torch.int16,
+            device=device,
+        )
+        self._full_to_swa_page = torch.full(
+            (self._num_pages,),
+            -1,
+            dtype=torch.int32,
+            device=device,
+        )
+        if self._swa_independent_lifecycle_enabled:
+            self._swa_page_refcount[self._swa_dummy_page] = 1
+            self._free_swa_pages = torch.arange(
+                max(self._swa_num_pages - 1, 0),
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            self._swa_page_refcount.fill_(1)
+            self._full_to_swa_page.copy_(
+                torch.arange(self._num_pages, dtype=torch.int32, device=device)
+            )
+            self._free_swa_pages = torch.empty(0, dtype=torch.int32, device=device)
+        self._swa_pages_allocated_total = 0
+        self._swa_pages_freed_total = 0
+        self._swa_pages_tombstoned_total = 0
         self._c4_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
         self._c128_refcount = torch.zeros(self._c128_slots, dtype=torch.int16, device=device)
         self._c4_indexer_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
@@ -760,6 +911,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         return self._component_loc_ownership_enabled
 
     @property
+    def swa_independent_lifecycle_enabled(self) -> bool:
+        return self._swa_independent_lifecycle_enabled
+
+    @property
     def c4_component_page_size(self) -> int:
         return self._c4_component_page_size
 
@@ -777,8 +932,16 @@ class DeepSeekV4KVCache(BaseKVCachePool):
 
     @property
     def allocation_counts(self) -> DSV4AllocationCounts:
+        if self._swa_independent_lifecycle_enabled:
+            tail_refcount = self._swa_page_refcount[: self._swa_dummy_page]
+            swa_pages = int(torch.count_nonzero(tail_refcount > 0).item())
+        else:
+            full_page_refcount = self._full_refcount.view(self._num_pages, self._page_size)
+            swa_pages = int(torch.count_nonzero(full_page_refcount.sum(dim=1) > 0).item())
         return DSV4AllocationCounts(
             full_slots=int(torch.count_nonzero(self._full_refcount).item()),
+            swa_slots=swa_pages * self._page_size,
+            swa_pages=swa_pages,
             c4_slots=(
                 int(torch.count_nonzero(self._c4_refcount).item()) if self._c4_layer_count else 0
             ),
@@ -813,7 +976,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         return self._layer_mapping[layer_id]
 
     def swa_cache(self, layer_id: int) -> torch.Tensor:
-        return self._swa_buffer[layer_id].view(self._num_tokens, self._head_dim)
+        return self._swa_buffer[layer_id].view(self._swa_num_tokens, self._head_dim)
 
     def c4_cache(self, layer_id: int) -> torch.Tensor:
         mapping = self.get_layer_mapping(layer_id)
@@ -915,7 +1078,13 @@ class DeepSeekV4KVCache(BaseKVCachePool):
     def store_swa(self, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
         if kv.numel() == 0:
             return
-        self.swa_cache(layer_id)[out_loc.long()] = kv.reshape(-1, self._head_dim).to(self._dtype)
+        swa_loc = self.translate_full_locs_to_swa_locs(out_loc)
+        valid = swa_loc >= 0
+        if not bool(torch.all(valid)):
+            raise RuntimeError("DSV4 SWA write requested for full loc without live SWA mapping")
+        self.swa_cache(layer_id)[swa_loc.long()] = kv.reshape(-1, self._head_dim).to(
+            self._dtype
+        )
 
     def store_compressed(
         self,
@@ -936,10 +1105,11 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         )
 
     def _clear_full_locs(self, locs: torch.Tensor) -> None:
-        locs = self._sanitize_locs(locs, self._num_tokens)
+        locs = self.translate_full_locs_to_swa_locs(locs)
+        locs = self._sanitize_locs(locs, self._swa_num_tokens)
         if locs.numel() == 0:
             return
-        self._swa_buffer.view(self._num_layers, self._num_tokens, self._head_dim).index_fill_(
+        self._swa_buffer.view(self._num_layers, self._swa_num_tokens, self._head_dim).index_fill_(
             1,
             locs,
             0,
@@ -1077,6 +1247,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             return
         clear_modes = _clear_allocated_kv_modes()
         self._full_refcount[full_locs] += 1
+        if self._swa_independent_lifecycle_enabled:
+            self._allocate_swa_pages_for_full_pages(page_starts, page_size)
         if "full" in clear_modes:
             self._clear_full_locs(full_locs)
         if self._component_loc_ownership_enabled:
@@ -1125,6 +1297,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         page_size: int,
         *,
         free_components: bool = True,
+        free_swa: bool = True,
     ) -> None:
         if indices.numel() == 0:
             return
@@ -1135,6 +1308,12 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         if full_locs.numel() == 0:
             return
         self._decrement_refcount(self._full_refcount, full_locs, "full token")
+        if self._swa_independent_lifecycle_enabled:
+            self._release_swa_pages_for_full_pages(
+                page_starts,
+                page_size,
+                free_swa=free_swa,
+            )
         if self._component_loc_ownership_enabled:
             self._release_component_pages_for_full_pages(
                 page_starts,
@@ -1190,7 +1369,14 @@ class DeepSeekV4KVCache(BaseKVCachePool):
 
         dtype_size = self._dtype.itemsize
         state_dtype_size = self._policy.compress_state_dtype.itemsize
-        swa_bytes = self._num_layers * retained_full_tokens * self._head_dim * dtype_size
+        legacy_swa_bytes = self._num_layers * retained_full_tokens * self._head_dim * dtype_size
+        if self._swa_independent_lifecycle_enabled:
+            runtime_swa_pages = self.runtime_swa_counters()["current_swa_tail_pages"]
+            swa_tokens = int(runtime_swa_pages) * page_size
+            swa_bytes = self._num_layers * swa_tokens * self._head_dim * dtype_size
+        else:
+            swa_tokens = retained_full_tokens
+            swa_bytes = legacy_swa_bytes
         c4_bytes = self._c4_layer_count * c4_slots * self._head_dim * dtype_size
         c128_bytes = self._c128_layer_count * c128_slots * self._head_dim * dtype_size
         c4_indexer_bytes = (
@@ -1244,7 +1430,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "c4_state_slots": c4_state_slots,
             "c128_state_slots": c128_state_slots,
             "c4_indexer_state_slots": c4_indexer_state_slots,
+            "swa_independent_lifecycle": bool(self._swa_independent_lifecycle_enabled),
+            "swa_tail_tokens": swa_tokens,
             "swa_bytes": swa_bytes,
+            "legacy_swa_bytes": legacy_swa_bytes,
             "c4_bytes": c4_bytes,
             "c128_bytes": c128_bytes,
             "c4_indexer_bytes": c4_indexer_bytes,
@@ -1254,6 +1443,35 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "c128_state_bytes": c128_state_bytes,
             "retained_memory_bytes": retained_memory_bytes,
             "page_size_c128_aligned": page_size % 128 == 0,
+        }
+
+    def runtime_swa_counters(self) -> dict[str, int | bool]:
+        current_pages = (
+            int(torch.count_nonzero(self._swa_page_refcount > 0).item())
+            if self._swa_independent_lifecycle_enabled
+            else int(torch.count_nonzero(self._full_refcount.view(self._num_pages, self._page_size).sum(dim=1) > 0).item())
+        )
+        if self._swa_independent_lifecycle_enabled and self._swa_page_refcount[
+            self._swa_dummy_page
+        ] > 0:
+            current_tail_pages = max(current_pages - 1, 0)
+        else:
+            current_tail_pages = current_pages
+        return {
+            "enabled": bool(self._swa_independent_lifecycle_enabled),
+            "swa_capacity_pages": int(self._swa_num_pages),
+            "swa_tail_capacity_pages": int(
+                max(self._swa_num_pages - (1 if self._swa_independent_lifecycle_enabled else 0), 0)
+            ),
+            "current_swa_pages": int(current_pages),
+            "current_swa_tail_pages": int(current_tail_pages),
+            "available_swa_pages": int(self.available_swa_pages()),
+            "swa_pages_allocated_total": int(self._swa_pages_allocated_total),
+            "swa_pages_freed_total": int(self._swa_pages_freed_total),
+            "swa_pages_tombstoned_total": int(self._swa_pages_tombstoned_total),
+            "swa_tail_pages_per_req": int(self._swa_tail_pages_per_req),
+            "sliding_window": int(self._window_size),
+            "page_size": int(self._page_size),
         }
 
     def make_component_page_handles(
@@ -1334,7 +1552,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             if not enabled:
                 return None
             out = torch.full_like(full_pages, -1, dtype=torch.int32)
-            valid = full_pages >= 0
+            valid = (full_pages >= 0) & (full_pages < self._num_pages)
             if bool(torch.any(valid)):
                 out[valid] = mapping[full_pages[valid]].to(torch.int32)
             return out
@@ -1350,6 +1568,51 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             _gather(self._full_to_c4_page, self._c4_layer_count > 0),
             _gather(self._full_to_c128_page, self._c128_layer_count > 0),
             _gather(self._full_to_c4_indexer_page, self._c4_layer_count > 0),
+        )
+
+    def swa_pages_from_full_page_starts(
+        self,
+        page_starts: torch.Tensor,
+        page_size: int,
+    ) -> torch.Tensor | None:
+        if not self._swa_independent_lifecycle_enabled:
+            return None
+        page_starts = page_starts.to(device=self.device, dtype=torch.long)
+        full_pages = torch.where(
+            page_starts >= 0,
+            page_starts.div(page_size, rounding_mode="floor"),
+            torch.full_like(page_starts, -1),
+        )
+        out = torch.full_like(full_pages, -1, dtype=torch.int32)
+        valid = (full_pages >= 0) & (full_pages < self._num_pages)
+        if bool(torch.any(valid)):
+            out[valid] = self._full_to_swa_page[full_pages[valid]].to(torch.int32)
+        dummy = page_starts == self._num_tokens
+        if bool(torch.any(dummy)):
+            out[dummy] = int(self._swa_dummy_page)
+        return out
+
+    def make_swa_page_handles(
+        self,
+        full_indices: torch.Tensor,
+        page_size: int,
+    ) -> DSV4SWAPageHandles | None:
+        if not self._swa_independent_lifecycle_enabled:
+            return None
+        if full_indices.numel() == 0:
+            return DSV4SWAPageHandles(length=0, page_size=page_size)
+        if full_indices.numel() % page_size != 0:
+            raise ValueError(
+                "DSV4 SWA handles require page-aligned full indices, "
+                f"got {full_indices.numel()} tokens for page_size={page_size}"
+            )
+        page_starts = full_indices[::page_size].to(device=self.device, dtype=torch.long)
+        swa_pages = self.swa_pages_from_full_page_starts(page_starts, page_size)
+        assert swa_pages is not None
+        return DSV4SWAPageHandles(
+            length=int(full_indices.numel()),
+            page_size=page_size,
+            swa_pages=swa_pages,
         )
 
     def state_locs_from_full_locs(
@@ -1448,6 +1711,55 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 name="C4 indexer state",
             )
 
+    def release_swa_page_handles(
+        self,
+        handles: DSV4SWAPageHandles | None,
+        *,
+        tombstone: bool = False,
+    ) -> None:
+        if handles is None or handles.length == 0 or handles.swa_pages is None:
+            return
+        if not self._swa_independent_lifecycle_enabled:
+            return
+        pages = handles.swa_pages.to(device=self.device, dtype=torch.long)
+        pages = pages[(pages >= 0) & (pages != self._swa_dummy_page)]
+        if pages.numel() == 0:
+            return
+        pages = torch.unique(pages)
+        self._decrement_refcount(self._swa_page_refcount, pages, "SWA page")
+        freed = pages[self._swa_page_refcount[pages] == 0].to(torch.int32)
+        if freed.numel() > 0:
+            self._clear_full_to_swa_mappings_for_swa_pages(freed)
+            self._free_swa_pages = torch.cat([self._free_swa_pages, freed])
+            self._swa_pages_freed_total += int(freed.numel())
+        if tombstone:
+            self._swa_pages_tombstoned_total += int(pages.numel())
+
+    def release_swa_for_full_indices(
+        self,
+        full_indices: torch.Tensor,
+        page_size: int,
+        *,
+        tombstone: bool = True,
+    ) -> None:
+        if not self._swa_independent_lifecycle_enabled or full_indices.numel() == 0:
+            return
+        if full_indices.numel() % page_size != 0:
+            raise ValueError(
+                "DSV4 active SWA release requires page-aligned full indices, "
+                f"got {full_indices.numel()} tokens for page_size={page_size}"
+            )
+        pages = full_indices.to(device=self.device, dtype=torch.long).view(-1, page_size)
+        valid = pages[:, 0] >= 0
+        if not bool(torch.any(valid)):
+            return
+        self._release_swa_pages_for_full_pages(
+            pages[valid, 0],
+            page_size,
+            free_swa=True,
+            tombstone=tombstone,
+        )
+
     def available_component_pages(self) -> int:
         if not self._component_loc_ownership_enabled:
             return self._num_pages
@@ -1461,6 +1773,30 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             counts.append(int(self._free_c128_pages.numel()))
             counts.append(int(self._free_c128_state_pages.numel()))
         return min(counts) if counts else self._num_pages
+
+    def available_swa_pages(self) -> int:
+        if not self._swa_independent_lifecycle_enabled:
+            return self._num_pages
+        return int(self._free_swa_pages.numel())
+
+    def translate_full_locs_to_swa_locs(self, full_locs: torch.Tensor) -> torch.Tensor:
+        full_locs = full_locs.to(device=self.device, dtype=torch.long)
+        if full_locs.numel() == 0:
+            return full_locs
+        if not self._swa_independent_lifecycle_enabled:
+            return torch.where(full_locs < 0, torch.full_like(full_locs, -1), full_locs)
+        full_pages = full_locs.div(self._page_size, rounding_mode="floor")
+        offsets = full_locs % self._page_size
+        valid = (full_locs >= 0) & (full_pages >= 0) & (full_pages < self._num_pages)
+        out = torch.full_like(full_locs, -1)
+        if bool(torch.any(valid)):
+            swa_pages = self._full_to_swa_page[full_pages[valid]].to(torch.long)
+            mapped = swa_pages * self._page_size + offsets[valid]
+            out[valid] = torch.where(swa_pages >= 0, mapped, torch.full_like(mapped, -1))
+        dummy = full_locs == self._num_tokens
+        if bool(torch.any(dummy)):
+            out[dummy] = int(self._swa_dummy_page * self._page_size)
+        return out
 
     def _expand_page_starts(self, page_starts: torch.Tensor, page_size: int) -> torch.Tensor:
         if page_starts.numel() == 0:
@@ -1499,6 +1835,31 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         pages = free_pages[:count].clone()
         setattr(self, attr, free_pages[count:])
         return pages
+
+    def _allocate_swa_pages_for_full_pages(
+        self,
+        page_starts: torch.Tensor,
+        page_size: int,
+    ) -> None:
+        page_starts = page_starts.to(device=self.device, dtype=torch.long)
+        if page_starts.numel() == 0:
+            return
+        full_pages = page_starts.div(page_size, rounding_mode="floor")
+        count = int(full_pages.numel())
+        if torch.any(full_pages < 0) or torch.any(full_pages >= self._num_pages):
+            raise RuntimeError("DSV4 SWA allocation received out-of-range full pages")
+        if torch.any(self._full_to_swa_page[full_pages] >= 0):
+            raise RuntimeError("DSV4 SWA allocation found stale full-to-SWA mapping")
+        if count > int(self._free_swa_pages.numel()):
+            raise RuntimeError(
+                "DSV4 SWA allocator exhausted: "
+                f"need={count}, available={int(self._free_swa_pages.numel())}"
+            )
+        swa_pages = self._free_swa_pages[:count].clone()
+        self._free_swa_pages = self._free_swa_pages[count:]
+        self._swa_page_refcount[swa_pages.long()] += 1
+        self._full_to_swa_page[full_pages] = swa_pages
+        self._swa_pages_allocated_total += count
 
     def _allocate_component_pages_for_full_pages(
         self,
@@ -1661,6 +2022,40 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._full_to_c128_state_page[full_pages] = -1
         self._full_to_c4_indexer_state_page[full_pages] = -1
 
+    def _release_swa_pages_for_full_pages(
+        self,
+        page_starts: torch.Tensor,
+        page_size: int,
+        *,
+        free_swa: bool,
+        tombstone: bool = False,
+    ) -> None:
+        page_starts = page_starts.to(device=self.device, dtype=torch.long)
+        if page_starts.numel() == 0:
+            return
+        full_pages = page_starts.div(page_size, rounding_mode="floor")
+        if torch.any(full_pages < 0) or torch.any(full_pages >= self._num_pages):
+            raise RuntimeError("DSV4 SWA free received out-of-range full pages")
+        swa_pages = self._full_to_swa_page[full_pages].clone()
+        if free_swa:
+            self.release_swa_page_handles(
+                DSV4SWAPageHandles(
+                    length=int(full_pages.numel()) * page_size,
+                    page_size=page_size,
+                    swa_pages=swa_pages,
+                ),
+                tombstone=tombstone,
+            )
+        self._full_to_swa_page[full_pages] = -1
+
+    def _clear_full_to_swa_mappings_for_swa_pages(self, swa_pages: torch.Tensor) -> None:
+        if swa_pages.numel() == 0:
+            return
+        pages = swa_pages.to(device=self.device, dtype=self._full_to_swa_page.dtype)
+        stale = torch.isin(self._full_to_swa_page, pages)
+        if bool(torch.any(stale)):
+            self._full_to_swa_page[stale] = -1
+
     def _free_component_pages(
         self,
         pages: torch.Tensor,
@@ -1723,6 +2118,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
     def _assert_no_negative_refcounts(self) -> None:
         for name, refcount in (
             ("full token", self._full_refcount),
+            ("SWA page", self._swa_page_refcount),
             ("C4", self._c4_refcount),
             ("C128", self._c128_refcount),
             ("C4 indexer", self._c4_indexer_refcount),
@@ -1734,6 +2130,33 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 raise RuntimeError(f"DSV4 KV cache has negative {name} refcounts")
         if self._component_loc_ownership_enabled:
             self._assert_component_free_lists_unique()
+        if self._swa_independent_lifecycle_enabled:
+            self._assert_swa_free_list_unique()
+            self._assert_swa_mapping_integrity()
+
+    def _assert_swa_free_list_unique(self) -> None:
+        pages = self._free_swa_pages
+        total = max(self._swa_num_pages - 1, 0)
+        if pages.numel() == 0:
+            return
+        if torch.any(pages < 0) or torch.any(pages >= total):
+            raise RuntimeError("DSV4 SWA free list contains out-of-range pages")
+        if torch.unique(pages).numel() != pages.numel():
+            raise RuntimeError("DSV4 SWA free list contains duplicate pages")
+
+    def _assert_swa_mapping_integrity(self) -> None:
+        mapped = self._full_to_swa_page[self._full_to_swa_page >= 0].to(torch.long)
+        if mapped.numel() == 0:
+            return
+        total = max(self._swa_num_pages - 1, 0)
+        if torch.any(mapped >= total):
+            raise RuntimeError("DSV4 SWA mapping points outside non-dummy SWA pages")
+        if torch.any(self._swa_page_refcount[mapped] <= 0):
+            raise RuntimeError("DSV4 SWA mapping points to a free SWA page")
+        if self._free_swa_pages.numel() > 0 and bool(
+            torch.any(torch.isin(mapped.to(self._free_swa_pages.dtype), self._free_swa_pages))
+        ):
+            raise RuntimeError("DSV4 SWA mapping points to a page on the free list")
 
     def _assert_component_free_lists_unique(self) -> None:
         for name, pages, total in (
@@ -1881,5 +2304,8 @@ __all__ = [
     "DSV4_INDEXER_FP8_CACHE_ENV",
     "DSV4KVAndScore",
     "DSV4LayerCacheMapping",
+    "DSV4SWAPageHandles",
+    "DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV",
+    "DSV4_SWA_INDEPENDENT_NUM_PAGES_ENV",
     "estimate_deepseek_v4_kvcache_bytes_per_page",
 ]

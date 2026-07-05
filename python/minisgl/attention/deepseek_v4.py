@@ -54,6 +54,8 @@ DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH_ENV = (
     "MINISGL_DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH"
 )
 DSV4_DEBUG_ATTENTION_COMPONENTS_ENV = "MINISGL_DSV4_PREFIX_DEBUG_ATTENTION_COMPONENTS"
+DSV4_SWA_INDEX_BOUNDS_DEBUG_ENV = "MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG"
+DSV4_SPARSE_SYNC_DEBUG_ENV = "MINISGL_DSV4_SPARSE_SYNC_DEBUG"
 
 
 def _pad_last_dim(
@@ -722,6 +724,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
             and group in _direct_graph_metadata_groups()
         ):
             return False
+        if group == "swa" and bool(
+            getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)
+        ):
+            return False
         padded_size = int(getattr(batch, "padded_size", batch.size))
         if padded_size <= 0 or padded_size not in self.capture_bs:
             return False
@@ -761,6 +767,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
         req_seq_lens = torch.tensor(req_seq_lens_list, dtype=torch.int32, device=device)
         cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0), (1, 0))
         component_ownership = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
+        swa_independent = bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
+        swa_page_table = (
+            self._make_swa_page_tables(reqs, max_seqlen_k) if swa_independent else None
+        )
 
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.metadata.build.table_indices",
@@ -803,6 +813,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         deforested = None
         if (
             batch.is_decode
+            and not swa_independent
             and dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE)
             and not self._should_elide_index_source_for_graph(
                 batch,
@@ -867,7 +878,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     "dsv4.metadata.decode.make_swa_indices",
                     {**timing_base, "window_size": int(self.window_size)},
                 ):
-                    swa_page_indices = self._make_swa_indices(table_indices, positions)
+                    if swa_page_table is not None:
+                        swa_page_indices = self._make_swa_indices_from_page_table(
+                            swa_page_table,
+                            positions,
+                        )
+                    else:
+                        swa_page_indices = self._make_swa_indices(table_indices, positions)
             swa_topk_lengths = torch.clamp(seq_lens, max=self.window_size)
 
             c4_topk_lengths_raw = torch.div(seq_lens, 4, rounding_mode="floor")
@@ -1328,6 +1345,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         handle_cached_len = int(getattr(handle, "cached_len", -1))
         logical_pages = div_ceil(int(req.device_len), self.page_size)
         return (
+            int(id(req)),
             int(getattr(req, "uid", -1)),
             int(req.table_idx),
             int(handle_cached_len),
@@ -1368,6 +1386,67 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._component_page_table_cache_signatures[table_idx] = signature
         return True
 
+    def _make_swa_page_tables(self, reqs, max_seq_len: int) -> torch.Tensor:
+        table_len = div_ceil(max(max_seq_len, 1), self.page_size)
+        rows = sum(req.extend_len for req in reqs)
+        chunks: list[torch.Tensor] = []
+        for req in reqs:
+            row = self._build_swa_page_table_row(req, table_len)
+            for _ in range(req.extend_len):
+                chunks.append(row)
+        if not chunks:
+            return torch.full((rows, table_len), -1, dtype=torch.int32, device=self.device)
+        return torch.stack(chunks).to(torch.int32)
+
+    def _build_swa_page_table_row(self, req, table_len: int) -> torch.Tensor:
+        table = torch.full((table_len,), -1, dtype=torch.int32, device=self.device)
+        if int(getattr(req, "uid", 0)) < 0:
+            swa_pages = int(self.kvcache.swa_cache(0).shape[0]) // self.page_size
+            table.fill_(max(swa_pages - 1, 0))
+            return table
+        handle_getter = getattr(req.cache_handle, "get_dsv4_swa_pages", None)
+        handle_pages = handle_getter() if callable(handle_getter) else None
+        if handle_pages is not None and handle_pages.swa_pages is not None:
+            prefix_pages = min(handle_pages.num_pages, table_len)
+            table[:prefix_pages] = handle_pages.swa_pages[:prefix_pages].to(
+                device=self.device,
+                dtype=torch.int32,
+            )
+
+        logical_pages = min(div_ceil(req.device_len, self.page_size), table_len)
+        if logical_pages <= 0:
+            return table
+        page_offsets = (
+            torch.arange(logical_pages, dtype=torch.long, device=self.device)
+            * self.page_size
+        )
+        full_page_starts = get_global_ctx().page_table[req.table_idx, page_offsets]
+        active_swa = self.kvcache.swa_pages_from_full_page_starts(
+            full_page_starts,
+            self.page_size,
+        )
+        if active_swa is None or active_swa.numel() == 0:
+            return table
+        n = min(table.numel(), active_swa.numel())
+        live_window_start = max(int(req.device_len) - int(self.window_size), 0)
+        live_page_start = min(live_window_start // self.page_size, n)
+        live_missing = (table[live_page_start:n] < 0) & (active_swa[live_page_start:n] < 0)
+        if bool(torch.any(live_missing).item()):
+            rel = torch.where(live_missing)[0]
+            page = int((rel[0] + live_page_start).item())
+            raise RuntimeError(
+                "DSV4 independent SWA missing active page mapping: "
+                f"uid={getattr(req, 'uid', None)}, table_idx={getattr(req, 'table_idx', None)}, "
+                f"device_len={int(req.device_len)}, cached_len={int(req.cached_len)}, "
+                f"page={page}, table_len={table_len}"
+            )
+        missing = table[:n] < 0
+        valid = active_swa[:n] >= 0
+        mask = missing & valid
+        table_view = table[:n]
+        table_view[mask] = active_swa[:n][mask].to(device=table.device, dtype=table.dtype)
+        return table
+
     def _make_swa_indices(
         self,
         table_indices: torch.Tensor,
@@ -1382,6 +1461,34 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )[None, :]
         )
         return self._gather_full_locs(table_indices, offsets)
+
+    def _make_swa_indices_from_page_table(
+        self,
+        swa_page_table: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        offsets = (
+            positions[:, None]
+            - torch.arange(
+                self.window_size,
+                dtype=torch.int32,
+                device=self.device,
+            )[None, :]
+        )
+        valid = offsets >= 0
+        clamped = offsets.clamp_min(0).to(torch.long)
+        logical_pages = clamped.div(self.page_size, rounding_mode="floor")
+        page_offsets = clamped % self.page_size
+        rows = torch.arange(clamped.shape[0], dtype=torch.long, device=self.device)[:, None]
+        rows = rows.expand_as(clamped)
+        max_page = max(swa_page_table.shape[1] - 1, 0)
+        gathered_pages = swa_page_table[
+            rows,
+            logical_pages.clamp(max=max_page),
+        ].to(torch.long)
+        locs = gathered_pages * self.page_size + page_offsets
+        valid = valid & (logical_pages < swa_page_table.shape[1]) & (gathered_pages >= 0)
+        return torch.where(valid, locs.to(torch.int32), torch.full_like(offsets, -1))
 
     def _make_sparse_compressed_indices(
         self,
@@ -1876,6 +1983,138 @@ class DSV4AttentionBackend(BaseAttnBackend):
         count = min(rows, 4)
         return torch.arange(count, dtype=torch.long, device=device)
 
+    def _debug_check_swa_index_bounds(
+        self,
+        swa_indices: torch.Tensor,
+        swa_lengths: torch.Tensor,
+        cache_rows: int,
+        *,
+        layer_id: int,
+    ) -> None:
+        if _cuda_graph_capture_active():
+            return
+        if (
+            os.environ.get(DSV4_SWA_INDEX_BOUNDS_DEBUG_ENV, "").strip().lower()
+            not in _TRUE_ENV_VALUES
+        ):
+            return
+        if swa_indices.numel() == 0:
+            return
+        width = int(swa_indices.shape[-1])
+        lengths = swa_lengths.to(device=swa_indices.device, dtype=torch.long).clamp(
+            min=0,
+            max=width,
+        )
+        cols = torch.arange(width, device=swa_indices.device, dtype=torch.long)
+        active = cols[None, :] < lengths[:, None]
+        bad = active & ((swa_indices < 0) | (swa_indices >= int(cache_rows)))
+        if not bool(torch.any(bad).item()):
+            return
+        rows, cols = torch.where(bad)
+        row = int(rows[0].item())
+        col = int(cols[0].item())
+        value = int(swa_indices[row, col].item())
+        length = int(lengths[row].item())
+        raise RuntimeError(
+            "DSV4 SWA index out of bounds before sparse attention: "
+            f"layer={layer_id}, row={row}, col={col}, value={value}, "
+            f"length={length}, cache_rows={int(cache_rows)}"
+        )
+
+    def _debug_check_cache_index_bounds(
+        self,
+        indices: torch.Tensor | None,
+        lengths: torch.Tensor | None,
+        cache_rows: int,
+        *,
+        layer_id: int,
+        label: str,
+    ) -> None:
+        if _cuda_graph_capture_active():
+            return
+        if (
+            os.environ.get(DSV4_SWA_INDEX_BOUNDS_DEBUG_ENV, "").strip().lower()
+            not in _TRUE_ENV_VALUES
+        ):
+            return
+        if indices is None or indices.numel() == 0:
+            return
+        width = int(indices.shape[-1])
+        if lengths is None:
+            active = indices >= 0
+            length_values = active.sum(dim=-1).to(dtype=torch.long)
+        else:
+            length_values = lengths.to(device=indices.device, dtype=torch.long).clamp(
+                min=0,
+                max=width,
+            )
+            cols = torch.arange(width, device=indices.device, dtype=torch.long)
+            active = cols[None, :] < length_values[:, None]
+        bad = active & ((indices < 0) | (indices >= int(cache_rows)))
+        if not bool(torch.any(bad).item()):
+            return
+        rows, cols = torch.where(bad)
+        row = int(rows[0].item())
+        col = int(cols[0].item())
+        value = int(indices[row, col].item())
+        length = int(length_values[row].item())
+        raise RuntimeError(
+            "DSV4 cache index out of bounds before sparse attention: "
+            f"label={label}, layer={layer_id}, row={row}, col={col}, "
+            f"value={value}, length={length}, cache_rows={int(cache_rows)}"
+        )
+
+    def _debug_sync_sparse_attention(
+        self,
+        *,
+        backend: str,
+        layer_id: int,
+        rows: int,
+        metadata: DSV4CoreAttentionMetadata,
+        compress_ratio: DSV4CompressRatio,
+        swa_indices: torch.Tensor,
+        swa_lengths: torch.Tensor,
+        compressed_indices: torch.Tensor | None,
+        compressed_lengths: torch.Tensor | None,
+    ) -> None:
+        if _cuda_graph_capture_active():
+            return
+        if (
+            os.environ.get(DSV4_SPARSE_SYNC_DEBUG_ENV, "").strip().lower()
+            not in _TRUE_ENV_VALUES
+        ):
+            return
+        try:
+            torch.cuda.synchronize(self.device)
+        except Exception as exc:
+            def _range(tensor: torch.Tensor | None) -> tuple[int | None, int | None]:
+                if tensor is None or tensor.numel() == 0:
+                    return None, None
+                valid = tensor[tensor >= 0]
+                if valid.numel() == 0:
+                    return None, None
+                return int(valid.min().item()), int(valid.max().item())
+
+            swa_min, swa_max = _range(swa_indices)
+            comp_min, comp_max = _range(compressed_indices)
+            max_swa_len = (
+                int(swa_lengths.max().item()) if swa_lengths.numel() else 0
+            )
+            max_comp_len = (
+                int(compressed_lengths.max().item())
+                if compressed_lengths is not None and compressed_lengths.numel()
+                else 0
+            )
+            raise RuntimeError(
+                "DSV4 sparse attention failed during debug synchronize: "
+                f"backend={backend}, layer={layer_id}, ratio={compress_ratio}, "
+                f"rows={rows}, max_seqlen_q={int(metadata.max_seqlen_q)}, "
+                f"max_seqlen_k={int(metadata.max_seqlen_k)}, "
+                f"swa_len_max={max_swa_len}, swa_range=({swa_min}, {swa_max}), "
+                f"compressed_len_max={max_comp_len}, "
+                f"compressed_range=({comp_min}, {comp_max})"
+            ) from exc
+
     def _capture_attention_debug(
         self,
         layer_id: int,
@@ -1979,6 +2218,12 @@ class DSV4AttentionBackend(BaseAttnBackend):
         ):
             swa_lengths = metadata.swa_topk_lengths[:rows].to(device=q.device, dtype=torch.int32)
         swa_lengths = swa_lengths.clamp(max=swa_indices.shape[-1])
+        self._debug_check_swa_index_bounds(
+            swa_indices,
+            swa_lengths,
+            self.kvcache.swa_cache(layer_id).shape[0],
+            layer_id=layer_id,
+        )
 
         compressed_cache = None
         compressed_indices = None
@@ -2009,6 +2254,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 compressed_lengths = compressed_lengths.clamp(max=compressed_indices.shape[-1])
             else:
                 compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+            self._debug_check_cache_index_bounds(
+                compressed_indices,
+                compressed_lengths,
+                compressed_cache.shape[0],
+                layer_id=layer_id,
+                label="c4",
+            )
         elif compress_ratio == 128:
             with dsv4_direct_copy_nvtx(
                 f"attention_boundary.c128_cache_to_q_dtype.layer{layer_id}.rows{rows}",
@@ -2024,6 +2276,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     dtype=torch.int32,
                 )
             compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+            self._debug_check_cache_index_bounds(
+                compressed_indices,
+                compressed_lengths,
+                compressed_cache.shape[0],
+                layer_id=layer_id,
+                label="c128",
+            )
 
         if metadata.max_seqlen_q <= 1:
             with dsv4_direct_copy_nvtx(
@@ -2043,6 +2302,17 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 attn_sink=attn_sink,
             )
             if fast is not None:
+                self._debug_sync_sparse_attention(
+                    backend="splitk",
+                    layer_id=layer_id,
+                    rows=rows,
+                    metadata=metadata,
+                    compress_ratio=compress_ratio,
+                    swa_indices=swa_indices,
+                    swa_lengths=swa_lengths,
+                    compressed_indices=compressed_indices,
+                    compressed_lengths=compressed_lengths,
+                )
                 self._capture_attention_debug(
                     layer_id,
                     q,
@@ -2077,6 +2347,17 @@ class DSV4AttentionBackend(BaseAttnBackend):
             attn_sink=attn_sink,
         )
         if fast is not None:
+            self._debug_sync_sparse_attention(
+                backend="base",
+                layer_id=layer_id,
+                rows=rows,
+                metadata=metadata,
+                compress_ratio=compress_ratio,
+                swa_indices=swa_indices,
+                swa_lengths=swa_lengths,
+                compressed_indices=compressed_indices,
+                compressed_lengths=compressed_lengths,
+            )
             self._capture_attention_debug(
                 layer_id,
                 q,
@@ -2175,11 +2456,19 @@ class DSV4AttentionBackend(BaseAttnBackend):
         c128_width = div_ceil(max(div_ceil(max_seq_len, 128), 1), _PAGE_INDEX_ALIGNMENT)
         c128_width *= _PAGE_INDEX_ALIGNMENT
         component_ownership = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
+        swa_independent = bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
         has_c4 = any(m.compress_ratio == 4 for m in self.kvcache.layer_mapping)
         has_c128 = any(m.compress_ratio == 128 for m in self.kvcache.layer_mapping)
 
         def empty_index(width: int) -> torch.Tensor:
             return torch.full((max_bs, width), -1, dtype=torch.int32, device=device)
+
+        swa_index_width = div_ceil(self.window_size, _PAGE_INDEX_ALIGNMENT) * _PAGE_INDEX_ALIGNMENT
+        swa_page_indices = empty_index(swa_index_width)
+        if swa_independent:
+            swa_rows = int(self.kvcache.swa_cache(0).shape[0])
+            dummy_loc = max(swa_rows - self.page_size, 0)
+            swa_page_indices.fill_(dummy_loc)
 
         c4_out_loc = torch.full((max_bs,), -1, dtype=torch.int32, device=device)
         c128_out_loc = torch.full((max_bs,), -1, dtype=torch.int32, device=device)
@@ -2214,16 +2503,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
             req_table_indices=torch.zeros(max_bs, dtype=torch.int32, device=device),
             max_seqlen_q=1,
             max_seqlen_k=max_seq_len,
-            swa_page_indices=empty_index(
-                div_ceil(self.window_size, _PAGE_INDEX_ALIGNMENT) * _PAGE_INDEX_ALIGNMENT
-            ),
+            swa_page_indices=swa_page_indices,
             swa_topk_lengths=torch.ones(max_bs, dtype=torch.int32, device=device),
             c4_out_loc=c4_out_loc,
             c128_out_loc=c128_out_loc,
             c4_indexer_out_loc=c4_indexer_out_loc,
             c4_topk_lengths_raw=torch.zeros(max_bs, dtype=torch.int32, device=device),
             c4_topk_lengths_clamp1=torch.ones(max_bs, dtype=torch.int32, device=device),
-            c4_sparse_topk_lengths=torch.ones(max_bs, dtype=torch.int32, device=device),
+            c4_sparse_topk_lengths=torch.zeros(max_bs, dtype=torch.int32, device=device),
             c4_sparse_raw_indices=empty_index(topk_width),
             c4_sparse_page_indices=empty_index(topk_width),
             c4_sparse_full_indices=empty_index(topk_width),
@@ -2456,7 +2743,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
         ):
             return False, False, False
         groups = _direct_graph_metadata_groups()
-        direct_swa = "swa" in groups and src_core.swa_page_indices is not None
+        direct_swa = (
+            "swa" in groups
+            and src_core.swa_page_indices is not None
+            and not bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
+        )
         direct_c4 = (
             "c4" in groups
             and dst_core.c4_page_table is not None

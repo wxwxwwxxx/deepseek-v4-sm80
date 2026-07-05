@@ -80,6 +80,7 @@ DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA
 DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
 )
+DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV = "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
@@ -99,6 +100,9 @@ DSV4_PROMOTED_ROUTE_B_LIFETIME_VARIANT = "dsv4_sm80_a100_victory_prefix_routeb_l
 DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_moereducebf16"
 )
+DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_swa_independent"
+)
 DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
     "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
 )
@@ -109,6 +113,9 @@ DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_VARIANT = (
 )
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release"
+)
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent"
 )
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
@@ -142,9 +149,17 @@ DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_ENV = {
     **DSV4_ROUTE_B_LIFETIME_ENV,
     **DSV4_A100_MARLIN_RELEASE_ENV,
 }
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_ENV = {
+    **DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_ENV,
+    DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV: "1",
+}
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_ENV = {
     **DSV4_ROUTE_B_LIFETIME_ENV,
     **DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_ENV,
+}
+DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_ENV = {
+    **DSV4_ROUTE_B_LIFETIME_ENV,
+    DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV: "1",
 }
 
 
@@ -195,6 +210,9 @@ class Variant:
     use_pynccl: bool = False
     allow_dsv4_cuda_graph: bool = False
     cuda_graph_capture_greedy_sample: bool = False
+    enable_dsv4_radix_prefix_cache: bool = False
+    enable_dsv4_component_loc_ownership: bool = False
+    enable_dsv4_swa_independent_lifecycle: bool = False
 
 
 DEFAULT_SCENARIOS: tuple[Scenario, ...] = (
@@ -1335,6 +1353,8 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT,
@@ -1347,6 +1367,22 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+    ),
+    Variant(
+        name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_VARIANT,
+        env=dict(DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_ENV),
+        description=(
+            "TARGET 08.31/08.40 compatibility preset: Route B lifetime plus "
+            "Marlin WNA16 before-KV release capacity credit, component-slot "
+            "clear on page allocation, and independent SWA lifecycle."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_VARIANT,
@@ -1358,6 +1394,8 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name="dsv4_sm80_a100_victory_prefix_routeb_lifetime_groupedfp4",
@@ -1372,6 +1410,8 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name=DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT,
@@ -1384,6 +1424,23 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+    ),
+    Variant(
+        name=DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_VARIANT,
+        env=dict(DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_ENV),
+        description=(
+            "TARGET 08.31 opt-in: promoted Route B lifetime prefix preset plus "
+            "independent SWA lifecycle. Pair with --enable-dsv4-radix-prefix-cache, "
+            "--enable-dsv4-component-loc-ownership, and "
+            "--enable-dsv4-swa-independent-lifecycle."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name=DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT,
@@ -1395,6 +1452,8 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name="target0762_woabf16bmmcache",
@@ -1621,6 +1680,7 @@ def git_info() -> dict[str, Any]:
 
 def _all_dsv4_sm80_env_names(dsv4_kernel) -> list[str]:
     names = set(getattr(dsv4_kernel, "DSV4_SM80_KNOWN_TOGGLES", ()))
+    names.add(DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV)
     names.update(name for name in os.environ if name.startswith("MINISGL_DSV4_SM80_"))
     return sorted(names)
 
@@ -2101,10 +2161,22 @@ def make_benchmark_llm_class():
         def _forward(self, forward_input):
             batch = forward_input.batch
             batch_id = id(batch)
+            stderr_batch_trace = os.environ.get("MINISGL_BENCH_STDERR_BATCH_TRACE", "0") == "1"
+            if stderr_batch_trace:
+                stderr_batch_trace = int(os.environ.get("RANK", "0")) == 0
             range_name = f"batch_forward:{batch.phase}:bs{batch.size}:padded{batch.padded_size}"
             enqueue_range_name = (
                 f"batch_forward_enqueue:{batch.phase}:" f"bs{batch.size}:padded{batch.padded_size}"
             )
+            if stderr_batch_trace:
+                max_device_len = max((int(req.device_len) for req in batch.reqs), default=0)
+                max_cached_len = max((int(req.cached_len) for req in batch.reqs), default=0)
+                print(
+                    "[bench-batch-start] "
+                    f"phase={batch.phase} bs={batch.size} padded={batch.padded_size} "
+                    f"max_device_len={max_device_len} max_cached_len={max_cached_len}",
+                    flush=True,
+                )
             graph_before = copy.deepcopy(getattr(self.engine.graph_runner, "capture_status", {}))
             torch.cuda.synchronize(self.device)
             with torch.cuda.nvtx.range(range_name):
@@ -2135,6 +2207,14 @@ def make_benchmark_llm_class():
                 }
             )
             self.bench_batch_trace.append(info)
+            if stderr_batch_trace:
+                print(
+                    "[bench-batch-done] "
+                    f"phase={batch.phase} bs={batch.size} padded={batch.padded_size} "
+                    f"forward_s={toc - tic:.6f} replay_delta={replay_delta} "
+                    f"eager_delta={eager_delta}",
+                    flush=True,
+                )
             return output
 
         def generate(self, prompts, sampling_params):
@@ -2334,6 +2414,11 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
     variant_graph_greedy_sample = any(
         variant.cuda_graph_capture_greedy_sample for variant in variants
     )
+    variant_prefix = any(variant.enable_dsv4_radix_prefix_cache for variant in variants)
+    variant_component = any(variant.enable_dsv4_component_loc_ownership for variant in variants)
+    variant_swa_independent = any(
+        variant.enable_dsv4_swa_independent_lifecycle for variant in variants
+    )
     if (
         variant_pynccl
         and not all(variant.use_pynccl for variant in variants)
@@ -2357,11 +2442,50 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
         cuda_graph_capture_greedy_sample = variant_graph_greedy_sample
     else:
         cuda_graph_capture_greedy_sample = bool(args.cuda_graph_capture_greedy_sample)
+    if (
+        variant_prefix
+        and not all(variant.enable_dsv4_radix_prefix_cache for variant in variants)
+        and not args.enable_dsv4_radix_prefix_cache
+    ):
+        raise SystemExit(
+            "DSV4 radix-prefix variants must be run separately or with "
+            "--enable-dsv4-radix-prefix-cache."
+        )
+    if (
+        variant_component
+        and not all(variant.enable_dsv4_component_loc_ownership for variant in variants)
+        and not args.enable_dsv4_component_loc_ownership
+    ):
+        raise SystemExit(
+            "DSV4 component-ownership variants must be run separately or with "
+            "--enable-dsv4-component-loc-ownership."
+        )
+    if (
+        variant_swa_independent
+        and not all(variant.enable_dsv4_swa_independent_lifecycle for variant in variants)
+        and not args.enable_dsv4_swa_independent_lifecycle
+    ):
+        raise SystemExit(
+            "DSV4 SWA independent lifecycle variants must be run separately or with "
+            "--enable-dsv4-swa-independent-lifecycle."
+        )
+    enable_dsv4_radix_prefix_cache = bool(
+        args.enable_dsv4_radix_prefix_cache or variant_prefix
+    )
+    enable_dsv4_component_loc_ownership = bool(
+        args.enable_dsv4_component_loc_ownership or variant_component
+    )
+    enable_dsv4_swa_independent_lifecycle = bool(
+        args.enable_dsv4_swa_independent_lifecycle or variant_swa_independent
+    )
     return {
         "use_pynccl": bool(args.use_pynccl or variant_pynccl),
         "allow_dsv4_cuda_graph": allow_dsv4_cuda_graph,
         "cuda_graph_bs": cuda_graph_bs,
         "cuda_graph_capture_greedy_sample": cuda_graph_capture_greedy_sample,
+        "enable_dsv4_radix_prefix_cache": enable_dsv4_radix_prefix_cache,
+        "enable_dsv4_component_loc_ownership": enable_dsv4_component_loc_ownership,
+        "enable_dsv4_swa_independent_lifecycle": enable_dsv4_swa_independent_lifecycle,
     }
 
 
@@ -3318,9 +3442,14 @@ def run_case(
         "scenario": {
             **asdict(scenario),
             "scheduler_supports_interleaved_arrivals": False,
-            "radix_prefix_enabled": bool(args.enable_dsv4_radix_prefix_cache),
+            "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
             "swa_tail_retention_v1_requested": bool(args.enable_dsv4_swa_tail_retention_v1),
-            "component_loc_ownership_enabled": bool(args.enable_dsv4_component_loc_ownership),
+            "component_loc_ownership_enabled": runtime_options[
+                "enable_dsv4_component_loc_ownership"
+            ],
+            "swa_independent_lifecycle_enabled": runtime_options[
+                "enable_dsv4_swa_independent_lifecycle"
+            ],
         },
         "classification": run_classification(
             tp_size=tp_size,
@@ -3347,9 +3476,14 @@ def run_case(
             "max_extend_tokens": args.max_extend_tokens,
             "max_running_req": args.max_running_req,
             "token_id_range": args.token_id_range,
-            "radix_prefix_enabled": bool(args.enable_dsv4_radix_prefix_cache),
+            "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
             "enable_dsv4_swa_tail_retention_v1": args.enable_dsv4_swa_tail_retention_v1,
-            "enable_dsv4_component_loc_ownership": args.enable_dsv4_component_loc_ownership,
+            "enable_dsv4_component_loc_ownership": runtime_options[
+                "enable_dsv4_component_loc_ownership"
+            ],
+            "enable_dsv4_swa_independent_lifecycle": (
+                runtime_options["enable_dsv4_swa_independent_lifecycle"]
+            ),
             "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
             "kv_capacity_plan_report": getattr(llm.engine, "kv_capacity_plan_report", {}),
@@ -3408,9 +3542,14 @@ def _init_llm(
         allow_dsv4_cuda_graph=runtime_options["allow_dsv4_cuda_graph"],
         cuda_graph_bs=runtime_options["cuda_graph_bs"],
         cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
-        enable_dsv4_radix_prefix_cache=args.enable_dsv4_radix_prefix_cache,
+        enable_dsv4_radix_prefix_cache=runtime_options["enable_dsv4_radix_prefix_cache"],
         enable_dsv4_swa_tail_retention_v1=args.enable_dsv4_swa_tail_retention_v1,
-        enable_dsv4_component_loc_ownership=args.enable_dsv4_component_loc_ownership,
+        enable_dsv4_component_loc_ownership=runtime_options[
+            "enable_dsv4_component_loc_ownership"
+        ],
+        enable_dsv4_swa_independent_lifecycle=runtime_options[
+            "enable_dsv4_swa_independent_lifecycle"
+        ],
         **kwargs,
     )
     torch.cuda.synchronize(llm.device)
@@ -3502,12 +3641,17 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
                         "page_size": args.page_size,
                         "num_pages": args.num_pages,
-                        "enable_dsv4_radix_prefix_cache": args.enable_dsv4_radix_prefix_cache,
+                        "enable_dsv4_radix_prefix_cache": runtime_options[
+                            "enable_dsv4_radix_prefix_cache"
+                        ],
                         "enable_dsv4_swa_tail_retention_v1": (
                             args.enable_dsv4_swa_tail_retention_v1
                         ),
                         "enable_dsv4_component_loc_ownership": (
-                            args.enable_dsv4_component_loc_ownership
+                            runtime_options["enable_dsv4_component_loc_ownership"]
+                        ),
+                        "enable_dsv4_swa_independent_lifecycle": (
+                            runtime_options["enable_dsv4_swa_independent_lifecycle"]
                         ),
                         "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
                         "classification": run_classification(
@@ -3625,6 +3769,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Explicitly enable TARGET 08.21.2 DSV4 Route B component loc ownership. "
             "Requires --enable-dsv4-radix-prefix-cache; Route B decode metadata "
             "deforest/direct graph metadata buffers remain separate env opt-ins."
+        ),
+    )
+    parser.add_argument(
+        "--enable-dsv4-swa-independent-lifecycle",
+        action="store_true",
+        help=(
+            "Explicitly enable TARGET 08.31 DSV4 independent SWA lifecycle. "
+            "Requires --enable-dsv4-radix-prefix-cache and "
+            "--enable-dsv4-component-loc-ownership."
         ),
     )
     parser.add_argument(

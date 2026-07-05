@@ -15,6 +15,7 @@ def _config(
     enable_radix: bool = False,
     enable_swa_tail_v1: bool = False,
     enable_component_loc_ownership: bool = False,
+    enable_swa_independent_lifecycle: bool = False,
 ):
     return SimpleNamespace(
         model_config=SimpleNamespace(is_deepseek_v4=is_deepseek_v4, window_size=window_size),
@@ -23,6 +24,7 @@ def _config(
         enable_dsv4_radix_prefix_cache=enable_radix,
         enable_dsv4_swa_tail_retention_v1=enable_swa_tail_v1,
         enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
+        enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
     )
 
 
@@ -60,6 +62,32 @@ def test_dsv4_component_loc_ownership_requires_phase1_radix_and_safe_window():
     assert (
         resolve_dsv4_cache_type(
             _config(enable_radix=True, enable_component_loc_ownership=True)
+        )
+        == "radix"
+    )
+
+
+def test_dsv4_swa_independent_lifecycle_requires_radix_and_route_b():
+    with pytest.raises(ValueError, match="requires --enable-dsv4-radix-prefix-cache"):
+        resolve_dsv4_cache_type(_config(enable_swa_independent_lifecycle=True))
+
+    with pytest.raises(ValueError, match="requires --enable-dsv4-component-loc-ownership"):
+        resolve_dsv4_cache_type(
+            _config(
+                enable_radix=True,
+                enable_swa_independent_lifecycle=True,
+            )
+        )
+
+    assert (
+        resolve_dsv4_cache_type(
+            _config(
+                page_size=128,
+                window_size=256,
+                enable_radix=True,
+                enable_component_loc_ownership=True,
+                enable_swa_independent_lifecycle=True,
+            )
         )
         == "radix"
     )

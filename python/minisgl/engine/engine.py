@@ -106,6 +106,15 @@ class Engine:
             enable_dsv4_component_loc_ownership=bool(
                 getattr(config, "enable_dsv4_component_loc_ownership", False)
             ),
+            enable_dsv4_swa_independent_lifecycle=bool(
+                getattr(config, "enable_dsv4_swa_independent_lifecycle", False)
+            ),
+            max_running_req=int(getattr(config, "max_running_req", 1)),
+            dsv4_swa_num_pages=(
+                self._planned_dsv4_swa_independent_pages(config)
+                if self._dsv4_swa_independent_enabled(config)
+                else None
+            ),
         )
         self._record_marlin_wna16_owner_allocations("after_kv_alloc")
         self._check_marlin_wna16_release_guards("after_kv_alloc")
@@ -335,6 +344,22 @@ class Engine:
             dtype=self.dtype,
             tp_size=config.tp_info.size,
         )
+        fixed_swa_cache_bytes = 0
+        legacy_cache_per_page = cache_per_page
+        if (
+            config.model_config.is_deepseek_v4
+            and self._dsv4_swa_independent_enabled(config)
+        ):
+            dtype_size = torch.bfloat16.itemsize
+            planned_swa_pages = self._planned_dsv4_swa_independent_pages(config)
+            swa_per_page = (
+                config.model_config.num_layers
+                * config.page_size
+                * config.model_config.head_dim
+                * dtype_size
+            )
+            fixed_swa_cache_bytes = int(planned_swa_pages * swa_per_page)
+            cache_per_page = int(max(cache_per_page - swa_per_page, 1))
         num_pages = config.num_page_override
         credit_report = self._marlin_wna16_release_capacity_credit_report(
             config=config,
@@ -346,11 +371,11 @@ class Engine:
             credit_bytes = int(credit_report.get("net_release_credit_bytes", 0) or 0)
             if bool(credit_report.get("applied_to_num_pages", False)):
                 available_memory += credit_bytes
-            num_pages = available_memory // cache_per_page
+            num_pages = (available_memory - fixed_swa_cache_bytes) // cache_per_page
 
         assert num_pages > 1, "Not enough memory for KV cache, try reducing --num-pages"
         num_tokens = num_pages * config.page_size
-        real_kv_size = num_pages * cache_per_page
+        real_kv_size = num_pages * cache_per_page + fixed_swa_cache_bytes
         credit_report["planned_num_pages"] = int(num_pages)
         credit_report["planned_num_tokens"] = int(num_tokens)
         credit_report["planned_kv_bytes"] = int(real_kv_size)
@@ -359,6 +384,8 @@ class Engine:
             "new_free_memory_bytes": int(new_free_memory),
             "memory_ratio": float(config.memory_ratio),
             "cache_per_page_bytes": int(cache_per_page),
+            "legacy_cache_per_page_bytes": int(legacy_cache_per_page),
+            "fixed_swa_cache_bytes": int(fixed_swa_cache_bytes),
             "num_page_override": config.num_page_override,
             "release_credit": credit_report,
         }
@@ -370,6 +397,37 @@ class Engine:
             )
         logger.info(f"Allocating {num_tokens} tokens for KV cache, K + V = {mem_GB(real_kv_size)}")
         return num_pages
+
+    def _dsv4_swa_independent_enabled(self, config: EngineConfig) -> bool:
+        return bool(getattr(config, "enable_dsv4_swa_independent_lifecycle", False)) or (
+            os.environ.get("MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+
+    def _planned_dsv4_swa_independent_pages(self, config: EngineConfig) -> int:
+        env_pages = os.environ.get("MINISGL_DSV4_SWA_INDEPENDENT_NUM_PAGES")
+        if env_pages:
+            try:
+                parsed = int(env_pages)
+            except ValueError:
+                parsed = 0
+            if parsed > 0:
+                return parsed
+        window_size = int(getattr(config.model_config, "window_size", 128) or 128)
+        tail_pages_per_req = max((window_size + config.page_size - 1) // config.page_size, 1)
+        running_tail_pages = max(int(getattr(config, "max_running_req", 1)), 1)
+        # A decode request can need one freshly allocated SWA page before the
+        # previous page ages out of the sliding window and is tombstoned.
+        running_tail_pages *= tail_pages_per_req + 1
+        max_forward_len = int(getattr(config, "max_forward_len", config.page_size))
+        max_forward_pages = max((max_forward_len + config.page_size - 1) // config.page_size, 1)
+        planned = max_forward_pages + running_tail_pages + 1
+        max_running_req = max(int(getattr(config, "max_running_req", 1)), 1)
+        if max_running_req >= 16:
+            planned = max(planned, max_running_req * 8)
+        if config.num_page_override is not None:
+            planned = min(planned, int(config.num_page_override))
+        return planned
 
     def _marlin_wna16_release_capacity_credit_report(
         self,

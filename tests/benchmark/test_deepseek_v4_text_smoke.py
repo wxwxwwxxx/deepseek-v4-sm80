@@ -52,6 +52,7 @@ def test_text_smoke_defaults_match_target06_baseline_shape():
     assert args.enable_dsv4_radix_prefix_cache is False
     assert args.enable_dsv4_swa_tail_retention_v1 is False
     assert args.enable_dsv4_component_loc_ownership is False
+    assert args.enable_dsv4_swa_independent_lifecycle is False
 
     enabled_args = smoke.parse_args(["--enable-dsv4-radix-prefix-cache"])
     assert enabled_args.enable_dsv4_radix_prefix_cache is True
@@ -61,6 +62,9 @@ def test_text_smoke_defaults_match_target06_baseline_shape():
 
     ownership_args = smoke.parse_args(["--enable-dsv4-component-loc-ownership"])
     assert ownership_args.enable_dsv4_component_loc_ownership is True
+
+    swa_args = smoke.parse_args(["--enable-dsv4-swa-independent-lifecycle"])
+    assert swa_args.enable_dsv4_swa_independent_lifecycle is True
 
 
 def test_text_sanity_accepts_readable_text_and_flags_garbage():
@@ -371,6 +375,9 @@ def test_marlin_release_smoke_variants_expand_full_policy_env(monkeypatch):
     prefix_release = variants[
         "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release"
     ]
+    prefix_release_swa = variants[
+        "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent"
+    ]
     prefix_safe_arena = variants[
         "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
     ]
@@ -398,6 +405,10 @@ def test_marlin_release_smoke_variants_expand_full_policy_env(monkeypatch):
         **variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"].env,
         **release.env,
     }
+    assert prefix_release_swa.env == {
+        **prefix_release.env,
+        "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE": "1",
+    }
     assert prefix_safe_arena.env == {
         **variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"].env,
         **safe_arena.env,
@@ -424,6 +435,15 @@ def test_marlin_release_smoke_variants_expand_full_policy_env(monkeypatch):
         "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
         in result["active_dsv4_toggles"]
     )
+    swa_result = smoke.configure_variant(FakeKernel, prefix_release_swa)
+    assert swa_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"] == "1"
+    assert (
+        swa_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC"]
+        == "component"
+    )
+    assert prefix_release_swa.enable_dsv4_radix_prefix_cache is True
+    assert prefix_release_swa.enable_dsv4_component_loc_ownership is True
+    assert prefix_release_swa.enable_dsv4_swa_independent_lifecycle is True
     assert "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT" in result["active_dsv4_toggles"]
     assert release.allow_dsv4_cuda_graph is True
     assert safe_arena.allow_dsv4_cuda_graph is True

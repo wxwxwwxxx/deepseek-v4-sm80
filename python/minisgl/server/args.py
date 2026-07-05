@@ -240,6 +240,16 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
             "as explicit env opt-ins."
         ),
     )
+    parser.add_argument(
+        "--enable-dsv4-swa-independent-lifecycle",
+        action="store_true",
+        dest="enable_dsv4_swa_independent_lifecycle",
+        help=(
+            "Explicitly enable TARGET 08.31 DSV4 independent SWA lifecycle. "
+            "Requires --enable-dsv4-radix-prefix-cache and "
+            "--enable-dsv4-component-loc-ownership."
+        ),
+    )
 
     parser.add_argument(
         "--moe-backend",

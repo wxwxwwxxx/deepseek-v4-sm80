@@ -7,6 +7,7 @@ children:
 
 ```text
 prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
+prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md
 prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
 prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
@@ -21,6 +22,13 @@ prompts/TARGET_08.40_dsv4_sm80_marlin_wna16_release_component_clear_promotion.md
 TARGET 08.31 is about SGLang-aligned SWA lifecycle and memory ownership.  It is
 not a low-precision target, but it should run before reopening TARGET 09.5
 because it changes the real memory denominator for SWA-only FP8 cache.
+
+TARGET 08.41 is the promotion/soak pass after TARGET 08.31.  TARGET 08.31
+implemented opt-in SWA independent lifecycle and proved large auto-capacity
+potential with Marlin release, but fixed-128 serving uses a conservative SWA
+floor and short offline E2E throughput regressed.  TARGET 08.41 should run
+serving/prefix soak with graph buckets `[1,2,4,8,16]`, attribute overhead, and
+decide whether SWA independent lifecycle should be promoted or remain opt-in.
 
 TARGET 08.32 is about CUDA graph private-pool memory attribution.  It should
 avoid full model weight loading at first and instead use synthetic/partial
@@ -290,7 +298,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.31, TARGET 08.40, or
+3. the active future target prompt, currently TARGET 08.41, TARGET 08.40, or
    a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
@@ -301,7 +309,7 @@ The archive contains implementation history, not active todos.
 
 ### Independent SWA Ownership
 
-Status: active follow-up as TARGET 08.31.
+Status: active follow-up as TARGET 08.41 after TARGET 08.31.
 
 SWA KV is still effectively protected by the conservative full/SWA tail rule.
 This costs retained memory and can reduce useful prefix capacity, but TARGET
@@ -314,7 +322,27 @@ more valuable than it may be after SGLang-aligned lifecycle.  The next step is
 therefore to prove independent SWA lifecycle and runtime SWA tail occupancy
 before deciding whether TARGET 09.5 should implement FP8 cache.
 
+TARGET 08.31 result: opt-in SWA independent lifecycle was implemented and
+validated against SGLang's allocator/component model.  SWA KV now has separate
+page lifecycle and can tombstone/free out-of-window tail pages without
+invalidating C4/C128/indexer/compression-state/component locations.  Unit and
+integration gates passed, graph replay remained valid for the tested buckets,
+and Marlin WNA16 release + component-slot clear stayed compatible.  Runtime
+counters showed live SWA tails of only about `4`, `18`, and `26` pages in the
+fresh fixed-128 historical/serving/prefix runs.  The Marlin release auto
+capacity path improved from `2776` pages to `6636` pages at roughly the same
+KV memory budget.  However, fixed-128 macro/serving safe-floor planning still
+keeps `128` SWA pages, and short offline E2E throughput regressed by about
+`3%` to `9%`.  TARGET 08.41 should run the promotion soak and overhead
+attribution before any default promotion.
+
 Active prompt:
+
+```text
+prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md
+```
+
+Implementation prompt:
 
 ```text
 prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md

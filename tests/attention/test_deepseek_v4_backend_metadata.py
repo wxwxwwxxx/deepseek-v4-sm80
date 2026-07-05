@@ -589,6 +589,11 @@ def test_dsv4_route_b_component_page_table_lifetime_cache_invalidates_lifecycle(
     assert backend._component_page_table_cache_signatures[0] == original_signature
 
     ctx.page_table[0].copy_(ctx.page_table[1])
+    reused_uid_and_node = _req(11, 0, 2 * page_size + 1, cached_len=2 * page_size)
+    reused_uid_and_node.cache_handle = cache_handle(0, 2, 100)
+    assert decode_c4_pages(reused_uid_and_node) == [4, 5, 6]
+
+    ctx.page_table[0].copy_(ctx.page_table[1])
     reused_slot = _req(12, 0, 2 * page_size + 1, cached_len=2 * page_size)
     reused_slot.cache_handle = cache_handle(0, 2, 200)
     assert decode_c4_pages(reused_slot) == [4, 5, 6]
