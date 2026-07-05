@@ -42,8 +42,9 @@ Run in this order:
 | TARGET 10.15 | `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md` | completed | Isolated the high-severity MoE reduce-once dtype/bytes mismatch found by 10.1; BF16 reduce is implemented and kept as explicit opt-in. |
 | TARGET 10.2 | `prompts/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md` | completed | Tested communication backends with micro-first and no-weight replay gates; best candidate was PyNCCL threshold32m opt-in, but not repeat-stable enough to promote. |
 | TARGET 10.25 | `prompts/TARGET_10.25_dsv4_sm80_comm_size_owner_routing.md` | completed | Validated PyNCCL threshold32m as a positive opt-in; explicit per-owner/per-size routing did not beat the global threshold in no-weight replay. |
-| TARGET 10.26 | `prompts/TARGET_10.26_dsv4_sm80_pynccl_threshold32m_promotion_gate.md` | next | Run the short promotion gate for PyNCCL threshold32m: all required macro scenarios, repeat stability, text smoke, graph replay, and owner timing/profile. |
-| TARGET 10.3 | future conditional | not written yet | If 10.26 promotes or rejects threshold32m but communication remains material, test overlap, NCCL grouping, stream scheduling, or fused compute+collective boundaries. |
+| TARGET 10.26 | `prompts/TARGET_10.26_dsv4_sm80_pynccl_threshold32m_promotion_gate.md` | completed | PyNCCL threshold32m became the recommended opt-in: repeat-stable macro wins and zero-eager graph replay, but default promotion was blocked by an `lm_head_all_gather` owner-timing anomaly and a full serving Nsight capture without CUDA activity. |
+| TARGET 10.27 | `prompts/TARGET_10.27_dsv4_sm80_pynccl_default_promotion_blockers.md` | completed | Explained the `lm_head_all_gather` owner-timing spike as a one-time non-captured first all-gather cost, obtained rank-scoped full-model Nsight traces with CUDA activity, and default-promoted PyNCCL threshold32m for A100/sm80 DSV4. |
+| TARGET 10.3 | future conditional | not written yet | If 10.27 promotes or rejects threshold32m but communication remains material, test overlap, NCCL grouping, stream scheduling, or fused compute+collective boundaries. |
 
 Do not start broad attention-kernel work inside TARGET 10 unless a fresh profile
 shows attention compute, not communication, is the top remaining owner.
@@ -194,6 +195,21 @@ probe, so do not start by rewriting C4A/C128A attention.
 
 Do not introduce FP8 KV, INT8 MoE, or quantized projection changes inside
 TARGET 10.  Those belong in TARGET 09.
+
+## Current Default Communication Path
+
+TARGET 10.27 default-promoted the fixed A100/sm80 DSV4 communication path:
+
+```text
+dsv4_sm80_a100_victory_prefix_routeb_lifetime_moereducebf16
+MINISGL_DSV4_SM80_MOE_REDUCE_BF16=1
+PyNCCL enabled by default for that preset
+Default DSV4 sm80 PyNCCL max buffer size: 32M
+```
+
+The 32M cap is applied by the engine for DeepSeek V4 on sm80 only when
+`MINISGL_PYNCCL_MAX_BUFFER_SIZE` is not explicitly set. To roll back, set a
+different `MINISGL_PYNCCL_MAX_BUFFER_SIZE` or disable PyNCCL.
 
 ## Stop Rules
 

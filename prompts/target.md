@@ -53,7 +53,8 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 10.15 | `prompts/TARGET_10.15_dsv4_sm80_moe_reduce_bf16_parity.md` | completed | Implemented BF16 MoE reduce-once as an explicit opt-in; hot fp32 all-reduce disappeared, but promotion awaits repeat-stable evidence. |
 | TARGET 10.2 | `prompts/TARGET_10.2_dsv4_sm80_comm_stack_backend_experiments.md` | completed | Tested Torch/NCCL, mini PyNCCL, symmetric-memory workspace, and no-weight replay; best candidate was PyNCCL threshold32m opt-in, not yet promoted. |
 | TARGET 10.25 | `prompts/TARGET_10.25_dsv4_sm80_comm_size_owner_routing.md` | completed | Repeat-gated PyNCCL threshold32m as a positive opt-in; explicit owner/size routing did not beat the global threshold cheap gate. |
-| TARGET 10.26 | `prompts/TARGET_10.26_dsv4_sm80_pynccl_threshold32m_promotion_gate.md` | next | Short promotion gate for PyNCCL threshold32m: repeat all macro scenarios, text smoke, graph replay, and owner timing/profile. |
+| TARGET 10.26 | `prompts/TARGET_10.26_dsv4_sm80_pynccl_threshold32m_promotion_gate.md` | completed | PyNCCL threshold32m became the recommended opt-in: repeat-stable macro wins and zero-eager graph replay, but default promotion was blocked by an `lm_head_all_gather` owner-timing anomaly and a full serving Nsight capture without CUDA activity. |
+| TARGET 10.27 | `prompts/TARGET_10.27_dsv4_sm80_pynccl_default_promotion_blockers.md` | completed | Resolved the `lm_head_all_gather` owner-timing artifact and full-model Nsight evidence gap; PyNCCL threshold32m is now the default A100/sm80 DSV4 communication path. |
 
 ## Current Milestones
 
@@ -92,29 +93,32 @@ TARGET 08.30 result:
 - no-hit `serving_mixed_112req_wave16` still paid opt-in overhead:
   `163.3985` versus `178.3004` output tok/s.
 
-Decision:
+TARGET 10.27 result:
 
 ```text
-TARGET 08 is closed as a prefix-cache baseline.
-Recommended next: TARGET 10.26 PyNCCL threshold32m promotion gate.
-TARGET 09 remains planned for low-precision research after the communication
-surface is either exploited or disproven.
+TARGET 10.27 default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 path:
+dsv4_sm80_a100_victory_prefix_routeb_lifetime_moereducebf16
+MINISGL_DSV4_SM80_MOE_REDUCE_BF16=1
+PyNCCL enabled by default for that preset
+Default DSV4 sm80 PyNCCL max buffer size: 32M unless
+MINISGL_PYNCCL_MAX_BUFFER_SIZE is explicitly set.
 ```
 
-Rationale: prefix metadata/runtime is no longer the first bottleneck.  The
-post-prefix owner timing points to decode forward and communication/all-reduce
-owners such as attention `wo_b` row-parallel all-reduce, MoE reduce-once
-all-reduce, and embedding all-reduce. TARGET 10.1 found that the communication
-owner boundaries largely match vLLM, but mini currently reduces the combined
-MoE output in fp32 while vLLM's SM80 source path indicates a BF16 hidden-state
-reduce. TARGET 10.15 fixes or rejects that dtype/bytes mismatch before any
-PyNCCL or symmetric-memory tuning in TARGET 10.2. TARGET 10.2 then found that
-PyNCCL threshold32m is a promising opt-in, but not yet repeat-stable enough to
-promote. TARGET 10.25 should first repeat-gate that candidate, then test whether
-an explicit per-owner/per-size routing layer is better than a global PyNCCL
-threshold. TARGET 10.25 found that the global threshold remains the best simple
-candidate and explicit owner/size routing did not beat it. TARGET 10.26 should
-now run the final promotion gate before changing recommended defaults.
+Rollback:
+
+```bash
+MINISGL_PYNCCL_MAX_BUFFER_SIZE=1G
+# or pass --disable-pynccl on serving / omit PyNCCL benchmark presets
+```
+
+Rationale: prefix metadata/runtime is no longer the first bottleneck.  TARGET
+10.1 found matching communication owner boundaries and a MoE reduce-once
+fp32-vs-BF16 mismatch. TARGET 10.15 fixed that dtype/bytes mismatch as an
+explicit BF16 reduce path. TARGET 10.25 and 10.26 showed PyNCCL threshold32m is
+repeat-stable positive with zero-eager graph replay. TARGET 10.27 explained the
+`lm_head_all_gather` timing spike as a one-time non-captured first all-gather
+cost, not a hot-path regression, and captured rank-scoped full-model Nsight
+traces with CUDA kernel/memcpy/NCCL/graph activity.
 
 ## Archive Policy
 

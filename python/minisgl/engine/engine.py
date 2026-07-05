@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 from typing import Any, Dict, NamedTuple, Tuple
 
@@ -25,6 +26,9 @@ from .graph import GraphRunner, get_free_memory, mem_GB
 from .sample import BatchSamplingArgs, Sampler
 
 logger = init_logger(__name__)
+
+_PYNCCL_MAX_BUFFER_SIZE_ENV = "MINISGL_PYNCCL_MAX_BUFFER_SIZE"
+_DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES = 32 * 1024 * 1024
 
 
 class ForwardOutput(NamedTuple):
@@ -143,9 +147,7 @@ class Engine:
             )
             tp_cpu_group = torch.distributed.group.WORLD
             assert tp_cpu_group is not None
-            max_bytes = (
-                config.max_forward_len * config.model_config.hidden_size * self.dtype.itemsize
-            )
+            max_bytes = _pynccl_max_buffer_bytes(config, self.dtype)
             enable_pynccl_distributed(config.tp_info, tp_cpu_group, max_bytes)
         else:
             torch.distributed.init_process_group(
@@ -283,6 +285,33 @@ class Engine:
 
 def _align_up(num: int, multiple: int) -> int:
     return (num + multiple - 1) // multiple * multiple
+
+
+def _pynccl_max_buffer_bytes(config: EngineConfig, dtype: torch.dtype) -> int:
+    max_bytes = config.max_forward_len * config.model_config.hidden_size * dtype.itemsize
+    if _use_dsv4_sm80_default_pynccl_threshold(config):
+        logger.info_rank0(
+            "Defaulting DeepSeek V4 sm80 PyNCCL max buffer size to 32 MiB; "
+            f"set {_PYNCCL_MAX_BUFFER_SIZE_ENV} to override."
+        )
+        return min(max_bytes, _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES)
+    return max_bytes
+
+
+def _use_dsv4_sm80_default_pynccl_threshold(config: EngineConfig) -> bool:
+    if config.tp_info.size <= 1 or not config.use_pynccl:
+        return False
+    if _PYNCCL_MAX_BUFFER_SIZE_ENV in os.environ:
+        return False
+    if not config.model_config.is_deepseek_v4:
+        return False
+    if not torch.cuda.is_available():
+        return False
+    try:
+        capability = torch.cuda.get_device_capability()
+    except Exception:
+        return False
+    return tuple(int(part) for part in capability) == (8, 0)
 
 
 def _adjust_config(config: EngineConfig):

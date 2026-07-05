@@ -1246,9 +1246,11 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         name=DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT,
         env={**DSV4_ROUTE_B_LIFETIME_ENV, DSV4_MOE_REDUCE_BF16_TOGGLE: "1"},
         description=(
-            "TARGET 10.15 opt-in: promoted Route B lifetime preset plus BF16 "
-            "MoE reduce-once input for vLLM-aligned hidden-state communication."
+            "TARGET 10.27 promoted A100/sm80 communication preset: promoted "
+            "Route B lifetime preset plus BF16 MoE reduce-once input and "
+            "default PyNCCL threshold32m tensor-parallel collectives."
         ),
+        use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
     ),
