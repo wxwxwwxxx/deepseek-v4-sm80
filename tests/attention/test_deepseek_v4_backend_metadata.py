@@ -792,6 +792,75 @@ def _install_independent_swa_context(page_size: int = 4, max_len: int = 16) -> C
     return ctx
 
 
+def test_dsv4_independent_swa_page_table_cache_reuses_and_invalidates(monkeypatch):
+    cfg = _tiny_dsv4_config([0])
+    page_size = 4
+    max_len = 16
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0, max_len],
+        max_len=max_len,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+    )
+    ctx.kv_cache.on_pages_allocated(
+        torch.arange(0, 2 * max_len, page_size, dtype=torch.int32),
+        page_size,
+    )
+    backend = ctx.attn_backend
+    monkeypatch.setenv("MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE", "1")
+
+    def expected_pages(row: int, logical_pages: int) -> list[int]:
+        starts = ctx.page_table[
+            row,
+            torch.arange(logical_pages, dtype=torch.long) * page_size,
+        ]
+        pages = ctx.kv_cache.swa_pages_from_full_page_starts(starts, page_size)
+        assert pages is not None
+        return pages.to(torch.int32).tolist()
+
+    def cache_handle(row: int, cached_pages: int, node_uuid: int) -> SimpleNamespace:
+        prefix_len = cached_pages * page_size
+        handles = ctx.kv_cache.make_swa_page_handles(
+            ctx.page_table[row, :prefix_len],
+            page_size,
+        )
+        return SimpleNamespace(
+            cached_len=prefix_len,
+            node=SimpleNamespace(uuid=node_uuid),
+            get_dsv4_swa_pages=lambda handles=handles: handles,
+        )
+
+    def decode_cached_row(req: Req) -> list[int]:
+        batch = _prepare_decode_batch([req])
+        backend.prepare_metadata(batch)
+        logical_pages = (req.device_len + page_size - 1) // page_size
+        assert backend._swa_page_table_cache is not None
+        return backend._swa_page_table_cache[req.table_idx, :logical_pages].tolist()
+
+    req = _req(11, 0, 2 * page_size + 1, cached_len=2 * page_size)
+    req.cache_handle = cache_handle(0, 2, 100)
+    assert decode_cached_row(req) == expected_pages(0, 3)
+    original_signature = backend._swa_page_table_cache_signatures[0]
+
+    assert decode_cached_row(req) == expected_pages(0, 3)
+    assert backend._swa_page_table_cache_signatures[0] == original_signature
+
+    ctx.kv_cache._bump_swa_ownership_version()
+    assert decode_cached_row(req) == expected_pages(0, 3)
+    assert backend._swa_page_table_cache_signatures[0] == original_signature
+
+    ctx.page_table[0].copy_(ctx.page_table[1])
+    reused_slot = _req(12, 0, 2 * page_size + 1, cached_len=2 * page_size)
+    reused_slot.cache_handle = cache_handle(0, 2, 200)
+    assert decode_cached_row(reused_slot) == expected_pages(0, 3)
+
+    grown_active_page = _req(12, 0, 3 * page_size + 1, cached_len=3 * page_size)
+    grown_active_page.cache_handle = cache_handle(0, 2, 200)
+    assert decode_cached_row(grown_active_page) == expected_pages(0, 4)
+
+
 def test_dsv4_independent_swa_metadata_rejects_tombstone_inside_active_length(
     monkeypatch,
 ):

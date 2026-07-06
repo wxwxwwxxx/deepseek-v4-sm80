@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Literal
 
@@ -57,6 +58,14 @@ DSV4_DEBUG_ATTENTION_COMPONENTS_ENV = "MINISGL_DSV4_PREFIX_DEBUG_ATTENTION_COMPO
 DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 DSV4_SWA_INDEX_BOUNDS_DEBUG_ENV = "MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG"
 DSV4_SPARSE_SYNC_DEBUG_ENV = "MINISGL_DSV4_SPARSE_SYNC_DEBUG"
+DSV4_SWA_METADATA_PAGE_TABLE_CACHE_ENV = "MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE"
+
+
+def _swa_metadata_page_table_cache_enabled() -> bool:
+    return (
+        os.environ.get(DSV4_SWA_METADATA_PAGE_TABLE_CACHE_ENV, "").strip().lower()
+        in _TRUE_ENV_VALUES
+    )
 
 
 def _pad_last_dim(
@@ -125,6 +134,22 @@ def _cuda_graph_capture_active() -> bool:
         return bool(torch.cuda.is_current_stream_capturing())
     except Exception:
         return False
+
+
+def _profile_start(profile: dict[str, float] | None) -> float:
+    return time.perf_counter() if profile is not None else 0.0
+
+
+def _profile_add(
+    profile: dict[str, float] | None,
+    owner: str,
+    started_at: float,
+) -> None:
+    if profile is None:
+        return
+    profile[owner] = profile.get(owner, 0.0) + (
+        time.perf_counter() - started_at
+    ) * 1_000_000.0
 
 
 def _debug_attention_components_enabled() -> bool:
@@ -271,6 +296,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._component_page_table_cache_c128: torch.Tensor | None = None
         self._component_page_table_cache_indexer: torch.Tensor | None = None
         self._component_page_table_cache_signatures: dict[int, tuple[int, ...]] = {}
+        self._swa_page_table_cache_width = 0
+        self._swa_page_table_cache_rows = 0
+        self._swa_page_table_cache: torch.Tensor | None = None
+        self._swa_page_table_cache_signatures: dict[int, tuple[int, ...]] = {}
         dsv4_kernel.warmup_indexer_fp8_backend(self.device)
 
     @property
@@ -937,18 +966,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0), (1, 0))
         component_ownership = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
         swa_independent = bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
-        with dsv4_owner_timing.maybe_cuda_range(
-            "dsv4.metadata.decode.make_swa_page_table",
-            {
-                **timing_base,
-                "max_seqlen_k": int(max_seqlen_k),
-                "enabled": bool(swa_independent),
-            },
-        ):
-            swa_page_table = (
-                self._make_swa_page_tables(reqs, max_seqlen_k) if swa_independent else None
-            )
-
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.metadata.build.table_indices",
             {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
@@ -961,6 +978,32 @@ class DSV4AttentionBackend(BaseAttnBackend):
         assert offset == positions.numel()
 
         seq_lens = positions + 1
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.metadata.decode.make_swa_page_table",
+            {
+                **timing_base,
+                "max_seqlen_k": int(max_seqlen_k),
+                "enabled": bool(swa_independent),
+                "cache_enabled": bool(
+                    swa_independent
+                    and batch.is_decode
+                    and _swa_metadata_page_table_cache_enabled()
+                ),
+            },
+        ):
+            swa_page_table = (
+                self._make_swa_page_tables(
+                    reqs,
+                    max_seqlen_k,
+                    table_indices=table_indices,
+                    use_cache=batch.is_decode
+                    and _swa_metadata_page_table_cache_enabled(),
+                    timing_base=timing_base,
+                )
+                if swa_independent
+                else None
+            )
+
         with dsv4_owner_timing.maybe_cuda_range(
             "dsv4.metadata.decode.make_component_page_tables",
             {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
@@ -1564,24 +1607,225 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._component_page_table_cache_signatures[table_idx] = signature
         return True
 
-    def _make_swa_page_tables(self, reqs, max_seq_len: int) -> torch.Tensor:
+    def _make_swa_page_tables(
+        self,
+        reqs,
+        max_seq_len: int,
+        *,
+        table_indices: torch.Tensor,
+        use_cache: bool,
+        timing_base: dict[str, int | str | bool],
+    ) -> torch.Tensor:
+        if use_cache:
+            return self._make_swa_page_tables_cached(
+                reqs,
+                max_seq_len,
+                table_indices,
+                timing_base=timing_base,
+            )
+        return self._make_swa_page_tables_uncached(
+            reqs,
+            max_seq_len,
+            timing_base=timing_base,
+        )
+
+    def _make_swa_page_tables_uncached(
+        self,
+        reqs,
+        max_seq_len: int,
+        *,
+        timing_base: dict[str, int | str | bool],
+    ) -> torch.Tensor:
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
         rows = sum(req.extend_len for req in reqs)
         chunks: list[torch.Tensor] = []
+        profile = {} if dsv4_owner_timing.enabled() else None
+        started = _profile_start(profile) if profile is not None else 0.0
         for req in reqs:
-            row = self._build_swa_page_table_row(req, table_len)
+            row = self._build_swa_page_table_row(req, table_len, profile=profile)
             for _ in range(req.extend_len):
                 chunks.append(row)
+        if profile is not None:
+            _profile_add(profile, "row_construction", started)
         if not chunks:
             return torch.full((rows, table_len), -1, dtype=torch.int32, device=self.device)
-        return torch.stack(chunks).to(torch.int32)
+        started = _profile_start(profile) if profile is not None else 0.0
+        table = torch.stack(chunks).to(torch.int32)
+        if profile is not None:
+            _profile_add(profile, "stack_rows", started)
+        self._record_swa_page_table_profile(
+            profile,
+            timing_base=timing_base,
+            mode="uncached",
+            rows=rows,
+            table_len=table_len,
+        )
+        return table
 
-    def _build_swa_page_table_row(self, req, table_len: int) -> torch.Tensor:
+    def _make_swa_page_tables_cached(
+        self,
+        reqs,
+        max_seq_len: int,
+        table_indices: torch.Tensor,
+        *,
+        timing_base: dict[str, int | str | bool],
+    ) -> torch.Tensor:
+        table_len = div_ceil(max(max_seq_len, 1), self.page_size)
+        rows = sum(req.extend_len for req in reqs)
+        profile = {} if dsv4_owner_timing.enabled() else None
+        started = _profile_start(profile) if profile is not None else 0.0
+        self._ensure_swa_page_table_cache(table_len)
+        if profile is not None:
+            _profile_add(profile, "cache_ensure", started)
+
+        dirty = 0
+        clean = 0
+        started = _profile_start(profile) if profile is not None else 0.0
+        for req in reqs:
+            if self._refresh_swa_page_table_cache_row(req, profile=profile):
+                dirty += 1
+            else:
+                clean += 1
+        if profile is not None:
+            _profile_add(profile, "cache_refresh_rows", started)
+
+        started = _profile_start(profile) if profile is not None else 0.0
+        row_indices = table_indices.to(device=self.device, dtype=torch.long)
+        if rows == 0:
+            table = torch.full(
+                (0, table_len),
+                -1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+        else:
+            assert self._swa_page_table_cache is not None
+            table = (
+                self._swa_page_table_cache.index_select(0, row_indices)[:, :table_len]
+                .contiguous()
+            )
+        if profile is not None:
+            _profile_add(profile, "cache_select_rows", started)
+
+        if dsv4_owner_timing.enabled():
+            base = {
+                **timing_base,
+                "phase": "decode",
+                "rows": int(rows),
+                "table_width": int(table_len),
+            }
+            dsv4_owner_timing.record_counter(
+                "dsv4.swa_page_table_cache.rows",
+                {**base, "status": "dirty"},
+                value=dirty,
+            )
+            dsv4_owner_timing.record_counter(
+                "dsv4.swa_page_table_cache.rows",
+                {**base, "status": "clean"},
+                value=clean,
+            )
+        self._record_swa_page_table_profile(
+            profile,
+            timing_base=timing_base,
+            mode="cached",
+            rows=rows,
+            table_len=table_len,
+        )
+        return table
+
+    def _ensure_swa_page_table_cache(self, table_len: int) -> None:
+        ctx_page_table = get_global_ctx().page_table
+        rows = int(ctx_page_table.shape[0])
+        width = max(
+            int(table_len),
+            div_ceil(max(int(ctx_page_table.shape[1]), 1), self.page_size),
+        )
+        needs_alloc = (
+            self._swa_page_table_cache is None
+            or self._swa_page_table_cache_rows != rows
+            or self._swa_page_table_cache_width < width
+        )
+        if not needs_alloc:
+            return
+        self._swa_page_table_cache_rows = rows
+        self._swa_page_table_cache_width = width
+        self._swa_page_table_cache = torch.full(
+            (rows, width),
+            -1,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._swa_page_table_cache_signatures.clear()
+        dsv4_memory_debug.record_owner_tensors(
+            owner_prefix="attention.dsv4.swa_page_table_cache",
+            stage="ensure_swa_page_table_cache",
+            tensors={"swa": self._swa_page_table_cache},
+            extra={"rows": int(rows), "width": int(width)},
+        )
+
+    def _swa_page_table_cache_signature(self, req) -> tuple[int, ...]:
+        handle = getattr(req, "cache_handle", None)
+        node = getattr(handle, "node", None)
+        node_uuid = int(getattr(node, "uuid", -1))
+        handle_cached_len = int(getattr(handle, "cached_len", -1))
+        device_len = int(req.device_len)
+        logical_pages = div_ceil(device_len, self.page_size)
+        live_window_start = max(device_len - int(self.window_size), 0)
+        live_page_start = live_window_start // self.page_size
+        live_page_end = (device_len - 1) // self.page_size if device_len > 0 else -1
+        return (
+            int(getattr(req, "uid", -1)),
+            int(req.table_idx),
+            int(handle_cached_len),
+            int(node_uuid),
+            int(logical_pages),
+            int(live_page_start),
+            int(live_page_end),
+            int(getattr(req, "swa_evicted_seqlen", 0)),
+        )
+
+    def _refresh_swa_page_table_cache_row(
+        self,
+        req,
+        *,
+        profile: dict[str, float] | None,
+    ) -> bool:
+        table_idx = int(req.table_idx)
+        signature = self._swa_page_table_cache_signature(req)
+        if self._swa_page_table_cache_signatures.get(table_idx) == signature:
+            return False
+        assert self._swa_page_table_cache is not None
+        width = self._swa_page_table_cache_width
+        row = self._build_swa_page_table_row(req, width, profile=profile)
+        started = _profile_start(profile) if profile is not None else 0.0
+        dst = self._swa_page_table_cache[table_idx]
+        dst.fill_(-1)
+        if row.numel() > 0:
+            dst[: row.numel()].copy_(row)
+        if profile is not None:
+            _profile_add(profile, "cache_copy_dirty_row", started)
+        self._swa_page_table_cache_signatures[table_idx] = signature
+        return True
+
+    def _build_swa_page_table_row(
+        self,
+        req,
+        table_len: int,
+        *,
+        profile: dict[str, float] | None = None,
+    ) -> torch.Tensor:
+        started = _profile_start(profile) if profile is not None else 0.0
         table = torch.full((table_len,), -1, dtype=torch.int32, device=self.device)
+        if profile is not None:
+            _profile_add(profile, "row_alloc", started)
         if int(getattr(req, "uid", 0)) < 0:
+            started = _profile_start(profile) if profile is not None else 0.0
             swa_pages = int(self.kvcache.swa_cache(0).shape[0]) // self.page_size
             table.fill_(max(swa_pages - 1, 0))
+            if profile is not None:
+                _profile_add(profile, "dummy_row_fill", started)
             return table
+        started = _profile_start(profile) if profile is not None else 0.0
         handle_getter = getattr(req.cache_handle, "get_dsv4_swa_pages", None)
         handle_pages = handle_getter() if callable(handle_getter) else None
         if handle_pages is not None and handle_pages.swa_pages is not None:
@@ -1590,10 +1834,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 device=self.device,
                 dtype=torch.int32,
             )
+        if profile is not None:
+            _profile_add(profile, "prefix_handle_merge", started)
 
         logical_pages = min(div_ceil(req.device_len, self.page_size), table_len)
         if logical_pages <= 0:
             return table
+        started = _profile_start(profile) if profile is not None else 0.0
         page_offsets = (
             torch.arange(logical_pages, dtype=torch.long, device=self.device)
             * self.page_size
@@ -1603,11 +1850,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
             full_page_starts,
             self.page_size,
         )
+        if profile is not None:
+            _profile_add(profile, "active_full_to_swa_translation", started)
         if active_swa is None or active_swa.numel() == 0:
             return table
         n = min(table.numel(), active_swa.numel())
         live_window_start = max(int(req.device_len) - int(self.window_size), 0)
         live_page_start = min(live_window_start // self.page_size, n)
+        started = _profile_start(profile) if profile is not None else 0.0
         live_missing = (table[live_page_start:n] < 0) & (active_swa[live_page_start:n] < 0)
         if bool(torch.any(live_missing).item()):
             rel = torch.where(live_missing)[0]
@@ -1618,12 +1868,44 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 f"device_len={int(req.device_len)}, cached_len={int(req.cached_len)}, "
                 f"page={page}, table_len={table_len}"
             )
+        if profile is not None:
+            _profile_add(profile, "liveness_check", started)
+        started = _profile_start(profile) if profile is not None else 0.0
         missing = table[:n] < 0
         valid = active_swa[:n] >= 0
         mask = missing & valid
         table_view = table[:n]
         table_view[mask] = active_swa[:n][mask].to(device=table.device, dtype=table.dtype)
+        if profile is not None:
+            _profile_add(profile, "fill_missing", started)
         return table
+
+    def _record_swa_page_table_profile(
+        self,
+        profile: dict[str, float] | None,
+        *,
+        timing_base: dict[str, int | str | bool],
+        mode: str,
+        rows: int,
+        table_len: int,
+    ) -> None:
+        if not profile or not dsv4_owner_timing.enabled():
+            return
+        base = {
+            **timing_base,
+            "mode": mode,
+            "rows": int(rows),
+            "table_width": int(table_len),
+        }
+        for owner, elapsed_us in sorted(profile.items()):
+            value = max(int(elapsed_us), 0)
+            if value <= 0:
+                continue
+            dsv4_owner_timing.record_counter(
+                "dsv4.metadata.swa_page_table.subowner_us",
+                {**base, "owner": owner},
+                value=value,
+            )
 
     def _make_swa_indices(
         self,

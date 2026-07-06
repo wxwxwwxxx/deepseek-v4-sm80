@@ -14,6 +14,9 @@ prompts/TARGET_08.44_dsv4_sm80_swa_stale_prefix_handle_tombstone_fix.md
 prompts/TARGET_08.45_dsv4_sm80_swa_independent_lifecycle_contract.md
 prompts/TARGET_08.46_dsv4_sm80_swa_contract_based_code_audit.md
 prompts/TARGET_08.47_dsv4_sm80_swa_contract_unified_fix.md
+prompts/TARGET_08.48_dsv4_sm80_marlin_swa_auto_cross_case_lifecycle_fix.md
+prompts/TARGET_08.49_dsv4_sm80_swa_metadata_page_table_perf_parity.md
+prompts/TARGET_08.50_dsv4_sm80_swa_direct_token_metadata_parity.md
 prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
 prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
@@ -69,6 +72,35 @@ patch.  TARGET 08.45 should write the SGLang-aligned
 `prompts/DSV4_SWA_INDEPENDENT_LIFECYCLE_CONTRACT.md`; TARGET 08.46 should audit
 mini code against that contract; TARGET 08.47 should perform the unified fix
 and return to the 08.43 promotion soak only after fixed128 historical gates pass.
+
+TARGET 08.48 fixed the remaining same-Engine auto-capacity Marlin release +
+SWA independent failure found when rerunning TARGET 08.43.  The root cause was
+an address-space violation in fused model-side SWA cache stores: full-token
+`batch.out_loc` was passed directly to compact `swa_cache`.  The fix translates
+through `DeepSeekV4KVCache.translate_full_locs_to_swa_locs()` before fused SWA
+physical-cache writes.
+
+TARGET 08.43 was rerun after TARGET 08.48 and should now be treated as the
+post-fix promotion soak result.  Correctness, graph replay, capacity, and the
+previously blocking same-Engine auto gate are clean.  SWA independent remains
+opt-in only because fixed-capacity serving/prefix E2E throughput regresses by
+about `16-18%`, with owner timing pointing to decode attention metadata / SWA
+page-table construction.
+
+TARGET 08.49 is the next active performance follow-up.  It should first compare
+mini's SWA metadata/page-table behavior with SGLang source, then implement one
+bounded parity-inspired optimization to reduce decode metadata overhead without
+reopening lifecycle correctness.
+
+TARGET 08.49 result: a bounded opt-in page-table row cache landed behind
+`MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE=1`.  It reduced
+`dsv4.prepare.decode.attention_metadata` on `serving_mixed_112req_wave16` from
+`2968.232 ms` to `1381.333 ms` and improved fixed128 serving by `+11.38%`
+versus old SWA, while preserving correctness, graph replay, and capacity.
+However, fixed128 serving remains `-6.28%` and prefix remains `-10.34%` versus
+the non-SWA baseline, so SWA independent is still opt-in.  TARGET 08.50 should
+now pursue SGLang-style direct token-level SWA metadata that avoids full SWA
+page-table materialization in decode.
 
 TARGET 08.32 is about CUDA graph private-pool memory attribution.  It should
 avoid full model weight loading at first and instead use synthetic/partial
@@ -182,6 +214,32 @@ The final TARGET 08.30 reprofile showed:
 This is enough to close TARGET 08 as a functional/performance milestone.  Do
 not keep polishing prefix metadata unless a fresh profile shows it is again a
 top bottleneck.
+
+### Phase 7: Independent SWA Capacity And Metadata Performance
+
+TARGET 08.31-08.48 reopened TARGET 08 for high-capacity SWA lifecycle work.
+The final post-fix state is:
+
+- independent SWA lifecycle is correctness-clean under the TARGET 08.43 rerun;
+- Marlin WNA16 release + SWA independent supports explicit cap4096 and auto
+  capacity;
+- the same-Engine auto gate
+  `historical_4096_128_bs4 -> historical_4096_1024_bs4` passes with zero eager
+  graph replay;
+- auto capacity improves from about `2777` pages to about `6490` pages at the
+  same about `49.96 GiB/rank` KV budget;
+- default promotion is still blocked by decode attention metadata / SWA
+  page-table overhead.
+
+TARGET 08.49 should investigate that metadata overhead with SGLang parity as
+the first principle.  If it reduces overhead enough, SWA independent can be
+reconsidered as a high-capacity preset; otherwise it remains opt-in.
+
+TARGET 08.49 proved the first point with a request-slot dirty-row page-table
+cache, but the SGLang census showed this is still a mini-specific workaround.
+TARGET 08.50 should attempt the more structural parity step: generate
+graph/attention-consumed SWA token locs directly from full-token loc windows
+and full-to-SWA mapping, keeping the 08.49 page-table cache as fallback.
 
 ## Historical Evolution
 
@@ -338,8 +396,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.45, TARGET 08.40, or
-   a TARGET 09 child
+3. the active future target prompt, currently TARGET 08.50 or a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
 
@@ -349,18 +406,20 @@ The archive contains implementation history, not active todos.
 
 ### Independent SWA Ownership
 
-Status: active follow-up as TARGET 08.45 after TARGET 08.44.
+Status: correctness-clean but opt-in after TARGET 08.43 post-08.48 rerun;
+TARGET 08.49 landed an opt-in metadata cache, and active performance follow-up
+is TARGET 08.50.
 
-SWA KV is still effectively protected by the conservative full/SWA tail rule.
-This costs retained memory and can reduce useful prefix capacity, but TARGET
-08.30 did not show it as the active bottleneck for the measured `--num-pages
-128` workloads.
+Current state: SWA KV now has an independent lifecycle and can tombstone/free
+out-of-window tail pages without invalidating C4/C128/indexer/compression-state
+or component locations.  The lifecycle is correctness-clean after TARGET 08.48
+and the TARGET 08.43 rerun, including Marlin release and same-Engine auto
+capacity.  It remains opt-in because decode attention metadata / SWA page-table
+overhead is too high for default promotion.
 
-TARGET 09.45 reopened this item from a capacity/low-precision ROI angle.  It
-found that current mini's full 128-page SWA BF16 pool makes SWA-only FP8 appear
-more valuable than it may be after SGLang-aligned lifecycle.  The next step is
-therefore to prove independent SWA lifecycle and runtime SWA tail occupancy
-before deciding whether TARGET 09.5 should implement FP8 cache.
+TARGET 09.5 low-precision SWA/cache work should stay deferred until TARGET
+08.50 either reduces the remaining direct metadata overhead or records why SWA
+independent must remain a capacity-only opt-in path.
 
 TARGET 08.31 result: opt-in SWA independent lifecycle was implemented and
 validated against SGLang's allocator/component model.  SWA KV now has separate
