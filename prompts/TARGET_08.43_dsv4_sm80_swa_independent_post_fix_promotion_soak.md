@@ -2,7 +2,7 @@
 
 ## Status
 
-Active TARGET 08 follow-up after TARGET 08.47.
+Active TARGET 08 follow-up after TARGET 08.48.
 
 TARGET 08.31 implemented opt-in, SGLang-aligned SWA independent lifecycle for
 DeepSeek V4 on A100/sm80.  TARGET 08.41 then found that fixed-128 serving was
@@ -11,24 +11,29 @@ serving crashed with CUDA illegal memory access.  TARGET 08.42 fixed that
 blocker by aligning the Engine/KV-cache dummy full-page token contract.
 TARGET 08.45 then wrote the authoritative SWA independent lifecycle contract,
 TARGET 08.46 audited the code against that contract, and TARGET 08.47
-implemented the unified finish/cache owner-boundary fix.
+implemented the unified finish/cache owner-boundary fix.  TARGET 08.48 then
+fixed the remaining auto-capacity Marlin release + SWA independent same-Engine
+cross-case CUDA illegal memory access by enforcing the full-to-SWA address-space
+translation for fused model-side SWA cache writes.
 
 This target is the post-fix promotion soak.  It should not re-implement SWA
 lifecycle, re-debug the old dummy-token issue, re-open the SWA ownership model,
-or broaden into FP8 KV/cache.  It should decide whether the 08.47 contract
-implementation is ready to promote, should remain opt-in because of overhead,
-or needs one focused follow-up.
+re-debug the 08.48 fused SWA-store bug, or broaden into FP8 KV/cache.  It
+should decide whether the 08.48-corrected SWA independent implementation is
+ready to promote, should remain opt-in because of overhead, or needs one
+focused follow-up.
 
 ## Goal
 
-Verify the 08.47 SWA contract fix under serving-like pressure and make a
-promotion decision:
+Verify the 08.47 SWA contract fix and 08.48 fused SWA-store address-space fix
+under serving-like pressure and make a promotion decision:
 
 ```text
 SWA independent lifecycle
 -> dummy full-token contract remains correct
 -> finish/cache owner-boundary SWA lifecycle remains correct
 -> active release protected frontier and monotonic SWA frontier remain correct
+-> all SWA physical-cache writes use translated SWA locations
 -> Marlin WNA16 release + component-slot clear remains compatible
 -> fixed and auto capacity paths are correctness-clean
 -> graph replay covers serving buckets
@@ -62,6 +67,11 @@ performance_milestones/target08_swa_contract_unified_fix/contract_fixes.md
 performance_milestones/target08_swa_contract_unified_fix/ownership_fix_summary.md
 performance_milestones/target08_swa_contract_unified_fix/metadata_graph_fix_summary.md
 performance_milestones/target08_swa_contract_unified_fix/full_model_fixed128_gate.md
+performance_milestones/target08_marlin_swa_auto_cross_case_lifecycle_fix/README.md
+performance_milestones/target08_marlin_swa_auto_cross_case_lifecycle_fix/root_cause.md
+performance_milestones/target08_marlin_swa_auto_cross_case_lifecycle_fix/fix_summary.md
+performance_milestones/target08_marlin_swa_auto_cross_case_lifecycle_fix/two_case_gate.md
+performance_milestones/target08_marlin_swa_auto_cross_case_lifecycle_fix/rerun_0843_recommendation.md
 prompts/DSV4_SWA_INDEPENDENT_LIFECYCLE_CONTRACT.md
 prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
 prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md
@@ -69,6 +79,7 @@ prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md
 prompts/TARGET_08.45_dsv4_sm80_swa_independent_lifecycle_contract.md
 prompts/TARGET_08.46_dsv4_sm80_swa_contract_based_code_audit.md
 prompts/TARGET_08.47_dsv4_sm80_swa_contract_unified_fix.md
+prompts/TARGET_08.48_dsv4_sm80_marlin_swa_auto_cross_case_lifecycle_fix.md
 prompts/TARGET_08_radix_prefix_dsv4.md
 prompts/target.md
 ```
@@ -155,12 +166,41 @@ Important TARGET 08.45-08.47 conclusions:
   - the 08.44 CUDA illegal memory access did not reproduce under
     `CUDA_LAUNCH_BLOCKING=1` and SWA liveness debug.
 
+Important TARGET 08.48 conclusions:
+
+- TARGET 08.43's first rerun was blocked by the same-Engine auto-capacity
+  Marlin release + SWA independent sequence
+  `historical_4096_128_bs4 -> historical_4096_1024_bs4`.
+- The root cause was an address-space violation in fused model-side SWA cache
+  stores:
+  - `batch.out_loc` is a full-token KV location;
+  - independent SWA lifecycle stores into a compact SWA physical cache;
+  - two fused call sites passed full-token locs directly to `swa_cache`,
+    corrupting memory during graph replay.
+- The fix adds `DSV4Attention._swa_store_out_loc()` and translates
+  `batch.out_loc` through
+  `DeepSeekV4KVCache.translate_full_locs_to_swa_locs()` before the fused
+  `q_kv_norm_rope_cache_fallback()` and `k_norm_rope_cache_fallback()`
+  SWA-store paths write into `swa_cache`.
+- Supporting fixes kept from diagnosis:
+  - graph-replay compressed-read metadata clamping;
+  - indexer metadata identity/remap fixes for graph replay buffers;
+  - opt-in `MINISGL_DSV4_CASE_BOUNDARY_DEBUG=1` snapshots and graph replay
+    error context.
+- TARGET 08.48 passed:
+  - focused tests: `149 passed`;
+  - required same-Engine two-case gate, pass/pass;
+  - second case replay `1023`, eager `0`, `graph_runner.error == null`;
+  - fresh long-case control, pass.
+
 ## Non-Goals
 
 - Do not implement FP8 KV/cache in this target.
 - Do not implement INT8 MoE or quantized communication.
 - Do not rewrite attention kernels unless a tiny correctness fix is needed.
 - Do not re-open the SWA ownership design unless correctness fails.
+- Do not re-debug the 08.48 fused SWA-store address-space violation unless the
+  exact two-case gate regresses.
 - Do not hide a performance regression by switching to eager or reducing graph
   bucket coverage.
 - Do not bypass TARGET 08.40 component-slot clear semantics.
@@ -183,8 +223,14 @@ Review the current code and confirm these contracts:
   owner boundaries.
 - It does not invalidate C4/C128/indexer/compression-state/component locs when
   SWA rows are tombstoned or freed.
+- Fused model-side SWA physical-cache stores translate full-token output locs
+  to compact SWA physical locs when independent SWA lifecycle is enabled.
+- `translate_full_locs_to_swa_locs()` remains vectorized and graph-capture
+  safe, including dummy full-token mapping.
 - SWA metadata liveness checks and ownership-version graph replay guards remain
   enabled and covered by tests.
+- Graph-replay compressed-read metadata clamp and indexer metadata identity /
+  remap fixes from 08.48 remain covered by tests.
 - TARGET 08.40 component-slot clear still runs on page allocation when Marlin
   WNA16 raw expert release is enabled.
 - Direct C4 graph metadata buffers remain valid.  Direct SWA graph metadata
@@ -224,6 +270,10 @@ Required capacity modes:
 Required gates:
 
 - text smoke passes with sane output;
+- the previously blocking same-Engine auto-capacity Marlin release + SWA
+  independent sequence passes:
+  `historical_4096_128_bs4 -> historical_4096_1024_bs4` with graph buckets
+  `[1,2,4,8,16]`, replay healthy and eager `0`;
 - no garbled text, token-0 flood, NaN/Inf logit explosion, crash, or NCCL
   watchdog;
 - graph replay is zero-eager for captured serving buckets;
@@ -232,6 +282,8 @@ Required gates:
 - no SWA negative refcount, double-free, stale handle, or leaked active
   mapping;
 - Marlin release path still reports component-slot clear and `0` guard bytes.
+- fused SWA store address-space validation remains covered by focused tests or
+  explicit source sanity.
 
 If a workload uses a decode batch size outside captured buckets, either add the
 bucket or label it clearly; avoidable eager fallback is not promotion-ready.
@@ -259,7 +311,7 @@ dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent
 Workloads:
 
 - `historical_4096_128_bs4`;
-- `historical_4096_1024_bs4` if runtime budget allows;
+- `historical_4096_1024_bs4`;
 - `serving_mixed_112req_wave16`;
 - `prefix_multi_112req_wave16`;
 - `prefix_eviction_pressure_96req_wave16` or closest available eviction
@@ -287,13 +339,15 @@ The capacity ledger must clearly separate:
 - explicit `--num-pages 4096` large-capacity stability;
 - auto-capacity Marlin release page/token gain;
 - runtime-proven live SWA tail reduction.
+- the 08.48 same-Engine auto sequence result from fresh-process single-case
+  controls.
 
 ### 4. E2E Overhead Attribution
 
-Re-run the 08.41 overhead attribution after the 08.42 dummy-token fix and
-08.47 owner-boundary lifecycle fix.  The prior owner was decode prepare /
-attention metadata; verify whether that is still true under the final contract
-implementation.
+Re-run the 08.41 overhead attribution after the 08.42 dummy-token fix, 08.47
+owner-boundary lifecycle fix, and 08.48 fused SWA-store address-space fix.  The
+prior owner was decode prepare / attention metadata; verify whether that is
+still true under the final contract implementation.
 
 Split overhead into:
 
@@ -379,24 +433,29 @@ Required files:
 
 The README must answer:
 
-1. Did the 08.42 dummy-token fix and 08.47 SWA owner-boundary contract stay
-   correct under fixed, cap4096, and auto capacity?
+1. Did the 08.42 dummy-token fix, 08.47 SWA owner-boundary contract, and 08.48
+   fused SWA-store address-space fix stay correct under fixed, cap4096, and
+   auto capacity?
 2. Is SWA independent lifecycle correctness-clean under prefix/serving/eviction
    pressure with `swa_evicted_seqlen`, protected frontier, and graph replay
    version guards active?
 3. Does it remain compatible with Marlin WNA16 release + component clear?
-4. Does graph replay cover buckets `[1,2,4,8,16]` without avoidable eager
+4. Does the previously blocking same-Engine auto Marlin release + SWA
+   independent `4096/128 -> 4096/1024` sequence remain clean?
+5. Does graph replay cover buckets `[1,2,4,8,16]` without avoidable eager
    fallback?
-5. What is the real fixed-128, cap4096, and auto-capacity memory/token benefit?
-6. What is the current E2E overhead owner, and is it acceptable?
-7. Should SWA independent lifecycle be promoted, kept opt-in, or blocked?
-8. What exactly should happen to TARGET 09.5 next?
+6. What is the real fixed-128, cap4096, and auto-capacity memory/token benefit?
+7. What is the current E2E overhead owner, and is it acceptable?
+8. Should SWA independent lifecycle be promoted, kept opt-in, or blocked?
+9. What exactly should happen to TARGET 09.5 next?
 
 ## Stop Conditions
 
 Stop and report rather than continuing to polish if:
 
 - CUDA illegal memory access, NCCL watchdog, or corrupted text reappears;
+- the 08.48 same-Engine two-case auto Marlin release + SWA independent gate
+  regresses;
 - graph replay falls back to eager after adding the obvious missing bucket;
 - a correctness failure appears under prefix hit/eviction pressure;
 - Marlin release + SWA independent breaks the TARGET 08.40 component clear
