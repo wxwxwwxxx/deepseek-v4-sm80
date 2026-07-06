@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, List, Tuple
 import torch
 from minisgl.core import Req
 from minisgl.kvcache import BaseCacheHandle, BaseKVCachePool, MatchResult, create_prefix_cache
-from minisgl.utils import align_down, div_ceil
+from minisgl.utils import align_down, div_ceil, dsv4_owner_timing
 
 if TYPE_CHECKING:
     from .utils import PendingReq
@@ -103,7 +103,11 @@ class CacheManager:
     def match_req(self, req: PendingReq) -> MatchResult:
         input_len = req.input_len
         assert input_len > 0, "Input length must be greater than 0."
-        result = self.prefix_cache.match_prefix(req.input_ids[: input_len - 1])
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.scheduler.prefix.match_req",
+            {"input_len": int(input_len), "page_size": int(self.page_size)},
+        ):
+            result = self.prefix_cache.match_prefix(req.input_ids[: input_len - 1])
         self._record_prefix_match(result.cuda_handle.cached_len, input_len)
         return result
 
@@ -141,17 +145,21 @@ class CacheManager:
         self.prefix_cache.lock_handle(handle, unlock=True)
 
     def allocate_paged(self, reqs: List[Req]) -> None:
-        needed_pages = 0
-        allocation_info: List[Tuple[int, int, int]] = []
-        for req in reqs:
-            first_page = div_ceil(req.cached_len, self.page_size)
-            last_page = div_ceil(req.device_len, self.page_size)
-            if last_page > first_page:
-                needed_pages += last_page - first_page
-                allocation_info.append((req.table_idx, first_page, last_page))
-        if needed_pages > 0:
-            allocated = self._page_to_token(self._allocate(needed_pages))
-            _write_page_table(self.page_table, allocated, allocation_info, self.page_size)
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.scheduler.page.allocate_paged",
+            {"reqs": int(len(reqs)), "page_size": int(self.page_size)},
+        ):
+            needed_pages = 0
+            allocation_info: List[Tuple[int, int, int]] = []
+            for req in reqs:
+                first_page = div_ceil(req.cached_len, self.page_size)
+                last_page = div_ceil(req.device_len, self.page_size)
+                if last_page > first_page:
+                    needed_pages += last_page - first_page
+                    allocation_info.append((req.table_idx, first_page, last_page))
+            if needed_pages > 0:
+                allocated = self._page_to_token(self._allocate(needed_pages))
+                _write_page_table(self.page_table, allocated, allocation_info, self.page_size)
 
     def cache_req(self, req: Req, *, finished: bool) -> None:
         # ==================================== valid cache region ====================================
@@ -165,65 +173,75 @@ class CacheManager:
         # [cached_len, new_handle.cached_len)       This part is newly inserted into the prefix cache.
         # [new_handle.cached_len, req.cached_len)   This part is tailing part that can not inserted into the prefix cache.
         #                                           We should free it if the request has finished.
-        insert_ids = req.input_ids[: req.cached_len]
-        page_indices = self.page_table[req.table_idx, : req.cached_len]
-        old_handle = req.cache_handle
-        if self.dsv4_component_ownership:
-            def make_new_component_pages(
-                start: int,
-                end: int,
-            ):
-                return self.kv_cache.make_component_page_handles(
-                    page_indices[start:end],
-                    self.page_size,
-                )
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.scheduler.prefix.cache_req",
+            {
+                "finished": bool(finished),
+                "cached_len": int(req.cached_len),
+                "page_size": int(self.page_size),
+                "component_loc_ownership": bool(self.dsv4_component_ownership),
+                "swa_independent_lifecycle": bool(self.dsv4_swa_independent_lifecycle),
+            },
+        ):
+            insert_ids = req.input_ids[: req.cached_len]
+            page_indices = self.page_table[req.table_idx, : req.cached_len]
+            old_handle = req.cache_handle
+            if self.dsv4_component_ownership:
+                def make_new_component_pages(
+                    start: int,
+                    end: int,
+                ):
+                    return self.kv_cache.make_component_page_handles(
+                        page_indices[start:end],
+                        self.page_size,
+                    )
 
-            def make_new_swa_pages(
-                start: int,
-                end: int,
-            ):
-                if not self.dsv4_swa_independent_lifecycle:
-                    return None
-                return self.kv_cache.make_swa_page_handles(
-                    page_indices[start:end],
-                    self.page_size,
-                )
+                def make_new_swa_pages(
+                    start: int,
+                    end: int,
+                ):
+                    if not self.dsv4_swa_independent_lifecycle:
+                        return None
+                    return self.kv_cache.make_swa_page_handles(
+                        page_indices[start:end],
+                        self.page_size,
+                    )
 
-            cached_len, new_handle = self.prefix_cache.insert_prefix(
-                insert_ids,
-                page_indices,
-                dsv4_component_pages_builder=make_new_component_pages,
-                dsv4_swa_pages_builder=make_new_swa_pages,
+                cached_len, new_handle = self.prefix_cache.insert_prefix(
+                    insert_ids,
+                    page_indices,
+                    dsv4_component_pages_builder=make_new_component_pages,
+                    dsv4_swa_pages_builder=make_new_swa_pages,
+                )
+            else:
+                cached_len, new_handle = self.prefix_cache.insert_prefix(insert_ids, page_indices)
+            self.metrics.inserted_tokens += max(0, new_handle.cached_len - cached_len)
+            already_cached_indices = page_indices[old_handle.cached_len : cached_len].clone()
+            if self.dsv4_component_ownership and cached_len > old_handle.cached_len:
+                matched_indices = new_handle.get_matched_indices()
+                page_indices[old_handle.cached_len : cached_len].copy_(
+                    matched_indices[old_handle.cached_len : cached_len]
+                )
+            # unlock until all operations on handle is done
+            self.unlock(old_handle)
+            # this part is already in the prefix cache, free it
+            self._free(already_cached_indices)
+            if finished:  # this tail part should be freed
+                self._free(page_indices[new_handle.cached_len :])
+            else:  # keep the tail part, update the handle
+                req.cache_handle = new_handle
+                self.lock(new_handle)
+            self._release_dsv4_swa_out_of_window(new_handle)
+            self._release_dsv4_component_owned_full_head(new_handle)
+            if self.dsv4_component_ownership and not finished and new_handle.cached_len > 0:
+                page_indices[: new_handle.cached_len].copy_(new_handle.get_matched_indices())
+            self._debug_sync_integrity(
+                "cache_req",
+                req=req,
+                finished=finished,
+                cached_len=int(req.cached_len),
+                new_cached_len=int(new_handle.cached_len),
             )
-        else:
-            cached_len, new_handle = self.prefix_cache.insert_prefix(insert_ids, page_indices)
-        self.metrics.inserted_tokens += max(0, new_handle.cached_len - cached_len)
-        already_cached_indices = page_indices[old_handle.cached_len : cached_len].clone()
-        if self.dsv4_component_ownership and cached_len > old_handle.cached_len:
-            matched_indices = new_handle.get_matched_indices()
-            page_indices[old_handle.cached_len : cached_len].copy_(
-                matched_indices[old_handle.cached_len : cached_len]
-            )
-        # unlock until all operations on handle is done
-        self.unlock(old_handle)
-        # this part is already in the prefix cache, free it
-        self._free(already_cached_indices)
-        if finished:  # this tail part should be freed
-            self._free(page_indices[new_handle.cached_len :])
-        else:  # keep the tail part, update the handle
-            req.cache_handle = new_handle
-            self.lock(new_handle)
-        self._release_dsv4_swa_out_of_window(new_handle)
-        self._release_dsv4_component_owned_full_head(new_handle)
-        if self.dsv4_component_ownership and not finished and new_handle.cached_len > 0:
-            page_indices[: new_handle.cached_len].copy_(new_handle.get_matched_indices())
-        self._debug_sync_integrity(
-            "cache_req",
-            req=req,
-            finished=finished,
-            cached_len=int(req.cached_len),
-            new_cached_len=int(new_handle.cached_len),
-        )
 
     def check_integrity(self) -> None:
         self.prefix_cache.check_integrity()
@@ -279,27 +297,40 @@ class CacheManager:
             )
 
     def _allocate(self, needed_pages: int) -> torch.Tensor:
-        if self.dsv4_component_ownership:
-            self._evict_for_dsv4_component_capacity(needed_pages)
-        elif needed_pages > (free_pages := len(self.free_slots)):
-            evicted = self.prefix_cache.evict((needed_pages - free_pages) * self.page_size)
-            self._record_prefix_eviction(evicted)
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.scheduler.page.allocate",
+            {
+                "needed_pages": int(needed_pages),
+                "free_pages_before": int(len(self.free_slots)),
+                "component_loc_ownership": bool(self.dsv4_component_ownership),
+                "swa_independent_lifecycle": bool(self.dsv4_swa_independent_lifecycle),
+            },
+        ):
+            if self.dsv4_component_ownership:
+                self._evict_for_dsv4_component_capacity(needed_pages)
+            elif needed_pages > (free_pages := len(self.free_slots)):
+                evicted = self.prefix_cache.evict((needed_pages - free_pages) * self.page_size)
+                self._record_prefix_eviction(evicted)
+                if self.kv_cache is not None:
+                    self.kv_cache.on_token_indices_freed(evicted, self.page_size)
+                self.free_slots = torch.cat([self.free_slots, evicted[:: self.page_size]])
+                assert len(self.free_slots) >= needed_pages, "Eviction did not free enough space."
+            allocated = self.free_slots[:needed_pages]
+            self.free_slots = self.free_slots[needed_pages:]
             if self.kv_cache is not None:
-                self.kv_cache.on_token_indices_freed(evicted, self.page_size)
-            self.free_slots = torch.cat([self.free_slots, evicted[:: self.page_size]])
-            assert len(self.free_slots) >= needed_pages, "Eviction did not free enough space."
-        allocated = self.free_slots[:needed_pages]
-        self.free_slots = self.free_slots[needed_pages:]
-        if self.kv_cache is not None:
-            self.kv_cache.on_pages_allocated(allocated, self.page_size)
-        return allocated
+                self.kv_cache.on_pages_allocated(allocated, self.page_size)
+            return allocated
 
     def _free(self, indices: torch.Tensor) -> None:
-        indices = self._valid_full_indices(indices)
-        if len(indices) > 0:
-            if self.kv_cache is not None:
-                self.kv_cache.on_token_indices_freed(indices, self.page_size)
-            self.free_slots = torch.cat([self.free_slots, indices[:: self.page_size]])
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.scheduler.page.free",
+            {"tokens": int(indices.numel()), "page_size": int(self.page_size)},
+        ):
+            indices = self._valid_full_indices(indices)
+            if len(indices) > 0:
+                if self.kv_cache is not None:
+                    self.kv_cache.on_token_indices_freed(indices, self.page_size)
+                self.free_slots = torch.cat([self.free_slots, indices[:: self.page_size]])
 
     def _valid_full_indices(self, indices: torch.Tensor) -> torch.Tensor:
         if len(indices) == 0:
@@ -340,7 +371,15 @@ class CacheManager:
             return
         window = int(getattr(self.kv_cache, "_window_size", self.page_size))
         tail_tokens = div_ceil(max(window, 1), self.page_size) * self.page_size
-        releaser(handle, tail_tokens=tail_tokens)
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.scheduler.swa.release_prefix_out_of_window",
+            {
+                "cached_len": int(handle.cached_len),
+                "tail_tokens": int(tail_tokens),
+                "page_size": int(self.page_size),
+            },
+        ):
+            releaser(handle, tail_tokens=tail_tokens)
 
     def release_active_dsv4_swa_out_of_window(self, req: Req) -> None:
         if not self.dsv4_swa_independent_lifecycle:
@@ -357,7 +396,16 @@ class CacheManager:
         active_head = self._valid_full_indices(active_head)
         if active_head.numel() == 0:
             return
-        releaser(active_head, self.page_size, tombstone=True)
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.scheduler.swa.release_active_out_of_window",
+            {
+                "release_pages": int(active_head.numel() // self.page_size),
+                "release_end": int(release_end),
+                "cached_len": int(req.cached_len),
+                "device_len": int(req.device_len),
+            },
+        ):
+            releaser(active_head, self.page_size, tombstone=True)
 
     def _release_dsv4_component_owned_full_head(self, handle: BaseCacheHandle) -> None:
         if not self.dsv4_component_ownership:

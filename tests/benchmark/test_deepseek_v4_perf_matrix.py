@@ -73,6 +73,16 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
     assert swa_args.enable_dsv4_swa_independent_lifecycle is True
 
 
+def test_num_pages_zero_selects_auto_capacity():
+    bench = _load_module()
+
+    args = bench.parse_args(["--num-pages", "0"])
+    assert args.num_pages is None
+
+    with pytest.raises(SystemExit):
+        bench.parse_args(["--num-pages", "1"])
+
+
 def test_smoke_or_page_size_one_is_not_reported_as_baseline():
     bench = _load_module()
 

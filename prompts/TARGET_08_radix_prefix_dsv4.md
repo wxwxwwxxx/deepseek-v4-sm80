@@ -8,6 +8,7 @@ children:
 ```text
 prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
 prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md
+prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md
 prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
 prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
@@ -29,6 +30,13 @@ potential with Marlin release, but fixed-128 serving uses a conservative SWA
 floor and short offline E2E throughput regressed.  TARGET 08.41 should run
 serving/prefix soak with graph buckets `[1,2,4,8,16]`, attribute overhead, and
 decide whether SWA independent lifecycle should be promoted or remain opt-in.
+
+TARGET 08.42 is the correctness target after TARGET 08.41.  TARGET 08.41
+showed fixed-128 SWA independent serving is clean, but Marlin release + SWA
+independent crashes with CUDA illegal memory access at large capacity, including
+an explicit `--num-pages 4096` cap.  TARGET 08.42 should use no-weight and
+partial repros first, then full-model confirmation, to fix the large-capacity
+SWA serving bug before any promotion or FP8 cache work continues.
 
 TARGET 08.32 is about CUDA graph private-pool memory attribution.  It should
 avoid full model weight loading at first and instead use synthetic/partial
@@ -298,7 +306,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.41, TARGET 08.40, or
+3. the active future target prompt, currently TARGET 08.42, TARGET 08.40, or
    a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
@@ -309,7 +317,7 @@ The archive contains implementation history, not active todos.
 
 ### Independent SWA Ownership
 
-Status: active follow-up as TARGET 08.41 after TARGET 08.31.
+Status: active follow-up as TARGET 08.42 after TARGET 08.41.
 
 SWA KV is still effectively protected by the conservative full/SWA tail rule.
 This costs retained memory and can reduce useful prefix capacity, but TARGET
@@ -336,16 +344,27 @@ keeps `128` SWA pages, and short offline E2E throughput regressed by about
 `3%` to `9%`.  TARGET 08.41 should run the promotion soak and overhead
 attribution before any default promotion.
 
+TARGET 08.41 result: SWA independent lifecycle should not be promoted yet.
+Fixed `--num-pages 128` serving/prefix/eviction runs are correctness-clean with
+graph buckets `[1,2,4,8,16]`, but Marlin release + SWA independent
+auto-capacity crashes under serving with CUDA illegal memory access.  The same
+failure appears with explicit `--num-pages 4096`, so it is not merely an
+auto-planner near-OOM artifact.  E2E overhead was attributed mainly to decode
+prepare / attention metadata, but correctness takes priority.  TARGET 08.42
+should fix the large-capacity SWA serving crash, using no-weight/partial repros
+before full model runs.
+
 Active prompt:
 
 ```text
-prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md
+prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md
 ```
 
-Implementation prompt:
+Previous prompts:
 
 ```text
 prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
+prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md
 ```
 
 Historical prompt:

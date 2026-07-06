@@ -9,6 +9,7 @@ from typing import Any
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _ENABLE_ENV = "MINISGL_DSV4_OWNER_TIMING"
+_CUDA_ENV = "MINISGL_DSV4_OWNER_TIMING_CUDA"
 _SYNC_HOST_ENV = "MINISGL_DSV4_OWNER_TIMING_SYNC_HOST"
 _MAX_SAMPLES_ENV = "MINISGL_DSV4_OWNER_TIMING_MAX_SAMPLES"
 
@@ -31,6 +32,13 @@ _seq = 0
 
 def enabled() -> bool:
     return os.environ.get(_ENABLE_ENV, "").strip().lower() in _TRUE_VALUES
+
+
+def cuda_enabled() -> bool:
+    raw = os.environ.get(_CUDA_ENV)
+    if raw is None:
+        return True
+    return raw.strip().lower() in _TRUE_VALUES
 
 
 def sync_host_enabled() -> bool:
@@ -156,7 +164,7 @@ class host_range:
 
 
 def maybe_cuda_range(label: str, metadata: dict[str, Any] | None = None):
-    if not enabled():
+    if not enabled() or not cuda_enabled():
         return nullcontext()
     return cuda_range(label, metadata)
 
@@ -232,6 +240,7 @@ def snapshot(
 
     return {
         "enabled": enabled(),
+        "cuda_enabled": cuda_enabled(),
         "sync_host": sync_host_enabled(),
         "seq": int(_seq),
         "cuda_sample_count": len(cuda_entries),

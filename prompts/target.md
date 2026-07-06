@@ -46,7 +46,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | Added v0 BF16 E2E smoke and basic correctness gates. |
 | TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | Added TP8 benchmark harness and text smoke; fixed early correctness issues. |
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
-| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline plus active capacity children | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime`; TARGET 08.41 soaks/promotes the SWA independent lifecycle after TARGET 08.31, and TARGET 08.40 productionized the Marlin WNA16 raw-expert release component-clear fix. |
+| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline plus active capacity children | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime`; TARGET 08.42 fixes large-capacity SWA independent serving correctness after TARGET 08.41, and TARGET 08.40 productionized the Marlin WNA16 raw-expert release component-clear fix. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | active research | Low-precision research after TARGET 10: INT8 MoE W8A8 and FP8 KV/cache are the two primary lanes; TARGET 09.5 is deferred until TARGET 08.31 proves real SWA lifecycle/capacity value. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 
@@ -147,6 +147,24 @@ regressed by about `3%` to `9%`.  TARGET 08.41 should run graph-bucket
 `[1,2,4,8,16]` soak, serving/prefix pressure, overhead attribution, and a
 promotion/opt-in decision before reopening TARGET 09.5.
 
+TARGET 08.41 result:
+
+```text
+prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md completed.
+Run prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md next.
+```
+
+Rationale: fixed-128 SWA independent serving/prefix/eviction is clean with
+graph buckets `[1,2,4,8,16]`, but high-capacity Marlin release + SWA
+independent serving crashes with CUDA illegal memory access at auto capacity
+and at explicit `--num-pages 4096`.  The stack surfaces near
+`_swa_page_refcount`, but likely observes an earlier illegal device access in
+large-capacity SWA mapping/page-table/refcount/free-list behavior.  E2E
+overhead was attributed mainly to decode prepare / attention metadata, but
+correctness must be fixed before overhead optimization or TARGET 09.5 FP8 work.
+TARGET 08.42 should investigate no-weight/partial repros first, then confirm
+with full-model smoke/macro.
+
 TARGET 08.32-08.40 CUDA graph / warmup memory follow-up:
 
 ```text
@@ -241,7 +259,7 @@ prompts/archive/target10/
 For new child threads, start from:
 
 1. `prompts/target.md`
-2. the active target prompt, currently TARGET 08.41, TARGET 08.40, or a
+2. the active target prompt, currently TARGET 08.42, TARGET 08.40, or a
    TARGET 09 child
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
    milestone history

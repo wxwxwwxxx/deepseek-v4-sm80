@@ -768,9 +768,17 @@ class DSV4AttentionBackend(BaseAttnBackend):
         cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0), (1, 0))
         component_ownership = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
         swa_independent = bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
-        swa_page_table = (
-            self._make_swa_page_tables(reqs, max_seqlen_k) if swa_independent else None
-        )
+        with dsv4_owner_timing.maybe_cuda_range(
+            "dsv4.metadata.decode.make_swa_page_table",
+            {
+                **timing_base,
+                "max_seqlen_k": int(max_seqlen_k),
+                "enabled": bool(swa_independent),
+            },
+        ):
+            swa_page_table = (
+                self._make_swa_page_tables(reqs, max_seqlen_k) if swa_independent else None
+            )
 
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.metadata.build.table_indices",

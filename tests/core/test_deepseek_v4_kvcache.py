@@ -76,6 +76,7 @@ def _make_dsv4_pool(
     enable_component_loc_ownership: bool = False,
     enable_swa_independent_lifecycle: bool = False,
     max_running_req: int | None = None,
+    dsv4_dummy_token_start: int | None = None,
 ) -> DeepSeekV4KVCache:
     pool = create_kvcache_pool(
         _tiny_dsv4_config(compress_ratios),
@@ -86,6 +87,7 @@ def _make_dsv4_pool(
         enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
         enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
         max_running_req=max_running_req,
+        dsv4_dummy_token_start=dsv4_dummy_token_start,
     )
     assert isinstance(pool, DeepSeekV4KVCache)
     return pool
@@ -775,6 +777,45 @@ def test_dsv4_swa_independent_dummy_full_sentinel_maps_to_swa_dummy_only():
     assert c4_pages is not None and c4_pages.tolist() == [-1]
     assert c128_pages is not None and c128_pages.tolist() == [-1]
     assert indexer_pages is not None and indexer_pages.tolist() == [-1]
+    pool.assert_no_leak()
+
+
+def test_dsv4_swa_independent_engine_dummy_page_maps_to_swa_dummy_only():
+    page_size = 4
+    planned_pages = 7
+    dummy_full_loc = planned_pages * page_size
+    pool = _make_dsv4_pool(
+        [0, 4, 128],
+        num_pages=planned_pages + 1,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=2,
+        dsv4_dummy_token_start=dummy_full_loc,
+    )
+
+    assert pool.num_tokens == (planned_pages + 1) * page_size
+    assert pool.dummy_token_start == dummy_full_loc
+    assert dummy_full_loc != pool.num_tokens
+
+    swa_locs = pool.translate_full_locs_to_swa_locs(
+        torch.tensor([dummy_full_loc], dtype=torch.int32)
+    )
+    dummy_swa_page = pool.runtime_swa_counters()["swa_capacity_pages"] - 1
+    assert swa_locs.tolist() == [dummy_swa_page * page_size]
+
+    swa_pages = pool.swa_pages_from_full_page_starts(
+        torch.tensor([dummy_full_loc], dtype=torch.int32),
+        page_size,
+    )
+    assert swa_pages is not None
+    assert swa_pages.tolist() == [dummy_swa_page]
+
+    pool.swa_cache(0).zero_()
+    kv = torch.ones((1, pool.swa_cache(0).shape[1]), dtype=torch.float32)
+    pool.store_swa(0, kv, torch.tensor([dummy_full_loc], dtype=torch.int32))
+    assert torch.all(pool.swa_cache(0)[dummy_swa_page * page_size] == 1)
+    assert pool.allocation_counts.swa_pages == 0
     pool.assert_no_leak()
 
 

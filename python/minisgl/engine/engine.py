@@ -115,6 +115,7 @@ class Engine:
                 if self._dsv4_swa_independent_enabled(config)
                 else None
             ),
+            dsv4_dummy_token_start=num_tokens,
         )
         self._record_marlin_wna16_owner_allocations("after_kv_alloc")
         self._check_marlin_wna16_release_guards("after_kv_alloc")

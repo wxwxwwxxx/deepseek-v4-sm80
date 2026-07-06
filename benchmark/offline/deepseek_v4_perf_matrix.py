@@ -3348,6 +3348,7 @@ def run_case(
     from minisgl.utils import dsv4_owner_timing
 
     tracer.reset()
+    dsv4_owner_timing.reset()
     reset_communication_stats()
     warmup = None
     repeats = []
@@ -3366,6 +3367,7 @@ def run_case(
         )
         llm.sync_all_ranks()
         graph_status_after_warmup = _snapshot_graph_status(llm)
+        dsv4_owner_timing.reset()
         for repeat_idx in range(scenario.repeats):
             repeat_payload = _run_one_repeat(
                 llm=llm,
@@ -3830,8 +3832,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--memory-ratio must be positive")
     if args.token_id_range <= 0:
         parser.error("--token-id-range must be positive")
-    if args.num_pages is not None and args.num_pages <= 1:
-        parser.error("--num-pages must be greater than 1")
+    if args.num_pages == 0:
+        args.num_pages = None
+    elif args.num_pages is not None and args.num_pages <= 1:
+        parser.error("--num-pages must be greater than 1, or 0 for automatic planning")
     if args.cuda_graph_bs is not None:
         if any(value <= 0 for value in args.cuda_graph_bs):
             parser.error("--cuda-graph-bs values must be positive")
