@@ -110,6 +110,50 @@ def _tensor_nbytes(x: torch.Tensor | None, rows: int | None = None) -> int:
     return int(rows * x[0].numel() * x.element_size())
 
 
+def _metadata_field_group(field: str | None) -> str | None:
+    if field is None:
+        return None
+    if field in {"swa_page_indices", "swa_topk_lengths"}:
+        return "swa"
+    if field in {
+        "c4_sparse_raw_indices",
+        "c4_sparse_page_indices",
+        "c4_sparse_full_indices",
+        "c4_sparse_topk_lengths",
+        "c4_topk_lengths_raw",
+        "c4_topk_lengths_clamp1",
+    }:
+        return "c4"
+    if field in {
+        "c128_raw_indices",
+        "c128_page_indices",
+        "c128_full_indices",
+        "c128_topk_lengths_clamp1",
+    }:
+        return "c128"
+    if field in {
+        "c4_page_table",
+        "c128_page_table",
+        "c4_indexer_page_table",
+        "c4_out_loc",
+        "c128_out_loc",
+        "c4_indexer_out_loc",
+    }:
+        return "component"
+    if field in {
+        "page_table",
+        "req_table_indices",
+        "raw_out_loc",
+        "positions",
+        "seq_lens",
+        "req_seq_lens",
+        "extend_lens",
+        "cu_seqlens_q",
+    }:
+        return "scalar"
+    return "other"
+
+
 def _record_metadata_counter(
     label: str,
     *,
@@ -125,6 +169,9 @@ def _record_metadata_counter(
         metadata["padded_rows"] = int(padded_rows)
     if field is not None:
         metadata["field"] = field
+        group = _metadata_field_group(field)
+        if group is not None:
+            metadata["group"] = group
     if stable is not None:
         metadata["stable"] = stable
     dsv4_owner_timing.record_counter(label, metadata, value=int(value))
@@ -962,21 +1009,29 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 getattr(self.kvcache, "component_loc_ownership_enabled", False)
             ),
         }
-        positions = _to_int32(batch.positions, device)
-        raw_out_loc = _to_int32(batch.out_loc, device)
-        extend_lens_list = [req.extend_len for req in reqs]
-        req_seq_lens_list = [req.device_len for req in reqs]
-        max_seqlen_q = max(extend_lens_list)
-        max_seqlen_k = max(req_seq_lens_list)
+        with dsv4_owner_timing.maybe_host_range(
+            f"dsv4.metadata.{batch.phase}.scalar_source",
+            timing_base,
+        ):
+            positions = _to_int32(batch.positions, device)
+            raw_out_loc = _to_int32(batch.out_loc, device)
+            extend_lens_list = [req.extend_len for req in reqs]
+            req_seq_lens_list = [req.device_len for req in reqs]
+            max_seqlen_q = max(extend_lens_list)
+            max_seqlen_k = max(req_seq_lens_list)
 
-        extend_lens = torch.tensor(extend_lens_list, dtype=torch.int32, device=device)
-        req_seq_lens = torch.tensor(req_seq_lens_list, dtype=torch.int32, device=device)
-        cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0), (1, 0))
-        component_ownership = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
-        swa_independent = bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
-        swa_direct_token_metadata = bool(
-            swa_independent and batch.is_decode and _swa_direct_token_metadata_enabled()
-        )
+            extend_lens = torch.tensor(extend_lens_list, dtype=torch.int32, device=device)
+            req_seq_lens = torch.tensor(req_seq_lens_list, dtype=torch.int32, device=device)
+            cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0), (1, 0))
+            component_ownership = bool(
+                getattr(self.kvcache, "component_loc_ownership_enabled", False)
+            )
+            swa_independent = bool(
+                getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)
+            )
+            swa_direct_token_metadata = bool(
+                swa_independent and batch.is_decode and _swa_direct_token_metadata_enabled()
+            )
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.metadata.build.table_indices",
             {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
@@ -988,9 +1043,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 offset += length
         assert offset == positions.numel()
 
-        seq_lens = positions + 1
-        with dsv4_owner_timing.maybe_cuda_range(
-            "dsv4.metadata.decode.make_swa_page_table",
+        with dsv4_owner_timing.maybe_host_range(
+            f"dsv4.metadata.{batch.phase}.seq_lens",
+            timing_base,
+        ):
+            seq_lens = positions + 1
+        with dsv4_owner_timing.maybe_host_range(
+            f"dsv4.metadata.{batch.phase}.swa_page_table_source",
             {
                 **timing_base,
                 "max_seqlen_k": int(max_seqlen_k),
@@ -1004,39 +1063,58 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 "direct_token_metadata": bool(swa_direct_token_metadata),
             },
         ):
-            swa_page_table = (
-                self._make_swa_page_tables(
-                    reqs,
-                    max_seqlen_k,
-                    table_indices=table_indices,
-                    use_cache=batch.is_decode
-                    and _swa_metadata_page_table_cache_enabled(),
-                    timing_base=timing_base,
-                )
-                if swa_independent and not swa_direct_token_metadata
-                else None
-            )
-
-        with dsv4_owner_timing.maybe_cuda_range(
-            "dsv4.metadata.decode.make_component_page_tables",
-            {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
-        ):
-            if component_ownership and batch.is_decode and dsv4_kernel.dsv4_env_flag(
-                dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE
+            with dsv4_owner_timing.maybe_cuda_range(
+                "dsv4.metadata.decode.make_swa_page_table",
+                {
+                    **timing_base,
+                    "max_seqlen_k": int(max_seqlen_k),
+                    "enabled": bool(swa_independent),
+                    "cache_enabled": bool(
+                        swa_independent
+                        and batch.is_decode
+                        and not swa_direct_token_metadata
+                        and _swa_metadata_page_table_cache_enabled()
+                    ),
+                    "direct_token_metadata": bool(swa_direct_token_metadata),
+                },
             ):
-                component_tables = self._make_component_page_tables_cached(
-                    reqs,
-                    max_seqlen_k,
-                    table_indices,
-                    has_c4=has_c4,
-                    has_c128=has_c128,
-                )
-            else:
-                component_tables = (
-                    self._make_component_page_tables(reqs, max_seqlen_k)
-                    if component_ownership
+                swa_page_table = (
+                    self._make_swa_page_tables(
+                        reqs,
+                        max_seqlen_k,
+                        table_indices=table_indices,
+                        use_cache=batch.is_decode
+                        and _swa_metadata_page_table_cache_enabled(),
+                        timing_base=timing_base,
+                    )
+                    if swa_independent and not swa_direct_token_metadata
                     else None
                 )
+
+        with dsv4_owner_timing.maybe_host_range(
+            f"dsv4.metadata.{batch.phase}.component_page_tables_source",
+            {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
+        ):
+            with dsv4_owner_timing.maybe_cuda_range(
+                "dsv4.metadata.decode.make_component_page_tables",
+                {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
+            ):
+                if component_ownership and batch.is_decode and dsv4_kernel.dsv4_env_flag(
+                    dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE
+                ):
+                    component_tables = self._make_component_page_tables_cached(
+                        reqs,
+                        max_seqlen_k,
+                        table_indices,
+                        has_c4=has_c4,
+                        has_c128=has_c128,
+                    )
+                else:
+                    component_tables = (
+                        self._make_component_page_tables(reqs, max_seqlen_k)
+                        if component_ownership
+                        else None
+                    )
         c4_page_table = None if component_tables is None else component_tables[0]
         c128_page_table = None if component_tables is None else component_tables[1]
         c4_indexer_page_table = None if component_tables is None else component_tables[2]
@@ -1093,41 +1171,72 @@ class DSV4AttentionBackend(BaseAttnBackend):
             c128_page_indices = deforested.c128_page_indices
             c128_full_indices = deforested.c128_full_indices
         else:
-            with dsv4_owner_timing.maybe_cuda_range(
-                "dsv4.metadata.decode.make_page_table",
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.metadata.{batch.phase}.page_table_source",
                 {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
             ):
-                page_table = self._make_page_table(table_indices, max_seqlen_k)
-            swa_source_elided = self._should_elide_index_source_for_graph(
-                batch,
-                component_ownership=component_ownership,
-                enabled=True,
-                group="swa",
-            )
-            if swa_source_elided:
-                swa_page_indices = self._empty_index_source_placeholder(rows)
-            else:
                 with dsv4_owner_timing.maybe_cuda_range(
-                    "dsv4.metadata.decode.make_swa_indices",
-                    {**timing_base, "window_size": int(self.window_size)},
+                    "dsv4.metadata.decode.make_page_table",
+                    {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
                 ):
-                    if swa_direct_token_metadata:
-                        swa_page_indices = self._make_swa_indices_direct_token_metadata(
-                            table_indices,
-                            positions,
-                        )
-                    elif swa_page_table is not None:
-                        swa_page_indices = self._make_swa_indices_from_page_table(
-                            swa_page_table,
-                            positions,
-                        )
-                    else:
-                        swa_page_indices = self._make_swa_indices(table_indices, positions)
-            swa_topk_lengths = torch.clamp(seq_lens, max=self.window_size)
+                    page_table = self._make_page_table(table_indices, max_seqlen_k)
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.metadata.{batch.phase}.swa_indices_source",
+                {
+                    **timing_base,
+                    "window_size": int(self.window_size),
+                    "direct_token_metadata": bool(swa_direct_token_metadata),
+                    "from_swa_page_table": bool(swa_page_table is not None),
+                },
+            ):
+                swa_source_elided = self._should_elide_index_source_for_graph(
+                    batch,
+                    component_ownership=component_ownership,
+                    enabled=True,
+                    group="swa",
+                )
+                if swa_source_elided:
+                    swa_page_indices = self._empty_index_source_placeholder(rows)
+                else:
+                    with dsv4_owner_timing.maybe_cuda_range(
+                        "dsv4.metadata.decode.make_swa_indices",
+                        {**timing_base, "window_size": int(self.window_size)},
+                    ):
+                        if swa_direct_token_metadata:
+                            swa_page_indices = self._make_swa_indices_direct_token_metadata(
+                                table_indices,
+                                positions,
+                            )
+                        elif swa_page_table is not None:
+                            with dsv4_owner_timing.maybe_host_range(
+                                f"dsv4.metadata.{batch.phase}.swa_indices.from_page_table",
+                                {**timing_base, "window_size": int(self.window_size)},
+                            ):
+                                swa_page_indices = self._make_swa_indices_from_page_table(
+                                    swa_page_table,
+                                    positions,
+                                )
+                        else:
+                            with dsv4_owner_timing.maybe_host_range(
+                                f"dsv4.metadata.{batch.phase}.swa_indices.full_page_table_gather",
+                                {**timing_base, "window_size": int(self.window_size)},
+                            ):
+                                swa_page_indices = self._make_swa_indices(
+                                    table_indices, positions
+                                )
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.metadata.{batch.phase}.swa_topk_lengths",
+                {**timing_base, "window_size": int(self.window_size)},
+            ):
+                swa_topk_lengths = torch.clamp(seq_lens, max=self.window_size)
 
-            c4_topk_lengths_raw = torch.div(seq_lens, 4, rounding_mode="floor")
-            c4_topk_lengths_clamp1 = c4_topk_lengths_raw.clamp_min(1)
-            c4_sparse_topk_lengths = c4_topk_lengths_raw.clamp(min=0, max=self.index_topk)
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.metadata.{batch.phase}.c4_lengths_source",
+                {**timing_base, "index_topk": int(self.index_topk)},
+            ):
+                c4_topk_lengths_raw = torch.div(seq_lens, 4, rounding_mode="floor")
+                c4_topk_lengths_clamp1 = c4_topk_lengths_raw.clamp_min(1)
+                c4_sparse_topk_lengths = c4_topk_lengths_raw.clamp(min=0, max=self.index_topk)
             c4_sparse_source_elided = self._should_elide_index_source_for_graph(
                 batch,
                 component_ownership=component_ownership,
@@ -1135,27 +1244,39 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 group="c4",
             )
             if c4_sparse_source_elided:
-                c4_sparse_raw_indices = self._empty_index_source_placeholder(rows)
-                c4_sparse_page_indices = self._empty_index_source_placeholder(rows)
-                c4_sparse_full_indices = self._empty_index_source_placeholder(rows)
-            else:
-                with dsv4_owner_timing.maybe_cuda_range(
-                    "dsv4.metadata.decode.make_c4_sparse_indices",
+                with dsv4_owner_timing.maybe_host_range(
+                    f"dsv4.metadata.{batch.phase}.c4_sparse_placeholder_source",
                     {**timing_base, "index_topk": int(self.index_topk)},
                 ):
-                    (
-                        c4_sparse_raw_indices,
-                        c4_sparse_page_indices,
-                        c4_sparse_full_indices,
-                    ) = self._make_sparse_compressed_indices(
-                        table_indices,
-                        c4_topk_lengths_raw,
-                        4,
-                        component_page_table=c4_page_table,
-                    )
+                    c4_sparse_raw_indices = self._empty_index_source_placeholder(rows)
+                    c4_sparse_page_indices = self._empty_index_source_placeholder(rows)
+                    c4_sparse_full_indices = self._empty_index_source_placeholder(rows)
+            else:
+                with dsv4_owner_timing.maybe_host_range(
+                    f"dsv4.metadata.{batch.phase}.c4_sparse_indices_source",
+                    {**timing_base, "index_topk": int(self.index_topk)},
+                ):
+                    with dsv4_owner_timing.maybe_cuda_range(
+                        "dsv4.metadata.decode.make_c4_sparse_indices",
+                        {**timing_base, "index_topk": int(self.index_topk)},
+                    ):
+                        (
+                            c4_sparse_raw_indices,
+                            c4_sparse_page_indices,
+                            c4_sparse_full_indices,
+                        ) = self._make_sparse_compressed_indices(
+                            table_indices,
+                            c4_topk_lengths_raw,
+                            4,
+                            component_page_table=c4_page_table,
+                        )
 
-            c128_lengths_raw = torch.div(seq_lens, 128, rounding_mode="floor")
-            c128_topk_lengths_clamp1 = c128_lengths_raw.clamp_min(1)
+            with dsv4_owner_timing.maybe_host_range(
+                f"dsv4.metadata.{batch.phase}.c128_lengths_source",
+                {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
+            ):
+                c128_lengths_raw = torch.div(seq_lens, 128, rounding_mode="floor")
+                c128_topk_lengths_clamp1 = c128_lengths_raw.clamp_min(1)
             c128_source_elided = self._should_elide_index_source_for_graph(
                 batch,
                 component_ownership=component_ownership,
@@ -1163,132 +1284,148 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 group="c128",
             )
             if c128_source_elided:
-                c128_raw_indices = self._empty_index_source_placeholder(rows)
-                c128_page_indices = self._empty_index_source_placeholder(rows)
-                c128_full_indices = self._empty_index_source_placeholder(rows)
-            else:
-                with dsv4_owner_timing.maybe_cuda_range(
-                    "dsv4.metadata.decode.make_c128_indices",
+                with dsv4_owner_timing.maybe_host_range(
+                    f"dsv4.metadata.{batch.phase}.c128_placeholder_source",
                     {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
                 ):
-                    c128_raw_indices, c128_page_indices, c128_full_indices = (
-                        self._make_all_compressed_indices(
-                            table_indices,
-                            c128_lengths_raw,
-                            128,
-                            component_page_table=c128_page_table,
+                    c128_raw_indices = self._empty_index_source_placeholder(rows)
+                    c128_page_indices = self._empty_index_source_placeholder(rows)
+                    c128_full_indices = self._empty_index_source_placeholder(rows)
+            else:
+                with dsv4_owner_timing.maybe_host_range(
+                    f"dsv4.metadata.{batch.phase}.c128_indices_source",
+                    {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
+                ):
+                    with dsv4_owner_timing.maybe_cuda_range(
+                        "dsv4.metadata.decode.make_c128_indices",
+                        {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
+                    ):
+                        c128_raw_indices, c128_page_indices, c128_full_indices = (
+                            self._make_all_compressed_indices(
+                                table_indices,
+                                c128_lengths_raw,
+                                128,
+                                component_page_table=c128_page_table,
+                            )
                         )
-                    )
 
-        with dsv4_owner_timing.maybe_cuda_range(
-            "dsv4.metadata.decode.make_write_locs",
+        with dsv4_owner_timing.maybe_host_range(
+            f"dsv4.metadata.{batch.phase}.component_write_locs_source",
             {**timing_base, "component_tables": bool(component_tables is not None)},
         ):
-            if component_ownership and component_tables is not None:
-                c4_out_loc = self._component_write_locs_from_page_table(
-                    c4_page_table,
-                    positions,
-                    4,
-                )
-                c128_out_loc = self._component_write_locs_from_page_table(
-                    c128_page_table,
-                    positions,
-                    128,
-                )
-                c4_indexer_out_loc = self._component_write_locs_from_page_table(
-                    c4_indexer_page_table,
-                    positions,
-                    4,
-                )
-            else:
-                c4_out_loc = self.kvcache.compressed_locs_from_full_locs(
-                    raw_out_loc,
-                    4,
-                    positions,
-                )
-                c128_out_loc = self.kvcache.compressed_locs_from_full_locs(
-                    raw_out_loc,
-                    128,
-                    positions,
-                )
-                c4_indexer_out_loc = self.kvcache.indexer_locs_from_full_locs(
-                    raw_out_loc,
-                    positions,
-                )
-        if c4_out_loc.numel() == 0:
-            c4_out_loc = None
-        if c128_out_loc.numel() == 0:
-            c128_out_loc = None
-        if c4_indexer_out_loc.numel() == 0:
-            c4_indexer_out_loc = None
+            with dsv4_owner_timing.maybe_cuda_range(
+                "dsv4.metadata.decode.make_write_locs",
+                {**timing_base, "component_tables": bool(component_tables is not None)},
+            ):
+                if component_ownership and component_tables is not None:
+                    c4_out_loc = self._component_write_locs_from_page_table(
+                        c4_page_table,
+                        positions,
+                        4,
+                    )
+                    c128_out_loc = self._component_write_locs_from_page_table(
+                        c128_page_table,
+                        positions,
+                        128,
+                    )
+                    c4_indexer_out_loc = self._component_write_locs_from_page_table(
+                        c4_indexer_page_table,
+                        positions,
+                        4,
+                    )
+                else:
+                    c4_out_loc = self.kvcache.compressed_locs_from_full_locs(
+                        raw_out_loc,
+                        4,
+                        positions,
+                    )
+                    c128_out_loc = self.kvcache.compressed_locs_from_full_locs(
+                        raw_out_loc,
+                        128,
+                        positions,
+                    )
+                    c4_indexer_out_loc = self.kvcache.indexer_locs_from_full_locs(
+                        raw_out_loc,
+                        positions,
+                    )
+        with dsv4_owner_timing.maybe_host_range(
+            f"dsv4.metadata.{batch.phase}.object_assembly",
+            timing_base,
+        ):
+            if c4_out_loc.numel() == 0:
+                c4_out_loc = None
+            if c128_out_loc.numel() == 0:
+                c128_out_loc = None
+            if c4_indexer_out_loc.numel() == 0:
+                c4_indexer_out_loc = None
 
-        core = DSV4CoreAttentionMetadata(
-            raw_out_loc=raw_out_loc,
-            page_table=page_table,
-            cu_seqlens_q=cu_seqlens_q,
-            seq_lens=seq_lens,
-            req_seq_lens=req_seq_lens,
-            extend_lens=extend_lens,
-            positions=positions,
-            req_table_indices=table_indices,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            swa_page_indices=swa_page_indices,
-            swa_topk_lengths=swa_topk_lengths,
-            c4_out_loc=c4_out_loc,
-            c128_out_loc=c128_out_loc,
-            c4_indexer_out_loc=c4_indexer_out_loc,
-            c4_topk_lengths_raw=c4_topk_lengths_raw,
-            c4_topk_lengths_clamp1=c4_topk_lengths_clamp1,
-            c4_sparse_topk_lengths=c4_sparse_topk_lengths,
-            c4_sparse_raw_indices=c4_sparse_raw_indices,
-            c4_sparse_page_indices=c4_sparse_page_indices,
-            c4_sparse_full_indices=c4_sparse_full_indices,
-            c128_topk_lengths_clamp1=c128_topk_lengths_clamp1,
-            c128_raw_indices=c128_raw_indices,
-            c128_page_indices=c128_page_indices,
-            c128_full_indices=c128_full_indices,
-            component_loc_ownership=component_ownership,
-            c4_page_table=c4_page_table,
-            c128_page_table=c128_page_table,
-            c4_indexer_page_table=c4_indexer_page_table,
-            swa_source_elided_for_graph=swa_source_elided,
-            c4_sparse_source_elided_for_graph=c4_sparse_source_elided,
-            c128_source_elided_for_graph=c128_source_elided,
-            swa_ownership_version=self._current_swa_ownership_version(),
-        )
-        self._record_metadata_build_bytes(batch, core)
-        self._record_marlin_wna16_metadata_owners(batch, core)
-
-        indexer_metadata = (
-            DSV4IndexerMetadata(
-                page_size=self.page_size,
-                page_table=(
-                    core.c4_indexer_page_table
-                    if component_ownership and core.c4_indexer_page_table is not None
-                    else core.page_table
-                ),
-                c4_seq_lens=core.c4_topk_lengths_raw,
+            core = DSV4CoreAttentionMetadata(
+                raw_out_loc=raw_out_loc,
+                page_table=page_table,
+                cu_seqlens_q=cu_seqlens_q,
+                seq_lens=seq_lens,
+                req_seq_lens=req_seq_lens,
+                extend_lens=extend_lens,
+                positions=positions,
+                req_table_indices=table_indices,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                swa_page_indices=swa_page_indices,
+                swa_topk_lengths=swa_topk_lengths,
+                c4_out_loc=c4_out_loc,
+                c128_out_loc=c128_out_loc,
+                c4_indexer_out_loc=c4_indexer_out_loc,
+                c4_topk_lengths_raw=c4_topk_lengths_raw,
+                c4_topk_lengths_clamp1=c4_topk_lengths_clamp1,
+                c4_sparse_topk_lengths=c4_sparse_topk_lengths,
+                c4_sparse_raw_indices=c4_sparse_raw_indices,
+                c4_sparse_page_indices=c4_sparse_page_indices,
+                c4_sparse_full_indices=c4_sparse_full_indices,
+                c128_topk_lengths_clamp1=c128_topk_lengths_clamp1,
+                c128_raw_indices=c128_raw_indices,
+                c128_page_indices=c128_page_indices,
+                c128_full_indices=c128_full_indices,
+                component_loc_ownership=component_ownership,
+                c4_page_table=c4_page_table,
+                c128_page_table=c128_page_table,
+                c4_indexer_page_table=c4_indexer_page_table,
+                swa_source_elided_for_graph=swa_source_elided,
+                c4_sparse_source_elided_for_graph=c4_sparse_source_elided,
+                c128_source_elided_for_graph=c128_source_elided,
+                swa_ownership_version=self._current_swa_ownership_version(),
             )
-            if has_c4
-            else None
-        )
-        return DSV4AttentionMetadata(
-            core_attn_metadata=core,
-            indexer_metadata=indexer_metadata,
-            c4_compress_metadata=DSV4CompressMetadata(
-                ratio=4,
-                write_loc=core.c4_out_loc,
-                seq_lens=core.seq_lens,
-                positions=core.positions,
-            ),
-            c128_compress_metadata=DSV4CompressMetadata(
-                ratio=128,
-                write_loc=core.c128_out_loc,
-                seq_lens=core.seq_lens,
-                positions=core.positions,
-            ),
-        )
+            self._record_metadata_build_bytes(batch, core)
+            self._record_marlin_wna16_metadata_owners(batch, core)
+
+            indexer_metadata = (
+                DSV4IndexerMetadata(
+                    page_size=self.page_size,
+                    page_table=(
+                        core.c4_indexer_page_table
+                        if component_ownership and core.c4_indexer_page_table is not None
+                        else core.page_table
+                    ),
+                    c4_seq_lens=core.c4_topk_lengths_raw,
+                )
+                if has_c4
+                else None
+            )
+            return DSV4AttentionMetadata(
+                core_attn_metadata=core,
+                indexer_metadata=indexer_metadata,
+                c4_compress_metadata=DSV4CompressMetadata(
+                    ratio=4,
+                    write_loc=core.c4_out_loc,
+                    seq_lens=core.seq_lens,
+                    positions=core.positions,
+                ),
+                c128_compress_metadata=DSV4CompressMetadata(
+                    ratio=128,
+                    write_loc=core.c128_out_loc,
+                    seq_lens=core.seq_lens,
+                    positions=core.positions,
+                ),
+            )
 
     def _make_page_table(self, table_indices: torch.Tensor, max_seq_len: int) -> torch.Tensor:
         ctx_page_table = get_global_ctx().page_table
@@ -1440,22 +1577,31 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
         rows = sum(req.extend_len for req in reqs)
-        self._ensure_component_page_table_cache(
-            table_len,
-            has_c4=has_c4,
-            has_c128=has_c128,
-        )
-        dirty = 0
-        clean = 0
-        for req in reqs:
-            if self._refresh_component_page_table_cache_row(
-                req,
+        timing_metadata = {"phase": "decode", "rows": int(rows), "table_width": int(table_len)}
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.metadata.decode.component_page_table_cache.ensure",
+            timing_metadata,
+        ):
+            self._ensure_component_page_table_cache(
+                table_len,
                 has_c4=has_c4,
                 has_c128=has_c128,
-            ):
-                dirty += 1
-            else:
-                clean += 1
+            )
+        dirty = 0
+        clean = 0
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.metadata.decode.component_page_table_cache.refresh_rows",
+            timing_metadata,
+        ):
+            for req in reqs:
+                if self._refresh_component_page_table_cache_row(
+                    req,
+                    has_c4=has_c4,
+                    has_c128=has_c128,
+                ):
+                    dirty += 1
+                else:
+                    clean += 1
         if dsv4_owner_timing.enabled():
             base = {"phase": "decode", "rows": int(rows), "table_width": int(table_len)}
             dsv4_owner_timing.record_counter(
@@ -1469,7 +1615,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 value=clean,
             )
 
-        row_indices = table_indices.to(device=self.device, dtype=torch.long)
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.metadata.decode.component_page_table_cache.row_indices",
+            timing_metadata,
+        ):
+            row_indices = table_indices.to(device=self.device, dtype=torch.long)
 
         def _select(src: torch.Tensor | None, enabled: bool) -> torch.Tensor | None:
             if not enabled:
@@ -1484,11 +1634,15 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 )
             return src.index_select(0, row_indices)[:, :table_len].contiguous()
 
-        result = (
-            _select(self._component_page_table_cache_c4, has_c4),
-            _select(self._component_page_table_cache_c128, has_c128),
-            _select(self._component_page_table_cache_indexer, has_c4),
-        )
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.metadata.decode.component_page_table_cache.select_rows",
+            timing_metadata,
+        ):
+            result = (
+                _select(self._component_page_table_cache_c4, has_c4),
+                _select(self._component_page_table_cache_c128, has_c128),
+                _select(self._component_page_table_cache_indexer, has_c4),
+            )
 
         if dsv4_kernel.dsv4_env_flag(
             dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE
@@ -1951,8 +2105,23 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 f"{DSV4_SWA_DIRECT_TOKEN_METADATA_ENV}=1 requires "
                 "DeepSeekV4KVCache.translate_full_locs_to_swa_locs."
             )
-        full_locs = self._make_swa_indices(table_indices, positions)
-        return translate(full_locs).to(device=self.device, dtype=torch.int32)
+        rows = int(positions.numel())
+        metadata = {
+            "phase": "decode",
+            "rows": rows,
+            "window_size": int(self.window_size),
+            "direct_token_metadata": True,
+        }
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.metadata.decode.swa_direct.full_loc_source",
+            metadata,
+        ):
+            full_locs = self._make_swa_indices(table_indices, positions)
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.metadata.decode.swa_direct.translate_full_to_swa",
+            metadata,
+        ):
+            return translate(full_locs).to(device=self.device, dtype=torch.int32)
 
     def _make_swa_indices_from_page_table(
         self,

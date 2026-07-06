@@ -1373,34 +1373,72 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         ):
             if indices.numel() == 0:
                 return
-            page_starts = self._valid_page_starts(indices, page_size)
+            base_timing = {
+                "tokens": int(indices.numel()),
+                "page_size": int(page_size),
+                "free_components": bool(free_components),
+                "free_swa": bool(free_swa),
+                "component_loc_ownership": bool(self._component_loc_ownership_enabled),
+                "swa_independent_lifecycle": bool(self._swa_independent_lifecycle_enabled),
+            }
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.kvcache.pages.on_freed.valid_page_starts",
+                base_timing,
+            ):
+                page_starts = self._valid_page_starts(indices, page_size)
             if page_starts.numel() == 0:
                 return
-            full_locs = self._expand_page_starts(page_starts, page_size)
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.kvcache.pages.on_freed.expand_full_locs",
+                {**base_timing, "page_starts": int(page_starts.numel())},
+            ):
+                full_locs = self._expand_page_starts(page_starts, page_size)
             if full_locs.numel() == 0:
                 return
-            self._decrement_refcount(self._full_refcount, full_locs, "full token")
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.kvcache.pages.on_freed.full_refcount",
+                {**base_timing, "full_locs": int(full_locs.numel())},
+            ):
+                self._decrement_refcount(self._full_refcount, full_locs, "full token")
             if self._swa_independent_lifecycle_enabled:
-                self._release_swa_pages_for_full_pages(
-                    page_starts,
-                    page_size,
-                    free_swa=free_swa,
-                )
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.kvcache.pages.on_freed.swa_release",
+                    {**base_timing, "page_starts": int(page_starts.numel())},
+                ):
+                    self._release_swa_pages_for_full_pages(
+                        page_starts,
+                        page_size,
+                        free_swa=free_swa,
+                    )
             if self._component_loc_ownership_enabled:
-                self._release_component_pages_for_full_pages(
-                    page_starts,
-                    page_size,
-                    free_components=free_components,
-                )
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.kvcache.pages.on_freed.component_release",
+                    {**base_timing, "page_starts": int(page_starts.numel())},
+                ):
+                    self._release_component_pages_for_full_pages(
+                        page_starts,
+                        page_size,
+                        free_components=free_components,
+                    )
                 return
             if self._c4_layer_count:
-                c4_locs = torch.unique(full_locs // 4)
-                self._decrement_refcount(self._c4_refcount, c4_locs, "C4")
-                self._decrement_refcount(self._c4_indexer_refcount, c4_locs, "C4 indexer")
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.kvcache.pages.on_freed.c4_refcount",
+                    {**base_timing, "full_locs": int(full_locs.numel())},
+                ):
+                    c4_locs = torch.unique(full_locs // 4)
+                    self._decrement_refcount(self._c4_refcount, c4_locs, "C4")
+                    self._decrement_refcount(
+                        self._c4_indexer_refcount, c4_locs, "C4 indexer"
+                    )
             if self._c128_layer_count:
-                self._decrement_refcount(
-                    self._c128_refcount, torch.unique(full_locs // 128), "C128"
-                )
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.kvcache.pages.on_freed.c128_refcount",
+                    {**base_timing, "full_locs": int(full_locs.numel())},
+                ):
+                    self._decrement_refcount(
+                        self._c128_refcount, torch.unique(full_locs // 128), "C128"
+                    )
 
     def check_allocation_integrity(self, allocated_pages: int, page_size: int) -> None:
         expected_full_slots = allocated_pages * page_size
@@ -1837,20 +1875,36 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 return
             if not self._swa_independent_lifecycle_enabled:
                 return
-            pages = handles.swa_pages.to(device=self.device, dtype=torch.long)
-            pages = pages[(pages >= 0) & (pages != self._swa_dummy_page)]
-            if pages.numel() == 0:
-                return
-            pages = torch.unique(pages)
-            self._decrement_refcount(self._swa_page_refcount, pages, "SWA page")
-            self._bump_swa_ownership_version()
-            freed = pages[self._swa_page_refcount[pages] == 0].to(torch.int32)
-            if freed.numel() > 0:
-                self._clear_full_to_swa_mappings_for_swa_pages(freed)
-                self._free_swa_pages = torch.cat([self._free_swa_pages, freed])
-                self._swa_pages_freed_total += int(freed.numel())
-            if tombstone:
-                self._swa_pages_tombstoned_total += int(pages.numel())
+            base_timing = {
+                "tombstone": bool(tombstone),
+                "handle_length": int(handles.length),
+            }
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.kvcache.swa.release_handles.normalize_unique",
+                base_timing,
+            ):
+                pages = handles.swa_pages.to(device=self.device, dtype=torch.long)
+                pages = pages[(pages >= 0) & (pages != self._swa_dummy_page)]
+                if pages.numel() == 0:
+                    return
+                pages = torch.unique(pages)
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.kvcache.swa.release_handles.refcount_decrement",
+                {**base_timing, "pages": int(pages.numel())},
+            ):
+                self._decrement_refcount(self._swa_page_refcount, pages, "SWA page")
+                self._bump_swa_ownership_version()
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.kvcache.swa.release_handles.free_list_update",
+                {**base_timing, "pages": int(pages.numel())},
+            ):
+                freed = pages[self._swa_page_refcount[pages] == 0].to(torch.int32)
+                if freed.numel() > 0:
+                    self._clear_full_to_swa_mappings_for_swa_pages(freed)
+                    self._free_swa_pages = torch.cat([self._free_swa_pages, freed])
+                    self._swa_pages_freed_total += int(freed.numel())
+                if tombstone:
+                    self._swa_pages_tombstoned_total += int(pages.numel())
 
     def release_swa_for_full_indices(
         self,
@@ -2163,27 +2217,45 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 "tombstone": bool(tombstone),
             },
         ):
-            page_starts = page_starts.to(device=self.device, dtype=torch.long)
-            if page_starts.numel() == 0:
-                return
-            full_pages = page_starts.div(page_size, rounding_mode="floor")
-            if torch.any(full_pages < 0) or torch.any(full_pages >= self._num_pages):
-                raise RuntimeError("DSV4 SWA free received out-of-range full pages")
-            swa_pages = self._full_to_swa_page[full_pages].clone()
+            base_timing = {
+                "page_starts": int(page_starts.numel()),
+                "page_size": int(page_size),
+                "free_swa": bool(free_swa),
+                "tombstone": bool(tombstone),
+            }
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.kvcache.swa.release_full_pages.lookup_mapping",
+                base_timing,
+            ):
+                page_starts = page_starts.to(device=self.device, dtype=torch.long)
+                if page_starts.numel() == 0:
+                    return
+                full_pages = page_starts.div(page_size, rounding_mode="floor")
+                if torch.any(full_pages < 0) or torch.any(full_pages >= self._num_pages):
+                    raise RuntimeError("DSV4 SWA free received out-of-range full pages")
+                swa_pages = self._full_to_swa_page[full_pages].clone()
             if free_swa:
-                self.release_swa_page_handles(
-                    DSV4SWAPageHandles(
-                        length=int(full_pages.numel()) * page_size,
-                        page_size=page_size,
-                        swa_pages=swa_pages,
-                    ),
-                    tombstone=tombstone,
-                )
-            if torch.any(self._full_to_swa_page[full_pages] >= 0):
-                self._full_to_swa_page[full_pages] = -1
-                self._bump_swa_ownership_version()
-            else:
-                self._full_to_swa_page[full_pages] = -1
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.kvcache.swa.release_full_pages.release_handles",
+                    {**base_timing, "full_pages": int(full_pages.numel())},
+                ):
+                    self.release_swa_page_handles(
+                        DSV4SWAPageHandles(
+                            length=int(full_pages.numel()) * page_size,
+                            page_size=page_size,
+                            swa_pages=swa_pages,
+                        ),
+                        tombstone=tombstone,
+                    )
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.kvcache.swa.release_full_pages.clear_mapping",
+                {**base_timing, "full_pages": int(full_pages.numel())},
+            ):
+                if torch.any(self._full_to_swa_page[full_pages] >= 0):
+                    self._full_to_swa_page[full_pages] = -1
+                    self._bump_swa_ownership_version()
+                else:
+                    self._full_to_swa_page[full_pages] = -1
 
     def _clear_full_to_swa_mappings_for_swa_pages(self, swa_pages: torch.Tensor) -> None:
         if swa_pages.numel() == 0:

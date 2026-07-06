@@ -18,6 +18,7 @@ prompts/TARGET_08.48_dsv4_sm80_marlin_swa_auto_cross_case_lifecycle_fix.md
 prompts/TARGET_08.49_dsv4_sm80_swa_metadata_page_table_perf_parity.md
 prompts/TARGET_08.50_dsv4_sm80_swa_direct_token_metadata_parity.md
 prompts/TARGET_08.51_dsv4_sm80_prefix_decode_metadata_graph_copy_attribution.md
+prompts/TARGET_08.52_dsv4_sm80_swa_independent_decode_forward_graph_replay_parity.md
 prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
 prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
@@ -112,6 +113,15 @@ over 08.49 was small: fixed128 serving improved only `+0.28%`, prefix_multi
 `1381.333 ms` to `1308.225 ms`.  The remaining gap now appears to live in the
 wider decode metadata / graph-copy / prefix-scheduler surface.  TARGET 08.51
 should perform an attribution reset before any further implementation work.
+
+TARGET 08.51 result: graph metadata/copy bytes are not the dominant remaining
+owner.  Route B, 08.49 cache, and 08.50 direct have identical graph staging and
+replay-copy byte ledgers in the comparable owner runs.  The remaining gap is
+split by workload: serving and historical are dominated by captured
+`decode_forward_s`, while prefix/eviction pressure is dominated by
+scheduler/free/release bookkeeping.  TARGET 08.52 should therefore investigate
+captured decode forward graph replay parity first, using safe replay-level
+timing and operator microbench workloads before any macro-scale fix.
 
 TARGET 08.32 is about CUDA graph private-pool memory attribution.  It should
 avoid full model weight loading at first and instead use synthetic/partial
@@ -257,6 +267,12 @@ TARGET 08.50 completed that structural step, but the performance gain over
 construction as the active owner and instead split the remaining
 decode-metadata, graph-copy, C4/C128/indexer, component, and prefix-scheduler
 owners.
+
+TARGET 08.51 found that graph-copy bytes and Python metadata construction do
+not explain the decode-heavy gap.  TARGET 08.52 should move into captured
+decode forward replay parity and, when the kernel owner is identified,
+construct operator microbench workloads for fast iteration before rerunning the
+full macro matrix.
 
 ## Historical Evolution
 
@@ -413,7 +429,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.51 or a TARGET 09 child
+3. the active future target prompt, currently TARGET 08.52 or a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
 
@@ -425,8 +441,8 @@ The archive contains implementation history, not active todos.
 
 Status: correctness-clean but opt-in after TARGET 08.43 post-08.48 rerun;
 TARGET 08.49 landed an opt-in metadata cache, and active performance follow-up
-is TARGET 08.51 after TARGET 08.50 showed direct SWA token metadata is only a
-small incremental win.
+is TARGET 08.52 after TARGET 08.51 found the remaining decode-heavy gap is in
+captured decode forward replay, not SWA metadata copy.
 
 Current state: SWA KV now has an independent lifecycle and can tombstone/free
 out-of-window tail pages without invalidating C4/C128/indexer/compression-state
@@ -436,9 +452,9 @@ capacity.  It remains opt-in because decode attention metadata / SWA page-table
 overhead is too high for default promotion.
 
 TARGET 09.5 low-precision SWA/cache work should stay deferred until TARGET
-08.51 identifies the remaining owner and records whether SWA independent can
-be promoted after one more metadata/scheduler fix or must remain a
-capacity-only opt-in path.
+08.52 explains whether captured decode forward can reach parity.  Prefix/
+eviction scheduler release/free batching remains a likely separate target if
+decode-forward parity does not explain those workloads.
 
 TARGET 08.31 result: opt-in SWA independent lifecycle was implemented and
 validated against SGLang's allocator/component model.  SWA KV now has separate

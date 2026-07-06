@@ -184,18 +184,33 @@ class CacheManager:
                 "swa_independent_lifecycle": bool(self.dsv4_swa_independent_lifecycle),
             },
         ):
-            insert_ids = req.input_ids[: req.cached_len]
-            page_indices = self.page_table[req.table_idx, : req.cached_len]
-            old_handle = req.cache_handle
+            base_timing = {
+                "finished": bool(finished),
+                "cached_len": int(req.cached_len),
+                "page_size": int(self.page_size),
+                "component_loc_ownership": bool(self.dsv4_component_ownership),
+                "swa_independent_lifecycle": bool(self.dsv4_swa_independent_lifecycle),
+            }
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.scheduler.prefix.cache_req.slice_inputs",
+                base_timing,
+            ):
+                insert_ids = req.input_ids[: req.cached_len]
+                page_indices = self.page_table[req.table_idx, : req.cached_len]
+                old_handle = req.cache_handle
             if self.dsv4_component_ownership:
                 def make_new_component_pages(
                     start: int,
                     end: int,
                 ):
-                    return self.kv_cache.make_component_page_handles(
-                        page_indices[start:end],
-                        self.page_size,
-                    )
+                    with dsv4_owner_timing.maybe_host_range(
+                        "dsv4.scheduler.prefix.cache_req.component_handle_collection",
+                        {**base_timing, "start": int(start), "end": int(end)},
+                    ):
+                        return self.kv_cache.make_component_page_handles(
+                            page_indices[start:end],
+                            self.page_size,
+                        )
 
                 def make_new_swa_pages(
                     start: int,
@@ -203,58 +218,117 @@ class CacheManager:
                 ):
                     if not self.dsv4_swa_independent_lifecycle:
                         return None
-                    handles = self.kv_cache.make_swa_page_handles(
-                        page_indices[start:end],
-                        self.page_size,
-                    )
-                    evicted_until = align_down(
-                        max(int(getattr(req, "swa_evicted_seqlen", 0)), 0),
-                        self.page_size,
-                    )
-                    tombstone_end = align_down(
-                        max(min(int(end), evicted_until) - int(start), 0),
-                        self.page_size,
-                    )
-                    if handles is not None and tombstone_end > 0:
-                        handles, released = handles.tombstone_tokens(0, tombstone_end)
-                        if released.live_pages > 0:
-                            raise RuntimeError(
-                                "DSV4 SWA cache boundary found live pages below "
-                                "request eviction frontier: "
-                                f"uid={getattr(req, 'uid', None)}, start={start}, "
-                                f"end={end}, frontier={evicted_until}, "
-                                f"live_pages={released.live_pages}"
-                            )
+                    with dsv4_owner_timing.maybe_host_range(
+                        "dsv4.scheduler.prefix.cache_req.swa_handle_collection",
+                        {**base_timing, "start": int(start), "end": int(end)},
+                    ):
+                        handles = self.kv_cache.make_swa_page_handles(
+                            page_indices[start:end],
+                            self.page_size,
+                        )
+                    with dsv4_owner_timing.maybe_host_range(
+                        "dsv4.scheduler.prefix.cache_req.swa_tombstone_frontier",
+                        {**base_timing, "start": int(start), "end": int(end)},
+                    ):
+                        evicted_until = align_down(
+                            max(int(getattr(req, "swa_evicted_seqlen", 0)), 0),
+                            self.page_size,
+                        )
+                        tombstone_end = align_down(
+                            max(min(int(end), evicted_until) - int(start), 0),
+                            self.page_size,
+                        )
+                        if handles is not None and tombstone_end > 0:
+                            handles, released = handles.tombstone_tokens(0, tombstone_end)
+                            if released.live_pages > 0:
+                                raise RuntimeError(
+                                    "DSV4 SWA cache boundary found live pages below "
+                                    "request eviction frontier: "
+                                    f"uid={getattr(req, 'uid', None)}, start={start}, "
+                                    f"end={end}, frontier={evicted_until}, "
+                                    f"live_pages={released.live_pages}"
+                                )
                     return handles
 
-                cached_len, new_handle = self.prefix_cache.insert_prefix(
-                    insert_ids,
-                    page_indices,
-                    dsv4_component_pages_builder=make_new_component_pages,
-                    dsv4_swa_pages_builder=make_new_swa_pages,
-                )
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.scheduler.prefix.cache_req.radix_insert",
+                    base_timing,
+                ):
+                    cached_len, new_handle = self.prefix_cache.insert_prefix(
+                        insert_ids,
+                        page_indices,
+                        dsv4_component_pages_builder=make_new_component_pages,
+                        dsv4_swa_pages_builder=make_new_swa_pages,
+                    )
             else:
-                cached_len, new_handle = self.prefix_cache.insert_prefix(insert_ids, page_indices)
-            self.metrics.inserted_tokens += max(0, new_handle.cached_len - cached_len)
-            already_cached_indices = page_indices[old_handle.cached_len : cached_len].clone()
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.scheduler.prefix.cache_req.radix_insert",
+                    base_timing,
+                ):
+                    cached_len, new_handle = self.prefix_cache.insert_prefix(
+                        insert_ids, page_indices
+                    )
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.scheduler.prefix.cache_req.post_insert_bookkeeping",
+                {**base_timing, "new_cached_len": int(new_handle.cached_len)},
+            ):
+                self.metrics.inserted_tokens += max(0, new_handle.cached_len - cached_len)
+                already_cached_indices = page_indices[old_handle.cached_len : cached_len].clone()
             if self.dsv4_component_ownership and cached_len > old_handle.cached_len:
-                matched_indices = new_handle.get_matched_indices()
-                page_indices[old_handle.cached_len : cached_len].copy_(
-                    matched_indices[old_handle.cached_len : cached_len]
-                )
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.scheduler.prefix.cache_req.refresh_already_cached_pages",
+                    {
+                        **base_timing,
+                        "old_cached_len": int(old_handle.cached_len),
+                        "matched_cached_len": int(cached_len),
+                    },
+                ):
+                    matched_indices = new_handle.get_matched_indices()
+                    page_indices[old_handle.cached_len : cached_len].copy_(
+                        matched_indices[old_handle.cached_len : cached_len]
+                    )
             # unlock until all operations on handle is done
-            self.unlock(old_handle)
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.scheduler.prefix.cache_req.unlock_old_handle",
+                {**base_timing, "old_cached_len": int(old_handle.cached_len)},
+            ):
+                self.unlock(old_handle)
             # this part is already in the prefix cache, free it
-            self._free(already_cached_indices)
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.scheduler.prefix.cache_req.free_already_cached",
+                {**base_timing, "tokens": int(already_cached_indices.numel())},
+            ):
+                self._free(already_cached_indices)
             if finished:  # this tail part should be freed
-                self._free(page_indices[new_handle.cached_len :])
+                tail_indices = page_indices[new_handle.cached_len :]
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.scheduler.prefix.cache_req.free_finished_tail",
+                    {**base_timing, "tokens": int(tail_indices.numel())},
+                ):
+                    self._free(tail_indices)
             else:  # keep the tail part, update the handle
-                req.cache_handle = new_handle
-                self.lock(new_handle)
-            self._release_dsv4_swa_out_of_window(new_handle)
-            self._release_dsv4_component_owned_full_head(new_handle)
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.scheduler.prefix.cache_req.lock_new_handle",
+                    {**base_timing, "new_cached_len": int(new_handle.cached_len)},
+                ):
+                    req.cache_handle = new_handle
+                    self.lock(new_handle)
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.scheduler.prefix.cache_req.release_swa_out_of_window",
+                {**base_timing, "new_cached_len": int(new_handle.cached_len)},
+            ):
+                self._release_dsv4_swa_out_of_window(new_handle)
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.scheduler.prefix.cache_req.release_component_full_head",
+                {**base_timing, "new_cached_len": int(new_handle.cached_len)},
+            ):
+                self._release_dsv4_component_owned_full_head(new_handle)
             if self.dsv4_component_ownership and not finished and new_handle.cached_len > 0:
-                page_indices[: new_handle.cached_len].copy_(new_handle.get_matched_indices())
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.scheduler.prefix.cache_req.refresh_matched_prefix_pages",
+                    {**base_timing, "new_cached_len": int(new_handle.cached_len)},
+                ):
+                    page_indices[: new_handle.cached_len].copy_(new_handle.get_matched_indices())
             self._debug_sync_integrity(
                 "cache_req",
                 req=req,

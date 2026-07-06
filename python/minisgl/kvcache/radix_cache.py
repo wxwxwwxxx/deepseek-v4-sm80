@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Tuple, TypeAlias
 import torch
 from minisgl.core import get_global_ctx
 from minisgl.kvcache.deepseek_v4_pool import DSV4ComponentPageHandles, DSV4SWAPageHandles
-from minisgl.utils import align_down
+from minisgl.utils import align_down, dsv4_owner_timing
 
 from .base import BaseCacheHandle, BasePrefixCache, InsertResult, MatchResult, SizeInfo
 
@@ -88,43 +88,47 @@ class RadixTreeNode:
         return fast_compare_key(self._key, input_ids)
 
     def split_at(self, pos: int) -> RadixTreeNode:
-        assert 0 < pos < self.length
-        parent = self.parent
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.radix.split_at",
+            {"pos": int(pos), "node_length": int(self.length)},
+        ):
+            assert 0 < pos < self.length
+            parent = self.parent
 
-        new_node = RadixTreeNode(self.key_fn, self.timestamp)
-        parent_components = (
-            None
-            if self._dsv4_component_pages is None
-            else self._dsv4_component_pages.slice_tokens(0, pos)
-        )
-        child_components = (
-            None
-            if self._dsv4_component_pages is None
-            else self._dsv4_component_pages.slice_tokens(pos, self.length)
-        )
-        parent_swa = (
-            None
-            if self._dsv4_swa_pages is None
-            else self._dsv4_swa_pages.slice_tokens(0, pos)
-        )
-        child_swa = (
-            None
-            if self._dsv4_swa_pages is None
-            else self._dsv4_swa_pages.slice_tokens(pos, self.length)
-        )
-        new_node.set_key_value(
-            self._key[:pos],
-            self._value[:pos],
-            parent_components,
-            parent_swa,
-        )
-        new_node.set_parent(parent)
-        new_node.ref_count = self.ref_count
+            new_node = RadixTreeNode(self.key_fn, self.timestamp)
+            parent_components = (
+                None
+                if self._dsv4_component_pages is None
+                else self._dsv4_component_pages.slice_tokens(0, pos)
+            )
+            child_components = (
+                None
+                if self._dsv4_component_pages is None
+                else self._dsv4_component_pages.slice_tokens(pos, self.length)
+            )
+            parent_swa = (
+                None
+                if self._dsv4_swa_pages is None
+                else self._dsv4_swa_pages.slice_tokens(0, pos)
+            )
+            child_swa = (
+                None
+                if self._dsv4_swa_pages is None
+                else self._dsv4_swa_pages.slice_tokens(pos, self.length)
+            )
+            new_node.set_key_value(
+                self._key[:pos],
+                self._value[:pos],
+                parent_components,
+                parent_swa,
+            )
+            new_node.set_parent(parent)
+            new_node.ref_count = self.ref_count
 
-        self.set_key_value(self._key[pos:], self._value[pos:], child_components, child_swa)
-        self.set_parent(new_node)
+            self.set_key_value(self._key[pos:], self._value[pos:], child_components, child_swa)
+            self.set_parent(new_node)
 
-        return new_node
+            return new_node
 
     def __lt__(self, other: RadixTreeNode) -> bool:
         return self.timestamp < other.timestamp
@@ -184,28 +188,36 @@ class RadixPrefixCache(BasePrefixCache):
 
     def lock_handle(self, handle: BaseCacheHandle, unlock: bool = False) -> None:
         assert isinstance(handle, RadixCacheHandle)
-        node = handle.node
-        if unlock:
-            while not node.is_root():
-                node.ref_count -= 1
-                assert node.ref_count >= 0
-                if node.ref_count == 0:
-                    self.evictable_size += node.length
-                    self.protected_size -= node.length
-                node = node.parent
-        else:
-            while not node.is_root():
-                if node.ref_count == 0:
-                    self.evictable_size -= node.length
-                    self.protected_size += node.length
-                node.ref_count += 1
-                node = node.parent
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.radix.lock_handle",
+            {"unlock": bool(unlock), "cached_len": int(handle.cached_len)},
+        ):
+            node = handle.node
+            if unlock:
+                while not node.is_root():
+                    node.ref_count -= 1
+                    assert node.ref_count >= 0
+                    if node.ref_count == 0:
+                        self.evictable_size += node.length
+                        self.protected_size -= node.length
+                    node = node.parent
+            else:
+                while not node.is_root():
+                    if node.ref_count == 0:
+                        self.evictable_size -= node.length
+                        self.protected_size += node.length
+                    node.ref_count += 1
+                    node = node.parent
 
     def match_prefix(self, input_ids: torch.Tensor) -> MatchResult:
-        node, prefix_len = self._tree_walk(input_ids)
-        if self.dsv4_component_ownership_enabled:
-            node, prefix_len = self._dsv4_safe_match_boundary(node, prefix_len)
-        return MatchResult(RadixCacheHandle(prefix_len, node))
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.radix.match_prefix",
+            {"tokens": int(len(input_ids)), "page_size": int(self.page_size)},
+        ):
+            node, prefix_len = self._tree_walk(input_ids)
+            if self.dsv4_component_ownership_enabled:
+                node, prefix_len = self._dsv4_safe_match_boundary(node, prefix_len)
+            return MatchResult(RadixCacheHandle(prefix_len, node))
 
     def insert_prefix(
         self,
@@ -220,61 +232,73 @@ class RadixPrefixCache(BasePrefixCache):
         dsv4_swa_pages_builder: Callable[[int, int], DSV4SWAPageHandles | None]
         | None = None,
     ) -> InsertResult:
-        if dsv4_component_pages is not None and dsv4_component_pages_builder is not None:
-            raise ValueError(
-                "Pass either dsv4_component_pages or dsv4_component_pages_builder, not both"
-            )
-        if dsv4_swa_pages is not None and dsv4_swa_pages_builder is not None:
-            raise ValueError("Pass either dsv4_swa_pages or dsv4_swa_pages_builder, not both")
-        insert_len = align_down(len(input_ids), self.page_size)
-        input_ids, indices = input_ids[:insert_len], indices[:insert_len]
-        if dsv4_component_pages is not None:
-            dsv4_component_pages = dsv4_component_pages.slice_tokens(0, insert_len)
-        if dsv4_swa_pages is not None:
-            dsv4_swa_pages = dsv4_swa_pages.slice_tokens(0, insert_len)
-        node, prefix_len = self._tree_walk(input_ids)
-        if prefix_len != insert_len:  # NOTE: prefix_len < insert_len
-            new_node = RadixTreeNode(self.key_fn)
-            if dsv4_component_pages_builder is not None:
-                new_components = dsv4_component_pages_builder(prefix_len, insert_len)
-                if (
-                    new_components is not None
-                    and new_components.length != insert_len - prefix_len
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.radix.insert_prefix",
+            {"tokens": int(len(input_ids)), "page_size": int(self.page_size)},
+        ):
+            if dsv4_component_pages is not None and dsv4_component_pages_builder is not None:
+                raise ValueError(
+                    "Pass either dsv4_component_pages or dsv4_component_pages_builder, not both"
+                )
+            if dsv4_swa_pages is not None and dsv4_swa_pages_builder is not None:
+                raise ValueError("Pass either dsv4_swa_pages or dsv4_swa_pages_builder, not both")
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.radix.insert_prefix.align_and_slice",
+                {"tokens": int(len(input_ids)), "page_size": int(self.page_size)},
+            ):
+                insert_len = align_down(len(input_ids), self.page_size)
+                input_ids, indices = input_ids[:insert_len], indices[:insert_len]
+                if dsv4_component_pages is not None:
+                    dsv4_component_pages = dsv4_component_pages.slice_tokens(0, insert_len)
+                if dsv4_swa_pages is not None:
+                    dsv4_swa_pages = dsv4_swa_pages.slice_tokens(0, insert_len)
+            node, prefix_len = self._tree_walk(input_ids)
+            if prefix_len != insert_len:  # NOTE: prefix_len < insert_len
+                with dsv4_owner_timing.maybe_host_range(
+                    "dsv4.radix.insert_prefix.create_node",
+                    {"prefix_len": int(prefix_len), "insert_len": int(insert_len)},
                 ):
-                    raise ValueError(
-                        "Radix DSV4 component builder returned length mismatch: "
-                        f"new_segment={insert_len - prefix_len}, "
-                        f"components={new_components.length}"
+                    new_node = RadixTreeNode(self.key_fn)
+                    if dsv4_component_pages_builder is not None:
+                        new_components = dsv4_component_pages_builder(prefix_len, insert_len)
+                        if (
+                            new_components is not None
+                            and new_components.length != insert_len - prefix_len
+                        ):
+                            raise ValueError(
+                                "Radix DSV4 component builder returned length mismatch: "
+                                f"new_segment={insert_len - prefix_len}, "
+                                f"components={new_components.length}"
+                            )
+                    else:
+                        new_components = (
+                            None
+                            if dsv4_component_pages is None
+                            else dsv4_component_pages.slice_tokens(prefix_len, insert_len)
+                        )
+                    if dsv4_swa_pages_builder is not None:
+                        new_swa = dsv4_swa_pages_builder(prefix_len, insert_len)
+                        if new_swa is not None and new_swa.length != insert_len - prefix_len:
+                            raise ValueError(
+                                "Radix DSV4 SWA builder returned length mismatch: "
+                                f"new_segment={insert_len - prefix_len}, swa={new_swa.length}"
+                            )
+                    else:
+                        new_swa = (
+                            None
+                            if dsv4_swa_pages is None
+                            else dsv4_swa_pages.slice_tokens(prefix_len, insert_len)
+                        )
+                    new_node.set_key_value(
+                        input_ids[prefix_len:],
+                        indices[prefix_len:].clone(),
+                        new_components,
+                        new_swa,
                     )
-            else:
-                new_components = (
-                    None
-                    if dsv4_component_pages is None
-                    else dsv4_component_pages.slice_tokens(prefix_len, insert_len)
-                )
-            if dsv4_swa_pages_builder is not None:
-                new_swa = dsv4_swa_pages_builder(prefix_len, insert_len)
-                if new_swa is not None and new_swa.length != insert_len - prefix_len:
-                    raise ValueError(
-                        "Radix DSV4 SWA builder returned length mismatch: "
-                        f"new_segment={insert_len - prefix_len}, swa={new_swa.length}"
-                    )
-            else:
-                new_swa = (
-                    None
-                    if dsv4_swa_pages is None
-                    else dsv4_swa_pages.slice_tokens(prefix_len, insert_len)
-                )
-            new_node.set_key_value(
-                input_ids[prefix_len:],
-                indices[prefix_len:].clone(),
-                new_components,
-                new_swa,
-            )
-            new_node.set_parent(node)
-            self.evictable_size += new_node.length
-            node = new_node
-        return InsertResult(prefix_len, RadixCacheHandle(insert_len, node))
+                    new_node.set_parent(node)
+                    self.evictable_size += new_node.length
+                    node = new_node
+            return InsertResult(prefix_len, RadixCacheHandle(insert_len, node))
 
     def evict(self, size: int) -> torch.Tensor:
         if size == 0:
@@ -617,32 +641,36 @@ class RadixPrefixCache(BasePrefixCache):
         return bool(torch.all(tail >= 0).item())
 
     def _tree_walk(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int]:
-        prefix_len = 0
-        indice_len = len(input_ids)
-        node = self.root_node
-        tic = time.monotonic_ns()
+        with dsv4_owner_timing.maybe_host_range(
+            "dsv4.radix.tree_walk",
+            {"tokens": int(len(input_ids)), "page_size": int(self.page_size)},
+        ):
+            prefix_len = 0
+            indice_len = len(input_ids)
+            node = self.root_node
+            tic = time.monotonic_ns()
 
-        while prefix_len < indice_len:
-            child_node = node.children.get(self.key_fn(input_ids[prefix_len:]))
-            if child_node is None:
-                return node, prefix_len
-            node = child_node  # walk to child node
+            while prefix_len < indice_len:
+                child_node = node.children.get(self.key_fn(input_ids[prefix_len:]))
+                if child_node is None:
+                    return node, prefix_len
+                node = child_node  # walk to child node
 
-            # NOTE: at least 1 page is matched, so match_len >= page_size
-            match_len = node.get_match_len(input_ids[prefix_len:])
-            match_len = align_down(match_len, self.page_size)
-            prefix_len += match_len
+                # NOTE: at least 1 page is matched, so match_len >= page_size
+                match_len = node.get_match_len(input_ids[prefix_len:])
+                match_len = align_down(match_len, self.page_size)
+                prefix_len += match_len
 
-            # need to split the node if not fully matched
-            if match_len != node.length:
-                node = node.split_at(match_len)
+                # need to split the node if not fully matched
+                if match_len != node.length:
+                    node = node.split_at(match_len)
+                    node.timestamp = tic
+                    return node, prefix_len
+
+                # update timestamp for accessed node
                 node.timestamp = tic
-                return node, prefix_len
 
-            # update timestamp for accessed node
-            node.timestamp = tic
-
-        return node, prefix_len
+            return node, prefix_len
 
 
 def _get_key_fn(page_size: int) -> KEY_FN:

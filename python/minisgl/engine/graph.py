@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Dict, List
 import torch
 from minisgl.core import Batch, Req, get_global_ctx
 from minisgl.distributed import get_tp_info
-from minisgl.utils import dsv4_direct_copy_nvtx, dsv4_memory_debug, init_logger
+from minisgl.utils import dsv4_direct_copy_nvtx, dsv4_memory_debug, dsv4_owner_timing, init_logger
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -761,12 +761,37 @@ class GraphRunner:
             positions=batch.positions,
         ):
             copied_bytes = self.buffer.copy_from(batch)
+        if dsv4_owner_timing.enabled():
+            metadata = {
+                "phase": "decode",
+                "rows": int(batch.size),
+                "padded_rows": int(batch.padded_size),
+                "field": "graph_input_staging",
+                "group": "graph_input",
+            }
+            dsv4_owner_timing.record_counter(
+                "dsv4.graph_replay.input_copy.bytes",
+                metadata,
+                value=int(copied_bytes),
+            )
+            dsv4_owner_timing.record_counter(
+                "dsv4.graph_replay.input_copy.calls",
+                metadata,
+            )
         self._debug_sync_replay("after_input_staging", batch)
         g = self.graph_map[batch.padded_size]
         with dsv4_direct_copy_nvtx(
             f"replay_metadata_copy.prepare_for_replay.bs{batch.size}.padded{batch.padded_size}"
         ):
-            self.attn_backend.prepare_for_replay(batch)
+            with dsv4_owner_timing.maybe_host_range(
+                "dsv4.graph_replay.prepare_for_replay",
+                {
+                    "phase": "decode",
+                    "rows": int(batch.size),
+                    "padded_rows": int(batch.padded_size),
+                },
+            ):
+                self.attn_backend.prepare_for_replay(batch)
         self._debug_sync_replay("after_prepare_for_replay", batch)
         replay_context = self._debug_replay_context(batch)
         with dsv4_direct_copy_nvtx(
