@@ -46,7 +46,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | Added v0 BF16 E2E smoke and basic correctness gates. |
 | TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | Added TP8 benchmark harness and text smoke; fixed early correctness issues. |
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
-| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline plus active capacity children | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime`; TARGET 08.42 fixes large-capacity SWA independent serving correctness after TARGET 08.41, and TARGET 08.40 productionized the Marlin WNA16 raw-expert release component-clear fix. |
+| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed baseline plus active capacity children | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime`; SWA independent lifecycle is now on a contract-first reset: run TARGET 08.45, then 08.46 audit, then 08.47 unified fix. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | active research | Low-precision research after TARGET 10: INT8 MoE W8A8 and FP8 KV/cache are the two primary lanes; TARGET 09.5 is deferred until TARGET 08.31 proves real SWA lifecycle/capacity value. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 
@@ -165,6 +165,65 @@ correctness must be fixed before overhead optimization or TARGET 09.5 FP8 work.
 TARGET 08.42 should investigate no-weight/partial repros first, then confirm
 with full-model smoke/macro.
 
+TARGET 08.42 result:
+
+```text
+prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md completed.
+Run prompts/TARGET_08.43_dsv4_sm80_swa_independent_post_fix_promotion_soak.md next.
+```
+
+Rationale: the large-capacity Marlin release + SWA independent crash was caused
+by an Engine/KV-cache dummy full-page token contract mismatch.  Engine planned
+`num_tokens = planned_pages * page_size`, allocated `planned_pages + 1` pages
+for the dummy request row, and used `num_tokens` as the dummy full-token start;
+DSV4 KV-cache previously treated `allocated_pages * page_size` as the dummy
+sentinel.  That made graph-padded dummy rows look like real full pages and
+translate to SWA page `-1`, corrupting device memory.  The fix passes
+`dsv4_dummy_token_start=num_tokens` into `DeepSeekV4KVCache` and maps the
+dummy row to the SWA dummy page.  No-weight repros verified the producer, and
+full-model text/serving confirmation passed fixed 128, explicit cap4096, and
+auto-capacity paths with zero eager replay in the tested serving macro.  TARGET
+08.43 should now rerun the promotion soak, quantify remaining overhead, and
+decide promote vs opt-in.
+
+TARGET 08.43 result:
+
+```text
+prompts/TARGET_08.43_dsv4_sm80_swa_independent_post_fix_promotion_soak.md completed.
+Run prompts/TARGET_08.44_dsv4_sm80_swa_stale_prefix_handle_tombstone_fix.md next.
+```
+
+Rationale: TARGET 08.43 confirmed the 08.42 dummy-token fix remained healthy,
+but SWA independent lifecycle still cannot be promoted.  Fixed128 long decode
+`historical_4096_1024_bs4` failed on all ranks with
+`DSV4 KV cache double free detected in SWA page slots`; graph replay was
+healthy before failure (`1277` replay, `0` eager), and the pure SWA independent
+variant failed before Marlin release + SWA independent.  The likely owner is
+stale prefix SWA handles: active decode out-of-window release frees a SWA page,
+then finish-time prefix tombstone revisits an older handle containing the same
+page.  TARGET 08.44 should preserve the no-weight repro as a regression test,
+fix active-release / prefix-handle tombstone synchronization, and pass the
+fixed128 `4096/1024/bs4` SWA gates before rerunning 08.43.
+
+TARGET 08.44 result:
+
+```text
+prompts/TARGET_08.44_dsv4_sm80_swa_stale_prefix_handle_tombstone_fix.md completed.
+Run prompts/TARGET_08.45_dsv4_sm80_swa_independent_lifecycle_contract.md next.
+```
+
+Rationale: TARGET 08.44 reproduced and fixed the no-weight/core stale
+prefix-handle double-free path and kept the true duplicate-release guard
+active.  Focused tests passed (`110 passed`).  However, the TP8 full-model
+fixed128 gate then hit CUDA illegal memory access in the first SWA independent
+case, before the `historical_4096_128_bs4` report was emitted.  This suggests
+the SWA independent lifecycle still lacks a fully closed ownership/metadata
+contract.  Do not continue with ad hoc single-point patches.  TARGET 08.45
+should write `prompts/DSV4_SWA_INDEPENDENT_LIFECYCLE_CONTRACT.md` aligned with
+SGLang, TARGET 08.46 should audit mini implementation against that contract,
+and TARGET 08.47 should apply a unified fix before rerunning TARGET 08.43
+promotion soak.
+
 TARGET 08.32-08.40 CUDA graph / warmup memory follow-up:
 
 ```text
@@ -259,7 +318,7 @@ prompts/archive/target10/
 For new child threads, start from:
 
 1. `prompts/target.md`
-2. the active target prompt, currently TARGET 08.42, TARGET 08.40, or a
+2. the active target prompt, currently TARGET 08.45, TARGET 08.40, or a
    TARGET 09 child
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
    milestone history

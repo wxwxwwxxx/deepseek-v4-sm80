@@ -492,6 +492,31 @@ class RadixPrefixCache(BasePrefixCache):
                 heapq.heappush(leave_nodes, parent)
         return released_pages
 
+    def tombstone_dsv4_swa_pages(
+        self,
+        handle: BaseCacheHandle,
+        swa_pages: torch.Tensor,
+    ) -> int:
+        if not self.dsv4_swa_independent_lifecycle_enabled:
+            return 0
+        assert isinstance(handle, RadixCacheHandle)
+        if swa_pages.numel() == 0:
+            return 0
+        pages = swa_pages.to(device=self.device, dtype=torch.int32)
+        pages = pages[pages >= 0]
+        if pages.numel() == 0:
+            return 0
+        pages = torch.unique(pages)
+        tombstoned = 0
+        for node in self._path_from_root(handle.node):
+            if node._dsv4_swa_pages is None:
+                continue
+            updated, count = node._dsv4_swa_pages.tombstone_pages(pages)
+            if count > 0:
+                node._dsv4_swa_pages = updated
+                tombstoned += count
+        return tombstoned
+
     def _path_from_root(self, node: RadixTreeNode) -> list[RadixTreeNode]:
         path: list[RadixTreeNode] = []
         while not node.is_root():

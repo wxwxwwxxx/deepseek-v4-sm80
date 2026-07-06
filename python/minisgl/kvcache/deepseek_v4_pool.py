@@ -263,6 +263,34 @@ class DSV4SWAPageHandles:
             released,
         )
 
+    def tombstone_pages(self, pages_to_tombstone: torch.Tensor) -> tuple[DSV4SWAPageHandles, int]:
+        if self.swa_pages is None or self.swa_pages.numel() == 0:
+            return self, 0
+        if pages_to_tombstone.numel() == 0:
+            return self, 0
+        pages_to_tombstone = pages_to_tombstone.to(
+            device=self.swa_pages.device,
+            dtype=self.swa_pages.dtype,
+        )
+        pages_to_tombstone = pages_to_tombstone[pages_to_tombstone >= 0]
+        if pages_to_tombstone.numel() == 0:
+            return self, 0
+        live = self.swa_pages >= 0
+        mask = live & torch.isin(self.swa_pages, torch.unique(pages_to_tombstone))
+        count = int(torch.count_nonzero(mask).item())
+        if count == 0:
+            return self, 0
+        pages = self.swa_pages.clone()
+        pages[mask] = -1
+        return (
+            DSV4SWAPageHandles(
+                length=self.length,
+                page_size=self.page_size,
+                swa_pages=pages,
+            ),
+            count,
+        )
+
     @staticmethod
     def concat(handles: list[DSV4SWAPageHandles]) -> DSV4SWAPageHandles | None:
         handles = [h for h in handles if h.length > 0]

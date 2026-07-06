@@ -396,6 +396,7 @@ class CacheManager:
         active_head = self._valid_full_indices(active_head)
         if active_head.numel() == 0:
             return
+        released_swa_pages = self._dsv4_swa_pages_for_full_indices(active_head)
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.scheduler.swa.release_active_out_of_window",
             {
@@ -406,6 +407,38 @@ class CacheManager:
             },
         ):
             releaser(active_head, self.page_size, tombstone=True)
+            self._tombstone_active_dsv4_swa_handle(req.cache_handle, released_swa_pages)
+
+    def _dsv4_swa_pages_for_full_indices(self, full_indices: torch.Tensor) -> torch.Tensor:
+        if (
+            self.kv_cache is None
+            or full_indices.numel() == 0
+            or full_indices.numel() % self.page_size != 0
+        ):
+            return torch.empty(0, dtype=torch.int32, device=self.device)
+        mapper = getattr(self.kv_cache, "swa_pages_from_full_page_starts", None)
+        if not callable(mapper):
+            return torch.empty(0, dtype=torch.int32, device=self.device)
+        pages = mapper(full_indices[:: self.page_size], self.page_size)
+        if pages is None or pages.numel() == 0:
+            return torch.empty(0, dtype=torch.int32, device=self.device)
+        pages = pages.to(device=self.device, dtype=torch.int32)
+        pages = pages[pages >= 0]
+        dummy_page = getattr(self.kv_cache, "_swa_dummy_page", None)
+        if dummy_page is not None and pages.numel() > 0:
+            pages = pages[pages != int(dummy_page)]
+        return torch.unique(pages) if pages.numel() > 0 else pages
+
+    def _tombstone_active_dsv4_swa_handle(
+        self,
+        handle: BaseCacheHandle,
+        swa_pages: torch.Tensor,
+    ) -> None:
+        if swa_pages.numel() == 0:
+            return
+        tombstone = getattr(self.prefix_cache, "tombstone_dsv4_swa_pages", None)
+        if callable(tombstone):
+            tombstone(handle, swa_pages)
 
     def _release_dsv4_component_owned_full_head(self, handle: BaseCacheHandle) -> None:
         if not self.dsv4_component_ownership:

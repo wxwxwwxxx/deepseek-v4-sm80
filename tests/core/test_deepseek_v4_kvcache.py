@@ -10,6 +10,7 @@ from minisgl.kvcache.deepseek_v4_pool import (
     DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV,
     DSV4_INDEXER_FP8_CACHE_ENV,
     DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV,
+    DSV4SWAPageHandles,
     DeepSeekV4KVCache,
     DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV,
     _clear_allocated_kv_modes,
@@ -748,6 +749,109 @@ def test_dsv4_active_swa_release_preserves_component_mappings():
         torch.arange(0, page_size * 3, dtype=torch.int32),
         page_size,
     )
+    pool.assert_no_leak()
+
+
+def test_dsv4_active_swa_release_tombstones_stale_prefix_handle():
+    page_size = 4
+    num_pages = 256
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=8,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+
+    allocated = cm._page_to_token(cm._allocate(5))
+    cm.page_table[0, : allocated.numel()].copy_(allocated)
+    input_ids = torch.arange(allocated.numel() + 1, dtype=torch.int32)
+
+    prefix_tokens = 4 * page_size
+    _, prefix_handle = cm.prefix_cache.insert_prefix(
+        input_ids[:prefix_tokens],
+        allocated[:prefix_tokens],
+        dsv4_component_pages_builder=lambda start, end: pool.make_component_page_handles(
+            allocated[start:end],
+            page_size,
+        ),
+        dsv4_swa_pages_builder=lambda start, end: pool.make_swa_page_handles(
+            allocated[start:end],
+            page_size,
+        ),
+    )
+    cm.lock(prefix_handle)
+
+    cm._release_dsv4_swa_out_of_window(prefix_handle)
+    prefix_swa = prefix_handle.get_dsv4_swa_pages()
+    assert prefix_swa is not None and prefix_swa.swa_pages is not None
+    assert prefix_swa.swa_pages.tolist() == [-1, -1, -1, 3]
+    before_active = pool.runtime_swa_counters()
+    assert before_active["swa_pages_freed_total"] == 3
+
+    req = Req(
+        input_ids=input_ids,
+        table_idx=0,
+        cached_len=5 * page_size,
+        output_len=2,
+        uid=0,
+        sampling_params=SamplingParams(max_tokens=2),
+        cache_handle=prefix_handle,
+    )
+    cm.release_active_dsv4_swa_out_of_window(req)
+
+    synced_swa = prefix_handle.get_dsv4_swa_pages()
+    assert synced_swa is not None and synced_swa.swa_pages is not None
+    assert synced_swa.swa_pages.tolist() == [-1, -1, -1, -1]
+    after_active = pool.runtime_swa_counters()
+    assert after_active["swa_pages_freed_total"] == before_active["swa_pages_freed_total"] + 1
+    assert after_active["swa_pages_tombstoned_total"] == (
+        before_active["swa_pages_tombstoned_total"] + 1
+    )
+
+    cm.cache_req(req, finished=True)
+    after_finish = pool.runtime_swa_counters()
+    assert after_finish["swa_pages_freed_total"] == after_active["swa_pages_freed_total"]
+    assert after_finish["swa_pages_tombstoned_total"] == after_active["swa_pages_tombstoned_total"]
+    assert after_finish["available_swa_pages"] == after_active["available_swa_pages"]
+    assert pool._swa_page_refcount[pool._swa_dummy_page].item() == 1
+    assert torch.all(pool._swa_page_refcount >= 0)
+
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_swa_double_free_guard_still_rejects_duplicate_owner():
+    page_size = 4
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=8,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=2,
+    )
+    page_starts = torch.tensor([0], dtype=torch.int32)
+    pool.on_pages_allocated(page_starts, page_size)
+    handle = pool.make_swa_page_handles(torch.arange(page_size, dtype=torch.int32), page_size)
+
+    pool.release_swa_page_handles(handle, tombstone=True)
+    with pytest.raises(RuntimeError, match="DSV4 KV cache double free detected in SWA page slots"):
+        pool.release_swa_page_handles(handle, tombstone=True)
+
+    dummy_handle = DSV4SWAPageHandles(
+        length=page_size,
+        page_size=page_size,
+        swa_pages=torch.tensor([pool._swa_dummy_page], dtype=torch.int32),
+    )
+    before = pool.runtime_swa_counters()
+    pool.release_swa_page_handles(dummy_handle, tombstone=True)
+    assert pool.runtime_swa_counters() == before
+    assert pool._swa_page_refcount[pool._swa_dummy_page].item() == 1
+
+    pool.on_token_indices_freed(torch.arange(page_size, dtype=torch.int32), page_size)
     pool.assert_no_leak()
 
 

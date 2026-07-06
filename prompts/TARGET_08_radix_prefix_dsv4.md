@@ -9,6 +9,11 @@ children:
 prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
 prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md
 prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md
+prompts/TARGET_08.43_dsv4_sm80_swa_independent_post_fix_promotion_soak.md
+prompts/TARGET_08.44_dsv4_sm80_swa_stale_prefix_handle_tombstone_fix.md
+prompts/TARGET_08.45_dsv4_sm80_swa_independent_lifecycle_contract.md
+prompts/TARGET_08.46_dsv4_sm80_swa_contract_based_code_audit.md
+prompts/TARGET_08.47_dsv4_sm80_swa_contract_unified_fix.md
 prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
 prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
@@ -37,6 +42,33 @@ independent crashes with CUDA illegal memory access at large capacity, including
 an explicit `--num-pages 4096` cap.  TARGET 08.42 should use no-weight and
 partial repros first, then full-model confirmation, to fix the large-capacity
 SWA serving bug before any promotion or FP8 cache work continues.
+
+TARGET 08.43 is the post-fix promotion soak after TARGET 08.42.  TARGET 08.42
+fixed the large-capacity crash by aligning the Engine/KV-cache dummy full-token
+contract: Engine passes `dsv4_dummy_token_start=num_tokens`, and DSV4 KV-cache
+maps that dummy row to the SWA dummy page instead of treating it as a real full
+page that translates to `-1`.  TARGET 08.43 should rerun the promotion soak
+under fixed-128, explicit cap4096, and auto-capacity Marlin release paths,
+attribute any remaining decode-prepare / attention-metadata overhead, and
+decide whether SWA independent lifecycle is promoted, kept opt-in, or blocked.
+
+TARGET 08.44 is the correctness fix after TARGET 08.43.  TARGET 08.43 showed
+the dummy-token fix stayed healthy, but fixed-128 long decode
+`4096/1024/bs4` double-freed SWA page handles in pure SWA independent mode.
+The likely owner is stale prefix SWA handles: active decode out-of-window
+release frees a SWA page, then finish-time prefix tombstone revisits an older
+handle containing the same page.  TARGET 08.44 should reproduce this with the
+no-weight repro, synchronize active release with prefix-handle tombstone, and
+prove fixed-128 long decode passes before rerunning the 08.43 promotion soak.
+
+TARGET 08.45-08.47 are the contract-first SWA lifecycle reset after TARGET
+08.44.  TARGET 08.44 fixed the no-weight stale-handle double-free, but the
+full-model gate then hit CUDA illegal memory access before the first fixed128
+SWA independent macro report.  That means the next step is not another isolated
+patch.  TARGET 08.45 should write the SGLang-aligned
+`prompts/DSV4_SWA_INDEPENDENT_LIFECYCLE_CONTRACT.md`; TARGET 08.46 should audit
+mini code against that contract; TARGET 08.47 should perform the unified fix
+and return to the 08.43 promotion soak only after fixed128 historical gates pass.
 
 TARGET 08.32 is about CUDA graph private-pool memory attribution.  It should
 avoid full model weight loading at first and instead use synthetic/partial
@@ -306,7 +338,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.42, TARGET 08.40, or
+3. the active future target prompt, currently TARGET 08.45, TARGET 08.40, or
    a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
@@ -317,7 +349,7 @@ The archive contains implementation history, not active todos.
 
 ### Independent SWA Ownership
 
-Status: active follow-up as TARGET 08.42 after TARGET 08.41.
+Status: active follow-up as TARGET 08.45 after TARGET 08.44.
 
 SWA KV is still effectively protected by the conservative full/SWA tail rule.
 This costs retained memory and can reduce useful prefix capacity, but TARGET
@@ -354,10 +386,43 @@ prepare / attention metadata, but correctness takes priority.  TARGET 08.42
 should fix the large-capacity SWA serving crash, using no-weight/partial repros
 before full model runs.
 
+TARGET 08.42 result: the large-capacity crash was fixed.  The root cause was an
+Engine/KV-cache dummy full-token contract mismatch: Engine used
+`num_tokens = planned_pages * page_size` as the dummy full-token start while
+allocating `planned_pages + 1` physical pages, but DSV4 KV-cache treated
+`allocated_pages * page_size` as the dummy sentinel.  The graph-padded dummy
+row could then be interpreted as a real full page and translate to SWA page
+`-1`.  Engine now passes `dsv4_dummy_token_start=num_tokens` into
+`DeepSeekV4KVCache`, and DSV4 SWA translation maps that row to the SWA dummy
+page.  No-weight repros and full-model serving confirmation passed fixed 128,
+explicit cap4096, and auto-capacity paths.  TARGET 08.43 should rerun the
+promotion soak, quantify remaining overhead, and decide promote vs opt-in.
+
+TARGET 08.43 result: SWA independent lifecycle still should not be promoted.
+The 08.42 dummy-token fix remained correct under fixed, cap4096, and auto text
+smoke, but fixed-128 long decode `historical_4096_1024_bs4` failed on all ranks
+with `DSV4 KV cache double free detected in SWA page slots`.  The failure
+appeared in pure SWA independent before Marlin release + SWA independent, so it
+is not Marlin-specific.  The best current evidence is a stale prefix SWA handle:
+active decode out-of-window release frees a page, then finish-time prefix
+tombstone revisits an older handle containing that page.  TARGET 08.44 should
+turn the no-weight repro into a regression test and fix active-release /
+prefix-handle tombstone synchronization.
+
+TARGET 08.44 result: the stale prefix-handle double-free was reproduced without
+model weights and fixed in the core lifecycle path.  Focused tests passed, and
+the true double-free guard remains active.  However, the full-model fixed128
+gate hit CUDA illegal memory access during/after the first
+`historical_4096_128_bs4` SWA independent run, before any report was emitted.
+This suggests the overall SWA independent ownership/metadata contract is still
+ambiguous.  Do not continue with ad hoc patches.  TARGET 08.45 should first
+write the SGLang-aligned SWA lifecycle contract, TARGET 08.46 should audit mini
+against it, and TARGET 08.47 should apply the unified fix.
+
 Active prompt:
 
 ```text
-prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md
+prompts/TARGET_08.45_dsv4_sm80_swa_independent_lifecycle_contract.md
 ```
 
 Previous prompts:
@@ -365,6 +430,16 @@ Previous prompts:
 ```text
 prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
 prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md
+prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md
+prompts/TARGET_08.43_dsv4_sm80_swa_independent_post_fix_promotion_soak.md
+prompts/TARGET_08.44_dsv4_sm80_swa_stale_prefix_handle_tombstone_fix.md
+```
+
+Queued prompts:
+
+```text
+prompts/TARGET_08.46_dsv4_sm80_swa_contract_based_code_audit.md
+prompts/TARGET_08.47_dsv4_sm80_swa_contract_unified_fix.md
 ```
 
 Historical prompt:
