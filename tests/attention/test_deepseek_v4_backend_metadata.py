@@ -861,6 +861,47 @@ def test_dsv4_independent_swa_page_table_cache_reuses_and_invalidates(monkeypatc
     assert decode_cached_row(grown_active_page) == expected_pages(0, 4)
 
 
+def test_dsv4_independent_swa_direct_token_metadata_matches_page_table_and_wins(
+    monkeypatch,
+):
+    cfg = _tiny_dsv4_config([0])
+    page_size = 4
+    max_len = 16
+    base = 64
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[base],
+        max_len=max_len,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+    )
+    ctx.kv_cache.on_pages_allocated(
+        torch.arange(base, base + max_len, page_size, dtype=torch.int32),
+        page_size,
+    )
+    backend = ctx.attn_backend
+    req = _req(21, 0, 2 * page_size + 1, cached_len=2 * page_size)
+    batch = _prepare_decode_batch([req])
+
+    table = backend._make_swa_page_tables_uncached(
+        [req],
+        req.device_len,
+        timing_base={},
+    )
+    expected = backend._make_swa_indices_from_page_table(table, batch.positions)
+
+    monkeypatch.setenv("MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA", "1")
+    monkeypatch.setenv("MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE", "1")
+    backend.prepare_metadata(batch)
+    meta = batch.attn_metadata.core_metadata
+
+    assert torch.equal(meta.swa_page_indices, expected)
+    assert backend._swa_page_table_cache is None
+    assert meta.swa_page_indices[0, 0].item() == 2 * page_size
+    assert meta.swa_page_indices[0, 0].item() != ctx.page_table[0, req.device_len - 1].item()
+
+
 def test_dsv4_independent_swa_metadata_rejects_tombstone_inside_active_length(
     monkeypatch,
 ):

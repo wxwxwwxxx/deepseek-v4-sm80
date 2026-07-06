@@ -82,6 +82,7 @@ DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
 )
 DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV = "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"
+DSV4_SWA_DIRECT_TOKEN_METADATA_ENV = "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA"
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
@@ -104,6 +105,9 @@ DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT = (
 DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_swa_independent"
 )
+DSV4_ROUTE_B_LIFETIME_SWA_DIRECT_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_swa_independent_swadirect"
+)
 DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
     "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
 )
@@ -117,6 +121,9 @@ DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT = (
 )
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent"
+)
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent_swadirect"
 )
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
@@ -154,6 +161,10 @@ DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_ENV = {
     **DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_ENV,
     DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV: "1",
 }
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_ENV = {
+    **DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_ENV,
+    DSV4_SWA_DIRECT_TOKEN_METADATA_ENV: "1",
+}
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_ENV = {
     **DSV4_ROUTE_B_LIFETIME_ENV,
     **DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_ENV,
@@ -161,6 +172,10 @@ DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_ENV = {
 DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_ENV = {
     **DSV4_ROUTE_B_LIFETIME_ENV,
     DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV: "1",
+}
+DSV4_ROUTE_B_LIFETIME_SWA_DIRECT_ENV = {
+    **DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_ENV,
+    DSV4_SWA_DIRECT_TOKEN_METADATA_ENV: "1",
 }
 
 
@@ -1386,6 +1401,19 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
+        name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_VARIANT,
+        env=dict(DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_ENV),
+        description=(
+            "TARGET 08.50 opt-in: Route B lifetime plus Marlin WNA16 release, "
+            "independent SWA lifecycle, and direct token-level SWA metadata."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+        enable_dsv4_swa_independent_lifecycle=True,
+    ),
+    Variant(
         name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_VARIANT,
         env=dict(DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_ENV),
         description=(
@@ -1436,6 +1464,19 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
             "independent SWA lifecycle. Pair with --enable-dsv4-radix-prefix-cache, "
             "--enable-dsv4-component-loc-ownership, and "
             "--enable-dsv4-swa-independent-lifecycle."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+        enable_dsv4_swa_independent_lifecycle=True,
+    ),
+    Variant(
+        name=DSV4_ROUTE_B_LIFETIME_SWA_DIRECT_VARIANT,
+        env=dict(DSV4_ROUTE_B_LIFETIME_SWA_DIRECT_ENV),
+        description=(
+            "TARGET 08.50 opt-in: promoted Route B lifetime prefix preset plus "
+            "independent SWA lifecycle and direct token-level SWA metadata."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
@@ -1682,6 +1723,7 @@ def git_info() -> dict[str, Any]:
 def _all_dsv4_sm80_env_names(dsv4_kernel) -> list[str]:
     names = set(getattr(dsv4_kernel, "DSV4_SM80_KNOWN_TOGGLES", ()))
     names.add(DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV)
+    names.add(DSV4_SWA_DIRECT_TOKEN_METADATA_ENV)
     names.update(name for name in os.environ if name.startswith("MINISGL_DSV4_SM80_"))
     return sorted(names)
 

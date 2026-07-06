@@ -728,6 +728,41 @@ def test_route_b_lifetime_moe_reduce_bf16_variant_extends_promoted_env(monkeypat
     assert "MINISGL_DSV4_SM80_MOE_REDUCE_BF16" in result["active_dsv4_toggles"]
 
 
+def test_route_b_lifetime_swa_direct_variant_extends_independent_env(monkeypatch):
+    bench = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS",
+            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE",
+        )
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            if name == "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS":
+                return False
+            return os.environ.get(name) in {"1", "true"}
+
+    variants = bench._variant_map()
+    independent = variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime_swa_independent"]
+    direct = variants[
+        "dsv4_sm80_a100_victory_prefix_routeb_lifetime_swa_independent_swadirect"
+    ]
+    result = bench.configure_variant(FakeKernel, direct)
+
+    assert direct.env == {
+        **independent.env,
+        "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA": "1",
+    }
+    assert direct.allow_dsv4_cuda_graph == independent.allow_dsv4_cuda_graph
+    assert direct.cuda_graph_capture_greedy_sample == independent.cuda_graph_capture_greedy_sample
+    assert direct.enable_dsv4_swa_independent_lifecycle is True
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA"] == "1"
+    assert "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA" in result["active_dsv4_toggles"]
+
+
 def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
     bench = _load_module()
 
@@ -768,6 +803,9 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
     prefix_release_swa = variants[
         "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent"
     ]
+    prefix_release_swa_direct = variants[
+        "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent_swadirect"
+    ]
     prefix_safe_arena = variants[
         "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
     ]
@@ -798,6 +836,10 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
     assert prefix_release_swa.env == {
         **prefix_release.env,
         "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE": "1",
+    }
+    assert prefix_release_swa_direct.env == {
+        **prefix_release_swa.env,
+        "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA": "1",
     }
     assert prefix_safe_arena.env == {
         **variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"].env,
@@ -833,12 +875,18 @@ def test_marlin_release_variants_expand_full_policy_env(monkeypatch):
     assert prefix_release_swa.enable_dsv4_radix_prefix_cache is True
     assert prefix_release_swa.enable_dsv4_component_loc_ownership is True
     assert prefix_release_swa.enable_dsv4_swa_independent_lifecycle is True
+    assert prefix_release_swa_direct.enable_dsv4_swa_independent_lifecycle is True
     assert prefix_safe_arena.allow_dsv4_cuda_graph is True
     swa_result = bench.configure_variant(FakeKernel, prefix_release_swa)
     assert swa_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"] == "1"
     assert (
         swa_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC"]
         == "component"
+    )
+    swa_direct_result = bench.configure_variant(FakeKernel, prefix_release_swa_direct)
+    assert (
+        swa_direct_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA"]
+        == "1"
     )
 
 

@@ -59,11 +59,19 @@ DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 DSV4_SWA_INDEX_BOUNDS_DEBUG_ENV = "MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG"
 DSV4_SPARSE_SYNC_DEBUG_ENV = "MINISGL_DSV4_SPARSE_SYNC_DEBUG"
 DSV4_SWA_METADATA_PAGE_TABLE_CACHE_ENV = "MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE"
+DSV4_SWA_DIRECT_TOKEN_METADATA_ENV = "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA"
 
 
 def _swa_metadata_page_table_cache_enabled() -> bool:
     return (
         os.environ.get(DSV4_SWA_METADATA_PAGE_TABLE_CACHE_ENV, "").strip().lower()
+        in _TRUE_ENV_VALUES
+    )
+
+
+def _swa_direct_token_metadata_enabled() -> bool:
+    return (
+        os.environ.get(DSV4_SWA_DIRECT_TOKEN_METADATA_ENV, "").strip().lower()
         in _TRUE_ENV_VALUES
     )
 
@@ -966,6 +974,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
         cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0), (1, 0))
         component_ownership = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
         swa_independent = bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
+        swa_direct_token_metadata = bool(
+            swa_independent and batch.is_decode and _swa_direct_token_metadata_enabled()
+        )
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.metadata.build.table_indices",
             {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
@@ -987,8 +998,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 "cache_enabled": bool(
                     swa_independent
                     and batch.is_decode
+                    and not swa_direct_token_metadata
                     and _swa_metadata_page_table_cache_enabled()
                 ),
+                "direct_token_metadata": bool(swa_direct_token_metadata),
             },
         ):
             swa_page_table = (
@@ -1000,7 +1013,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     and _swa_metadata_page_table_cache_enabled(),
                     timing_base=timing_base,
                 )
-                if swa_independent
+                if swa_independent and not swa_direct_token_metadata
                 else None
             )
 
@@ -1098,7 +1111,12 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     "dsv4.metadata.decode.make_swa_indices",
                     {**timing_base, "window_size": int(self.window_size)},
                 ):
-                    if swa_page_table is not None:
+                    if swa_direct_token_metadata:
+                        swa_page_indices = self._make_swa_indices_direct_token_metadata(
+                            table_indices,
+                            positions,
+                        )
+                    elif swa_page_table is not None:
                         swa_page_indices = self._make_swa_indices_from_page_table(
                             swa_page_table,
                             positions,
@@ -1921,6 +1939,20 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )[None, :]
         )
         return self._gather_full_locs(table_indices, offsets)
+
+    def _make_swa_indices_direct_token_metadata(
+        self,
+        table_indices: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        translate = getattr(self.kvcache, "translate_full_locs_to_swa_locs", None)
+        if not callable(translate):
+            raise RuntimeError(
+                f"{DSV4_SWA_DIRECT_TOKEN_METADATA_ENV}=1 requires "
+                "DeepSeekV4KVCache.translate_full_locs_to_swa_locs."
+            )
+        full_locs = self._make_swa_indices(table_indices, positions)
+        return translate(full_locs).to(device=self.device, dtype=torch.int32)
 
     def _make_swa_indices_from_page_table(
         self,
