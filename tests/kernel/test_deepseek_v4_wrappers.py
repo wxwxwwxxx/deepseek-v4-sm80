@@ -2867,9 +2867,23 @@ def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
             raise AssertionError("ratio 4 path must not read c128 cache")
 
     class FakeBackend:
-        pass
+        def _ensure_swa_metadata_current(self, *args, **kwargs) -> None:
+            return None
+
+        def _debug_check_swa_index_bounds(self, *args, **kwargs) -> None:
+            return None
+
+        def _debug_check_cache_index_bounds(self, *args, **kwargs) -> None:
+            return None
+
+        def _debug_sync_sparse_attention(self, *args, **kwargs) -> None:
+            return None
+
+        def _capture_attention_debug(self, *args, **kwargs) -> None:
+            return None
 
     fake_backend = FakeBackend()
+    fake_backend.capture = None
     fake_backend.kvcache = FakeKVCache()
     fake_backend.softmax_scale = softmax_scale
 
@@ -2908,6 +2922,175 @@ def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
     torch.cuda.synchronize()
     assert torch.allclose(actual, expected, atol=6e-2, rtol=6e-2)
     assert not torch.allclose(actual, swa_only, atol=6e-2, rtol=6e-2)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_sparse_attention_backend_compressed_boundary_fast_path(monkeypatch):
+    device = torch.device("cuda")
+    torch.manual_seed(240855)
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_TOGGLE, "1")
+
+    q = (torch.randn(2, 2, 512, device=device, dtype=torch.bfloat16) * 0.2).contiguous()
+    swa_cache = (
+        torch.randn(16, 512, device=device, dtype=torch.bfloat16) * 0.2 + 0.25
+    ).contiguous()
+    c4_cache = (torch.randn(16, 512, device=device, dtype=torch.bfloat16) * 0.2 - 1.0).contiguous()
+    c128_cache = (
+        torch.randn(16, 512, device=device, dtype=torch.bfloat16) * 0.2 + 1.0
+    ).contiguous()
+    swa_indices = torch.tensor(
+        [[0, 1, -1], [2, 3, 4]],
+        device=device,
+        dtype=torch.int32,
+    )
+    swa_lengths = torch.tensor([2, 3], device=device, dtype=torch.int32)
+    c4_indices = torch.tensor(
+        [[5, 6, 7, -1], [8, 9, -1, -1]],
+        device=device,
+        dtype=torch.int32,
+    )
+    c4_lengths = torch.tensor([2, 1], device=device, dtype=torch.int32)
+    c128_indices = torch.tensor(
+        [[3, 4, -1, -1], [5, 6, 7, -1]],
+        device=device,
+        dtype=torch.int32,
+    )
+    c128_lengths = torch.tensor([1, 2], device=device, dtype=torch.int32)
+    empty = torch.empty(0, device=device, dtype=torch.int32)
+
+    meta = dsv4_attention.DSV4CoreAttentionMetadata(
+        raw_out_loc=empty,
+        page_table=empty,
+        cu_seqlens_q=empty,
+        seq_lens=empty,
+        req_seq_lens=empty,
+        extend_lens=empty,
+        positions=empty,
+        req_table_indices=empty,
+        max_seqlen_q=0,
+        max_seqlen_k=0,
+        swa_page_indices=swa_indices,
+        swa_topk_lengths=swa_lengths,
+        c4_out_loc=None,
+        c128_out_loc=None,
+        c4_indexer_out_loc=None,
+        c4_topk_lengths_raw=empty,
+        c4_topk_lengths_clamp1=empty,
+        c4_sparse_topk_lengths=c4_lengths,
+        c4_sparse_raw_indices=empty.reshape(0, 0),
+        c4_sparse_page_indices=c4_indices,
+        c4_sparse_full_indices=empty.reshape(0, 0),
+        c128_topk_lengths_clamp1=c128_lengths,
+        c128_raw_indices=empty.reshape(0, 0),
+        c128_page_indices=c128_indices,
+        c128_full_indices=empty.reshape(0, 0),
+    )
+
+    class FakeKVCache:
+        def swa_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return swa_cache
+
+        def c4_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return c4_cache
+
+        def c128_cache(self, layer_id: int) -> torch.Tensor:
+            assert layer_id == 0
+            return c128_cache
+
+    class FakeBackend:
+        def _ensure_swa_metadata_current(self, *args, **kwargs) -> None:
+            return None
+
+        def _debug_check_swa_index_bounds(self, *args, **kwargs) -> None:
+            return None
+
+        def _debug_check_cache_index_bounds(self, *args, **kwargs) -> None:
+            return None
+
+        def _debug_sync_sparse_attention(self, *args, **kwargs) -> None:
+            return None
+
+        def _capture_attention_debug(self, *args, **kwargs) -> None:
+            return None
+
+    fake_backend = FakeBackend()
+    fake_backend.capture = None
+    fake_backend.kvcache = FakeKVCache()
+    fake_backend.softmax_scale = 512**-0.5
+    attn_sink = torch.randn(2, device=device, dtype=torch.float32)
+
+    actual_c4 = dsv4_attention.DSV4AttentionBackend._sparse_attention_two_source(
+        fake_backend,
+        q,
+        0,
+        meta,
+        4,
+        attn_sink,
+    )
+    expected_c4 = _manual_two_source_sparse_attention(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=c4_cache,
+        compressed_indices=c4_indices,
+        compressed_lengths=c4_lengths,
+        softmax_scale=fake_backend.softmax_scale,
+        attn_sink=attn_sink,
+    )
+    recomputed_c4 = _manual_two_source_sparse_attention(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=c4_cache,
+        compressed_indices=c4_indices,
+        compressed_lengths=(c4_indices >= 0).sum(dim=-1).to(torch.int32),
+        softmax_scale=fake_backend.softmax_scale,
+        attn_sink=attn_sink,
+    )
+
+    actual_c128 = dsv4_attention.DSV4AttentionBackend._sparse_attention_two_source(
+        fake_backend,
+        q,
+        0,
+        meta,
+        128,
+        attn_sink,
+    )
+    expected_c128 = _manual_two_source_sparse_attention(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=c128_cache,
+        compressed_indices=c128_indices,
+        compressed_lengths=c128_lengths,
+        softmax_scale=fake_backend.softmax_scale,
+        attn_sink=attn_sink,
+    )
+    recomputed_c128 = _manual_two_source_sparse_attention(
+        q,
+        swa_cache,
+        swa_indices,
+        swa_lengths,
+        compressed_cache=c128_cache,
+        compressed_indices=c128_indices,
+        compressed_lengths=(c128_indices >= 0).sum(dim=-1).to(torch.int32),
+        softmax_scale=fake_backend.softmax_scale,
+        attn_sink=attn_sink,
+    )
+
+    assert actual_c4 is not None
+    assert actual_c128 is not None
+    torch.cuda.synchronize()
+    assert torch.allclose(actual_c4, expected_c4, atol=6e-2, rtol=6e-2)
+    assert torch.allclose(actual_c128, expected_c128, atol=6e-2, rtol=6e-2)
+    assert not torch.allclose(actual_c4, recomputed_c4, atol=6e-2, rtol=6e-2)
+    assert not torch.allclose(actual_c128, recomputed_c128, atol=6e-2, rtol=6e-2)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")

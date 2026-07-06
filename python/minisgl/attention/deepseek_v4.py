@@ -3482,35 +3482,53 @@ class DSV4AttentionBackend(BaseAttnBackend):
         compressed_cache = None
         compressed_indices = None
         compressed_lengths = None
+        compressed_debug_lengths = None
+        use_compressed_boundary_fast_path = _swa_direct_replay_metadata_fused_enabled()
         if compress_ratio == 4:
             with dsv4_direct_copy_nvtx(
                 f"attention_boundary.c4_cache_to_q_dtype.layer{layer_id}.rows{rows}",
                 src=self.kvcache.c4_cache(layer_id),
             ):
                 compressed_cache = self.kvcache.c4_cache(layer_id).to(q.dtype)
-            with dsv4_direct_copy_nvtx(
-                f"attention_boundary.c4_sparse_page_indices_to_i32.layer{layer_id}.rows{rows}",
-                src=metadata.c4_sparse_page_indices[:rows],
+            compressed_indices_view = metadata.c4_sparse_page_indices[:rows]
+            compressed_lengths_view = metadata.c4_sparse_topk_lengths[:rows]
+            if (
+                use_compressed_boundary_fast_path
+                and compressed_indices_view.device == q.device
+                and compressed_lengths_view.device == q.device
+                and compressed_indices_view.dtype == torch.int32
+                and compressed_lengths_view.dtype == torch.int32
+                and compressed_indices_view.stride(-1) == 1
+                and compressed_lengths_view.is_contiguous()
+                and compressed_lengths_view.numel() == rows
             ):
-                compressed_indices = metadata.c4_sparse_page_indices[:rows].to(
-                    device=q.device,
-                    dtype=torch.int32,
-                )
-            if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE):
+                compressed_indices = compressed_indices_view
+                compressed_lengths = compressed_lengths_view
+            else:
                 with dsv4_direct_copy_nvtx(
-                    f"attention_boundary.c4_sparse_topk_lengths_to_i32.layer{layer_id}.rows{rows}",
-                    src=metadata.c4_sparse_topk_lengths[:rows],
+                    f"attention_boundary.c4_sparse_page_indices_to_i32.layer{layer_id}.rows{rows}",
+                    src=compressed_indices_view,
                 ):
-                    compressed_lengths = metadata.c4_sparse_topk_lengths[:rows].to(
+                    compressed_indices = compressed_indices_view.to(
                         device=q.device,
                         dtype=torch.int32,
                     )
-                compressed_lengths = compressed_lengths.clamp(max=compressed_indices.shape[-1])
-            else:
-                compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+                if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE):
+                    with dsv4_direct_copy_nvtx(
+                        f"attention_boundary.c4_sparse_topk_lengths_to_i32.layer{layer_id}.rows{rows}",
+                        src=compressed_lengths_view,
+                    ):
+                        compressed_lengths = compressed_lengths_view.to(
+                            device=q.device,
+                            dtype=torch.int32,
+                        )
+                    compressed_lengths = compressed_lengths.clamp(max=compressed_indices.shape[-1])
+                else:
+                    compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+            compressed_debug_lengths = compressed_lengths
             self._debug_check_cache_index_bounds(
                 compressed_indices,
-                compressed_lengths,
+                compressed_debug_lengths,
                 compressed_cache.shape[0],
                 layer_id=layer_id,
                 label="c4",
@@ -3521,18 +3539,35 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 src=self.kvcache.c128_cache(layer_id),
             ):
                 compressed_cache = self.kvcache.c128_cache(layer_id).to(q.dtype)
-            with dsv4_direct_copy_nvtx(
-                f"attention_boundary.c128_page_indices_to_i32.layer{layer_id}.rows{rows}",
-                src=metadata.c128_page_indices[:rows],
+            compressed_indices_view = metadata.c128_page_indices[:rows]
+            compressed_lengths_view = metadata.c128_topk_lengths_clamp1[:rows]
+            if (
+                use_compressed_boundary_fast_path
+                and compressed_indices_view.device == q.device
+                and compressed_lengths_view.device == q.device
+                and compressed_indices_view.dtype == torch.int32
+                and compressed_lengths_view.dtype == torch.int32
+                and compressed_indices_view.stride(-1) == 1
+                and compressed_lengths_view.is_contiguous()
+                and compressed_lengths_view.numel() == rows
             ):
-                compressed_indices = metadata.c128_page_indices[:rows].to(
-                    device=q.device,
-                    dtype=torch.int32,
-                )
-            compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+                compressed_indices = compressed_indices_view
+                compressed_lengths = compressed_lengths_view
+                compressed_debug_lengths = None
+            else:
+                with dsv4_direct_copy_nvtx(
+                    f"attention_boundary.c128_page_indices_to_i32.layer{layer_id}.rows{rows}",
+                    src=compressed_indices_view,
+                ):
+                    compressed_indices = compressed_indices_view.to(
+                        device=q.device,
+                        dtype=torch.int32,
+                    )
+                compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+                compressed_debug_lengths = compressed_lengths
             self._debug_check_cache_index_bounds(
                 compressed_indices,
-                compressed_lengths,
+                compressed_debug_lengths,
                 compressed_cache.shape[0],
                 layer_id=layer_id,
                 label="c128",
