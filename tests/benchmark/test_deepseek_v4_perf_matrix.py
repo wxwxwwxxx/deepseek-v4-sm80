@@ -1243,6 +1243,68 @@ def test_bucket_coverage_table_counts_replay_eager_tokens_and_wall_share():
     assert by_bs[16]["wall_share"] == pytest.approx(0.8)
 
 
+def test_graph_status_delta_diffs_replay_timing_nested_buckets():
+    bench = _load_module()
+    before = {
+        "replay_count": 10,
+        "greedy_sample_replay_count": 10,
+        "replay_input_copy_bytes": 128,
+        "eager_decode_count": 0,
+        "replay_count_by_batch_size": {"4": 10},
+        "replay_count_by_padded_size": {"4": 10},
+        "greedy_sample_replay_count_by_batch_size": {"4": 10},
+        "eager_decode_count_by_batch_size": {},
+        "replay_timing": {
+            "enabled": True,
+            "count": 10,
+            "total_s": 1.0,
+            "by_batch_size": {"4": {"count": 10, "total_s": 1.0}},
+            "by_padded_size": {"4": {"count": 10, "total_s": 1.0}},
+            "samples": [{"replay_index": 1, "elapsed_s": 0.1}],
+        },
+    }
+    after = {
+        "replay_count": 15,
+        "greedy_sample_replay_count": 15,
+        "replay_input_copy_bytes": 200,
+        "eager_decode_count": 0,
+        "replay_count_by_batch_size": {"4": 10, "16": 5},
+        "replay_count_by_padded_size": {"4": 10, "16": 5},
+        "greedy_sample_replay_count_by_batch_size": {"4": 10, "16": 5},
+        "eager_decode_count_by_batch_size": {},
+        "replay_timing": {
+            "enabled": True,
+            "count": 15,
+            "total_s": 2.5,
+            "min_s": 0.1,
+            "max_s": 0.4,
+            "by_batch_size": {
+                "4": {"count": 10, "total_s": 1.0},
+                "16": {"count": 5, "total_s": 1.5, "min_s": 0.2, "max_s": 0.4},
+            },
+            "by_padded_size": {
+                "4": {"count": 10, "total_s": 1.0},
+                "16": {"count": 5, "total_s": 1.5, "min_s": 0.2, "max_s": 0.4},
+            },
+            "samples": [{"replay_index": 1, "elapsed_s": 0.1}],
+        },
+    }
+
+    delta = bench._graph_status_delta(before, after)
+    timing = delta["replay_timing"]
+
+    assert delta["replay_count"] == 5
+    assert delta["replay_count_by_padded_size"] == {"16": 5}
+    assert timing["count"] == 5
+    assert timing["total_s"] == pytest.approx(1.5)
+    assert timing["mean_s"] == pytest.approx(0.3)
+    assert timing["min_s"] is None
+    assert timing["max_s"] is None
+    assert timing["min_max_case_delta_unavailable"] is True
+    assert timing["samples"] == []
+    assert timing["by_padded_size"]["16"]["mean_s"] == pytest.approx(0.3)
+
+
 def test_aggregate_case_report_has_required_schema_and_bottleneck_labels():
     bench = _load_module()
     base = {

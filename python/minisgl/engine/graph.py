@@ -22,6 +22,8 @@ logger = init_logger(__name__)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 DSV4_CUDA_GRAPH_EXACT_BS_ONLY_ENV = "MINISGL_DSV4_CUDA_GRAPH_EXACT_BS_ONLY"
 DSV4_GRAPH_CAPTURE_STAGE_DEBUG_ENV = "MINISGL_DSV4_GRAPH_CAPTURE_STAGE_DEBUG"
+DSV4_GRAPH_REPLAY_TIMING_ENV = "MINISGL_DSV4_GRAPH_REPLAY_TIMING"
+DSV4_GRAPH_REPLAY_TIMING_MAX_SAMPLES_ENV = "MINISGL_DSV4_GRAPH_REPLAY_TIMING_MAX_SAMPLES"
 DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
 DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
 DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
@@ -150,6 +152,16 @@ def get_free_memory(device: torch.device) -> int:
 
 def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def _marlin_wna16_release_timing() -> str:
@@ -310,6 +322,10 @@ class GraphRunner:
             os.environ.get(DSV4_CUDA_GRAPH_EXACT_BS_ONLY_ENV, "").strip().lower()
             in _TRUE_ENV_VALUES
         )
+        self._replay_timing_enabled = _truthy_env(DSV4_GRAPH_REPLAY_TIMING_ENV)
+        self._replay_timing_max_samples = max(
+            0, _int_env(DSV4_GRAPH_REPLAY_TIMING_MAX_SAMPLES_ENV, 32)
+        )
         self.capture_status = {
             "enabled": bool(cuda_graph_bs),
             "exact_bs_only": bool(self.exact_bs_only),
@@ -337,6 +353,18 @@ class GraphRunner:
             "greedy_sample_replay_count": 0,
             "greedy_sample_replay_count_by_batch_size": {},
             "replay_input_copy_bytes": 0,
+            "replay_timing": {
+                "enabled": bool(self._replay_timing_enabled),
+                "sync_before_after_replay": bool(self._replay_timing_enabled),
+                "max_samples": int(self._replay_timing_max_samples),
+                "count": 0,
+                "total_s": 0.0,
+                "min_s": None,
+                "max_s": None,
+                "by_batch_size": {},
+                "by_padded_size": {},
+                "samples": [],
+            },
             "eager_decode_count": 0,
             "eager_decode_count_by_batch_size": {},
             "error": None,
@@ -744,6 +772,62 @@ class GraphRunner:
             "metadata": _metadata_context(int(batch.padded_size)),
         }
 
+    def _record_replay_timing(self, batch: Batch, elapsed_s: float) -> None:
+        timing = self.capture_status.get("replay_timing")
+        if not isinstance(timing, dict):
+            return
+        count = int(timing.get("count") or 0) + 1
+        total_s = float(timing.get("total_s") or 0.0) + float(elapsed_s)
+        timing["count"] = count
+        timing["total_s"] = total_s
+        old_min = timing.get("min_s")
+        old_max = timing.get("max_s")
+        timing["min_s"] = (
+            float(elapsed_s) if old_min is None else min(float(old_min), float(elapsed_s))
+        )
+        timing["max_s"] = (
+            float(elapsed_s) if old_max is None else max(float(old_max), float(elapsed_s))
+        )
+        timing["mean_s"] = total_s / count if count else None
+
+        def _update_bucket(section: str, key: int) -> None:
+            buckets = timing.setdefault(section, {})
+            bucket = buckets.setdefault(
+                str(int(key)),
+                {"count": 0, "total_s": 0.0, "min_s": None, "max_s": None},
+            )
+            bucket_count = int(bucket.get("count") or 0) + 1
+            bucket_total_s = float(bucket.get("total_s") or 0.0) + float(elapsed_s)
+            bucket_min = bucket.get("min_s")
+            bucket_max = bucket.get("max_s")
+            bucket["count"] = bucket_count
+            bucket["total_s"] = bucket_total_s
+            bucket["min_s"] = (
+                float(elapsed_s)
+                if bucket_min is None
+                else min(float(bucket_min), float(elapsed_s))
+            )
+            bucket["max_s"] = (
+                float(elapsed_s)
+                if bucket_max is None
+                else max(float(bucket_max), float(elapsed_s))
+            )
+            bucket["mean_s"] = bucket_total_s / bucket_count if bucket_count else None
+
+        _update_bucket("by_batch_size", int(batch.size))
+        _update_bucket("by_padded_size", int(batch.padded_size))
+
+        samples = timing.setdefault("samples", [])
+        if len(samples) < self._replay_timing_max_samples:
+            samples.append(
+                {
+                    "replay_index": int(self.capture_status.get("replay_count", 0)) + 1,
+                    "batch_size": int(batch.size),
+                    "padded_size": int(batch.padded_size),
+                    "elapsed_s": float(elapsed_s),
+                }
+            )
+
     def record_eager_decode(self, batch: Batch) -> None:
         if not batch.is_decode:
             return
@@ -798,7 +882,13 @@ class GraphRunner:
             f"static_graph_replay.g.replay.bs{batch.size}.padded{batch.padded_size}"
         ):
             try:
+                if self._replay_timing_enabled:
+                    torch.cuda.synchronize(self.device)
+                    replay_start_s = time.perf_counter()
                 g.replay()
+                if self._replay_timing_enabled:
+                    torch.cuda.synchronize(self.device)
+                    self._record_replay_timing(batch, time.perf_counter() - replay_start_s)
             except Exception as exc:
                 raise RuntimeError(
                     "DSV4 CUDA graph replay failed inside captured graph: "

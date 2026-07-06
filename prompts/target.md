@@ -46,7 +46,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 05.7 | `prompts/TARGET_05.7_dsv4_v0_bf16_e2e_smoke.md` | completed | Added v0 BF16 E2E smoke and basic correctness gates. |
 | TARGET 06 | `prompts/TARGET_06_benchmark_sm80_baseline.md` | completed | Added TP8 benchmark harness and text smoke; fixed early correctness issues. |
 | TARGET 07 | `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` | closed | Beat the old vLLM serving line with `dsv4_sm80_a100_victory`; detailed prompts archived under `prompts/archive/target07/`. |
-| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed prefix baseline plus active SWA capacity/perf children | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime`; SWA independent lifecycle is correctness-clean, 08.49/08.50 reduced SWA metadata overhead, 08.51 moved the remaining decode-heavy gap to captured decode forward, and the next step is TARGET 08.52 graph replay/operator parity. |
+| TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed prefix baseline plus active SWA capacity/perf children | Built DSV4 radix prefix cache and promoted `dsv4_sm80_a100_victory_prefix_routeb_lifetime`; SWA independent lifecycle is correctness-clean, 08.49/08.50 reduced SWA metadata overhead, 08.52 confirmed the remaining decode-heavy gap is inside captured graph replay, and the next step is TARGET 08.53 low-cost kernel-census / slow-kernel reproduction. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | active research | Low-precision research after TARGET 10: INT8 MoE W8A8 and FP8 KV/cache are the two primary lanes; TARGET 09.5 is deferred until TARGET 08.31 proves real SWA lifecycle/capacity value. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 
@@ -318,7 +318,7 @@ prompts/archive/target10/
 For new child threads, start from:
 
 1. `prompts/target.md`
-2. the active target prompt, currently TARGET 08.52 or a TARGET 09 child
+2. the active target prompt, currently TARGET 08.53 or a TARGET 09 child
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
    milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache history and

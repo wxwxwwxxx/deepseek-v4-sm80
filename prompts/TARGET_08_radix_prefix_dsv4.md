@@ -19,6 +19,7 @@ prompts/TARGET_08.49_dsv4_sm80_swa_metadata_page_table_perf_parity.md
 prompts/TARGET_08.50_dsv4_sm80_swa_direct_token_metadata_parity.md
 prompts/TARGET_08.51_dsv4_sm80_prefix_decode_metadata_graph_copy_attribution.md
 prompts/TARGET_08.52_dsv4_sm80_swa_independent_decode_forward_graph_replay_parity.md
+prompts/TARGET_08.53_dsv4_sm80_decode_forward_kernel_census_unblock.md
 prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
 prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
@@ -274,6 +275,16 @@ decode forward replay parity and, when the kernel owner is identified,
 construct operator microbench workloads for fast iteration before rerunning the
 full macro matrix.
 
+TARGET 08.52 reproduced the clean decode-forward gap and confirmed that the
+remaining Route B vs SWA-independent delta sits inside captured decode CUDA
+graph replay.  It stopped correctly before any kernel/layout fix because TP8
+Nsight Systems attempts did not produce usable `.nsys-rep` reports, even though
+a simple CUDA smoke could be profiled.  TARGET 08.53 should therefore unblock a
+stable per-rank kernel census first, starting with no-weight CUDA graph replay
+and short TP8 profiling probes.  It should also use no-weight or partial
+workloads to actively identify the slow kernel class before loading the full
+model, then run only one complete inference/macro validation at the end.
+
 ## Historical Evolution
 
 ### Phase 1: Conservative Radix Prefix Cache
@@ -429,7 +440,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.52 or a TARGET 09 child
+3. the active future target prompt, currently TARGET 08.53 or a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
 
@@ -441,8 +452,9 @@ The archive contains implementation history, not active todos.
 
 Status: correctness-clean but opt-in after TARGET 08.43 post-08.48 rerun;
 TARGET 08.49 landed an opt-in metadata cache, and active performance follow-up
-is TARGET 08.52 after TARGET 08.51 found the remaining decode-heavy gap is in
-captured decode forward replay, not SWA metadata copy.
+is TARGET 08.53 after TARGET 08.52 confirmed the remaining decode-heavy gap is
+inside captured decode CUDA graph replay but could not produce a TP8 kernel
+census.
 
 Current state: SWA KV now has an independent lifecycle and can tombstone/free
 out-of-window tail pages without invalidating C4/C128/indexer/compression-state
@@ -452,9 +464,10 @@ capacity.  It remains opt-in because decode attention metadata / SWA page-table
 overhead is too high for default promotion.
 
 TARGET 09.5 low-precision SWA/cache work should stay deferred until TARGET
-08.52 explains whether captured decode forward can reach parity.  Prefix/
-eviction scheduler release/free batching remains a likely separate target if
-decode-forward parity does not explain those workloads.
+08.53 identifies the decode replay kernel owner or proves that profiling is
+blocked by tooling.  Prefix/eviction scheduler release/free batching remains a
+likely separate target if decode-forward parity does not explain those
+workloads.
 
 TARGET 08.31 result: opt-in SWA independent lifecycle was implemented and
 validated against SGLang's allocator/component model.  SWA KV now has separate

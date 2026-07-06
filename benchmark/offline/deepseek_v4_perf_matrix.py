@@ -2669,6 +2669,73 @@ def _dict_counter_delta(
     return dict(sorted(delta.items(), key=lambda item: int(item[0])))
 
 
+def _replay_timing_bucket_delta(
+    before_bucket: dict[str, Any],
+    after_bucket: dict[str, Any],
+) -> dict[str, Any] | None:
+    count = int(after_bucket.get("count") or 0) - int(before_bucket.get("count") or 0)
+    total_s = float(after_bucket.get("total_s") or 0.0) - float(
+        before_bucket.get("total_s") or 0.0
+    )
+    if count <= 0:
+        return None
+    bucket = {
+        "count": count,
+        "total_s": total_s,
+        "mean_s": total_s / count,
+    }
+    if int(before_bucket.get("count") or 0) == 0:
+        bucket["min_s"] = after_bucket.get("min_s")
+        bucket["max_s"] = after_bucket.get("max_s")
+    else:
+        bucket["min_s"] = None
+        bucket["max_s"] = None
+        bucket["min_max_case_delta_unavailable"] = True
+    return bucket
+
+
+def _replay_timing_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    before_timing = before.get("replay_timing", {}) or {}
+    after_timing = after.get("replay_timing", {}) or {}
+    if not isinstance(after_timing, dict):
+        return {}
+    if not isinstance(before_timing, dict):
+        before_timing = {}
+
+    status = copy.deepcopy(after_timing)
+    before_count = int(before_timing.get("count") or 0)
+    count = int(after_timing.get("count") or 0) - before_count
+    total_s = float(after_timing.get("total_s") or 0.0) - float(
+        before_timing.get("total_s") or 0.0
+    )
+    status["count"] = count
+    status["total_s"] = total_s
+    status["mean_s"] = total_s / count if count > 0 else None
+    if before_count == 0:
+        status["min_s"] = after_timing.get("min_s")
+        status["max_s"] = after_timing.get("max_s")
+    else:
+        status["min_s"] = None
+        status["max_s"] = None
+        status["min_max_case_delta_unavailable"] = True
+        status["samples"] = []
+        status["samples_are_global_first_replays"] = True
+
+    for section in ("by_batch_size", "by_padded_size"):
+        before_buckets = before_timing.get(section, {}) or {}
+        after_buckets = after_timing.get(section, {}) or {}
+        bucket_delta: dict[str, Any] = {}
+        for key in set(before_buckets) | set(after_buckets):
+            delta = _replay_timing_bucket_delta(
+                before_buckets.get(key, {}) or {},
+                after_buckets.get(key, {}) or {},
+            )
+            if delta is not None:
+                bucket_delta[str(key)] = delta
+        status[section] = dict(sorted(bucket_delta.items(), key=lambda item: int(item[0])))
+    return status
+
+
 def _graph_status_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     status = copy.deepcopy(after)
     for key in (
@@ -2685,6 +2752,8 @@ def _graph_status_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
         "eager_decode_count_by_batch_size",
     ):
         status[key] = _dict_counter_delta(before, after, key)
+    if "replay_timing" in after:
+        status["replay_timing"] = _replay_timing_delta(before, after)
     return status
 
 
