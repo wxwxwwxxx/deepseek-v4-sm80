@@ -451,6 +451,85 @@ def test_dsv4_indexer_select_updates_c4_sparse_metadata():
     assert meta.c4_sparse_raw_indices.shape[1] % 64 == 0
 
 
+def test_dsv4_indexer_select_preserves_metadata_buffer_identity():
+    cfg = _tiny_dsv4_config([4])
+    ctx = _install_context(cfg, page_size=4, table_bases=[0], max_len=16)
+    backend = ctx.attn_backend
+    backend.init_capture_graph(max_seq_len=16, bs_list=[1])
+    batch = Batch(reqs=[_req(0, 0, 16, cached_len=15)], phase="decode")
+    batch.padded_reqs = batch.reqs
+    backend.prepare_for_capture(batch)
+    assert isinstance(batch.attn_metadata, DSV4AttentionMetadata)
+    meta = batch.attn_metadata.core_metadata
+
+    raw_indices = meta.c4_sparse_raw_indices
+    page_indices = meta.c4_sparse_page_indices
+    full_indices = meta.c4_sparse_full_indices
+    topk_lengths = meta.c4_sparse_topk_lengths
+
+    ctx.kv_cache.indexer_cache(0).zero_()
+    q = torch.ones(1, cfg.index_n_heads, cfg.index_head_dim, dtype=torch.bfloat16)
+    weights = torch.ones(1, cfg.index_n_heads, dtype=torch.float32)
+
+    out = backend.select_indexer(0, q, weights, batch)
+
+    assert out is not None
+    assert meta.c4_sparse_raw_indices is raw_indices
+    assert meta.c4_sparse_page_indices is page_indices
+    assert meta.c4_sparse_full_indices is full_indices
+    assert meta.c4_sparse_topk_lengths is topk_lengths
+    assert meta.c4_sparse_topk_lengths[0].item() > 0
+
+
+def test_dsv4_indexer_select_uses_c4_attention_table_for_attention_rows():
+    cfg = _tiny_dsv4_config([4])
+    page_size = 128
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0],
+        max_len=page_size,
+        enable_component_loc_ownership=True,
+    )
+    ctx.kv_cache.on_pages_allocated(torch.tensor([0], dtype=torch.int32), page_size)
+    batch = _prepare_decode_batch([_req(0, 0, page_size, cached_len=page_size - 1)])
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+    assert isinstance(batch.attn_metadata, DSV4AttentionMetadata)
+    meta = batch.attn_metadata.core_metadata
+    assert batch.attn_metadata.indexer_metadata.page_table is meta.c4_indexer_page_table
+    assert batch.attn_metadata.indexer_metadata.c4_page_size == page_size // 4
+
+    meta.c4_page_table[0, 0] = 10
+    meta.c4_indexer_page_table[0, 0] = 20
+    ctx.kv_cache.indexer_cache(0).zero_()
+    q = torch.ones(1, cfg.index_n_heads, cfg.index_head_dim, dtype=torch.bfloat16)
+    weights = torch.ones(1, cfg.index_n_heads, dtype=torch.float32)
+
+    out = backend.select_indexer(0, q, weights, batch)
+
+    assert out is not None
+    active = int(meta.c4_sparse_topk_lengths[0].item())
+    assert active == cfg.index_topk
+    raw = meta.c4_sparse_raw_indices[0, :active].to(torch.long)
+    assert torch.all(raw >= 0)
+    component_page_size = ctx.kv_cache.c4_component_page_size
+    logical_pages = raw.div(component_page_size, rounding_mode="floor")
+    offsets = raw % component_page_size
+    expected_attention_locs = (
+        meta.c4_page_table[0, logical_pages].to(torch.long) * component_page_size + offsets
+    ).tolist()
+    expected_indexer_locs = (
+        meta.c4_indexer_page_table[0, logical_pages].to(torch.long)
+        * component_page_size
+        + offsets
+    ).tolist()
+    expected_full_locs = ctx.page_table[0, raw * 4 + 3].tolist()
+    assert meta.c4_sparse_page_indices[0, :active].tolist() == expected_attention_locs
+    assert meta.c4_sparse_page_indices[0, :active].tolist() != expected_indexer_locs
+    assert meta.c4_sparse_full_indices[0, :active].tolist() == expected_full_locs
+
+
 def test_dsv4_component_loc_ownership_metadata_uses_direct_component_tables():
     cfg = _tiny_dsv4_config([4, 128])
     page_size = 128
@@ -542,6 +621,51 @@ def test_dsv4_component_loc_ownership_capture_replay_copies_direct_component_met
     assert capture.c4_indexer_out_loc is not capture.c4_out_loc
     assert batch.attn_metadata.indexer_metadata.page_table is src.c4_indexer_page_table
     assert backend.capture.indexer_metadata.page_table is capture.c4_indexer_page_table
+
+
+def test_dsv4_graph_replay_clamps_compressed_reads_to_materialized_prompt():
+    cfg = _tiny_dsv4_config([4, 128])
+    page_size = 128
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0],
+        max_len=512,
+        enable_component_loc_ownership=True,
+    )
+    page_starts = torch.arange(0, 4 * page_size, page_size, dtype=torch.int32)
+    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
+    prefix_handles = ctx.kv_cache.make_component_page_handles(
+        ctx.page_table[0, : 2 * page_size],
+        page_size,
+    )
+    assert prefix_handles is not None
+
+    req = _req(0, 0, 384, cached_len=383)
+    req.output_len = 256
+    req.max_device_len = 512
+    req.cache_handle = SimpleNamespace(get_dsv4_component_pages=lambda: prefix_handles)
+    batch = _prepare_decode_batch([req])
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+    src = batch.attn_metadata.core_metadata
+
+    assert src.c4_topk_lengths_raw.tolist() == [96]
+    assert src.c4_sparse_raw_indices[0, :2].tolist() == [94, 95]
+    assert src.c4_sparse_page_indices[0, :2].tolist() == [94, 95]
+    assert src.c128_raw_indices[0, :3].tolist() == [0, 1, 2]
+
+    backend.init_capture_graph(max_seq_len=512, bs_list=[1])
+    backend.prepare_for_replay(batch)
+
+    assert backend.capture is not None
+    capture = backend.capture.core_metadata
+    assert src.c4_topk_lengths_raw.tolist() == [64]
+    assert src.c4_sparse_raw_indices[0, :2].tolist() == [62, 63]
+    assert capture.c4_topk_lengths_raw.tolist() == [64]
+    assert capture.c4_sparse_raw_indices[0, :2].tolist() == [62, 63]
+    assert capture.c4_sparse_page_indices[0, :2].tolist() == [62, 63]
+    assert capture.c128_raw_indices[0, :3].tolist() == [0, 1, -1]
 
 
 def test_dsv4_route_b_component_page_table_lifetime_cache_invalidates_lifecycle(

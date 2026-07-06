@@ -18,6 +18,7 @@ from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
 from minisgl.models.deepseek_v4 import (
     DeepseekV4Model,
+    DSV4Attention,
     DSV4FusedRoutedExperts,
     DSV4MoE,
     DSV4MoEGate,
@@ -98,6 +99,27 @@ def _install_dsv4_context(cfg: ModelConfig, *, max_len: int) -> Context:
     core.set_global_ctx(ctx)
     ctx.attn_backend = create_attention_backend("dsv4", cfg)
     return ctx
+
+
+def test_dsv4_attention_swa_store_out_loc_translates_independent_lifecycle():
+    full_locs = torch.tensor([34004, -1], dtype=torch.int32)
+    translated_locs = torch.tensor([900, -1], dtype=torch.int64)
+
+    class FakeKVCache:
+        swa_independent_lifecycle_enabled = True
+
+        def translate_full_locs_to_swa_locs(self, locs):
+            assert locs is full_locs
+            return translated_locs
+
+    out = DSV4Attention._swa_store_out_loc(
+        SimpleNamespace(kvcache=FakeKVCache()),
+        full_locs,
+    )
+
+    assert out.dtype is full_locs.dtype
+    assert out.device == full_locs.device
+    assert out.tolist() == [900, -1]
 
 
 def _fill_forward_weights(model) -> None:

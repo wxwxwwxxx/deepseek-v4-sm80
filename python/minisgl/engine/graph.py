@@ -24,6 +24,7 @@ DSV4_CUDA_GRAPH_EXACT_BS_ONLY_ENV = "MINISGL_DSV4_CUDA_GRAPH_EXACT_BS_ONLY"
 DSV4_GRAPH_CAPTURE_STAGE_DEBUG_ENV = "MINISGL_DSV4_GRAPH_CAPTURE_STAGE_DEBUG"
 DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
 DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
+DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 _MARLIN_WNA16_RELEASE_ENV = "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
 _MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING"
 _MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV = (
@@ -601,6 +602,148 @@ class GraphRunner:
         str_key = str(int(key))
         counter[str_key] = int(counter.get(str_key, 0)) + 1
 
+    def _debug_sync_replay(self, stage: str, batch: Batch) -> None:
+        if os.environ.get(DSV4_CASE_BOUNDARY_DEBUG_ENV, "").strip().lower() not in _TRUE_ENV_VALUES:
+            return
+        try:
+            torch.cuda.synchronize(self.device)
+        except Exception as exc:
+            raise RuntimeError(
+                "DSV4 case-boundary debug CUDA sync failed during graph replay: "
+                f"stage={stage}, phase={batch.phase}, bs={batch.size}, "
+                f"padded={batch.padded_size}, replay_count={self.capture_status.get('replay_count')}, "
+                f"captured_bs={self.capture_status.get('captured_bs')}"
+            ) from exc
+
+    def _debug_replay_context(self, batch: Batch) -> dict[str, object]:
+        if os.environ.get(DSV4_CASE_BOUNDARY_DEBUG_ENV, "").strip().lower() not in _TRUE_ENV_VALUES:
+            return {}
+
+        def _range(tensor: torch.Tensor | None, rows: int) -> tuple[int | None, int | None]:
+            if tensor is None or rows <= 0 or tensor.numel() == 0:
+                return None, None
+            view = tensor[: min(rows, int(tensor.numel()))]
+            if view.numel() == 0:
+                return None, None
+            return int(view.min().item()), int(view.max().item())
+
+        def _valid_range(tensor: torch.Tensor | None, rows: int) -> tuple[int | None, int | None]:
+            if tensor is None or rows <= 0 or tensor.numel() == 0:
+                return None, None
+            if tensor.ndim == 1:
+                view = tensor[: min(rows, int(tensor.shape[0]))]
+            else:
+                view = tensor[: min(rows, int(tensor.shape[0]))].reshape(-1)
+            valid = view[view >= 0]
+            if valid.numel() == 0:
+                return None, None
+            return int(valid.min().item()), int(valid.max().item())
+
+        def _active_2d_range(
+            tensor: torch.Tensor | None,
+            lengths: torch.Tensor | None,
+            rows: int,
+        ) -> tuple[int | None, int | None]:
+            if (
+                tensor is None
+                or lengths is None
+                or rows <= 0
+                or tensor.numel() == 0
+                or lengths.numel() == 0
+            ):
+                return None, None
+            rows = min(rows, int(tensor.shape[0]), int(lengths.shape[0]))
+            if rows <= 0:
+                return None, None
+            width = int(tensor.shape[1]) if tensor.ndim == 2 else 0
+            if width <= 0:
+                return None, None
+            lens = lengths[:rows].to(device=tensor.device, dtype=torch.long).clamp(min=0, max=width)
+            cols = torch.arange(width, dtype=torch.long, device=tensor.device)
+            active = cols[None, :] < lens[:, None]
+            values = tensor[:rows][active]
+            values = values[values >= 0]
+            if values.numel() == 0:
+                return None, None
+            return int(values.min().item()), int(values.max().item())
+
+        def _metadata_context(rows: int) -> dict[str, object]:
+            attn_backend = getattr(self, "attn_backend", None)
+            capture = getattr(attn_backend, "capture", None)
+            core = getattr(capture, "core_metadata", None)
+            if core is None or rows <= 0:
+                return {}
+            out: dict[str, object] = {
+                "seq_lens_range": _range(getattr(core, "seq_lens", None), rows),
+                "req_seq_lens_range": _range(getattr(core, "req_seq_lens", None), rows),
+                "swa_ownership_version": int(getattr(core, "swa_ownership_version", -1)),
+                "component_loc_ownership": bool(getattr(core, "component_loc_ownership", False)),
+                "swa_source_elided": bool(getattr(core, "swa_source_elided_for_graph", False)),
+                "c4_source_elided": bool(
+                    getattr(core, "c4_sparse_source_elided_for_graph", False)
+                ),
+                "c128_source_elided": bool(getattr(core, "c128_source_elided_for_graph", False)),
+                "swa_len_range": _range(getattr(core, "swa_topk_lengths", None), rows),
+                "swa_active_range": _active_2d_range(
+                    getattr(core, "swa_page_indices", None),
+                    getattr(core, "swa_topk_lengths", None),
+                    rows,
+                ),
+                "c4_len_range": _range(getattr(core, "c4_topk_lengths_raw", None), rows),
+                "c4_sparse_len_range": _range(
+                    getattr(core, "c4_sparse_topk_lengths", None),
+                    rows,
+                ),
+                "c4_sparse_active_range": _active_2d_range(
+                    getattr(core, "c4_sparse_page_indices", None),
+                    getattr(core, "c4_sparse_topk_lengths", None),
+                    rows,
+                ),
+                "c128_len_range": _range(
+                    getattr(core, "c128_topk_lengths_clamp1", None),
+                    rows,
+                ),
+                "c128_active_range": _valid_range(
+                    getattr(core, "c128_page_indices", None),
+                    rows,
+                ),
+                "c4_out_loc_range": _valid_range(getattr(core, "c4_out_loc", None), rows),
+                "c128_out_loc_range": _valid_range(getattr(core, "c128_out_loc", None), rows),
+                "c4_indexer_out_loc_range": _valid_range(
+                    getattr(core, "c4_indexer_out_loc", None),
+                    rows,
+                ),
+            }
+            return out
+
+        req_summaries = []
+        for req in batch.padded_reqs[: min(batch.padded_size, 4)]:
+            req_summaries.append(
+                {
+                    "uid": int(getattr(req, "uid", -1)),
+                    "table_idx": int(getattr(req, "table_idx", -1)),
+                    "cached_len": int(getattr(req, "cached_len", -1)),
+                    "device_len": int(getattr(req, "device_len", -1)),
+                    "extend_len": int(getattr(req, "extend_len", -1)),
+                }
+            )
+        pos_min, pos_max = _range(getattr(batch, "positions", None), batch.padded_size)
+        out_min, out_max = _range(getattr(batch, "out_loc", None), batch.padded_size)
+        return {
+            "phase": batch.phase,
+            "bs": int(batch.size),
+            "padded": int(batch.padded_size),
+            "replay_count": int(self.capture_status.get("replay_count", 0)),
+            "greedy_replay_count": int(
+                self.capture_status.get("greedy_sample_replay_count", 0)
+            ),
+            "captured_bs": list(self.capture_status.get("captured_bs", [])),
+            "positions_range": (pos_min, pos_max),
+            "out_loc_range": (out_min, out_max),
+            "reqs": req_summaries,
+            "metadata": _metadata_context(int(batch.padded_size)),
+        }
+
     def record_eager_decode(self, batch: Batch) -> None:
         if not batch.is_decode:
             return
@@ -618,15 +761,25 @@ class GraphRunner:
             positions=batch.positions,
         ):
             copied_bytes = self.buffer.copy_from(batch)
+        self._debug_sync_replay("after_input_staging", batch)
         g = self.graph_map[batch.padded_size]
         with dsv4_direct_copy_nvtx(
             f"replay_metadata_copy.prepare_for_replay.bs{batch.size}.padded{batch.padded_size}"
         ):
             self.attn_backend.prepare_for_replay(batch)
+        self._debug_sync_replay("after_prepare_for_replay", batch)
+        replay_context = self._debug_replay_context(batch)
         with dsv4_direct_copy_nvtx(
             f"static_graph_replay.g.replay.bs{batch.size}.padded{batch.padded_size}"
         ):
-            g.replay()
+            try:
+                g.replay()
+            except Exception as exc:
+                raise RuntimeError(
+                    "DSV4 CUDA graph replay failed inside captured graph: "
+                    f"context={replay_context}"
+                ) from exc
+        self._debug_sync_replay("after_graph_replay", batch)
         self.capture_status["replay_count"] = int(self.capture_status["replay_count"]) + 1
         self.capture_status["replay_input_copy_bytes"] = int(
             self.capture_status["replay_input_copy_bytes"]

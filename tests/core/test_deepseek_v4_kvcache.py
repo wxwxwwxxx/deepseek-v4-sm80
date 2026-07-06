@@ -1013,6 +1013,36 @@ def test_dsv4_swa_independent_dummy_full_sentinel_maps_to_swa_dummy_only():
     pool.assert_no_leak()
 
 
+def test_dsv4_swa_independent_translate_full_locs_is_vectorized_for_mixed_rows():
+    page_size = 4
+    pool = _make_dsv4_pool(
+        [0, 4],
+        num_pages=8,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=2,
+    )
+    allocated_page_starts = torch.tensor([4, 12], dtype=torch.int32)
+    pool.on_pages_allocated(allocated_page_starts, page_size)
+
+    dummy_loc = torch.tensor([pool.num_tokens], dtype=torch.int32)
+    locs = torch.tensor([5, 14, 0, -1, int(dummy_loc.item())], dtype=torch.int32)
+    swa_locs = pool.translate_full_locs_to_swa_locs(locs)
+    dummy_swa_page = pool.runtime_swa_counters()["swa_capacity_pages"] - 1
+
+    assert swa_locs.tolist() == [1, page_size + 2, -1, -1, dummy_swa_page * page_size]
+
+    freed = torch.cat(
+        [
+            torch.arange(4, 8, dtype=torch.int32),
+            torch.arange(12, 16, dtype=torch.int32),
+        ]
+    )
+    pool.on_token_indices_freed(freed, page_size)
+    pool.assert_no_leak()
+
+
 def test_dsv4_swa_independent_engine_dummy_page_maps_to_swa_dummy_only():
     page_size = 4
     planned_pages = 7

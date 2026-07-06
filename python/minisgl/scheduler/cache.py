@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 DSV4_CACHE_SYNC_DEBUG_ENV = "MINISGL_DSV4_CACHE_SYNC_DEBUG"
+DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 
 
 @dataclass
@@ -601,6 +602,46 @@ class CacheManager:
                     ),
                 }
         return snapshot
+
+    def debug_case_boundary_snapshot(
+        self,
+        stage: str,
+        *,
+        graph_runner: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if os.environ.get(DSV4_CASE_BOUNDARY_DEBUG_ENV, "").strip().lower() not in _TRUE_ENV_VALUES:
+            return {}
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        if self.free_slots.numel() > 0:
+            if torch.any(self.free_slots < 0) or torch.any(self.free_slots >= self.num_pages * self.page_size):
+                raise RuntimeError(f"DSV4 case-boundary debug found out-of-range free slots at {stage}")
+            if self.page_size > 1 and torch.any(self.free_slots % self.page_size != 0):
+                raise RuntimeError(f"DSV4 case-boundary debug found unaligned free slots at {stage}")
+            if torch.unique(self.free_slots).numel() != self.free_slots.numel():
+                raise RuntimeError(f"DSV4 case-boundary debug found duplicate free slots at {stage}")
+        self.check_integrity()
+        kv_snapshot: dict[str, Any] = {}
+        validator = getattr(self.kv_cache, "debug_validate_swa_lifecycle", None)
+        if callable(validator):
+            kv_snapshot = dict(validator(stage=stage))
+        size_info = self.prefix_cache.size_info
+        return {
+            "stage": stage,
+            "free_full_pages": int(self.free_slots.numel()),
+            "retained_prefix_pages": int(size_info.total_size // self.page_size),
+            "evictable_prefix_pages": int(size_info.evictable_size // self.page_size),
+            "protected_prefix_pages": int(size_info.protected_size // self.page_size),
+            "retained_prefix_swa_pages": int(
+                (
+                    int(getattr(self.prefix_cache, "dsv4_evictable_swa_tokens", 0))
+                    + int(getattr(self.prefix_cache, "dsv4_protected_swa_tokens", 0))
+                )
+                // self.page_size
+            ),
+            "kv_cache": kv_snapshot,
+            "graph_runner": dict(graph_runner or {}),
+        }
 
     def _record_prefix_match(self, cached_len: int, input_len: int) -> None:
         self.metrics.match_requests += 1

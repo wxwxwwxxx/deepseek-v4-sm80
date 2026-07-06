@@ -1550,6 +1550,39 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "dummy_token_start": int(self._dummy_token_start),
         }
 
+    def debug_validate_swa_lifecycle(self, *, stage: str = "") -> dict[str, int | bool | str]:
+        if not self._swa_independent_lifecycle_enabled:
+            return {"enabled": False, "stage": stage}
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        refcount = self._swa_page_refcount
+        free_pages = self._free_swa_pages.to(device=self.device, dtype=torch.long)
+        if torch.any(refcount < 0):
+            raise RuntimeError(f"DSV4 SWA lifecycle debug found negative refcounts at {stage}")
+        if int(refcount[self._swa_dummy_page].item()) <= 0:
+            raise RuntimeError(f"DSV4 SWA lifecycle debug found unpinned dummy page at {stage}")
+        if free_pages.numel() > 0:
+            if torch.any(free_pages < 0) or torch.any(free_pages >= self._swa_dummy_page):
+                raise RuntimeError(f"DSV4 SWA lifecycle debug found out-of-range free page at {stage}")
+            if torch.unique(free_pages).numel() != free_pages.numel():
+                raise RuntimeError(f"DSV4 SWA lifecycle debug found duplicate free pages at {stage}")
+            if torch.any(refcount[free_pages] != 0):
+                raise RuntimeError(f"DSV4 SWA lifecycle debug found live refcount on free page at {stage}")
+        mapped = self._full_to_swa_page[self._full_to_swa_page >= 0].to(torch.long)
+        if mapped.numel() > 0:
+            if torch.any(mapped >= self._swa_dummy_page):
+                raise RuntimeError(f"DSV4 SWA lifecycle debug found dummy/out-of-range mapping at {stage}")
+            if torch.any(refcount[mapped] <= 0):
+                raise RuntimeError(f"DSV4 SWA lifecycle debug found zero-refcount mapping at {stage}")
+            if free_pages.numel() > 0 and torch.any(torch.isin(mapped, free_pages)):
+                raise RuntimeError(f"DSV4 SWA lifecycle debug found mapping to free page at {stage}")
+        return {
+            **self.runtime_swa_counters(),
+            "stage": stage,
+            "mapped_full_pages": int(mapped.numel()),
+            "free_swa_pages": int(free_pages.numel()),
+        }
+
     def make_component_page_handles(
         self,
         full_indices: torch.Tensor,
@@ -1872,15 +1905,13 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         full_pages = full_locs.div(self._page_size, rounding_mode="floor")
         offsets = full_locs % self._page_size
         valid = (full_locs >= 0) & (full_pages >= 0) & (full_pages < self._num_pages)
-        out = torch.full_like(full_locs, -1)
-        if bool(torch.any(valid)):
-            swa_pages = self._full_to_swa_page[full_pages[valid]].to(torch.long)
-            mapped = swa_pages * self._page_size + offsets[valid]
-            out[valid] = torch.where(swa_pages >= 0, mapped, torch.full_like(mapped, -1))
+        safe_pages = full_pages.clamp(min=0, max=max(self._num_pages - 1, 0))
+        swa_pages = self._full_to_swa_page[safe_pages].to(torch.long)
+        mapped = swa_pages * self._page_size + offsets
+        out = torch.where(valid & (swa_pages >= 0), mapped, torch.full_like(mapped, -1))
         dummy = full_locs == self._dummy_token_start
-        if bool(torch.any(dummy)):
-            out[dummy] = int(self._swa_dummy_page * self._page_size)
-        return out
+        dummy_loc = torch.full_like(out, int(self._swa_dummy_page * self._page_size))
+        return torch.where(dummy, dummy_loc, out)
 
     def _expand_page_starts(self, page_starts: torch.Tensor, page_size: int) -> torch.Tensor:
         if page_starts.numel() == 0:

@@ -80,6 +80,7 @@ DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA
 DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
 )
+DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV = "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
@@ -2577,6 +2578,31 @@ def _snapshot_graph_status(llm) -> dict[str, Any]:
     return copy.deepcopy(getattr(llm.engine.graph_runner, "capture_status", {}))
 
 
+def _case_boundary_debug_enabled() -> bool:
+    return os.environ.get(DSV4_CASE_BOUNDARY_DEBUG_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _case_boundary_debug_snapshot(llm, stage: str) -> dict[str, Any]:
+    if not _case_boundary_debug_enabled():
+        return {}
+    try:
+        if getattr(llm, "device", None) is not None and llm.device.type == "cuda":
+            import torch
+
+            torch.cuda.synchronize(llm.device)
+        snapshot = getattr(llm.cache_manager, "debug_case_boundary_snapshot", None)
+        if callable(snapshot):
+            return snapshot(stage, graph_runner=_snapshot_graph_status(llm))
+        return {"stage": stage, "graph_runner": _snapshot_graph_status(llm)}
+    except BaseException as exc:
+        raise RuntimeError(f"DSV4 case-boundary debug failed at {stage}") from exc
+
+
 def _counter_delta(
     before: dict[str, Any],
     after: dict[str, Any],
@@ -2793,7 +2819,9 @@ def _run_one_repeat(
     prompt_tokens = int(sum(len(prompt) for prompt in prompts))
     torch.cuda.synchronize(llm.device)
     torch.cuda.reset_peak_memory_stats(llm.device)
+    _case_boundary_debug_snapshot(llm, f"{nvtx_name or scenario.name}:before_prefix_metrics_before")
     prefix_metrics_before = llm.cache_manager.prefix_metrics_snapshot()
+    _case_boundary_debug_snapshot(llm, f"{nvtx_name or scenario.name}:after_prefix_metrics_before")
     nvtx_context = torch.cuda.nvtx.range(nvtx_name) if nvtx_name else contextlib.nullcontext()
     outputs = []
     trace: list[dict[str, Any]] = []
@@ -2805,12 +2833,18 @@ def _run_one_repeat(
             if not part_prompts:
                 continue
             part_outputs = llm.generate(part_prompts, part_sampling_params)
+            _case_boundary_debug_snapshot(
+                llm,
+                f"{nvtx_name or scenario.name}:after_generate_part{len(outputs)}",
+            )
             outputs.extend(part_outputs)
             trace.extend(llm.bench_batch_trace)
             request_metrics.extend(llm.request_metrics())
         torch.cuda.synchronize(llm.device)
         elapsed_s = time.perf_counter() - tic
+    _case_boundary_debug_snapshot(llm, f"{nvtx_name or scenario.name}:before_prefix_metrics_after")
     prefix_metrics_after = llm.cache_manager.prefix_metrics_snapshot()
+    _case_boundary_debug_snapshot(llm, f"{nvtx_name or scenario.name}:after_prefix_metrics_after")
     output_lens = [len(output["token_ids"]) for output in outputs]
     return {
         "elapsed_s": elapsed_s,
@@ -3356,7 +3390,9 @@ def run_case(
     graph_status_before = _snapshot_graph_status(llm)
     graph_status_after_warmup = graph_status_before
     graph_status_after = graph_status_before
+    case_boundary_debug: list[dict[str, Any]] = []
     try:
+        case_boundary_debug.append(_case_boundary_debug_snapshot(llm, f"{case_name}:before_warmup"))
         warmup = _run_warmups(
             llm=llm,
             torch=torch,
@@ -3367,8 +3403,12 @@ def run_case(
         )
         llm.sync_all_ranks()
         graph_status_after_warmup = _snapshot_graph_status(llm)
+        case_boundary_debug.append(_case_boundary_debug_snapshot(llm, f"{case_name}:after_warmup"))
         dsv4_owner_timing.reset()
         for repeat_idx in range(scenario.repeats):
+            case_boundary_debug.append(
+                _case_boundary_debug_snapshot(llm, f"{case_name}:before_repeat_{repeat_idx}")
+            )
             repeat_payload = _run_one_repeat(
                 llm=llm,
                 torch=torch,
@@ -3380,8 +3420,12 @@ def run_case(
             )
             repeat_payload["repeat_index"] = repeat_idx
             repeats.append(repeat_payload)
+            case_boundary_debug.append(
+                _case_boundary_debug_snapshot(llm, f"{case_name}:after_repeat_{repeat_idx}")
+            )
             llm.sync_all_ranks()
         graph_status_after = _snapshot_graph_status(llm)
+        case_boundary_debug.append(_case_boundary_debug_snapshot(llm, f"{case_name}:after_case"))
     except BaseException as exc:
         graph_status_after = _snapshot_graph_status(llm)
         error = {
@@ -3389,6 +3433,17 @@ def run_case(
             "exception_message": str(exc),
             "traceback": traceback.format_exc(limit=20),
         }
+        try:
+            case_boundary_debug.append(
+                _case_boundary_debug_snapshot(llm, f"{case_name}:after_exception")
+            )
+        except BaseException as debug_exc:
+            case_boundary_debug.append(
+                {
+                    "stage": f"{case_name}:after_exception",
+                    "error": f"{type(debug_exc).__name__}: {debug_exc}",
+                }
+            )
     graph_status_case = _graph_status_delta(graph_status_after_warmup, graph_status_after)
     graph_status_case_with_warmup = _graph_status_delta(graph_status_before, graph_status_after)
 
@@ -3403,6 +3458,20 @@ def run_case(
         for size, count in graph_status_case.get("replay_count_by_padded_size", {}).items()
         if int(count) > 0
     ]
+    if error is None:
+        case_boundary_debug.append(
+            _case_boundary_debug_snapshot(llm, f"{case_name}:before_final_prefix_metrics")
+        )
+        final_prefix_cache_metrics = llm.cache_manager.prefix_metrics_snapshot()
+        case_boundary_debug.append(
+            _case_boundary_debug_snapshot(llm, f"{case_name}:after_final_prefix_metrics")
+        )
+    else:
+        final_prefix_cache_metrics = {
+            "error": "skipped_after_case_error",
+            "case_error_type": error.get("exception_type"),
+            "case_error_message": error.get("exception_message"),
+        }
     rank_payload = {
         "rank": rank,
         "is_primary_rank": rank == 0,
@@ -3418,7 +3487,8 @@ def run_case(
         "graph_runner_after_case": graph_status_after,
         "graph_runner_case": graph_status_case,
         "graph_runner_case_with_warmup": graph_status_case_with_warmup,
-        "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
+        "case_boundary_debug": case_boundary_debug,
+        "prefix_cache_metrics": final_prefix_cache_metrics,
         "memory_after_case": _rank_memory_report(torch, llm),
         "kv_cache_memory_bytes": kv_cache_memory_bytes,
         "runtime_environment": runtime_environment,
@@ -3486,7 +3556,7 @@ def run_case(
             "enable_dsv4_swa_independent_lifecycle": (
                 runtime_options["enable_dsv4_swa_independent_lifecycle"]
             ),
-            "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
+            "prefix_cache_metrics": final_prefix_cache_metrics,
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
             "kv_capacity_plan_report": getattr(llm.engine, "kv_capacity_plan_report", {}),
         },

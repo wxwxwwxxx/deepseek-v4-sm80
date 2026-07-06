@@ -45,6 +45,12 @@ _MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
 )
 _MARLIN_WNA16_QUARANTINE_BYTES_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
+_DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _case_boundary_debug_enabled() -> bool:
+    return os.environ.get(_DSV4_CASE_BOUNDARY_DEBUG_ENV, "").strip().lower() in _TRUE_ENV_VALUES
 
 
 class ForwardOutput(NamedTuple):
@@ -524,6 +530,60 @@ class Engine:
         if callable(audit):
             audit(stage)
 
+    def _debug_forward_context(self, batch: Batch, forward_source: str) -> dict[str, Any]:
+        def _tensor_range(tensor: torch.Tensor | None) -> tuple[int | None, int | None] | str:
+            if tensor is None:
+                return None, None
+            try:
+                if tensor.numel() == 0:
+                    return None, None
+                return int(tensor.min().item()), int(tensor.max().item())
+            except Exception as exc:
+                return f"{type(exc).__name__}: {exc}"
+
+        reqs = []
+        for req in getattr(batch, "reqs", [])[:4]:
+            reqs.append(
+                {
+                    "uid": int(getattr(req, "uid", -1)),
+                    "table_idx": int(getattr(req, "table_idx", -1)),
+                    "cached_len": int(getattr(req, "cached_len", -1)),
+                    "device_len": int(getattr(req, "device_len", -1)),
+                    "extend_len": int(getattr(req, "extend_len", -1)),
+                }
+            )
+        graph_status = getattr(getattr(self, "graph_runner", None), "capture_status", {})
+        return {
+            "stage_source": forward_source,
+            "phase": getattr(batch, "phase", "unknown"),
+            "bs": int(getattr(batch, "size", -1)),
+            "padded": int(getattr(batch, "padded_size", getattr(batch, "size", -1))),
+            "positions_range": _tensor_range(getattr(batch, "positions", None)),
+            "out_loc_range": _tensor_range(getattr(batch, "out_loc", None)),
+            "graph_replay_count": int(graph_status.get("replay_count", 0))
+            if isinstance(graph_status, dict)
+            else 0,
+            "graph_greedy_replay_count": int(graph_status.get("greedy_sample_replay_count", 0))
+            if isinstance(graph_status, dict)
+            else 0,
+            "eager_decode_count": int(graph_status.get("eager_decode_count", 0))
+            if isinstance(graph_status, dict)
+            else 0,
+            "reqs": reqs,
+        }
+
+    def _debug_sync_forward(self, stage: str, batch: Batch, forward_source: str) -> None:
+        if not _case_boundary_debug_enabled() or self.device.type != "cuda":
+            return
+        try:
+            torch.cuda.synchronize(self.device)
+        except Exception as exc:
+            context = self._debug_forward_context(batch, forward_source)
+            raise RuntimeError(
+                "DSV4 forward failed during case-boundary debug synchronize: "
+                f"stage={stage}, context={context}"
+            ) from exc
+
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
         next_tokens_gpu: torch.Tensor | None = None
@@ -548,6 +608,7 @@ class Engine:
                 forward_source = "eager"
                 self.graph_runner.record_eager_decode(batch)
                 logits = self.model.forward()
+            self._debug_sync_forward("after_model_forward", batch, forward_source)
 
         debug_recorder = dsv4_prefix_debug.get_dsv4_prefix_debug_recorder()
         forward_stage = (
@@ -590,6 +651,7 @@ class Engine:
             ):
                 assert logits is not None
                 next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
+            self._debug_sync_forward("after_sampler", batch, forward_source)
         dsv4_memory_debug.record_owner_tensor(
             owner_label="engine.sampler.next_tokens_gpu",
             stage=forward_stage,

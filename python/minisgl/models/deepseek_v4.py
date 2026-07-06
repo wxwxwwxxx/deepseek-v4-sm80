@@ -1392,6 +1392,16 @@ class DSV4Attention(BaseOP):
         if ratio == 4:
             self.indexer = DSV4Indexer(config, layer_id)
 
+    @staticmethod
+    def _swa_store_out_loc(attn_backend, out_loc: torch.Tensor) -> torch.Tensor:
+        kvcache = getattr(attn_backend, "kvcache", None)
+        translate = getattr(kvcache, "translate_full_locs_to_swa_locs", None)
+        if callable(translate) and bool(
+            getattr(kvcache, "swa_independent_lifecycle_enabled", False)
+        ):
+            return translate(out_loc).to(device=out_loc.device, dtype=out_loc.dtype)
+        return out_loc
+
     @property
     def _q_wqb_bf16_weight_cache_name(self) -> str:
         return "_dsv4_q_wqb_bf16_weight_cache"
@@ -1694,7 +1704,7 @@ class DSV4Attention(BaseOP):
                     norm_weight=self.kv_norm.weight,
                     rms_norm_eps=self.rms_norm_eps,
                     cache=attn_backend.kvcache.swa_cache(self.layer_id),
-                    out_loc=batch.out_loc,
+                    out_loc=self._swa_store_out_loc(attn_backend, batch.out_loc),
                     rotary_dim=self.rope_head_dim,
                     base=float(self.rope_base),
                     original_seq_len=self.original_seq_len,
@@ -1738,7 +1748,7 @@ class DSV4Attention(BaseOP):
                         norm_weight=self.kv_norm.weight,
                         rms_norm_eps=self.rms_norm_eps,
                         cache=attn_backend.kvcache.swa_cache(self.layer_id),
-                        out_loc=batch.out_loc,
+                        out_loc=self._swa_store_out_loc(attn_backend, batch.out_loc),
                         rotary_dim=self.rope_head_dim,
                         base=float(self.rope_base),
                         original_seq_len=self.original_seq_len,

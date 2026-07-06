@@ -54,6 +54,7 @@ DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH_ENV = (
     "MINISGL_DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH"
 )
 DSV4_DEBUG_ATTENTION_COMPONENTS_ENV = "MINISGL_DSV4_PREFIX_DEBUG_ATTENTION_COMPONENTS"
+DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 DSV4_SWA_INDEX_BOUNDS_DEBUG_ENV = "MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG"
 DSV4_SPARSE_SYNC_DEBUG_ENV = "MINISGL_DSV4_SPARSE_SYNC_DEBUG"
 
@@ -132,6 +133,10 @@ def _debug_attention_components_enabled() -> bool:
         and os.environ.get(DSV4_DEBUG_ATTENTION_COMPONENTS_ENV, "").strip().lower()
         in _TRUE_ENV_VALUES
     )
+
+
+def _case_boundary_debug_enabled() -> bool:
+    return os.environ.get(DSV4_CASE_BOUNDARY_DEBUG_ENV, "").strip().lower() in _TRUE_ENV_VALUES
 
 
 def _capture_debug_activation(
@@ -309,6 +314,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if ratio is None:
             ratio = self.get_layer_compress_ratio(layer_id)
         if not swa_cache_written:
+            if layer_id == 0:
+                self._debug_check_swa_write_liveness(
+                    batch.out_loc,
+                    layer_id=layer_id,
+                    label="forward_store",
+                    stage=f"{batch.phase}_bs{batch.size}",
+                )
             dsv4_kernel.store_swa_fallback(self.kvcache, layer_id, k, batch.out_loc)
         return self._fallback_attention(q, layer_id, metadata.core_metadata, ratio, attn_sink)
 
@@ -463,20 +475,15 @@ class DSV4AttentionBackend(BaseAttnBackend):
         )
         self._capture_indexer_select_debug(layer_id, out, seq_lens, page_table)
         core = metadata.core_metadata
-        core.c4_sparse_raw_indices = self._merge_indexer_rows(
-            core.c4_sparse_raw_indices,
-            out.topk.raw_indices,
+        raw_indices, page_indices, full_indices = self._remap_indexer_topk_for_attention(
+            core,
+            out,
         )
-        core.c4_sparse_page_indices = self._merge_indexer_rows(
-            core.c4_sparse_page_indices,
-            out.topk.page_indices,
-        )
-        core.c4_sparse_full_indices = self._merge_indexer_rows(
-            core.c4_sparse_full_indices,
-            out.topk.full_indices,
-        )
+        self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
+        self._merge_indexer_rows_in_place(core.c4_sparse_page_indices, page_indices)
+        self._merge_indexer_rows_in_place(core.c4_sparse_full_indices, full_indices)
         if out.topk.topk_lens is not None:
-            core.c4_sparse_topk_lengths = self._merge_indexer_lengths(
+            self._merge_indexer_lengths_in_place(
                 core.c4_sparse_topk_lengths,
                 out.topk.topk_lens,
             )
@@ -535,23 +542,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 width=max(self.index_topk, 1),
                 ratio=4,
                 layer_id=layer_id,
-            )
+        )
         self._capture_indexer_select_debug(layer_id, out, seq_lens, page_table)
         core = metadata.core_metadata
-        core.c4_sparse_raw_indices = self._merge_indexer_rows(
-            core.c4_sparse_raw_indices,
-            out.topk.raw_indices,
+        raw_indices, page_indices, full_indices = self._remap_indexer_topk_for_attention(
+            core,
+            out,
         )
-        core.c4_sparse_page_indices = self._merge_indexer_rows(
-            core.c4_sparse_page_indices,
-            out.topk.page_indices,
-        )
-        core.c4_sparse_full_indices = self._merge_indexer_rows(
-            core.c4_sparse_full_indices,
-            out.topk.full_indices,
-        )
+        self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
+        self._merge_indexer_rows_in_place(core.c4_sparse_page_indices, page_indices)
+        self._merge_indexer_rows_in_place(core.c4_sparse_full_indices, full_indices)
         if out.topk.topk_lens is not None:
-            core.c4_sparse_topk_lengths = self._merge_indexer_lengths(
+            self._merge_indexer_lengths_in_place(
                 core.c4_sparse_topk_lengths,
                 out.topk.topk_lens,
             )
@@ -603,6 +605,27 @@ class DSV4AttentionBackend(BaseAttnBackend):
             _debug_topk_scores(out.logits, out.topk.raw_indices),
         )
 
+    def _remap_indexer_topk_for_attention(
+        self,
+        core: DSV4CoreAttentionMetadata,
+        out: dsv4_kernel.DSV4IndexerSelectOutput,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        raw_indices = out.topk.raw_indices
+        page_indices = out.topk.page_indices
+        full_indices = out.topk.full_indices
+        if core.component_loc_ownership and core.c4_page_table is not None:
+            page_indices = self._compressed_raw_to_component_locs(
+                core.c4_page_table[: raw_indices.shape[0]],
+                raw_indices,
+                4,
+            ).to(torch.int32)
+            full_indices = self._compressed_raw_to_full_locs_from_page_table(
+                core.page_table[: raw_indices.shape[0]],
+                raw_indices,
+                4,
+            ).to(torch.int32)
+        return raw_indices, page_indices, full_indices
+
     def _merge_indexer_rows(self, current: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
         padded = _pad_last_dim(values, value=-1)
         if current.shape == padded.shape:
@@ -618,6 +641,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
         )
         return out
 
+    def _merge_indexer_rows_in_place(self, current: torch.Tensor, values: torch.Tensor) -> None:
+        padded = _pad_last_dim(values, value=-1).to(device=current.device, dtype=current.dtype)
+        current.fill_(-1)
+        rows = min(current.shape[0], padded.shape[0])
+        width = min(current.shape[1], padded.shape[1])
+        if rows > 0 and width > 0:
+            current[:rows, :width].copy_(padded[:rows, :width])
+
     def _merge_indexer_lengths(self, current: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
         lens = values.to(device=current.device, dtype=current.dtype).reshape(-1)
         if current.shape == lens.shape:
@@ -627,6 +658,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if rows > 0:
             out[:rows] = lens[:rows]
         return out
+
+    def _merge_indexer_lengths_in_place(self, current: torch.Tensor, values: torch.Tensor) -> None:
+        lens = values.to(device=current.device, dtype=current.dtype).reshape(-1)
+        current.zero_()
+        rows = min(current.numel(), lens.numel())
+        if rows > 0:
+            current[:rows].copy_(lens[:rows])
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
         self.capture_bs = sorted(bs_list)
@@ -714,7 +752,104 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     metadata.core_metadata,
                     context="CUDA graph replay metadata rebuild",
                 )
+        self._clamp_graph_replay_compressed_read_metadata(
+            batch,
+            metadata.core_metadata,
+            batch.padded_size,
+        )
+        self._debug_validate_replay_metadata(
+            metadata.core_metadata,
+            batch,
+            batch.padded_size,
+            stage="source_before_copy",
+        )
         self._copy_metadata_for_replay(self.capture, metadata, batch.padded_size)
+        self._debug_validate_replay_metadata(
+            self.capture.core_metadata,
+            batch,
+            batch.padded_size,
+            stage="capture_after_copy",
+        )
+
+    def _clamp_graph_replay_compressed_read_metadata(
+        self,
+        batch: Batch,
+        metadata: DSV4CoreAttentionMetadata,
+        rows: int,
+    ) -> None:
+        if not batch.is_decode or rows <= 0:
+            return
+        if metadata.max_seqlen_q != 1:
+            return
+        materialized_seq_lens = self._graph_replay_materialized_seq_lens(batch, rows)
+        if materialized_seq_lens is None:
+            return
+        rows = min(int(rows), int(metadata.seq_lens.shape[0]))
+        if rows <= 0:
+            return
+        seq_lens = metadata.seq_lens[:rows].to(device=self.device, dtype=torch.long)
+        capped_seq_lens = torch.minimum(seq_lens, materialized_seq_lens[:rows])
+        if bool(torch.all(capped_seq_lens == seq_lens).item()):
+            return
+
+        table_indices = metadata.req_table_indices[:rows]
+        c4_layer = self._debug_first_layer_for_ratio(4)
+        if c4_layer is not None:
+            c4_lengths = capped_seq_lens.div(4, rounding_mode="floor").to(torch.int32)
+            metadata.c4_topk_lengths_raw[:rows].copy_(c4_lengths)
+            metadata.c4_topk_lengths_clamp1[:rows].copy_(c4_lengths.clamp_min(1))
+            metadata.c4_sparse_topk_lengths[:rows].copy_(
+                c4_lengths.clamp(min=0, max=self.index_topk)
+            )
+            raw, page, full = self._make_sparse_compressed_indices(
+                table_indices,
+                c4_lengths,
+                4,
+                component_page_table=metadata.c4_page_table,
+            )
+            self._copy_2d(metadata.c4_sparse_raw_indices, raw, rows, fill=-1)
+            self._copy_2d(metadata.c4_sparse_page_indices, page, rows, fill=-1)
+            self._copy_2d(metadata.c4_sparse_full_indices, full, rows, fill=-1)
+
+        c128_layer = self._debug_first_layer_for_ratio(128)
+        if c128_layer is not None:
+            c128_lengths = capped_seq_lens.div(128, rounding_mode="floor").to(torch.int32)
+            metadata.c128_topk_lengths_clamp1[:rows].copy_(c128_lengths.clamp_min(1))
+            raw, page, full = self._make_all_compressed_indices(
+                table_indices,
+                c128_lengths,
+                128,
+                component_page_table=metadata.c128_page_table,
+            )
+            self._copy_2d(metadata.c128_raw_indices, raw, rows, fill=-1)
+            self._copy_2d(metadata.c128_page_indices, page, rows, fill=-1)
+            self._copy_2d(metadata.c128_full_indices, full, rows, fill=-1)
+
+    def _graph_replay_materialized_seq_lens(
+        self,
+        batch: Batch,
+        rows: int,
+    ) -> torch.Tensor | None:
+        if rows <= 0:
+            return None
+        values: list[int] = []
+        for req in getattr(batch, "padded_reqs", batch.reqs):
+            extend_len = max(int(getattr(req, "extend_len", 1)), 1)
+            if int(getattr(req, "uid", 0)) < 0:
+                materialized = 0
+            else:
+                max_device_len = int(getattr(req, "max_device_len", getattr(req, "device_len", 0)))
+                output_len = int(getattr(req, "output_len", 0))
+                device_len = int(getattr(req, "device_len", 0))
+                materialized = max(0, min(device_len, max_device_len - output_len))
+            values.extend([materialized] * extend_len)
+            if len(values) >= rows:
+                break
+        if not values:
+            return None
+        if len(values) < rows:
+            values.extend([0] * (rows - len(values)))
+        return torch.tensor(values[:rows], dtype=torch.long, device=self.device)
 
     def _swa_version_guard_required(self) -> bool:
         return bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
@@ -1612,6 +1747,28 @@ class DSV4AttentionBackend(BaseAttnBackend):
         valid = valid & (logical_pages < component_page_table.shape[1]) & (gathered_pages >= 0)
         return torch.where(valid, locs, torch.full_like(locs, -1))
 
+    def _compressed_raw_to_full_locs_from_page_table(
+        self,
+        page_table: torch.Tensor,
+        raw_indices: torch.Tensor,
+        ratio: Literal[4, 128],
+    ) -> torch.Tensor:
+        valid = raw_indices >= 0
+        raw = raw_indices.clamp_min(0).to(torch.long)
+        full_positions = raw * int(ratio) + (int(ratio) - 1)
+        logical_pages = full_positions.div(self.page_size, rounding_mode="floor")
+        offsets = full_positions % self.page_size
+        rows = torch.arange(raw.shape[0], dtype=torch.long, device=self.device)[:, None]
+        rows = rows.expand_as(raw)
+        max_page = max(page_table.shape[1] - 1, 0)
+        gathered_pages = page_table[
+            rows,
+            logical_pages.clamp(max=max_page),
+        ].to(torch.long)
+        locs = gathered_pages * self.page_size + offsets
+        valid = valid & (logical_pages < page_table.shape[1]) & (gathered_pages >= 0)
+        return torch.where(valid, locs, torch.full_like(locs, -1))
+
     def _component_write_locs_from_page_table(
         self,
         component_page_table: torch.Tensor | None,
@@ -2034,12 +2191,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
         *,
         layer_id: int,
         allow_dummy_pages: bool = False,
+        dummy_rows: torch.Tensor | None = None,
     ) -> None:
         if _cuda_graph_capture_active():
             return
-        if (
+        if not (
             os.environ.get(DSV4_SWA_INDEX_BOUNDS_DEBUG_ENV, "").strip().lower()
-            not in _TRUE_ENV_VALUES
+            in _TRUE_ENV_VALUES
+            or _case_boundary_debug_enabled()
         ):
             return
         if swa_indices.numel() == 0:
@@ -2068,11 +2227,34 @@ class DSV4AttentionBackend(BaseAttnBackend):
         active_locs = swa_indices[active].to(device=self.device, dtype=torch.long)
         if active_locs.numel() == 0:
             return
+        active_rows = (
+            torch.arange(
+                swa_indices.shape[0],
+                device=swa_indices.device,
+                dtype=torch.long,
+            )[:, None]
+            .expand_as(swa_indices)[active]
+            .to(device=self.device, dtype=torch.long)
+        )
         pages = active_locs.div(self.page_size, rounding_mode="floor")
         dummy_page = int(getattr(self.kvcache, "_swa_dummy_page", -1))
         dummy = pages == dummy_page
-        if bool(torch.any(dummy).item()) and not allow_dummy_pages:
-            loc = int(active_locs[torch.where(dummy)[0][0]].item())
+        if dummy_rows is not None:
+            allowed = dummy_rows.to(device=self.device, dtype=torch.bool)
+            if allowed.numel() < swa_indices.shape[0]:
+                padded = torch.zeros(
+                    swa_indices.shape[0],
+                    dtype=torch.bool,
+                    device=self.device,
+                )
+                padded[: allowed.numel()] = allowed
+                allowed = padded
+            allowed_dummy = allowed[active_rows]
+            bad_dummy = dummy & ~allowed_dummy
+        else:
+            bad_dummy = dummy
+        if bool(torch.any(bad_dummy).item()) and not allow_dummy_pages:
+            loc = int(active_locs[torch.where(bad_dummy)[0][0]].item())
             raise RuntimeError(
                 "DSV4 SWA metadata points a real active row at the dummy page: "
                 f"layer={layer_id}, loc={loc}, dummy_page={dummy_page}"
@@ -2109,9 +2291,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> None:
         if _cuda_graph_capture_active():
             return
-        if (
+        if not (
             os.environ.get(DSV4_SWA_INDEX_BOUNDS_DEBUG_ENV, "").strip().lower()
-            not in _TRUE_ENV_VALUES
+            in _TRUE_ENV_VALUES
+            or _case_boundary_debug_enabled()
         ):
             return
         if indices is None or indices.numel() == 0:
@@ -2140,6 +2323,431 @@ class DSV4AttentionBackend(BaseAttnBackend):
             f"label={label}, layer={layer_id}, row={row}, col={col}, "
             f"value={value}, length={length}, cache_rows={int(cache_rows)}"
         )
+
+    def _debug_validate_replay_metadata(
+        self,
+        metadata: DSV4CoreAttentionMetadata,
+        batch: Batch,
+        rows: int,
+        *,
+        stage: str,
+    ) -> None:
+        if _cuda_graph_capture_active() or not _case_boundary_debug_enabled():
+            return
+        rows = int(rows)
+        if rows <= 0:
+            return
+        dummy_rows = self._debug_dummy_rows_for_batch(batch, rows)
+        required_rows = {
+            "positions": metadata.positions,
+            "seq_lens": metadata.seq_lens,
+            "req_seq_lens": metadata.req_seq_lens,
+            "req_table_indices": metadata.req_table_indices,
+            "swa_page_indices": metadata.swa_page_indices,
+            "swa_topk_lengths": metadata.swa_topk_lengths,
+            "c4_sparse_page_indices": metadata.c4_sparse_page_indices,
+            "c4_sparse_topk_lengths": metadata.c4_sparse_topk_lengths,
+            "c128_page_indices": metadata.c128_page_indices,
+        }
+        for name, tensor in required_rows.items():
+            if tensor.shape[0] < rows:
+                raise RuntimeError(
+                    "DSV4 graph replay metadata has too few rows: "
+                    f"stage={stage}, field={name}, rows={rows}, shape={tuple(tensor.shape)}"
+                )
+        if metadata.cu_seqlens_q.shape[0] < rows + 1:
+            raise RuntimeError(
+                "DSV4 graph replay metadata has too few cu_seqlens rows: "
+                f"stage={stage}, rows={rows}, shape={tuple(metadata.cu_seqlens_q.shape)}"
+            )
+        ctx_page_table = get_global_ctx().page_table
+        table_indices = metadata.req_table_indices[:rows].to(device=self.device, dtype=torch.long)
+        bad_table = (table_indices < 0) | (table_indices >= ctx_page_table.shape[0])
+        if bool(torch.any(bad_table).item()):
+            idx = int(torch.where(bad_table)[0][0].item())
+            raise RuntimeError(
+                "DSV4 graph replay metadata has an invalid table slot: "
+                f"stage={stage}, row={idx}, table_idx={int(table_indices[idx].item())}, "
+                f"table_rows={int(ctx_page_table.shape[0])}"
+            )
+        positions = metadata.positions[:rows].to(device=self.device, dtype=torch.long)
+        seq_lens = metadata.seq_lens[:rows].to(device=self.device, dtype=torch.long)
+        req_seq_lens = metadata.req_seq_lens[:rows].to(device=self.device, dtype=torch.long)
+        if bool(torch.any(positions < 0).item()) or bool(
+            torch.any(seq_lens != positions + 1).item()
+        ):
+            idx = int(torch.where((positions < 0) | (seq_lens != positions + 1))[0][0].item())
+            raise RuntimeError(
+                "DSV4 graph replay metadata has inconsistent decode positions: "
+                f"stage={stage}, row={idx}, pos={int(positions[idx].item())}, "
+                f"seq_len={int(seq_lens[idx].item())}"
+            )
+        if bool(torch.any(req_seq_lens > ctx_page_table.shape[1]).item()):
+            idx = int(torch.where(req_seq_lens > ctx_page_table.shape[1])[0][0].item())
+            raise RuntimeError(
+                "DSV4 graph replay metadata exceeds the serving page-table width: "
+                f"stage={stage}, row={idx}, req_seq_len={int(req_seq_lens[idx].item())}, "
+                f"page_table_width={int(ctx_page_table.shape[1])}"
+            )
+        if not metadata.swa_source_elided_for_graph:
+            self._debug_check_swa_index_bounds(
+                metadata.swa_page_indices[:rows],
+                metadata.swa_topk_lengths[:rows],
+                self.kvcache.swa_cache(0).shape[0],
+                layer_id=0,
+                dummy_rows=dummy_rows,
+            )
+        self._debug_check_swa_write_liveness(
+            metadata.raw_out_loc[:rows],
+            layer_id=0,
+            label="replay_raw_out_loc",
+            stage=stage,
+        )
+        c4_layer = self._debug_first_layer_for_ratio(4)
+        if c4_layer is not None and not metadata.c4_sparse_source_elided_for_graph:
+            c4_indices = metadata.c4_sparse_page_indices[:rows]
+            c4_lengths = metadata.c4_sparse_topk_lengths[:rows]
+            self._debug_check_component_page_table_liveness(
+                metadata.c4_page_table,
+                metadata.c4_topk_lengths_raw[:rows],
+                component_page_size=int(getattr(self.kvcache, "c4_component_page_size", 1)),
+                refcount=getattr(self.kvcache, "_c4_refcount", None),
+                free_pages=getattr(self.kvcache, "_free_c4_pages", None),
+                total_pages=int(getattr(self.kvcache, "_c4_component_pages", 0)),
+                rows=rows,
+                label="c4_page_table",
+                stage=stage,
+            )
+            self._debug_check_component_page_table_liveness(
+                metadata.c4_indexer_page_table,
+                metadata.c4_topk_lengths_raw[:rows],
+                component_page_size=int(getattr(self.kvcache, "c4_component_page_size", 1)),
+                refcount=getattr(self.kvcache, "_c4_indexer_refcount", None),
+                free_pages=getattr(self.kvcache, "_free_c4_indexer_pages", None),
+                total_pages=int(getattr(self.kvcache, "_c4_component_pages", 0)),
+                rows=rows,
+                label="c4_indexer_page_table",
+                stage=stage,
+            )
+            self._debug_check_component_write_liveness(
+                metadata.c4_out_loc,
+                component="c4",
+                rows=rows,
+                label="c4_out_loc",
+                stage=stage,
+            )
+            self._debug_check_component_write_liveness(
+                metadata.c4_indexer_out_loc,
+                component="c4_indexer",
+                rows=rows,
+                label="c4_indexer_out_loc",
+                stage=stage,
+            )
+            self._debug_check_cache_index_bounds(
+                c4_indices,
+                c4_lengths,
+                self.kvcache.c4_cache(c4_layer).shape[0],
+                layer_id=c4_layer,
+                label="c4_graph_replay",
+            )
+            self._debug_check_component_index_liveness(
+                c4_indices,
+                c4_lengths,
+                ratio=4,
+                label="c4_graph_replay",
+                stage=stage,
+            )
+        c128_layer = self._debug_first_layer_for_ratio(128)
+        if c128_layer is not None and not metadata.c128_source_elided_for_graph:
+            c128_indices = metadata.c128_page_indices[:rows]
+            c128_lengths = (c128_indices >= 0).sum(dim=-1).to(torch.int32)
+            self._debug_check_cache_index_bounds(
+                c128_indices,
+                c128_lengths,
+                self.kvcache.c128_cache(c128_layer).shape[0],
+                layer_id=c128_layer,
+                label="c128_graph_replay",
+            )
+            self._debug_check_component_index_liveness(
+                c128_indices,
+                c128_lengths,
+                ratio=128,
+                label="c128_graph_replay",
+                stage=stage,
+            )
+            self._debug_check_component_write_liveness(
+                metadata.c128_out_loc,
+                component="c128",
+                rows=rows,
+                label="c128_out_loc",
+                stage=stage,
+            )
+        torch.cuda.synchronize(self.device)
+
+    def _debug_dummy_rows_for_batch(self, batch: Batch, rows: int) -> torch.Tensor:
+        flags: list[bool] = []
+        for req in getattr(batch, "padded_reqs", batch.reqs):
+            is_dummy = int(getattr(req, "uid", 0)) < 0
+            extend_len = max(int(getattr(req, "extend_len", 1)), 1)
+            flags.extend([is_dummy] * extend_len)
+            if len(flags) >= rows:
+                break
+        if len(flags) < rows:
+            flags.extend([False] * (rows - len(flags)))
+        return torch.tensor(flags[:rows], dtype=torch.bool, device=self.device)
+
+    def _debug_first_layer_for_ratio(self, ratio: Literal[4, 128]) -> int | None:
+        for mapping in self.kvcache.layer_mapping:
+            if mapping.compress_ratio == ratio:
+                return int(mapping.layer_id)
+        return None
+
+    def _debug_check_component_index_liveness(
+        self,
+        indices: torch.Tensor,
+        lengths: torch.Tensor,
+        *,
+        ratio: Literal[4, 128],
+        label: str,
+        stage: str,
+    ) -> None:
+        if not bool(getattr(self.kvcache, "component_loc_ownership_enabled", False)):
+            return
+        width = int(indices.shape[-1])
+        if width <= 0 or indices.numel() == 0:
+            return
+        lengths = lengths.to(device=indices.device, dtype=torch.long).clamp(min=0, max=width)
+        cols = torch.arange(width, device=indices.device, dtype=torch.long)
+        active = cols[None, :] < lengths[:, None]
+        locs = indices[active].to(device=self.device, dtype=torch.long)
+        locs = locs[locs >= 0]
+        if locs.numel() == 0:
+            return
+        if ratio == 4:
+            refcount = getattr(self.kvcache, "_c4_refcount", None)
+            free_pages = getattr(self.kvcache, "_free_c4_pages", None)
+            page_size = int(getattr(self.kvcache, "c4_component_page_size", 1))
+        else:
+            refcount = getattr(self.kvcache, "_c128_refcount", None)
+            free_pages = getattr(self.kvcache, "_free_c128_pages", None)
+            page_size = int(getattr(self.kvcache, "c128_component_page_size", 1))
+        if refcount is None:
+            return
+        if bool(torch.any(locs >= refcount.shape[0]).item()):
+            bad = locs[locs >= refcount.shape[0]][0]
+            raise RuntimeError(
+                "DSV4 component metadata points outside component cache: "
+                f"stage={stage}, label={label}, loc={int(bad.item())}, "
+                f"cache_rows={int(refcount.shape[0])}"
+            )
+        zero_ref = refcount[locs] <= 0
+        if bool(torch.any(zero_ref).item()):
+            bad = locs[torch.where(zero_ref)[0][0]]
+            raise RuntimeError(
+                "DSV4 component metadata points at a zero-refcount loc: "
+                f"stage={stage}, label={label}, loc={int(bad.item())}"
+            )
+        if free_pages is not None and free_pages.numel() > 0:
+            pages = locs.div(max(page_size, 1), rounding_mode="floor").to(dtype=free_pages.dtype)
+            free = torch.isin(pages, free_pages)
+            if bool(torch.any(free).item()):
+                bad = locs[torch.where(free)[0][0]]
+                page = pages[torch.where(free)[0][0]]
+                raise RuntimeError(
+                    "DSV4 component metadata points at a page on the free list: "
+                    f"stage={stage}, label={label}, loc={int(bad.item())}, "
+                    f"page={int(page.item())}"
+                )
+
+    def _debug_check_swa_write_liveness(
+        self,
+        out_loc: torch.Tensor,
+        *,
+        layer_id: int,
+        label: str,
+        stage: str,
+    ) -> None:
+        if _cuda_graph_capture_active() or not _case_boundary_debug_enabled():
+            return
+        if not bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)):
+            return
+        if out_loc is None or out_loc.numel() == 0:
+            return
+        translate = getattr(self.kvcache, "translate_full_locs_to_swa_locs", None)
+        if not callable(translate):
+            return
+        locs = translate(out_loc.reshape(-1)).to(device=self.device, dtype=torch.long)
+        if locs.numel() == 0:
+            return
+        cache_rows = int(self.kvcache.swa_cache(layer_id).shape[0])
+        bad = (locs < 0) | (locs >= cache_rows)
+        if bool(torch.any(bad).item()):
+            idx = int(torch.where(bad)[0][0].item())
+            raise RuntimeError(
+                "DSV4 SWA write loc is invalid before cache store: "
+                f"stage={stage}, label={label}, layer={layer_id}, "
+                f"row={idx}, raw_out_loc={int(out_loc.reshape(-1)[idx].item())}, "
+                f"swa_loc={int(locs[idx].item())}, cache_rows={cache_rows}"
+            )
+        refcount = getattr(self.kvcache, "_swa_page_refcount", None)
+        if refcount is None:
+            return
+        page_size = max(int(getattr(self.kvcache, "_page_size", self.page_size)), 1)
+        pages = locs.div(page_size, rounding_mode="floor").to(dtype=torch.long)
+        zero_ref = refcount[pages] <= 0
+        if bool(torch.any(zero_ref).item()):
+            idx = int(torch.where(zero_ref)[0][0].item())
+            raise RuntimeError(
+                "DSV4 SWA write loc points at a zero-refcount page: "
+                f"stage={stage}, label={label}, layer={layer_id}, "
+                f"row={idx}, raw_out_loc={int(out_loc.reshape(-1)[idx].item())}, "
+                f"swa_loc={int(locs[idx].item())}, page={int(pages[idx].item())}"
+            )
+        free_pages = getattr(self.kvcache, "_free_swa_pages", None)
+        if free_pages is not None and free_pages.numel() > 0:
+            free = torch.isin(pages.to(dtype=free_pages.dtype), free_pages)
+            if bool(torch.any(free).item()):
+                idx = int(torch.where(free)[0][0].item())
+                raise RuntimeError(
+                    "DSV4 SWA write loc points at a page on the free list: "
+                    f"stage={stage}, label={label}, layer={layer_id}, "
+                    f"row={idx}, raw_out_loc={int(out_loc.reshape(-1)[idx].item())}, "
+                    f"swa_loc={int(locs[idx].item())}, page={int(pages[idx].item())}"
+                )
+
+    def _debug_check_component_write_liveness(
+        self,
+        locs: torch.Tensor | None,
+        *,
+        component: Literal["c4", "c4_indexer", "c128"],
+        rows: int,
+        label: str,
+        stage: str,
+    ) -> None:
+        if locs is None or not bool(getattr(self.kvcache, "component_loc_ownership_enabled", False)):
+            return
+        rows = min(int(rows), int(locs.numel()))
+        if rows <= 0:
+            return
+        active_locs = locs[:rows].to(device=self.device, dtype=torch.long)
+        active_locs = active_locs[active_locs >= 0]
+        if active_locs.numel() == 0:
+            return
+        if component == "c4":
+            refcount = getattr(self.kvcache, "_c4_refcount", None)
+            free_pages = getattr(self.kvcache, "_free_c4_pages", None)
+            page_size = int(getattr(self.kvcache, "c4_component_page_size", 1))
+            total_pages = int(getattr(self.kvcache, "_c4_component_pages", 0))
+        elif component == "c4_indexer":
+            refcount = getattr(self.kvcache, "_c4_indexer_refcount", None)
+            free_pages = getattr(self.kvcache, "_free_c4_indexer_pages", None)
+            page_size = int(getattr(self.kvcache, "c4_component_page_size", 1))
+            total_pages = int(getattr(self.kvcache, "_c4_component_pages", 0))
+        else:
+            refcount = getattr(self.kvcache, "_c128_refcount", None)
+            free_pages = getattr(self.kvcache, "_free_c128_pages", None)
+            page_size = int(getattr(self.kvcache, "c128_component_page_size", 1))
+            total_pages = int(getattr(self.kvcache, "_c128_component_pages", 0))
+        if refcount is None:
+            return
+        if bool(torch.any(active_locs >= refcount.shape[0]).item()):
+            bad = active_locs[active_locs >= refcount.shape[0]][0]
+            raise RuntimeError(
+                "DSV4 component write metadata points outside component cache: "
+                f"stage={stage}, label={label}, component={component}, "
+                f"loc={int(bad.item())}, cache_rows={int(refcount.shape[0])}"
+            )
+        zero_ref = refcount[active_locs] <= 0
+        if bool(torch.any(zero_ref).item()):
+            bad = active_locs[torch.where(zero_ref)[0][0]]
+            raise RuntimeError(
+                "DSV4 component write metadata points at a zero-refcount loc: "
+                f"stage={stage}, label={label}, component={component}, loc={int(bad.item())}"
+            )
+        if free_pages is None or free_pages.numel() == 0:
+            return
+        page_size = max(page_size, 1)
+        pages = active_locs.div(page_size, rounding_mode="floor").to(dtype=torch.long)
+        if total_pages > 0 and bool(torch.any(pages >= total_pages).item()):
+            bad_page = pages[pages >= total_pages][0]
+            raise RuntimeError(
+                "DSV4 component write metadata points outside component pages: "
+                f"stage={stage}, label={label}, component={component}, "
+                f"page={int(bad_page.item())}, total_pages={total_pages}"
+            )
+        free = torch.isin(pages.to(dtype=free_pages.dtype), free_pages)
+        if bool(torch.any(free).item()):
+            idx = int(torch.where(free)[0][0].item())
+            raise RuntimeError(
+                "DSV4 component write metadata points at a page on the free list: "
+                f"stage={stage}, label={label}, component={component}, "
+                f"loc={int(active_locs[idx].item())}, page={int(pages[idx].item())}"
+            )
+
+    def _debug_check_component_page_table_liveness(
+        self,
+        page_table: torch.Tensor | None,
+        seq_lens: torch.Tensor,
+        *,
+        component_page_size: int,
+        refcount: torch.Tensor | None,
+        free_pages: torch.Tensor | None,
+        total_pages: int,
+        rows: int,
+        label: str,
+        stage: str,
+    ) -> None:
+        if page_table is None or refcount is None:
+            return
+        rows = min(int(rows), int(page_table.shape[0]), int(seq_lens.shape[0]))
+        if rows <= 0:
+            return
+        component_page_size = max(int(component_page_size), 1)
+        table = page_table[:rows].to(device=self.device, dtype=torch.long)
+        lens = seq_lens[:rows].to(device=self.device, dtype=torch.long).clamp_min(0)
+        logical_pages = (lens + component_page_size - 1).div(
+            component_page_size,
+            rounding_mode="floor",
+        )
+        cols = torch.arange(table.shape[1], dtype=torch.long, device=self.device)
+        active = cols[None, :] < logical_pages[:, None]
+        bad = active & ((table < 0) | (table >= int(total_pages)))
+        if bool(torch.any(bad).item()):
+            bad_rows, bad_cols = torch.where(bad)
+            row = int(bad_rows[0].item())
+            col = int(bad_cols[0].item())
+            value = int(table[row, col].item())
+            raise RuntimeError(
+                "DSV4 component page table has an invalid active page: "
+                f"stage={stage}, label={label}, row={row}, col={col}, "
+                f"value={value}, total_pages={int(total_pages)}, "
+                f"seq_len={int(lens[row].item())}"
+            )
+        pages = table[active].to(torch.long)
+        pages = pages[pages >= 0]
+        if pages.numel() == 0:
+            return
+        if free_pages is not None and free_pages.numel() > 0:
+            free = torch.isin(pages.to(dtype=free_pages.dtype), free_pages)
+            if bool(torch.any(free).item()):
+                page = int(pages[torch.where(free)[0][0]].item())
+                raise RuntimeError(
+                    "DSV4 component page table points at a page on the free list: "
+                    f"stage={stage}, label={label}, page={page}"
+                )
+        offsets = torch.arange(component_page_size, dtype=torch.long, device=self.device)
+        locs = (pages[:, None] * component_page_size + offsets[None, :]).reshape(-1)
+        locs = locs[(locs >= 0) & (locs < int(refcount.shape[0]))]
+        if locs.numel() == 0:
+            return
+        zero_ref = refcount[locs] <= 0
+        if bool(torch.any(zero_ref).item()):
+            loc = int(locs[torch.where(zero_ref)[0][0]].item())
+            page = loc // component_page_size
+            raise RuntimeError(
+                "DSV4 component page table points at a zero-refcount page: "
+                f"stage={stage}, label={label}, page={page}, loc={loc}"
+            )
 
     def _debug_sync_sparse_attention(
         self,
@@ -2546,10 +3154,32 @@ class DSV4AttentionBackend(BaseAttnBackend):
 
         swa_index_width = div_ceil(self.window_size, _PAGE_INDEX_ALIGNMENT) * _PAGE_INDEX_ALIGNMENT
         swa_page_indices = empty_index(swa_index_width)
+        dummy_loc = 0
         if swa_independent:
             swa_rows = int(self.kvcache.swa_cache(0).shape[0])
             dummy_loc = max(swa_rows - self.page_size, 0)
-            swa_page_indices.fill_(dummy_loc)
+        swa_page_indices.fill_(dummy_loc)
+
+        c4_sparse_raw_indices = empty_index(topk_width)
+        c4_sparse_page_indices = empty_index(topk_width)
+        c4_sparse_full_indices = empty_index(topk_width)
+        if topk_width > 0:
+            c4_sparse_raw_indices.fill_(0)
+            c4_sparse_page_indices.fill_(0)
+            c4_sparse_full_indices.fill_(0)
+
+        c128_raw_indices = empty_index(c128_width)
+        c128_page_indices = empty_index(c128_width)
+        c128_full_indices = empty_index(c128_width)
+        if c128_width > 0:
+            c128_raw_indices.fill_(0)
+            c128_page_indices.fill_(0)
+            c128_full_indices.fill_(0)
+
+        capture_swa_len = max(min(int(self.window_size), int(swa_index_width)), 1)
+        capture_c4_sparse_len = max(min(int(self.index_topk), int(topk_width)), 1)
+        capture_c4_raw_len = max(div_ceil(max_seq_len, 4), 1)
+        capture_c128_len = max(min(div_ceil(max_seq_len, 128), int(c128_width)), 1)
 
         c4_out_loc = torch.full((max_bs,), -1, dtype=torch.int32, device=device)
         c128_out_loc = torch.full((max_bs,), -1, dtype=torch.int32, device=device)
@@ -2585,20 +3215,30 @@ class DSV4AttentionBackend(BaseAttnBackend):
             max_seqlen_q=1,
             max_seqlen_k=max_seq_len,
             swa_page_indices=swa_page_indices,
-            swa_topk_lengths=torch.ones(max_bs, dtype=torch.int32, device=device),
+            swa_topk_lengths=torch.full(
+                (max_bs,), capture_swa_len, dtype=torch.int32, device=device
+            ),
             c4_out_loc=c4_out_loc,
             c128_out_loc=c128_out_loc,
             c4_indexer_out_loc=c4_indexer_out_loc,
-            c4_topk_lengths_raw=torch.zeros(max_bs, dtype=torch.int32, device=device),
-            c4_topk_lengths_clamp1=torch.ones(max_bs, dtype=torch.int32, device=device),
-            c4_sparse_topk_lengths=torch.zeros(max_bs, dtype=torch.int32, device=device),
-            c4_sparse_raw_indices=empty_index(topk_width),
-            c4_sparse_page_indices=empty_index(topk_width),
-            c4_sparse_full_indices=empty_index(topk_width),
-            c128_topk_lengths_clamp1=torch.ones(max_bs, dtype=torch.int32, device=device),
-            c128_raw_indices=empty_index(c128_width),
-            c128_page_indices=empty_index(c128_width),
-            c128_full_indices=empty_index(c128_width),
+            c4_topk_lengths_raw=torch.full(
+                (max_bs,), capture_c4_raw_len, dtype=torch.int32, device=device
+            ),
+            c4_topk_lengths_clamp1=torch.full(
+                (max_bs,), capture_c4_raw_len, dtype=torch.int32, device=device
+            ),
+            c4_sparse_topk_lengths=torch.full(
+                (max_bs,), capture_c4_sparse_len, dtype=torch.int32, device=device
+            ),
+            c4_sparse_raw_indices=c4_sparse_raw_indices,
+            c4_sparse_page_indices=c4_sparse_page_indices,
+            c4_sparse_full_indices=c4_sparse_full_indices,
+            c128_topk_lengths_clamp1=torch.full(
+                (max_bs,), capture_c128_len, dtype=torch.int32, device=device
+            ),
+            c128_raw_indices=c128_raw_indices,
+            c128_page_indices=c128_page_indices,
+            c128_full_indices=c128_full_indices,
             component_loc_ownership=component_ownership,
             c4_page_table=c4_page_table,
             c128_page_table=c128_page_table,
