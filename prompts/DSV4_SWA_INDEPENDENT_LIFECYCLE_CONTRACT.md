@@ -1,7 +1,8 @@
 # DeepSeek V4 SWA Independent Lifecycle Contract
 
 Status: authoritative contract for TARGET 08.45 and the first reference for
-TARGET 08.46 audit / TARGET 08.47 unified fix.
+TARGET 08.46 audit / TARGET 08.47 unified fix / TARGET 08.48 case-boundary
+fix.
 
 Scope: mini-sglang DeepSeek V4 on the TARGET 08 Route B radix-prefix path with
 component loc ownership and independent SWA lifecycle enabled. This document is
@@ -553,7 +554,65 @@ Independent SWA lifecycle may disable or bypass optimizations that cannot prove
 their SWA ownership version, but it must fail closed rather than silently pass
 invalid locs to kernels.
 
-## 9. Test And Promotion Gates
+## 9. Case Boundary And Serving-Run Contract
+
+TARGET 08.43 exposed an additional contract layer: a serving Engine must be
+able to run multiple benchmark scenarios or request waves back-to-back without
+recreating the process.  Passing a single fresh-process workload is necessary
+but not sufficient for promotion.
+
+Mini's case-boundary contract:
+
+- At the end of a case, all finished active requests must have transferred or
+  released their full/SWA/component owners through `cache_req(finished=True)`
+  and related owner-boundary paths.
+- No active request table slot may be reused by the next case while old active
+  full/SWA/component ownership remains attached to that slot.
+- Prefix cache state may intentionally survive across cases, but every retained
+  radix node must remain a valid owner:
+  - full/component values have valid refcounts;
+  - `DSV4SWAPageHandles` entries are either live non-negative SWA pages with
+    positive refcount and not on the free list, or explicit `-1` tombstones;
+  - SWA-only tombstones must not invalidate full/component/base values.
+- `_full_to_swa_page` is an active translation table only.  After a case, it
+  may contain mappings only for live active pages or pages whose owner contract
+  explicitly requires a mapping.  It must not keep stale mappings to free-list
+  pages, zero-refcount pages, dummy pages, or pages released by prefix
+  tombstone.
+- CUDA graph capture buffers may survive across cases, but replay source
+  metadata must be rebuilt for the current batch and current SWA ownership
+  version.  No graph metadata path may read stale request rows or stale
+  page-table columns from a previous case.
+- Static-width metadata builders must use the current row's logical lengths to
+  bound real active reads.  Stale page-table values outside the current
+  request's active lengths may be padding only and must not become active
+  kernel inputs.
+- Runtime metrics and retention counters are observation points.  They may
+  synchronize and expose earlier CUDA faults, but they must not be treated as
+  the producer until a preceding owner/metadata/kernel path has been ruled out.
+- For auto-capacity runs, Marlin WNA16 raw weight release and KV/SWA/component
+  arena planning must remain compatible with case-boundary reuse.  Released raw
+  expert addresses must not be read by later forwards, graph replay, integrity
+  probes, or fallback paths.
+
+SGLang parity points to keep aligned:
+
+- `free_swa_out_of_window_slots` updates page-aligned
+  `req.swa_evicted_seqlen` using `cache_protected_len`, `swa_evict_floor`, and
+  a one-page margin before freeing SWA slots.
+- `SWAComponent` refreshes only window-bounded ancestors at match/insert end,
+  uses `swa_evicted_seqlen` during insert overlap/recovery, and can skip leaf
+  creation when the inserted segment is entirely outside the retained SWA
+  window.
+- SGLang separates allocator state, component tombstone state, request
+  lifetime, and prefix component lifetime.  Mini adaptations may differ in data
+  layout, but must keep the same ownership boundaries.
+
+TARGET 08.48 must treat this section as part of the contract.  If SGLang
+review shows a stronger or safer case-boundary invariant, update this document
+before making broad fixes.
+
+## 10. Test And Promotion Gates
 
 Any future SWA lifecycle code change must pass these gates before promotion or
 large soak:
@@ -575,8 +634,13 @@ large soak:
 - Serving, prefix, and eviction soak only after historical fixed128 gates pass.
 - Graph replay/eager counters must remain healthy for buckets
   `[1, 2, 4, 8, 16]`.
+- Multi-case same-Engine gates:
+  `historical_4096_128_bs4 -> historical_4096_1024_bs4` with auto capacity,
+  Marlin release, SWA independent lifecycle, graph buckets `[1, 2, 4, 8, 16]`,
+  `CUDA_LAUNCH_BLOCKING=1`, and SWA liveness debug enabled.
+- A fresh-process single-case pass does not replace the multi-case gate.
 
-## 10. TARGET 08.46 Audit Priorities
+## 11. TARGET 08.46 / 08.48 Audit Priorities
 
 Audit first:
 
@@ -597,3 +661,9 @@ Audit first:
   replayed step.
 - Full-model sparse attention inputs: add a pre-kernel debug gate that catches
   stale/freed SWA locs before asynchronous CUDA faults surface elsewhere.
+- TARGET 08.48 additionally audits case-boundary state:
+  - finished request cleanup and table-slot reuse;
+  - retained prefix owner validity after each case;
+  - graph capture/replay buffers and source metadata after scenario changes;
+  - page-table static-width readers;
+  - Marlin released-weight address reuse and auto-capacity arena planning.

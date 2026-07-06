@@ -87,6 +87,7 @@ def _install_context(
     table_bases: list[int],
     max_len: int,
     enable_component_loc_ownership: bool = False,
+    enable_swa_independent_lifecycle: bool = False,
 ) -> Context:
     ctx = Context(page_size=page_size)
     ctx.kv_cache = create_kvcache_pool(
@@ -96,6 +97,7 @@ def _install_context(
         dtype=torch.float16,
         device=torch.device("cpu"),
         enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
+        enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
     )
     page_table = torch.full((len(table_bases), max_len), -1, dtype=torch.int32)
     for row, base in enumerate(table_bases):
@@ -649,3 +651,139 @@ def test_dsv4_metadata_repeats_page_table_for_multi_request_batch():
     assert meta.req_table_indices[:6].tolist() == [0] * 6
     assert meta.req_table_indices[6:].tolist() == [1] * 9
     assert meta.c4_sparse_page_indices.shape[1] % 64 == 0
+
+
+def _install_independent_swa_context(page_size: int = 4, max_len: int = 16) -> Context:
+    cfg = _tiny_dsv4_config([4, 128, 0])
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0],
+        max_len=max_len,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+    )
+    page_starts = torch.arange(0, max_len, page_size, dtype=torch.int32)
+    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
+    return ctx
+
+
+def test_dsv4_independent_swa_metadata_rejects_tombstone_inside_active_length(
+    monkeypatch,
+):
+    ctx = _install_independent_swa_context()
+    backend = ctx.attn_backend
+    monkeypatch.setenv("MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG", "1")
+
+    with pytest.raises(RuntimeError, match="out of bounds"):
+        backend._debug_check_swa_index_bounds(
+            torch.tensor([[-1]], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+            ctx.kv_cache.swa_cache(0).shape[0],
+            layer_id=0,
+        )
+
+
+def test_dsv4_independent_swa_metadata_rejects_dummy_page_for_real_row(
+    monkeypatch,
+):
+    ctx = _install_independent_swa_context()
+    backend = ctx.attn_backend
+    monkeypatch.setenv("MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG", "1")
+    dummy_loc = int(ctx.kv_cache._swa_dummy_page) * ctx.page_size
+
+    with pytest.raises(RuntimeError, match="dummy page"):
+        backend._debug_check_swa_index_bounds(
+            torch.tensor([[dummy_loc]], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+            ctx.kv_cache.swa_cache(0).shape[0],
+            layer_id=0,
+        )
+
+
+def test_dsv4_independent_swa_metadata_rejects_zero_refcount_page(monkeypatch):
+    ctx = _install_independent_swa_context()
+    backend = ctx.attn_backend
+    monkeypatch.setenv("MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG", "1")
+    page = int(ctx.kv_cache._full_to_swa_page[0].item())
+    ctx.kv_cache._swa_page_refcount[page] = 0
+
+    with pytest.raises(RuntimeError, match="zero-refcount"):
+        backend._debug_check_swa_index_bounds(
+            torch.tensor([[page * ctx.page_size]], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+            ctx.kv_cache.swa_cache(0).shape[0],
+            layer_id=0,
+        )
+
+
+def test_dsv4_independent_swa_metadata_rejects_free_page_inside_active_length(
+    monkeypatch,
+):
+    ctx = _install_independent_swa_context()
+    backend = ctx.attn_backend
+    monkeypatch.setenv("MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG", "1")
+    page = int(ctx.kv_cache._full_to_swa_page[0].item())
+    ctx.kv_cache._free_swa_pages = torch.cat(
+        [ctx.kv_cache._free_swa_pages, torch.tensor([page], dtype=torch.int32)]
+    )
+
+    with pytest.raises(RuntimeError, match="free list"):
+        backend._debug_check_swa_index_bounds(
+            torch.tensor([[page * ctx.page_size]], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+            ctx.kv_cache.swa_cache(0).shape[0],
+            layer_id=0,
+        )
+
+
+def test_dsv4_cuda_graph_replay_rejects_stale_swa_metadata_version():
+    ctx = _install_independent_swa_context(max_len=32)
+    req = _req(0, 0, 8, cached_len=7)
+    batch = _prepare_decode_batch([req])
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+    backend.init_capture_graph(max_seq_len=16, bs_list=[1])
+    assert backend.capture is not None
+
+    ctx.kv_cache.release_swa_for_full_indices(
+        ctx.page_table[0, 4 * ctx.page_size : 5 * ctx.page_size],
+        ctx.page_size,
+        tombstone=True,
+    )
+
+    with pytest.raises(RuntimeError, match="ownership version is stale"):
+        backend._copy_metadata_for_replay(backend.capture, batch.attn_metadata, 1)
+
+
+def test_dsv4_cuda_graph_replay_rebuilds_stale_swa_metadata_version():
+    ctx = _install_independent_swa_context(max_len=32)
+    req = _req(0, 0, 16, cached_len=15)
+    batch = _prepare_decode_batch([req])
+    backend = ctx.attn_backend
+    backend.prepare_metadata(batch)
+    backend.init_capture_graph(max_seq_len=16, bs_list=[1])
+    assert backend.capture is not None
+
+    ctx.kv_cache.release_swa_for_full_indices(
+        ctx.page_table[0, 4 * ctx.page_size : 5 * ctx.page_size],
+        ctx.page_size,
+        tombstone=True,
+    )
+    backend.prepare_for_replay(batch)
+
+    assert batch.attn_metadata.core_metadata.swa_ownership_version == ctx.kv_cache.swa_ownership_version
+    assert backend.capture.core_metadata.swa_ownership_version == ctx.kv_cache.swa_ownership_version
+
+
+def test_dsv4_cuda_graph_replay_keeps_direct_swa_disabled_under_independent(monkeypatch):
+    monkeypatch.setenv("MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS", "swa")
+    monkeypatch.setenv("MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS", "1")
+    ctx = _install_independent_swa_context()
+    req = _req(0, 0, 8, cached_len=7)
+    batch = _prepare_decode_batch([req])
+
+    ctx.attn_backend.prepare_metadata(batch)
+
+    meta = batch.attn_metadata.core_metadata
+    assert not meta.swa_source_elided_for_graph

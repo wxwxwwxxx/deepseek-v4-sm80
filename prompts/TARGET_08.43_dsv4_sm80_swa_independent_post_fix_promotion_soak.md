@@ -2,26 +2,33 @@
 
 ## Status
 
-Active TARGET 08 follow-up after TARGET 08.42.
+Active TARGET 08 follow-up after TARGET 08.47.
 
 TARGET 08.31 implemented opt-in, SGLang-aligned SWA independent lifecycle for
 DeepSeek V4 on A100/sm80.  TARGET 08.41 then found that fixed-128 serving was
 correctness-clean, but large-capacity Marlin WNA16 release + SWA independent
 serving crashed with CUDA illegal memory access.  TARGET 08.42 fixed that
 blocker by aligning the Engine/KV-cache dummy full-page token contract.
+TARGET 08.45 then wrote the authoritative SWA independent lifecycle contract,
+TARGET 08.46 audited the code against that contract, and TARGET 08.47
+implemented the unified finish/cache owner-boundary fix.
 
 This target is the post-fix promotion soak.  It should not re-implement SWA
-lifecycle, re-debug the old dummy-token issue, or broaden into FP8 KV/cache.
-It should decide whether SWA independent lifecycle is ready to promote, should
-remain opt-in because of overhead, or needs one focused follow-up.
+lifecycle, re-debug the old dummy-token issue, re-open the SWA ownership model,
+or broaden into FP8 KV/cache.  It should decide whether the 08.47 contract
+implementation is ready to promote, should remain opt-in because of overhead,
+or needs one focused follow-up.
 
 ## Goal
 
-Verify the 08.42 fix under serving-like pressure and make a promotion decision:
+Verify the 08.47 SWA contract fix under serving-like pressure and make a
+promotion decision:
 
 ```text
 SWA independent lifecycle
 -> dummy full-token contract remains correct
+-> finish/cache owner-boundary SWA lifecycle remains correct
+-> active release protected frontier and monotonic SWA frontier remain correct
 -> Marlin WNA16 release + component-slot clear remains compatible
 -> fixed and auto capacity paths are correctness-clean
 -> graph replay covers serving buckets
@@ -47,9 +54,21 @@ Read first:
 performance_milestones/target08_swa_independent_lifecycle/summaries/TARGET_08.31_report.md
 performance_milestones/target08_swa_independent_lifecycle_promotion_soak/README.md
 performance_milestones/target08_swa_large_capacity_serving_correctness/README.md
+performance_milestones/target08_swa_lifecycle_contract/README.md
+performance_milestones/target08_swa_contract_based_code_audit/README.md
+performance_milestones/target08_swa_contract_based_code_audit/recommended_fix_plan.md
+performance_milestones/target08_swa_contract_unified_fix/README.md
+performance_milestones/target08_swa_contract_unified_fix/contract_fixes.md
+performance_milestones/target08_swa_contract_unified_fix/ownership_fix_summary.md
+performance_milestones/target08_swa_contract_unified_fix/metadata_graph_fix_summary.md
+performance_milestones/target08_swa_contract_unified_fix/full_model_fixed128_gate.md
+prompts/DSV4_SWA_INDEPENDENT_LIFECYCLE_CONTRACT.md
 prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md
 prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md
 prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md
+prompts/TARGET_08.45_dsv4_sm80_swa_independent_lifecycle_contract.md
+prompts/TARGET_08.46_dsv4_sm80_swa_contract_based_code_audit.md
+prompts/TARGET_08.47_dsv4_sm80_swa_contract_unified_fix.md
 prompts/TARGET_08_radix_prefix_dsv4.md
 prompts/target.md
 ```
@@ -103,6 +122,39 @@ Important TARGET 08.42 conclusions:
   - no CUDA illegal memory access or NCCL watchdog.
 - Focused tests passed: `77 passed`.
 
+Important TARGET 08.45-08.47 conclusions:
+
+- Final SWA ownership model:
+  - `DeepSeekV4KVCache` owns physical SWA storage, refcounts, free list,
+    full-to-SWA mapping, and dummy SWA page;
+  - `DSV4SWAPageHandles` on radix nodes are owning prefix SWA component
+    values, not mutable request-local snapshots;
+  - active release may release only active-only SWA pages outside both the SWA
+    window and the protected prefix/cache region.
+- TARGET 08.47 replaced the old 08.44 active-time radix tombstone stopgap with
+  the finish/cache owner-boundary model:
+  - `Req.swa_evicted_seqlen` is a per-request monotonic SWA frontier;
+  - active SWA release uses `cache_protected_len(req)` from the locked radix
+    handle and releases only page-aligned
+    `[max(req.swa_evicted_seqlen, cache_protected_len), release_end)` ranges;
+  - active release no longer mutates radix SWA component handles;
+  - prefix SWA tombstones are committed at cache/finish/eviction owner
+    boundaries.
+- SWA metadata and graph replay now have stronger safety:
+  - real active SWA rows reject `-1`, dummy page, out-of-range page,
+    zero-refcount page, and free-list page under
+    `MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG=1`;
+  - `DSV4CoreAttentionMetadata` records `swa_ownership_version`;
+  - CUDA graph replay rebuilds or fails closed on stale SWA metadata;
+  - direct SWA graph metadata remains disabled under independent lifecycle.
+- TARGET 08.47 passed its correctness gate:
+  - focused tests: `121 passed`;
+  - fixed128 `historical_4096_128_bs4` and `historical_4096_1024_bs4` passed;
+  - both SWA independent and Marlin release + SWA independent variants passed;
+  - graph decode replay stayed zero-eager for buckets `[1,2,4,8,16]`;
+  - the 08.44 CUDA illegal memory access did not reproduce under
+    `CUDA_LAUNCH_BLOCKING=1` and SWA liveness debug.
+
 ## Non-Goals
 
 - Do not implement FP8 KV/cache in this target.
@@ -124,14 +176,24 @@ Review the current code and confirm these contracts:
 - The SWA independent lifecycle remains off by default unless a preset/CLI/env
   enables it.
 - It still requires radix prefix cache and DSV4 component loc ownership.
+- Active SWA release uses the protected prefix/cache frontier and monotonic
+  `Req.swa_evicted_seqlen`.
+- Active SWA release does not mutate radix SWA component handles.
+- Prefix SWA tombstone/release still happens only at cache/finish/eviction
+  owner boundaries.
 - It does not invalidate C4/C128/indexer/compression-state/component locs when
   SWA rows are tombstoned or freed.
+- SWA metadata liveness checks and ownership-version graph replay guards remain
+  enabled and covered by tests.
 - TARGET 08.40 component-slot clear still runs on page allocation when Marlin
   WNA16 raw expert release is enabled.
-- Direct C4 graph metadata buffers remain valid.  Direct SWA graph metadata is
-  either disabled in independent mode or explicitly proven safe.
+- Direct C4 graph metadata buffers remain valid.  Direct SWA graph metadata
+  remains disabled in independent mode unless this target explicitly proves it
+  safe in a separate sub-result; do not enable it as part of the promotion
+  soak.
 - Existing focused tests for dummy mapping, SWA page translation, component
-  clear, and prefix/eviction still pass.
+  clear, SWA owner-boundary release, metadata liveness, graph replay stale
+  version, and prefix/eviction still pass.
 
 If any of these checks fail, fix the smallest contract bug before running the
 long soak.
@@ -228,9 +290,10 @@ The capacity ledger must clearly separate:
 
 ### 4. E2E Overhead Attribution
 
-Re-run the 08.41 overhead attribution after the dummy-token fix.  The prior
-owner was decode prepare / attention metadata; verify whether that is still
-true.
+Re-run the 08.41 overhead attribution after the 08.42 dummy-token fix and
+08.47 owner-boundary lifecycle fix.  The prior owner was decode prepare /
+attention metadata; verify whether that is still true under the final contract
+implementation.
 
 Split overhead into:
 
@@ -316,10 +379,11 @@ Required files:
 
 The README must answer:
 
-1. Did the 08.42 dummy-token fix stay correct under fixed, cap4096, and auto
-   capacity?
+1. Did the 08.42 dummy-token fix and 08.47 SWA owner-boundary contract stay
+   correct under fixed, cap4096, and auto capacity?
 2. Is SWA independent lifecycle correctness-clean under prefix/serving/eviction
-   pressure?
+   pressure with `swa_evicted_seqlen`, protected frontier, and graph replay
+   version guards active?
 3. Does it remain compatible with Marlin WNA16 release + component clear?
 4. Does graph replay cover buckets `[1,2,4,8,16]` without avoidable eager
    fallback?

@@ -193,6 +193,7 @@ class DSV4CoreAttentionMetadata(BaseAttnMetadata):
     swa_source_elided_for_graph: bool = False
     c4_sparse_source_elided_for_graph: bool = False
     c128_source_elided_for_graph: bool = False
+    swa_ownership_version: int = 0
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
         return self.cu_seqlens_q[1 : 1 + bs] - 1
@@ -641,6 +642,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
     def prepare_for_capture(self, batch: Batch) -> None:
         assert self.capture is not None
         assert batch.size in self.capture_bs
+        self.capture.core_metadata.swa_ownership_version = self._current_swa_ownership_version()
         batch.attn_metadata = self.capture
 
     def bind_capture_graph_inputs(
@@ -703,7 +705,39 @@ class DSV4AttentionBackend(BaseAttnBackend):
         assert isinstance(metadata, DSV4AttentionMetadata)
         if metadata is self.capture:
             return
+        if self._swa_version_guard_required():
+            src_core = metadata.core_metadata
+            if src_core.swa_ownership_version != self._current_swa_ownership_version():
+                metadata = self._build_metadata(batch)
+                batch.attn_metadata = metadata
+                self._ensure_swa_metadata_current(
+                    metadata.core_metadata,
+                    context="CUDA graph replay metadata rebuild",
+                )
         self._copy_metadata_for_replay(self.capture, metadata, batch.padded_size)
+
+    def _swa_version_guard_required(self) -> bool:
+        return bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
+
+    def _current_swa_ownership_version(self) -> int:
+        return int(getattr(self.kvcache, "swa_ownership_version", 0))
+
+    def _ensure_swa_metadata_current(
+        self,
+        metadata: DSV4CoreAttentionMetadata,
+        *,
+        context: str,
+    ) -> None:
+        if not self._swa_version_guard_required():
+            return
+        current = self._current_swa_ownership_version()
+        if int(metadata.swa_ownership_version) == current:
+            return
+        raise RuntimeError(
+            "DSV4 independent SWA metadata ownership version is stale: "
+            f"context={context}, metadata_version={int(metadata.swa_ownership_version)}, "
+            f"current_version={current}"
+        )
 
     def _should_elide_index_source_for_graph(
         self,
@@ -1025,6 +1059,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             swa_source_elided_for_graph=swa_source_elided,
             c4_sparse_source_elided_for_graph=c4_sparse_source_elided,
             c128_source_elided_for_graph=c128_source_elided,
+            swa_ownership_version=self._current_swa_ownership_version(),
         )
         self._record_metadata_build_bytes(batch, core)
         self._record_marlin_wna16_metadata_owners(batch, core)
@@ -1998,6 +2033,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         cache_rows: int,
         *,
         layer_id: int,
+        allow_dummy_pages: bool = False,
     ) -> None:
         if _cuda_graph_capture_active():
             return
@@ -2016,18 +2052,51 @@ class DSV4AttentionBackend(BaseAttnBackend):
         cols = torch.arange(width, device=swa_indices.device, dtype=torch.long)
         active = cols[None, :] < lengths[:, None]
         bad = active & ((swa_indices < 0) | (swa_indices >= int(cache_rows)))
-        if not bool(torch.any(bad).item()):
+        if bool(torch.any(bad).item()):
+            rows, cols = torch.where(bad)
+            row = int(rows[0].item())
+            col = int(cols[0].item())
+            value = int(swa_indices[row, col].item())
+            length = int(lengths[row].item())
+            raise RuntimeError(
+                "DSV4 SWA index out of bounds before sparse attention: "
+                f"layer={layer_id}, row={row}, col={col}, value={value}, "
+                f"length={length}, cache_rows={int(cache_rows)}"
+            )
+        if not self._swa_version_guard_required():
             return
-        rows, cols = torch.where(bad)
-        row = int(rows[0].item())
-        col = int(cols[0].item())
-        value = int(swa_indices[row, col].item())
-        length = int(lengths[row].item())
-        raise RuntimeError(
-            "DSV4 SWA index out of bounds before sparse attention: "
-            f"layer={layer_id}, row={row}, col={col}, value={value}, "
-            f"length={length}, cache_rows={int(cache_rows)}"
-        )
+        active_locs = swa_indices[active].to(device=self.device, dtype=torch.long)
+        if active_locs.numel() == 0:
+            return
+        pages = active_locs.div(self.page_size, rounding_mode="floor")
+        dummy_page = int(getattr(self.kvcache, "_swa_dummy_page", -1))
+        dummy = pages == dummy_page
+        if bool(torch.any(dummy).item()) and not allow_dummy_pages:
+            loc = int(active_locs[torch.where(dummy)[0][0]].item())
+            raise RuntimeError(
+                "DSV4 SWA metadata points a real active row at the dummy page: "
+                f"layer={layer_id}, loc={loc}, dummy_page={dummy_page}"
+            )
+        refcount = getattr(self.kvcache, "_swa_page_refcount", None)
+        if refcount is not None and pages.numel() > 0:
+            zero_ref = refcount[pages] <= 0
+            if bool(torch.any(zero_ref).item()):
+                loc = int(active_locs[torch.where(zero_ref)[0][0]].item())
+                page = int(pages[torch.where(zero_ref)[0][0]].item())
+                raise RuntimeError(
+                    "DSV4 SWA metadata points at a zero-refcount page: "
+                    f"layer={layer_id}, loc={loc}, page={page}"
+                )
+        free_pages = getattr(self.kvcache, "_free_swa_pages", None)
+        if free_pages is not None and free_pages.numel() > 0 and pages.numel() > 0:
+            free = torch.isin(pages.to(dtype=free_pages.dtype), free_pages)
+            if bool(torch.any(free).item()):
+                loc = int(active_locs[torch.where(free)[0][0]].item())
+                page = int(pages[torch.where(free)[0][0]].item())
+                raise RuntimeError(
+                    "DSV4 SWA metadata points at a page on the free list: "
+                    f"layer={layer_id}, loc={loc}, page={page}"
+                )
 
     def _debug_check_cache_index_bounds(
         self,
@@ -2215,6 +2284,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         rows = q.shape[0]
         if rows == 0:
             return q.new_empty(q.shape)
+        self._ensure_swa_metadata_current(metadata, context="sparse attention launch")
         with dsv4_direct_copy_nvtx(
             f"attention_boundary.swa_indices_to_i32.layer{layer_id}.rows{rows}",
             src=metadata.swa_page_indices[:rows],
@@ -2231,6 +2301,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
             swa_lengths,
             self.kvcache.swa_cache(layer_id).shape[0],
             layer_id=layer_id,
+            allow_dummy_pages=(
+                self.capture is not None and metadata is self.capture.core_metadata
+            ),
         )
 
         compressed_cache = None
@@ -2530,6 +2603,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             c4_page_table=c4_page_table,
             c128_page_table=c128_page_table,
             c4_indexer_page_table=c4_indexer_page_table,
+            swa_ownership_version=self._current_swa_ownership_version(),
         )
         return DSV4AttentionMetadata(
             core_attn_metadata=core,
@@ -2558,6 +2632,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> None:
         dst_core = dst.core_metadata
         src_core = src.core_metadata
+        self._ensure_swa_metadata_current(src_core, context="CUDA graph replay metadata copy")
         dst_core.component_loc_ownership = src_core.component_loc_ownership
         direct_swa_requested, direct_c4_requested, direct_c128_requested = (
             self._direct_index_groups_for_replay(dst_core, src_core, bs)
@@ -2677,6 +2752,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             skip_c4_sparse=direct_c4_done,
             skip_c128=direct_c128_done,
         )
+        dst_core.swa_ownership_version = int(src_core.swa_ownership_version)
         if copied_by_helper:
             if not self._capture_compressed_locs_in_graph or src_core.component_loc_ownership:
                 self._copy_decode_write_locs_for_replay(dst_core, src_core, bs)

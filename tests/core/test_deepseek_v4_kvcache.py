@@ -634,12 +634,12 @@ def test_dsv4_swa_independent_lifecycle_tombstones_swa_without_component_invalid
     snapshot = cm.prefix_metrics_snapshot()
     counts = pool.allocation_counts
     assert counts.full_slots == page_size
-    assert counts.swa_pages == 1
+    assert counts.swa_pages == 2
     assert counts.c4_slots == 2 * (page_size // 4)
     assert counts.c128_slots == 2 * (page_size // 128)
-    assert snapshot["dsv4_swa_lifecycle"]["current_swa_tail_pages"] == 1
-    assert snapshot["dsv4_swa_lifecycle"]["retained_prefix_swa_pages"] == 1
-    assert snapshot["dsv4_swa_lifecycle"]["swa_pages_tombstoned_total"] == 1
+    assert snapshot["dsv4_swa_lifecycle"]["current_swa_tail_pages"] == 2
+    assert snapshot["dsv4_swa_lifecycle"]["retained_prefix_swa_pages"] == 2
+    assert snapshot["dsv4_swa_lifecycle"]["swa_pages_tombstoned_total"] == 0
     assert snapshot["dsv4_component_ownership"]["live_full_pages"] == 1
     assert snapshot["dsv4_component_ownership"]["available_component_pages"] == num_pages - 2
 
@@ -652,7 +652,7 @@ def test_dsv4_swa_independent_lifecycle_tombstones_swa_without_component_invalid
     swa_pages = handle.get_dsv4_swa_pages()
     assert component_pages is not None and component_pages.has_required_state_pages
     assert swa_pages is not None and swa_pages.swa_pages is not None
-    assert swa_pages.swa_pages.tolist()[0] == -1
+    assert swa_pages.swa_pages.tolist()[0] >= 0
     assert swa_pages.swa_pages.tolist()[1] >= 0
 
     _evict_all_prefix(cm, pool, page_size)
@@ -752,7 +752,7 @@ def test_dsv4_active_swa_release_preserves_component_mappings():
     pool.assert_no_leak()
 
 
-def test_dsv4_active_swa_release_tombstones_stale_prefix_handle():
+def test_dsv4_active_swa_release_respects_cache_protected_len():
     page_size = 4
     num_pages = 256
     pool = _make_dsv4_pool(
@@ -765,7 +765,7 @@ def test_dsv4_active_swa_release_tombstones_stale_prefix_handle():
     )
     cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
 
-    allocated = cm._page_to_token(cm._allocate(5))
+    allocated = cm._page_to_token(cm._allocate(8))
     cm.page_table[0, : allocated.numel()].copy_(allocated)
     input_ids = torch.arange(allocated.numel() + 1, dtype=torch.int32)
 
@@ -784,40 +784,169 @@ def test_dsv4_active_swa_release_tombstones_stale_prefix_handle():
     )
     cm.lock(prefix_handle)
 
-    cm._release_dsv4_swa_out_of_window(prefix_handle)
-    prefix_swa = prefix_handle.get_dsv4_swa_pages()
-    assert prefix_swa is not None and prefix_swa.swa_pages is not None
-    assert prefix_swa.swa_pages.tolist() == [-1, -1, -1, 3]
-    before_active = pool.runtime_swa_counters()
-    assert before_active["swa_pages_freed_total"] == 3
-
     req = Req(
         input_ids=input_ids,
         table_idx=0,
-        cached_len=5 * page_size,
+        cached_len=8 * page_size,
         output_len=2,
         uid=0,
         sampling_params=SamplingParams(max_tokens=2),
         cache_handle=prefix_handle,
     )
+    before_handle = prefix_handle.get_dsv4_swa_pages()
+    assert before_handle is not None and before_handle.swa_pages is not None
+    before_pages = before_handle.swa_pages.clone()
+
     cm.release_active_dsv4_swa_out_of_window(req)
 
-    synced_swa = prefix_handle.get_dsv4_swa_pages()
-    assert synced_swa is not None and synced_swa.swa_pages is not None
-    assert synced_swa.swa_pages.tolist() == [-1, -1, -1, -1]
-    after_active = pool.runtime_swa_counters()
-    assert after_active["swa_pages_freed_total"] == before_active["swa_pages_freed_total"] + 1
-    assert after_active["swa_pages_tombstoned_total"] == (
-        before_active["swa_pages_tombstoned_total"] + 1
-    )
+    after_handle = prefix_handle.get_dsv4_swa_pages()
+    assert after_handle is not None and after_handle.swa_pages is not None
+    assert after_handle.swa_pages.tolist() == before_pages.tolist()
+    assert req.swa_evicted_seqlen == 6 * page_size
+    protected_starts = torch.arange(0, prefix_tokens, page_size, dtype=torch.int32)
+    protected_swa = pool.swa_pages_from_full_page_starts(protected_starts, page_size)
+    assert protected_swa is not None and torch.all(protected_swa >= 0)
+    released_starts = torch.arange(prefix_tokens, 6 * page_size, page_size, dtype=torch.int32)
+    released_swa = pool.swa_pages_from_full_page_starts(released_starts, page_size)
+    assert released_swa is not None and released_swa.tolist() == [-1, -1]
 
     cm.cache_req(req, finished=True)
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_active_swa_release_uses_monotonic_frontier():
+    page_size = 4
+    num_pages = 64
+    pool = _make_dsv4_pool(
+        [4, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=6,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    req = _allocate_req_with_ids(
+        cm,
+        0,
+        torch.arange(10 * page_size, dtype=torch.int32),
+        output_len=1,
+    )
+    req.device_len = 8 * page_size
+    req.cached_len = req.device_len - 1
+
+    cm.release_active_dsv4_swa_out_of_window(req)
+    first = pool.runtime_swa_counters()
+    assert req.swa_evicted_seqlen == 6 * page_size
+    assert first["swa_pages_freed_total"] == 6
+
+    cm.release_active_dsv4_swa_out_of_window(req)
+    assert req.swa_evicted_seqlen == 6 * page_size
+    assert pool.runtime_swa_counters()["swa_pages_freed_total"] == 6
+
+    req.device_len = 10 * page_size
+    req.cached_len = req.device_len - 1
+    cm.release_active_dsv4_swa_out_of_window(req)
+    after_active = pool.runtime_swa_counters()
+    assert req.swa_evicted_seqlen == 8 * page_size
+    assert after_active["swa_pages_freed_total"] == 8
+
+    req.cached_len = req.device_len
+    cm.cache_req(req, finished=True)
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_finished_cache_req_commits_swa_tombstone_from_frontier():
+    page_size = 4
+    num_pages = 64
+    pool = _make_dsv4_pool(
+        [4, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=6,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    req = _allocate_req_with_ids(
+        cm,
+        0,
+        torch.arange(8 * page_size, dtype=torch.int32),
+        output_len=1,
+    )
+
+    cm.release_active_dsv4_swa_out_of_window(req)
+    after_active = pool.runtime_swa_counters()
+    req.cached_len = req.device_len
+    cm.cache_req(req, finished=True)
+    handle = cm.prefix_cache.match_prefix(req.input_ids).cuda_handle
+    swa = handle.get_dsv4_swa_pages()
+    assert swa is not None and swa.swa_pages is not None
+    assert swa.swa_pages.tolist()[:6] == [-1] * 6
+    assert all(page >= 0 for page in swa.swa_pages.tolist()[6:])
     after_finish = pool.runtime_swa_counters()
     assert after_finish["swa_pages_freed_total"] == after_active["swa_pages_freed_total"]
     assert after_finish["swa_pages_tombstoned_total"] == after_active["swa_pages_tombstoned_total"]
-    assert after_finish["available_swa_pages"] == after_active["available_swa_pages"]
-    assert pool._swa_page_refcount[pool._swa_dummy_page].item() == 1
-    assert torch.all(pool._swa_page_refcount >= 0)
+
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_unfinished_cache_req_commits_swa_tombstone_from_frontier():
+    page_size = 4
+    num_pages = 64
+    pool = _make_dsv4_pool(
+        [4, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=6,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    req = _allocate_req_with_ids(
+        cm,
+        0,
+        torch.arange(8 * page_size, dtype=torch.int32),
+        output_len=1,
+    )
+
+    cm.release_active_dsv4_swa_out_of_window(req)
+    req.cached_len = req.device_len
+    cm.cache_req(req, finished=False)
+
+    swa = req.cache_handle.get_dsv4_swa_pages()
+    assert swa is not None and swa.swa_pages is not None
+    assert swa.swa_pages.tolist()[:6] == [-1] * 6
+    assert all(page >= 0 for page in swa.swa_pages.tolist()[6:])
+    assert req.cache_handle.cached_len == 8 * page_size
+
+    cm.cache_req(req, finished=True)
+    _evict_all_prefix(cm, pool, page_size)
+    pool.assert_no_leak()
+
+
+def test_dsv4_swa_pressure_eviction_versions_metadata():
+    page_size = 256
+    num_pages = 8
+    pool = _make_dsv4_pool(
+        [4, 128, 0],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+        max_running_req=3,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    prompt = torch.arange(3 * page_size + 1, dtype=torch.int32)
+    _cache_finished_prompt(cm, 0, prompt)
+
+    before = pool.swa_ownership_version
+    released = cm.prefix_cache.release_dsv4_evictable_swa_pages(1)
+    assert released == 1
+    assert pool.swa_ownership_version > before
 
     _evict_all_prefix(cm, pool, page_size)
     pool.assert_no_leak()

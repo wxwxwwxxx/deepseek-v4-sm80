@@ -646,6 +646,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._swa_pages_allocated_total = 0
         self._swa_pages_freed_total = 0
         self._swa_pages_tombstoned_total = 0
+        self._swa_ownership_version = 0
         self._c4_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
         self._c128_refcount = torch.zeros(self._c128_slots, dtype=torch.int16, device=device)
         self._c4_indexer_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
@@ -956,6 +957,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
     @property
     def swa_independent_lifecycle_enabled(self) -> bool:
         return self._swa_independent_lifecycle_enabled
+
+    @property
+    def swa_ownership_version(self) -> int:
+        return int(self._swa_ownership_version)
 
     @property
     def c4_component_page_size(self) -> int:
@@ -1538,6 +1543,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "swa_pages_allocated_total": int(self._swa_pages_allocated_total),
             "swa_pages_freed_total": int(self._swa_pages_freed_total),
             "swa_pages_tombstoned_total": int(self._swa_pages_tombstoned_total),
+            "swa_ownership_version": int(self._swa_ownership_version),
             "swa_tail_pages_per_req": int(self._swa_tail_pages_per_req),
             "sliding_window": int(self._window_size),
             "page_size": int(self._page_size),
@@ -1804,6 +1810,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 return
             pages = torch.unique(pages)
             self._decrement_refcount(self._swa_page_refcount, pages, "SWA page")
+            self._bump_swa_ownership_version()
             freed = pages[self._swa_page_refcount[pages] == 0].to(torch.int32)
             if freed.numel() > 0:
                 self._clear_full_to_swa_mappings_for_swa_pages(freed)
@@ -1945,6 +1952,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             self._swa_page_refcount[swa_pages.long()] += 1
             self._full_to_swa_page[full_pages] = swa_pages
             self._swa_pages_allocated_total += count
+            self._bump_swa_ownership_version()
 
     def _allocate_component_pages_for_full_pages(
         self,
@@ -2140,7 +2148,11 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                     ),
                     tombstone=tombstone,
                 )
-            self._full_to_swa_page[full_pages] = -1
+            if torch.any(self._full_to_swa_page[full_pages] >= 0):
+                self._full_to_swa_page[full_pages] = -1
+                self._bump_swa_ownership_version()
+            else:
+                self._full_to_swa_page[full_pages] = -1
 
     def _clear_full_to_swa_mappings_for_swa_pages(self, swa_pages: torch.Tensor) -> None:
         if swa_pages.numel() == 0:
@@ -2149,6 +2161,11 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         stale = torch.isin(self._full_to_swa_page, pages)
         if bool(torch.any(stale)):
             self._full_to_swa_page[stale] = -1
+            self._bump_swa_ownership_version()
+
+    def _bump_swa_ownership_version(self) -> None:
+        if self._swa_independent_lifecycle_enabled:
+            self._swa_ownership_version += 1
 
     def _free_component_pages(
         self,

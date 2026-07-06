@@ -202,10 +202,29 @@ class CacheManager:
                 ):
                     if not self.dsv4_swa_independent_lifecycle:
                         return None
-                    return self.kv_cache.make_swa_page_handles(
+                    handles = self.kv_cache.make_swa_page_handles(
                         page_indices[start:end],
                         self.page_size,
                     )
+                    evicted_until = align_down(
+                        max(int(getattr(req, "swa_evicted_seqlen", 0)), 0),
+                        self.page_size,
+                    )
+                    tombstone_end = align_down(
+                        max(min(int(end), evicted_until) - int(start), 0),
+                        self.page_size,
+                    )
+                    if handles is not None and tombstone_end > 0:
+                        handles, released = handles.tombstone_tokens(0, tombstone_end)
+                        if released.live_pages > 0:
+                            raise RuntimeError(
+                                "DSV4 SWA cache boundary found live pages below "
+                                "request eviction frontier: "
+                                f"uid={getattr(req, 'uid', None)}, start={start}, "
+                                f"end={end}, frontier={evicted_until}, "
+                                f"live_pages={released.live_pages}"
+                            )
+                    return handles
 
                 cached_len, new_handle = self.prefix_cache.insert_prefix(
                     insert_ids,
@@ -371,6 +390,7 @@ class CacheManager:
             return
         window = int(getattr(self.kv_cache, "_window_size", self.page_size))
         tail_tokens = div_ceil(max(window, 1), self.page_size) * self.page_size
+        tail_tokens += self.page_size
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.scheduler.swa.release_prefix_out_of_window",
             {
@@ -388,57 +408,41 @@ class CacheManager:
         if not callable(releaser):
             return
         window = int(getattr(self.kv_cache, "_window_size", self.page_size))
-        tail_tokens = div_ceil(max(window, 1), self.page_size) * self.page_size
-        release_end = align_down(max(req.cached_len - tail_tokens, 0), self.page_size)
-        if release_end <= 0:
+        active_window_frontier = align_down(
+            max(int(req.device_len) - window - self.page_size, 0),
+            self.page_size,
+        )
+        protected_len = self._dsv4_swa_cache_protected_len(req)
+        evicted_until = align_down(
+            max(int(getattr(req, "swa_evicted_seqlen", 0)), 0),
+            self.page_size,
+        )
+        release_start = max(evicted_until, protected_len)
+        release_end = max(release_start, active_window_frontier)
+        if release_end <= release_start:
             return
-        active_head = self.page_table[req.table_idx, :release_end].clone()
-        active_head = self._valid_full_indices(active_head)
-        if active_head.numel() == 0:
-            return
-        released_swa_pages = self._dsv4_swa_pages_for_full_indices(active_head)
+        active_range = self.page_table[req.table_idx, release_start:release_end].clone()
+        active_range = self._valid_full_indices(active_range)
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.scheduler.swa.release_active_out_of_window",
             {
-                "release_pages": int(active_head.numel() // self.page_size),
+                "release_pages": int(active_range.numel() // self.page_size),
+                "release_start": int(release_start),
                 "release_end": int(release_end),
+                "protected_len": int(protected_len),
+                "swa_evicted_seqlen": int(evicted_until),
                 "cached_len": int(req.cached_len),
                 "device_len": int(req.device_len),
             },
         ):
-            releaser(active_head, self.page_size, tombstone=True)
-            self._tombstone_active_dsv4_swa_handle(req.cache_handle, released_swa_pages)
+            if active_range.numel() > 0:
+                releaser(active_range, self.page_size, tombstone=True)
+            req.swa_evicted_seqlen = release_end
 
-    def _dsv4_swa_pages_for_full_indices(self, full_indices: torch.Tensor) -> torch.Tensor:
-        if (
-            self.kv_cache is None
-            or full_indices.numel() == 0
-            or full_indices.numel() % self.page_size != 0
-        ):
-            return torch.empty(0, dtype=torch.int32, device=self.device)
-        mapper = getattr(self.kv_cache, "swa_pages_from_full_page_starts", None)
-        if not callable(mapper):
-            return torch.empty(0, dtype=torch.int32, device=self.device)
-        pages = mapper(full_indices[:: self.page_size], self.page_size)
-        if pages is None or pages.numel() == 0:
-            return torch.empty(0, dtype=torch.int32, device=self.device)
-        pages = pages.to(device=self.device, dtype=torch.int32)
-        pages = pages[pages >= 0]
-        dummy_page = getattr(self.kv_cache, "_swa_dummy_page", None)
-        if dummy_page is not None and pages.numel() > 0:
-            pages = pages[pages != int(dummy_page)]
-        return torch.unique(pages) if pages.numel() > 0 else pages
-
-    def _tombstone_active_dsv4_swa_handle(
-        self,
-        handle: BaseCacheHandle,
-        swa_pages: torch.Tensor,
-    ) -> None:
-        if swa_pages.numel() == 0:
-            return
-        tombstone = getattr(self.prefix_cache, "tombstone_dsv4_swa_pages", None)
-        if callable(tombstone):
-            tombstone(handle, swa_pages)
+    def _dsv4_swa_cache_protected_len(self, req: Req) -> int:
+        handle = getattr(req, "cache_handle", None)
+        cached_len = int(getattr(handle, "cached_len", 0) or 0)
+        return align_down(max(cached_len, 0), self.page_size)
 
     def _release_dsv4_component_owned_full_head(self, handle: BaseCacheHandle) -> None:
         if not self.dsv4_component_ownership:

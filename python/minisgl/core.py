@@ -34,12 +34,14 @@ class Req:
     uid: int
     sampling_params: SamplingParams
     cache_handle: BaseCacheHandle
+    swa_evicted_seqlen: int = 0
 
     def __post_init__(self) -> None:
         assert self.input_ids.is_cpu
         self.device_len = len(self.input_ids)
         self.max_device_len = len(self.input_ids) + self.output_len
         assert 0 <= self.cached_len < self.device_len <= self.max_device_len
+        self.swa_evicted_seqlen = max(0, int(self.swa_evicted_seqlen))
 
     @property
     def remain_len(self) -> int:
