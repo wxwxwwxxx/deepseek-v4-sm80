@@ -20,6 +20,8 @@ prompts/TARGET_08.50_dsv4_sm80_swa_direct_token_metadata_parity.md
 prompts/TARGET_08.51_dsv4_sm80_prefix_decode_metadata_graph_copy_attribution.md
 prompts/TARGET_08.52_dsv4_sm80_swa_independent_decode_forward_graph_replay_parity.md
 prompts/TARGET_08.53_dsv4_sm80_decode_forward_kernel_census_unblock.md
+prompts/TARGET_08.54_dsv4_sm80_swa_direct_metadata_indexing_replay_microbench.md
+prompts/TARGET_08.55_dsv4_sm80_compressed_metadata_boundary_replay_cleanup.md
 prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
 prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
 prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
@@ -285,6 +287,28 @@ and short TP8 profiling probes.  It should also use no-weight or partial
 workloads to actively identify the slow kernel class before loading the full
 model, then run only one complete inference/macro validation at the end.
 
+TARGET 08.53 completed that profiler/census reset.  It found that the remaining
+SWA direct decode replay gap is dominated by extra captured int64/bool
+metadata/indexing kernels, not slower GEMM, Marlin MoE, sparse attention, NCCL,
+memcpy, or memset.  The short replay profile showed `+13,545` kernel instances
+and `+22.673 ms` over 15 decode replays; several `+645` launch deltas match
+`15 replays * 43 layers`, indicating per-layer replay metadata algebra.
+TARGET 08.54 should now reproduce and remove that extra kernel family with a
+captured replay microbench, SGLang boundary review, and a scoped opt-in fused
+metadata/indexing fix before one final macro validation.
+
+TARGET 08.54 completed the targeted fix.  The new opt-in
+`MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED=1` and variant
+`dsv4_sm80_a100_victory_prefix_routeb_lifetime_swa_independent_swadirect_replaymetafused`
+extend direct graph metadata to SWA independent lifecycle, add replay-copied
+`swa_out_loc`, and add a narrow SWA attention-boundary fast path.  The short
+full-model replay gap moved from `+13,545` launches / `+22.673 ms` to `-645`
+launches / `-1.638 ms` versus Route B; final serving macro decode bucket gap
+shrunk from the old `+1.343 s` to `+0.255 s`.  TARGET 08.55 should make one
+final bounded pass over residual C4/C128 compressed metadata boundary kernels,
+then decide whether TARGET 08 small-kernel cleanup should stop in favor of
+TARGET 09 low-precision research.
+
 ## Historical Evolution
 
 ### Phase 1: Conservative Radix Prefix Cache
@@ -440,7 +464,7 @@ New Codex threads should not read the full archive by default.  Start from:
 
 1. `prompts/target.md`
 2. this roadmap
-3. the active future target prompt, currently TARGET 08.53 or a TARGET 09 child
+3. the active future target prompt, currently TARGET 08.55 or a TARGET 09 child
 4. archived TARGET 08 prompts only when exact old commands or stop rules are
    needed
 
@@ -452,9 +476,8 @@ The archive contains implementation history, not active todos.
 
 Status: correctness-clean but opt-in after TARGET 08.43 post-08.48 rerun;
 TARGET 08.49 landed an opt-in metadata cache, and active performance follow-up
-is TARGET 08.53 after TARGET 08.52 confirmed the remaining decode-heavy gap is
-inside captured decode CUDA graph replay but could not produce a TP8 kernel
-census.
+is TARGET 08.55 after TARGET 08.54 removed the primary SWA direct
+full-to-SWA/store metadata replay gap.
 
 Current state: SWA KV now has an independent lifecycle and can tombstone/free
 out-of-window tail pages without invalidating C4/C128/indexer/compression-state
@@ -463,11 +486,12 @@ and the TARGET 08.43 rerun, including Marlin release and same-Engine auto
 capacity.  It remains opt-in because decode attention metadata / SWA page-table
 overhead is too high for default promotion.
 
-TARGET 09.5 low-precision SWA/cache work should stay deferred until TARGET
-08.53 identifies the decode replay kernel owner or proves that profiling is
-blocked by tooling.  Prefix/eviction scheduler release/free batching remains a
-likely separate target if decode-forward parity does not explain those
-workloads.
+TARGET 09 low-precision work should resume after TARGET 08.55 if residual
+metadata/indexing kernels are below the stop line: roughly `0.5 ms/replay`,
+`2-3%` unstable macro gap, or less than `1-2%` expected macro upside from
+another metadata-only pass.  Prefix/eviction scheduler release/free batching
+remains a likely separate target if future serving profiles show it dominating
+shared-prefix or eviction-heavy workloads.
 
 TARGET 08.31 result: opt-in SWA independent lifecycle was implemented and
 validated against SGLang's allocator/component model.  SWA KV now has separate

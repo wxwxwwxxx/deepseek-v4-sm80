@@ -42,6 +42,9 @@ DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
 DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
 DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS"
 DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS_ENV = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS"
+DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_TOGGLE = (
+    "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED"
+)
 DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
 )
@@ -231,6 +234,7 @@ DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
     DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE,
     DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE,
     DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS_ENV,
+    DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_TOGGLE,
     DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE,
     DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE,
     DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE,
@@ -3816,10 +3820,21 @@ def _debug_check_store_loc_bounds(
     )
 
 
-def store_swa_fallback(kvcache, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
+def store_swa_fallback(
+    kvcache,
+    layer_id: int,
+    kv: torch.Tensor,
+    out_loc: torch.Tensor,
+    *,
+    out_loc_is_swa: bool = False,
+) -> None:
     store_loc = out_loc
     translate = getattr(kvcache, "translate_full_locs_to_swa_locs", None)
-    if callable(translate) and bool(getattr(kvcache, "swa_independent_lifecycle_enabled", False)):
+    if (
+        not out_loc_is_swa
+        and callable(translate)
+        and bool(getattr(kvcache, "swa_independent_lifecycle_enabled", False))
+    ):
         store_loc = translate(out_loc)
     _debug_check_store_loc_bounds(
         kvcache.swa_cache(layer_id),
@@ -3833,6 +3848,13 @@ def store_swa_fallback(kvcache, layer_id: int, kv: torch.Tensor, out_loc: torch.
                 return
         except Exception:
             pass
+    if out_loc_is_swa:
+        if not bool(torch.all(store_loc >= 0).item()):
+            raise RuntimeError("DSV4 SWA write requested for full loc without live SWA mapping")
+        kvcache.swa_cache(layer_id)[store_loc.long()] = kv.reshape(
+            -1, kvcache.swa_cache(layer_id).shape[-1]
+        ).to(kvcache.swa_cache(layer_id).dtype)
+        return
     kvcache.store_swa(layer_id, kv, out_loc)
 
 
@@ -4257,6 +4279,10 @@ def direct_decode_index_metadata_for_replay(
     direct_swa: bool,
     direct_c4: bool,
     direct_c128: bool,
+    swa_full_to_swa_page: torch.Tensor | None = None,
+    swa_dummy_token_start: int = -1,
+    swa_dummy_page: int = -1,
+    swa_independent: bool = False,
 ) -> bool:
     if not dsv4_env_flag(DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE):
         return False
@@ -4271,6 +4297,10 @@ def direct_decode_index_metadata_for_replay(
     ]
     if direct_swa:
         tensors.append(dst_swa_page_indices)
+        if swa_independent:
+            if swa_full_to_swa_page is None:
+                return False
+            tensors.append(swa_full_to_swa_page)
     if direct_c4:
         if c4_page_table is None:
             return False
@@ -4327,6 +4357,10 @@ def direct_decode_index_metadata_for_replay(
                 direct_swa=bool(direct_swa),
                 direct_c4=bool(direct_c4),
                 direct_c128=bool(direct_c128),
+                swa_full_to_swa_page=swa_full_to_swa_page,
+                swa_dummy_token_start=int(swa_dummy_token_start),
+                swa_dummy_page=int(swa_dummy_page),
+                swa_independent=bool(swa_independent),
             )
         )
     except Exception:
@@ -4784,6 +4818,7 @@ __all__ = [
     "DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE",
     "DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE",
     "DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE",
+    "DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_TOGGLE",
     "DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE",
     "DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE",
     "DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE",

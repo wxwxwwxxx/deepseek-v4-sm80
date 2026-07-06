@@ -1009,6 +1009,87 @@ def test_direct_decode_index_metadata_for_replay_matches_oracle(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_direct_decode_index_metadata_for_replay_swa_independent_matches_oracle(monkeypatch):
+    device = torch.device("cuda")
+    rows = 3
+    page_size = 128
+    window_size = 8
+    index_topk = 5
+    num_pages = 64
+    dummy_token_start = num_pages * page_size
+    swa_dummy_page = num_pages - 1
+
+    ctx_page_table = torch.stack(
+        [
+            torch.arange(0, 512, dtype=torch.int32),
+            torch.arange(1024, 1536, dtype=torch.int32),
+            torch.arange(2048, 2560, dtype=torch.int32),
+        ]
+    ).to(device)
+    ctx_page_table[1, 125] = -1
+    ctx_page_table[2, 376] = dummy_token_start
+    table_indices = torch.arange(rows, dtype=torch.int32, device=device)
+    positions = torch.tensor([127, 130, 383], dtype=torch.int32, device=device)
+    full_to_swa_page = torch.remainder(
+        torch.arange(num_pages, dtype=torch.int32, device=device) * 7 + 5,
+        num_pages - 1,
+    )
+    full_to_swa_page[::9] = -1
+    dst_swa = torch.full((rows, window_size), -91, dtype=torch.int32, device=device)
+    dummy2d = torch.empty((rows, 1), dtype=torch.int32, device=device)
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE, "1")
+    assert dsv4_kernel.direct_decode_index_metadata_for_replay(
+        ctx_page_table=ctx_page_table,
+        table_indices=table_indices,
+        positions=positions,
+        c4_page_table=None,
+        c128_page_table=None,
+        dst_swa_page_indices=dst_swa,
+        dst_c4_sparse_raw_indices=dummy2d,
+        dst_c4_sparse_page_indices=dummy2d,
+        dst_c4_sparse_full_indices=dummy2d,
+        dst_c128_raw_indices=dummy2d,
+        dst_c128_page_indices=dummy2d,
+        dst_c128_full_indices=dummy2d,
+        rows=rows,
+        page_size=page_size,
+        window_size=window_size,
+        index_topk=index_topk,
+        direct_swa=True,
+        direct_c4=False,
+        direct_c128=False,
+        swa_full_to_swa_page=full_to_swa_page,
+        swa_dummy_token_start=dummy_token_start,
+        swa_dummy_page=swa_dummy_page,
+        swa_independent=True,
+    )
+    torch.cuda.synchronize()
+
+    cpu_ctx = ctx_page_table.cpu()
+    cpu_map = full_to_swa_page.cpu()
+    for row, pos in enumerate(positions.cpu().tolist()):
+        expected = []
+        for offset in range(window_size):
+            logical = pos - offset
+            if logical < 0:
+                expected.append(-1)
+                continue
+            full_loc = int(cpu_ctx[row, logical].item())
+            if full_loc == dummy_token_start:
+                expected.append(swa_dummy_page * page_size)
+                continue
+            full_page = full_loc // page_size
+            page_offset = full_loc % page_size
+            if full_loc < 0 or full_page < 0 or full_page >= num_pages:
+                expected.append(-1)
+                continue
+            swa_page = int(cpu_map[full_page].item())
+            expected.append(swa_page * page_size + page_offset if swa_page >= 0 else -1)
+        assert dst_swa[row].cpu().tolist() == expected
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_decode_metadata_deforest_component_tables_match_oracle(monkeypatch):
     device = torch.device("cuda")
     rows = 3

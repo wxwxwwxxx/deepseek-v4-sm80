@@ -83,6 +83,9 @@ DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
 DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV = "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"
 DSV4_SWA_DIRECT_TOKEN_METADATA_ENV = "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA"
+DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_ENV = (
+    "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED"
+)
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
@@ -107,6 +110,9 @@ DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_VARIANT = (
 )
 DSV4_ROUTE_B_LIFETIME_SWA_DIRECT_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_swa_independent_swadirect"
+)
+DSV4_ROUTE_B_LIFETIME_SWA_REPLAY_METADATA_FUSED_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_swa_independent_swadirect_replaymetafused"
 )
 DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
     "dsv4_sm80_a100_victory_directgraphmetadata_c4_routeb_lifetime"
@@ -176,6 +182,11 @@ DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_ENV = {
 DSV4_ROUTE_B_LIFETIME_SWA_DIRECT_ENV = {
     **DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_ENV,
     DSV4_SWA_DIRECT_TOKEN_METADATA_ENV: "1",
+}
+DSV4_ROUTE_B_LIFETIME_SWA_REPLAY_METADATA_FUSED_ENV = {
+    **DSV4_ROUTE_B_LIFETIME_SWA_DIRECT_ENV,
+    DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "swa,c4",
+    DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_ENV: "1",
 }
 
 
@@ -1477,6 +1488,19 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         description=(
             "TARGET 08.50 opt-in: promoted Route B lifetime prefix preset plus "
             "independent SWA lifecycle and direct token-level SWA metadata."
+        ),
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+        enable_dsv4_swa_independent_lifecycle=True,
+    ),
+    Variant(
+        name=DSV4_ROUTE_B_LIFETIME_SWA_REPLAY_METADATA_FUSED_VARIANT,
+        env=dict(DSV4_ROUTE_B_LIFETIME_SWA_REPLAY_METADATA_FUSED_ENV),
+        description=(
+            "TARGET 08.54 opt-in: SWA direct plus fused replay metadata for "
+            "independent SWA write locs and direct SWA graph index buffers."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,

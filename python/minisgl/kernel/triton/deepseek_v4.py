@@ -882,6 +882,7 @@ def _direct_decode_index_metadata_for_replay_kernel(
     positions_ptr,
     c4_page_table_ptr,
     c128_page_table_ptr,
+    swa_full_to_swa_page_ptr,
     dst_swa_page_indices_ptr,
     dst_c4_sparse_raw_indices_ptr,
     dst_c4_sparse_page_indices_ptr,
@@ -891,6 +892,7 @@ def _direct_decode_index_metadata_for_replay_kernel(
     dst_c128_full_indices_ptr,
     ctx_page_table_stride0: tl.constexpr,
     ctx_page_table_width: tl.constexpr,
+    swa_full_to_swa_page_width: tl.constexpr,
     c4_page_table_width: tl.constexpr,
     c128_page_table_width: tl.constexpr,
     swa_width: tl.constexpr,
@@ -902,6 +904,9 @@ def _direct_decode_index_metadata_for_replay_kernel(
     direct_swa: tl.constexpr,
     direct_c4: tl.constexpr,
     direct_c128: tl.constexpr,
+    swa_independent: tl.constexpr,
+    swa_dummy_token_start: tl.constexpr,
+    swa_dummy_page: tl.constexpr,
     c4_component_page_size: tl.constexpr,
     c128_component_page_size: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -921,6 +926,24 @@ def _direct_decode_index_metadata_for_replay_kernel(
             mask=swa_valid & (swa_logical_pos < ctx_page_table_width),
             other=-1,
         )
+        if swa_independent:
+            full_page = swa_value // page_size
+            page_offset = swa_value - full_page * page_size
+            full_valid = swa_valid & (swa_value >= 0)
+            mapped_page = tl.load(
+                swa_full_to_swa_page_ptr + full_page,
+                mask=full_valid
+                & (full_page >= 0)
+                & (full_page < swa_full_to_swa_page_width),
+                other=-1,
+            )
+            mapped_loc = mapped_page * page_size + page_offset
+            dummy_loc = swa_dummy_page * page_size
+            swa_value = tl.where(
+                swa_value == swa_dummy_token_start,
+                dummy_loc,
+                tl.where(full_valid & (mapped_page >= 0), mapped_loc, -1),
+            )
         tl.store(
             dst_swa_page_indices_ptr + row * swa_width + offsets,
             tl.where(swa_valid, swa_value, -1),
@@ -4060,11 +4083,19 @@ def direct_decode_index_metadata_for_replay(
     direct_swa: bool,
     direct_c4: bool,
     direct_c128: bool,
+    swa_full_to_swa_page: torch.Tensor | None = None,
+    swa_dummy_token_start: int = -1,
+    swa_dummy_page: int = -1,
+    swa_independent: bool = False,
 ) -> bool:
     rows = int(positions.numel())
     tensors = [ctx_page_table, table_indices, positions]
     if direct_swa:
         tensors.append(dst_swa_page_indices)
+        if swa_independent:
+            if swa_full_to_swa_page is None:
+                return False
+            tensors.append(swa_full_to_swa_page)
     if direct_c4:
         if c4_page_table is None:
             return False
@@ -4099,6 +4130,13 @@ def direct_decode_index_metadata_for_replay(
         or index_topk <= 0
     ):
         return False
+    if direct_swa and swa_independent and (
+        swa_full_to_swa_page is None
+        or swa_full_to_swa_page.ndim != 1
+        or swa_dummy_token_start < 0
+        or swa_dummy_page < 0
+    ):
+        return False
     if direct_swa and (dst_swa_page_indices.ndim != 2 or dst_swa_page_indices.shape[0] < rows):
         return False
     if direct_c4:
@@ -4130,6 +4168,9 @@ def direct_decode_index_metadata_for_replay(
 
     dummy_c4_page_table = c4_page_table if c4_page_table is not None else ctx_page_table
     dummy_c128_page_table = c128_page_table if c128_page_table is not None else ctx_page_table
+    dummy_swa_full_to_swa_page = (
+        swa_full_to_swa_page if swa_full_to_swa_page is not None else table_indices
+    )
     swa_width = int(dst_swa_page_indices.shape[1]) if direct_swa else 1
     c4_width = int(dst_c4_sparse_raw_indices.shape[1]) if direct_c4 else 1
     c128_width = int(dst_c128_raw_indices.shape[1]) if direct_c128 else 1
@@ -4148,6 +4189,7 @@ def direct_decode_index_metadata_for_replay(
         positions,
         dummy_c4_page_table,
         dummy_c128_page_table,
+        dummy_swa_full_to_swa_page,
         dst_swa_page_indices,
         dst_c4_sparse_raw_indices,
         dst_c4_sparse_page_indices,
@@ -4157,6 +4199,7 @@ def direct_decode_index_metadata_for_replay(
         dst_c128_full_indices,
         ctx_page_table_stride0=ctx_page_table.stride(0),
         ctx_page_table_width=ctx_page_table.shape[1],
+        swa_full_to_swa_page_width=dummy_swa_full_to_swa_page.shape[0],
         c4_page_table_width=dummy_c4_page_table.shape[1],
         c128_page_table_width=dummy_c128_page_table.shape[1],
         swa_width=swa_width,
@@ -4168,6 +4211,9 @@ def direct_decode_index_metadata_for_replay(
         direct_swa=bool(direct_swa),
         direct_c4=bool(direct_c4),
         direct_c128=bool(direct_c128),
+        swa_independent=bool(swa_independent),
+        swa_dummy_token_start=int(swa_dummy_token_start),
+        swa_dummy_page=int(swa_dummy_page),
         c4_component_page_size=c4_component_page_size,
         c128_component_page_size=c128_component_page_size,
         BLOCK=block,
