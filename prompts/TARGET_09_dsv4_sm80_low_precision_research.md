@@ -2,7 +2,7 @@
 
 ## Status
 
-Recommended next family after TARGET 10.
+Deferred for now.
 
 TARGET 07 established the exact-ish A100/sm80 victory path, TARGET 08 added the
 prefix-cache baseline, and TARGET 10 default-promoted the communication path:
@@ -18,6 +18,10 @@ MINISGL_PYNCCL_MAX_BUFFER_SIZE is explicitly set.
 TARGET 09 is intentionally separate from the exact TARGET 07/08/10 route
 because it may change activation, cache, or expert precision and therefore
 needs stronger quality gates.
+
+Current project decision: pause TARGET 09 and explore TARGET 11 MTP
+speculative decoding first.  The existing low-precision notes remain useful
+for later INT8 MoE, FP8 KV/cache, and quantized projection/cache fusion work.
 
 Current decision from TARGET 09.45: do not run TARGET 09.5 yet.  First run
 TARGET 08.31 to prove SGLang-aligned independent SWA lifecycle and real SWA
@@ -136,7 +140,12 @@ Mini uses the system Python from `/workspace/mini-sglang`.
 
 ## Split Plan
 
-Run in this order unless a fresh profile strongly changes the bottleneck:
+This split plan is preserved for later use, but it is not the active next
+route.  Reopen it only after a fresh profile or memory/capacity target makes a
+specific low-precision lane clearly worthwhile.
+
+If reopened, run in this order unless a fresh profile strongly changes the
+bottleneck:
 
 | Stage | Prompt | Status | Purpose |
 | --- | --- | --- | --- |
