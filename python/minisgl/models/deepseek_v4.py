@@ -1850,6 +1850,22 @@ class DSV4Attention(BaseOP):
                     else self.wkv.forward(x)
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.wkv_output", kv)
+        q_norm_rope_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
+            "q_norm_rope",
+            q,
+        )
+        q_norm_rope_common_params = {
+            "rms_norm_eps": float(self.rms_norm_eps),
+            "rotary_dim": int(self.rope_head_dim),
+            "base": float(self.rope_base),
+            "original_seq_len": int(self.original_seq_len),
+            "factor": float(self.rope_factor),
+            "beta_fast": int(self.beta_fast),
+            "beta_slow": int(self.beta_slow),
+            "num_local_heads": int(self.num_local_heads),
+            "head_dim": int(self.head_dim),
+        }
+        q_norm_rope_path = "mini.q_norm_rope_fallback"
         q_kv_norm_rope_cache_written = False
         if fused_q_kv_norm_rope_store and kv is not None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_kv_norm_rope_store"):
@@ -1869,6 +1885,7 @@ class DSV4Attention(BaseOP):
                     beta_slow=self.beta_slow,
                 )
                 if q_kv_norm_rope_cache_written:
+                    q_norm_rope_path = "mini.q_kv_norm_rope_cache_fallback"
                     _capture_debug_activation(f"layer{self.layer_id}.q_after_q_norm_rope", q)
                     _capture_debug_activation(f"layer{self.layer_id}.kv_after_kv_norm_rope", kv)
         if not q_kv_norm_rope_cache_written:
@@ -1885,6 +1902,27 @@ class DSV4Attention(BaseOP):
                     beta_slow=self.beta_slow,
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.q_after_q_norm_rope", q)
+        dsv4_mtp_debug.record_operator_capture(
+            batch,
+            operator_name="q_norm_rope",
+            layer_id=int(self.layer_id),
+            input_row0=q_norm_rope_debug_input,
+            output_tensor=q,
+            positions=positions,
+            path=q_norm_rope_path,
+            params=q_norm_rope_common_params,
+            extra={
+                "fused_q_kv_norm_rope_store_requested": bool(
+                    fused_q_kv_norm_rope_store
+                ),
+                "q_kv_norm_rope_cache_written": bool(
+                    q_kv_norm_rope_cache_written
+                ),
+                "kv_norm_rope_store_enabled": bool(kv_norm_rope_store_enabled),
+                "fused_q_kv_rmsnorm": bool(fused_q_kv_rmsnorm),
+                "is_target_verify": bool(is_target_verify),
+            },
+        )
 
         if kv is None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):

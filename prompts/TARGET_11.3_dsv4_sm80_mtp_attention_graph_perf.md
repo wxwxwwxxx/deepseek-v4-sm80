@@ -2,7 +2,7 @@
 
 ## Goal
 
-After TARGET 11.13 proves the unified target-verify runtime contract and exact
+After TARGET 11.14 proves the unified target-verify runtime contract and exact
 accepted-KV commit / batch-shape correctness for `bs=1/2/4/5/6` and a
 rerun of the eager path proves useful target-pass reduction, align the DSV4
 attention/compressed metadata and CUDA graph path with SGLang enough to decide
@@ -45,6 +45,9 @@ rank-local downstream owners, so TARGET 11.12 must census and close or rank
 those owners before this graph/perf target starts. TARGET 11.12 ranked q/RoPE
 as the top common rank-local owner, so TARGET 11.13 must build the
 operator-parity framework and close or precisely no-go the q_norm_rope pilot
+before this graph/perf target starts. TARGET 11.13 showed q_norm_rope is a
+same-kernel amplifier for a non-bit-exact `q_wqb_output`, so TARGET 11.14 must
+close or precisely no-go the upstream q_lora/q_norm/wq_b precision boundary
 before this graph/perf target starts.
 
 ## Primary Question

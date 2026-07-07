@@ -243,6 +243,7 @@ class Engine:
             "c128_mtp_lifecycle_events": [],
             "row0_logits_debug": [],
             "row0_layer_parity_debug": [],
+            "operator_parity_debug": [],
             "row_depth_oracle_debug": [],
             "accepted_commit_row_hashes": [],
             "last_batch": {},
@@ -1020,6 +1021,8 @@ class Engine:
         target_trace = dsv4_mtp_debug.get_row0_layer_trace(verify_batch)
         target_summary = dsv4_mtp_debug.export_row0_layer_trace(target_trace)
         target_attention = dsv4_mtp_debug.export_attention_backend_trace(verify_batch)
+        target_operator_trace = dsv4_mtp_debug.get_operator_trace(verify_batch)
+        target_operator_summary = dsv4_mtp_debug.export_operator_trace(target_operator_trace)
 
         event: dict[str, Any] = {
             "trace_index": int(
@@ -1028,6 +1031,7 @@ class Engine:
             "mode": "mtp_target_verify_vs_row0_normal_oracle",
             "target_trace": target_summary,
             "target_attention_backend_trace": target_attention,
+            "target_operator_trace": target_operator_summary,
             "target_entries": [
                 {
                     "batch_index": int(entry["batch_index"]),
@@ -1060,6 +1064,7 @@ class Engine:
             event["oracle_attention_backend_trace"] = oracle.get(
                 "attention_backend_trace", []
             )
+            event["oracle_operator_trace"] = oracle.get("operator_trace_summary", [])
             event["oracle_context"] = oracle.get("context", {})
             event["comparison"] = dsv4_mtp_debug.compare_row0_layer_traces(
                 oracle_trace,
@@ -1067,11 +1072,35 @@ class Engine:
                 lhs_label="normal",
                 rhs_label="target_verify",
             )
+            event["operator_parity"] = dsv4_mtp_debug.compare_operator_traces(
+                oracle.get("operator_trace", []),
+                target_operator_trace,
+                case_prefix="mtp_target_verify_vs_row0_normal_oracle",
+                verify_event_id=int(event["trace_index"]),
+                rank=int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0"))),
+            )
 
         log = self.mtp_spec_stats.setdefault("row0_layer_parity_debug", [])
         log.append(event)
         if len(log) > 16:
             del log[:-16]
+        operator_records = (
+            event.get("operator_parity", {}).get("records", [])
+            if isinstance(event.get("operator_parity"), dict)
+            else []
+        )
+        if operator_records:
+            operator_log = self.mtp_spec_stats.setdefault("operator_parity_debug", [])
+            operator_log.append(
+                {
+                    "trace_index": int(event["trace_index"]),
+                    "mode": event["mode"],
+                    "records": operator_records,
+                    "first_owner": event.get("operator_parity", {}).get("first_owner"),
+                }
+            )
+            if len(operator_log) > 16:
+                del operator_log[:-16]
         self._mtp_row0_layer_parity_oracle = None
 
     def _mtp_row_topk_debug(self, row_logits: torch.Tensor, *, k: int = 5) -> dict[str, Any]:
@@ -1859,6 +1888,10 @@ class Engine:
                     ),
                     "attention_backend_trace": (
                         dsv4_mtp_debug.export_attention_backend_trace(oracle_batch)
+                    ),
+                    "operator_trace": dsv4_mtp_debug.get_operator_trace(oracle_batch),
+                    "operator_trace_summary": (
+                        dsv4_mtp_debug.export_operator_trace(oracle_batch)
                     ),
                     "context": {
                         "oracle_for_committed_seq_len": int(req.cached_len),
