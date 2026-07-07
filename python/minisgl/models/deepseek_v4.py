@@ -832,6 +832,31 @@ def _wo_a_bf16_bmm_projection(
     return y.transpose(0, 1).reshape(tokens, num_local_groups * cached_weight.shape[2])
 
 
+def _wo_a_bf16_bmm_projection_row_invariant(
+    o: torch.Tensor,
+    cached_weight: torch.Tensor,
+    *,
+    owner_label: str,
+) -> torch.Tensor:
+    if o.ndim != 3 or o.shape[0] <= 1:
+        return _wo_a_bf16_bmm_projection(
+            o,
+            cached_weight,
+            owner_label=owner_label,
+        )
+    return torch.cat(
+        [
+            _wo_a_bf16_bmm_projection(
+                o[row : row + 1],
+                cached_weight,
+                owner_label=owner_label,
+            )
+            for row in range(o.shape[0])
+        ],
+        dim=0,
+    )
+
+
 def _cached_gate_fp32_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
     return _cached_fp32_weight(
         owner,
@@ -1589,6 +1614,7 @@ class DSV4Attention(BaseOP):
         force_verify_exact_kv_store = bool(
             getattr(batch, "dsv4_force_torch_attention", False)
         )
+        is_target_verify = getattr(batch, "dsv4_target_verify_metadata", None) is not None
         kv_norm_rope_store_enabled = (
             use_dsv4_backend
             and attn_backend is not None
@@ -2043,11 +2069,18 @@ class DSV4Attention(BaseOP):
                     allow_build=False,
                     owner_label=self._wo_a_owner_label,
                 )
-                o = _wo_a_bf16_bmm_projection(
-                    o,
-                    cached_wo_a,
-                    owner_label=self._wo_a_owner_label,
-                )
+                if is_target_verify:
+                    o = _wo_a_bf16_bmm_projection_row_invariant(
+                        o,
+                        cached_wo_a,
+                        owner_label=self._wo_a_owner_label,
+                    )
+                else:
+                    o = _wo_a_bf16_bmm_projection(
+                        o,
+                        cached_wo_a,
+                        owner_label=self._wo_a_owner_label,
+                    )
             else:
                 wo_a_scale = _cached_projection_scale(
                     self.wo_a,

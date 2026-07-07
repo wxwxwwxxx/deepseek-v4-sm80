@@ -24,6 +24,8 @@ from minisgl.models.deepseek_v4 import (
     DSV4MoE,
     DSV4MoEGate,
     DSV4SharedExperts,
+    _wo_a_bf16_bmm_projection,
+    _wo_a_bf16_bmm_projection_row_invariant,
 )
 from minisgl.models.register import get_model_class
 
@@ -73,6 +75,30 @@ def _reset_globals(*, tp_rank: int = 0, tp_size: int = 1) -> None:
     core._GLOBAL_CTX = None
     dist_info._TP_INFO = None
     set_tp_info(tp_rank, tp_size)
+
+
+def test_wo_a_bf16_bmm_projection_row_invariant_matches_one_row_loop():
+    o = torch.randn(3, 2, 8, dtype=torch.bfloat16)
+    cached_weight = torch.randn(2, 8, 4, dtype=torch.bfloat16)
+
+    expected = torch.cat(
+        [
+            _wo_a_bf16_bmm_projection(
+                o[row : row + 1],
+                cached_weight,
+                owner_label="test.wo_a",
+            )
+            for row in range(o.shape[0])
+        ],
+        dim=0,
+    )
+    actual = _wo_a_bf16_bmm_projection_row_invariant(
+        o,
+        cached_weight,
+        owner_label="test.wo_a",
+    )
+
+    assert torch.equal(actual, expected)
 
 
 @pytest.fixture(autouse=True)

@@ -98,6 +98,7 @@ Run these in order.
 | TARGET 11.296 | `prompts/TARGET_11.296_dsv4_sm80_mtp_row0_logits_parity_after_commit.md` | After C128 lifecycle is ready but exactness still drifts, prove and fix row0 target-verify logits parity after accepted commit. |
 | TARGET 11.297 | `prompts/TARGET_11.297_dsv4_sm80_mtp_target_verify_batch_shape_hidden_parity.md` | After the visible row0 token drift is fixed but logits still differ, bisect normal one-row decode vs flattened target-verify row0 hidden parity. |
 | TARGET 11.298 | `prompts/TARGET_11.298_dsv4_sm80_mtp_wo_a_projection_batch_shape_parity.md` | Fix or prove the layer0 `wo_a` projection batch-shape owner found by 11.297. |
+| TARGET 11.299 | `prompts/TARGET_11.299_dsv4_sm80_mtp_multi_request_verify_contract.md` | Fix or prove the multi-request target-verify row/depth and mixed verify-length contract after `wo_a` parity is closed. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -191,6 +192,9 @@ Do not promote MTP by default unless all of these are true:
 - If the first row0 hidden-parity owner is `wo_a` projection batch shape, stop
   at TARGET 11.298 and fix/prove that projection path before continuing to
   graph/perf.
+- If bs=1 target verify is exact but bs=2/4 exposes row/depth or mixed
+  verify-length contract failures, stop at TARGET 11.299 and fix/prove the
+  multi-request target-verify contract before continuing to graph/perf.
 
 ## Deliverables
 
