@@ -100,6 +100,10 @@ Run these in order.
 | TARGET 11.298 | `prompts/TARGET_11.298_dsv4_sm80_mtp_wo_a_projection_batch_shape_parity.md` | Fix or prove the layer0 `wo_a` projection batch-shape owner found by 11.297. |
 | TARGET 11.299 | `prompts/TARGET_11.299_dsv4_sm80_mtp_multi_request_verify_contract.md` | Fix or prove the multi-request target-verify row/depth and mixed verify-length contract after `wo_a` parity is closed. |
 | TARGET 11.5 | `prompts/TARGET_11.5_dsv4_sm80_mtp_bs4_accepted_commit_state_parity.md` | After 11.299 fixes row/depth and mixed-length contract issues, isolate and repair the remaining `bs=4` accepted-commit state drift. |
+| TARGET 11.6 | `prompts/TARGET_11.6_dsv4_sm80_mtp_bs5_exposure_state_parity.md` | After 11.5 fixes `bs=4`, classify and repair the new `bs=5` exposure failure, starting with a normal-target batch-shape oracle. |
+| TARGET 11.7 | `prompts/TARGET_11.7_dsv4_sm80_mtp_bs6_path_census_contract_closure.md` | After 11.6 fixes `bs=5`, enumerate the MTP target-verify path matrix and close the smallest remaining `bs=6` exposure failure. |
+| TARGET 11.8 | `prompts/TARGET_11.8_dsv4_sm80_mtp_target_verify_runtime_contract_unification.md` | After 11.7 proves per-batch patching is unsafe, write and implement or plan a unified target-verify runtime contract. |
+| TARGET 11.9 | `prompts/TARGET_11.9_dsv4_sm80_mtp_sglang_aligned_target_verify_runtime_mode.md` | After 11.8 stops at a contract/no-go for local patching, implement one SGLang-aligned target-verify runtime mode and prove eager exactness through `bs=1/2/4/5/6`. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -200,6 +204,23 @@ Do not promote MTP by default unless all of these are true:
   diverges after accepted/correction row commit, stop at TARGET 11.5 and
   identify the first non-equivalent committed state owner before continuing to
   graph/perf.
+- If TARGET 11.5 fixes `bs=1/2/4` but light exposure finds `bs=5+` failures,
+  stop at TARGET 11.6 and first determine whether normal target decode is
+  batch-shape sensitive for the failing prefix before continuing state-parity
+  repair or graph/perf.
+- If TARGET 11.6 fixes `bs=1/2/4/5` but `bs=6+` still exposes new failures,
+  stop at TARGET 11.7 and build a source/runtime path census before applying
+  another local correctness fix.
+- If TARGET 11.7 finds that force_torch/separate-KV, force_torch/fused-KV, and
+  splitk/fused-KV each fix different cases while regressing others, stop at
+  TARGET 11.8 and unify the target-verify runtime contract before any more
+  per-batch repairs.
+- If TARGET 11.8 writes the unified contract but concludes that no existing
+  local flag combination can implement it safely, stop at TARGET 11.9 and port
+  one SGLang-aligned target-verify runtime mode before graph/perf work.
+- If TARGET 11.9 cannot prove eager exactness through `bs=1/2/4/5/6` with
+  accepted commit enabled, do not start TARGET 11.3; write the next correctness
+  target around the first non-batch-special-case owner.
 
 ## Deliverables
 

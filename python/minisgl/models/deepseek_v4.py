@@ -1613,7 +1613,6 @@ class DSV4Attention(BaseOP):
         read_only_frozen_kv = bool(getattr(batch, "frozen_kv_read_only", False))
         force_verify_exact_kv_store = bool(
             getattr(batch, "dsv4_force_exact_kv_store", False)
-            or getattr(batch, "dsv4_force_torch_attention", False)
         )
         is_target_verify = getattr(batch, "dsv4_target_verify_metadata", None) is not None
         kv_norm_rope_store_enabled = (

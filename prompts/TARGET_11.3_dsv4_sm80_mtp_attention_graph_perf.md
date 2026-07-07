@@ -2,7 +2,8 @@
 
 ## Goal
 
-After TARGET 11.5 proves exact accepted-KV commit for `bs=1/2/4` and a
+After TARGET 11.9 implements a unified target-verify runtime contract and exact
+accepted-KV commit / batch-shape correctness for `bs=1/2/4/5/6` and a
 rerun of the eager path proves useful target-pass reduction, align the DSV4
 attention/compressed metadata and CUDA graph path with SGLang enough to decide
 whether MTP should be kept as an opt-in, optimized further, or promoted.
@@ -22,6 +23,18 @@ so TARGET 11.299 must close those before graph/perf starts.  TARGET 11.299
 closed the row/depth and mixed-length class enough to reveal a narrower `bs=4`
 post-commit state drift; TARGET 11.5 must identify and fix the first
 non-equivalent accepted-commit state owner before this graph/perf target starts.
+TARGET 11.5 fixed `bs=1/2/4`, but light exposure found a new `bs=5` failure
+that may be normal-target batch-shape sensitivity; TARGET 11.6 must classify
+and fix or narrow that blocker before this graph/perf target starts.  TARGET
+11.6 fixed `bs=1/2/4/5`, but exposure still fails at `bs=6+`; TARGET 11.7
+must enumerate remaining MTP path branches and close or classify the `bs=6`
+minimal failure before this graph/perf target starts.  TARGET 11.7 found
+competing target-verify numerical contracts rather than a safe narrow fix, so
+TARGET 11.8 must write a unified target-verify runtime contract before this
+graph/perf target starts. TARGET 11.8 stopped after writing that contract and
+showing that another local patch is unsafe; TARGET 11.9 must implement a single
+SGLang-aligned target-verify runtime mode and prove eager exactness before this
+graph/perf target starts.
 
 ## Primary Question
 

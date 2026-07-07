@@ -1593,15 +1593,22 @@ class Engine:
                 ],
                 "num_tokens": int(total_verify_tokens),
             }
-            if _env_flag(_DSV4_MTP_VERIFY_SPLITK_ATTENTION_ENV):
-                verify_batch.dsv4_target_verify_decode_rows = True
-            verify_batch.dsv4_force_exact_kv_store = True
             parent_batch_size = max(
                 int(entry.get("parent_batch_size", len(entries))) for entry in entries
             )
+            if _env_flag(_DSV4_MTP_VERIFY_SPLITK_ATTENTION_ENV):
+                verify_batch.dsv4_target_verify_decode_rows = True
             force_torch_target_verify = (
                 _env_flag(_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV)
                 or parent_batch_size > 2
+            )
+            single_active_verify_row = (
+                len(entries) == 1
+                and len(active_verify_lens) == 1
+                and int(active_verify_lens[0]) == 1
+            )
+            verify_batch.dsv4_force_exact_kv_store = bool(
+                parent_batch_size <= 2 or not single_active_verify_row
             )
             if force_torch_target_verify:
                 # The bs>2 accepted-commit path exposes request-local drift when
@@ -2659,7 +2666,10 @@ class Engine:
                     "req": req,
                     "drafts": drafts[:draft_count],
                     "parent_batch_size": int(
-                        getattr(batch, "dsv4_parent_batch_size", len(batch.reqs))
+                        max(
+                            int(getattr(batch, "dsv4_parent_batch_size", len(batch.reqs))),
+                            int(getattr(req, "_dsv4_mtp_max_parent_batch_size", 0)),
+                        )
                     ),
                     "verify_len": verify_len,
                     "verify_inputs": verify_inputs,
@@ -3314,6 +3324,15 @@ class Engine:
             )
             self._check_marlin_wna16_kv_sentinels(
                 f"before_decode_step_{self._marlin_wna16_decode_guard_checks}"
+            )
+
+        parent_batch_size = int(batch.size)
+        for req in batch.reqs:
+            previous_parent = int(getattr(req, "_dsv4_mtp_max_parent_batch_size", 0))
+            setattr(
+                req,
+                "_dsv4_mtp_max_parent_batch_size",
+                max(previous_parent, parent_batch_size),
             )
 
         mtp_positions = [int(req.device_len) - 1 for req in batch.reqs]
