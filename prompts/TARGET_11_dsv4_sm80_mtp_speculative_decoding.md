@@ -104,6 +104,8 @@ Run these in order.
 | TARGET 11.7 | `prompts/TARGET_11.7_dsv4_sm80_mtp_bs6_path_census_contract_closure.md` | After 11.6 fixes `bs=5`, enumerate the MTP target-verify path matrix and close the smallest remaining `bs=6` exposure failure. |
 | TARGET 11.8 | `prompts/TARGET_11.8_dsv4_sm80_mtp_target_verify_runtime_contract_unification.md` | After 11.7 proves per-batch patching is unsafe, write and implement or plan a unified target-verify runtime contract. |
 | TARGET 11.9 | `prompts/TARGET_11.9_dsv4_sm80_mtp_sglang_aligned_target_verify_runtime_mode.md` | After 11.8 stops at a contract/no-go for local patching, implement one SGLang-aligned target-verify runtime mode and prove eager exactness through `bs=1/2/4/5/6`. |
+| TARGET 11.10 | `prompts/TARGET_11.10_dsv4_sm80_mtp_target_verify_layer0_attention_kv_producer_parity.md` | After 11.9 makes the SGLang-shaped runtime explicit but non-exact, fix or precisely no-go the first owner at layer0 target-verify attention/KV producer parity. |
+| TARGET 11.11 | `prompts/TARGET_11.11_dsv4_sm80_mtp_attn_wo_b_projection_reduce_parity.md` | After 11.10 fixes attention/KV parity and exposes `layer0.final_attention_output`, fix or precisely no-go `attn.wo_b` row-parallel projection/all-reduce parity. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -221,6 +223,14 @@ Do not promote MTP by default unless all of these are true:
 - If TARGET 11.9 cannot prove eager exactness through `bs=1/2/4/5/6` with
   accepted commit enabled, do not start TARGET 11.3; write the next correctness
   target around the first non-batch-special-case owner.
+- If TARGET 11.9's first owner is
+  `layer0.merged_attention_output_before_wo` under `sglang_prefill_extend`, stop
+  at TARGET 11.10 and fix/prove target-verify attention/KV producer parity
+  before any graph/perf or C128 boundary work.
+- If TARGET 11.10 fixes attention/KV parity but the new first owner is
+  `layer0.final_attention_output`, stop at TARGET 11.11 and fix/prove
+  `attn.wo_b` projection/all-reduce parity before graph/perf or C128 boundary
+  work.
 
 ## Deliverables
 

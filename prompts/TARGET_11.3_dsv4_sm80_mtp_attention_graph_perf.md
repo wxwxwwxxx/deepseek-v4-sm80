@@ -2,7 +2,7 @@
 
 ## Goal
 
-After TARGET 11.9 implements a unified target-verify runtime contract and exact
+After TARGET 11.11 proves the unified target-verify runtime contract and exact
 accepted-KV commit / batch-shape correctness for `bs=1/2/4/5/6` and a
 rerun of the eager path proves useful target-pass reduction, align the DSV4
 attention/compressed metadata and CUDA graph path with SGLang enough to decide
@@ -34,7 +34,12 @@ TARGET 11.8 must write a unified target-verify runtime contract before this
 graph/perf target starts. TARGET 11.8 stopped after writing that contract and
 showing that another local patch is unsafe; TARGET 11.9 must implement a single
 SGLang-aligned target-verify runtime mode and prove eager exactness before this
-graph/perf target starts.
+graph/perf target starts. TARGET 11.9 implemented the explicit mode but left it
+as a diagnostic no-go because the first owner is layer0 target-verify
+attention/KV producer parity under `sglang_prefill_extend`; TARGET 11.10 must
+close that owner before this graph/perf target starts. TARGET 11.10 fixed that
+owner and exposed `layer0.final_attention_output`, so TARGET 11.11 must close
+`attn.wo_b` projection/all-reduce parity before this graph/perf target starts.
 
 ## Primary Question
 

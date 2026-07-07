@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Dict, NamedTuple, Tuple
 
@@ -55,6 +56,9 @@ _DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV = (
 _DSV4_MTP_VERIFY_SPLITK_ATTENTION_ENV = "MINISGL_DSV4_MTP_VERIFY_SPLITK_ATTENTION"
 _DSV4_MTP_VERIFY_GROUP_SIZE_ENV = "MINISGL_DSV4_MTP_VERIFY_GROUP_SIZE"
 _DSV4_MTP_STATE_PARITY_TRACE_ENV = "MINISGL_DSV4_MTP_STATE_PARITY_TRACE"
+_DSV4_TARGET_VERIFY_RUNTIME_ENV = "MINISGL_DSV4_TARGET_VERIFY_RUNTIME"
+_DSV4_TARGET_VERIFY_RUNTIME_LEGACY = "legacy_target11_6"
+_DSV4_TARGET_VERIFY_RUNTIME_SGLANG_PREFILL_EXTEND = "sglang_prefill_extend"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -74,6 +78,86 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return int(default)
+
+
+@dataclass(frozen=True)
+class _DSV4TargetVerifyRuntimeContract:
+    mode: str
+    attention_mode: str
+    kv_store_mode: str
+
+    @classmethod
+    def from_env(cls) -> "_DSV4TargetVerifyRuntimeContract":
+        mode = os.environ.get(_DSV4_TARGET_VERIFY_RUNTIME_ENV, "").strip()
+        if not mode:
+            mode = _DSV4_TARGET_VERIFY_RUNTIME_LEGACY
+        if mode == _DSV4_TARGET_VERIFY_RUNTIME_LEGACY:
+            return cls(
+                mode=mode,
+                attention_mode="legacy_parent_active",
+                kv_store_mode="legacy_parent_active",
+            )
+        if mode == _DSV4_TARGET_VERIFY_RUNTIME_SGLANG_PREFILL_EXTEND:
+            return cls(
+                mode=mode,
+                attention_mode="prefill_extend_decode_row",
+                kv_store_mode="normal_target",
+            )
+        supported = (
+            _DSV4_TARGET_VERIFY_RUNTIME_LEGACY,
+            _DSV4_TARGET_VERIFY_RUNTIME_SGLANG_PREFILL_EXTEND,
+        )
+        if mode not in supported:
+            raise RuntimeError(
+                "Unsupported DeepSeek V4 MTP target-verify runtime mode "
+                f"{mode!r}. Supported modes: "
+                f"{', '.join(repr(item) for item in supported)}."
+            )
+        raise AssertionError("unreachable target-verify runtime mode")
+
+    def debug_attention_override(self) -> str:
+        if _env_flag(_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV):
+            return "force_torch"
+        if _env_flag(_DSV4_MTP_VERIFY_SPLITK_ATTENTION_ENV):
+            return "splitk_decode_rows"
+        return ""
+
+    def apply_to_batch(
+        self,
+        verify_batch: Batch,
+        entries: list[dict[str, Any]],
+        active_verify_lens: list[int],
+    ) -> None:
+        verify_batch.dsv4_target_verify_runtime = self.mode
+        override = self.debug_attention_override()
+        if self.mode == _DSV4_TARGET_VERIFY_RUNTIME_LEGACY:
+            parent_batch_size = max(
+                int(entry.get("parent_batch_size", len(entries))) for entry in entries
+            )
+            single_active_verify_row = (
+                len(entries) == 1
+                and len(active_verify_lens) == 1
+                and int(active_verify_lens[0]) == 1
+            )
+            verify_batch.dsv4_force_exact_kv_store = bool(
+                parent_batch_size <= 2 or not single_active_verify_row
+            )
+            if override == "splitk_decode_rows":
+                verify_batch.dsv4_target_verify_decode_rows = True
+            if override == "force_torch" or parent_batch_size > 2:
+                verify_batch.dsv4_force_torch_attention = True
+            return
+
+        verify_batch.dsv4_force_exact_kv_store = False
+        # SGLang builds target-verify as fixed-width extend metadata, then its
+        # DSV4 backend consumes those rows through the FlashMLA kvcache/decode
+        # attention path.  Mini's source-parity correctness path is the
+        # decode-row split-K consumer over the same per-row causal lengths.
+        verify_batch.dsv4_target_verify_decode_rows = True
+        if override == "force_torch":
+            verify_batch.dsv4_force_torch_attention = True
+        elif override == "splitk_decode_rows":
+            verify_batch.dsv4_target_verify_decode_rows = True
 
 
 class ForwardOutput(NamedTuple):
@@ -104,6 +188,7 @@ class Engine:
             getattr(config, "enable_dsv4_mtp_speculative", False)
             or _env_flag(_DSV4_MTP_SPECULATIVE_ENV)
         )
+        self.dsv4_target_verify_runtime = _DSV4TargetVerifyRuntimeContract.from_env()
         self.dsv4_mtp_spec_draft_len = int(
             getattr(config, "dsv4_mtp_spec_draft_len", 1) or 1
         )
@@ -114,6 +199,7 @@ class Engine:
         self.mtp_spec_stats: dict[str, Any] = {
             "enabled": bool(self.enable_dsv4_mtp_speculative),
             "draft_len": int(self.dsv4_mtp_spec_draft_len),
+            "dsv4_target_verify_runtime": self.dsv4_target_verify_runtime.mode,
             "draft_tokens_proposed": 0,
             "draft_tokens_verified": 0,
             "draft_tokens_accepted": 0,
@@ -788,11 +874,18 @@ class Engine:
             return [int(x) for x in flat.tolist()]
 
         metadata = getattr(verify_batch, "dsv4_target_verify_metadata", {})
+        debug_attention_override = (
+            self.dsv4_target_verify_runtime.debug_attention_override()
+        )
         commit_blocker = self._mtp_accepted_commit_blocker()
         owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
         trace_log.append(
             {
                 "mode": "target_verify",
+                "runtime": str(metadata.get("runtime", "")),
+                "attention_mode": str(metadata.get("attention_mode", "")),
+                "kv_store_mode": str(metadata.get("kv_store_mode", "")),
+                "debug_attention_override": debug_attention_override,
                 "speculative_num_draft_tokens": int(
                     metadata.get("speculative_num_draft_tokens", 0)
                 ),
@@ -813,6 +906,15 @@ class Engine:
                 "input_tokens": _tolist(getattr(verify_batch, "input_ids", None)),
                 "positions": _tolist(getattr(verify_batch, "positions", None)),
                 "out_cache_loc": _tolist(getattr(verify_batch, "out_loc", None)),
+                "active_row_mask": [
+                    bool(x) for x in list(metadata.get("active_row_mask", []))[:32]
+                ],
+                "padded_row_mask": [
+                    bool(x) for x in list(metadata.get("padded_row_mask", []))[:32]
+                ],
+                "row_depths": [
+                    int(x) for x in list(metadata.get("row_depths", []))[:32]
+                ],
                 "force_torch_attention": bool(
                     getattr(verify_batch, "dsv4_force_torch_attention", False)
                 ),
@@ -1509,6 +1611,11 @@ class Engine:
         input_chunks: list[torch.Tensor] = []
         position_chunks: list[torch.Tensor] = []
         out_loc_chunks: list[torch.Tensor] = []
+        active_row_mask: list[bool] = []
+        padded_row_mask: list[bool] = []
+        row_depths: list[int] = []
+        row_to_table_idx: list[int] = []
+        row_to_batch_index: list[int] = []
         cursor = 0
         try:
             for entry in entries:
@@ -1563,6 +1670,21 @@ class Engine:
                 input_chunks.extend(padded_inputs)
                 position_chunks.append(entry["positions_tensor"])
                 out_loc_chunks.append(entry["real_locs"])
+                active_row_mask.extend(
+                    depth < active_verify_len
+                    for depth in range(speculative_num_draft_tokens)
+                )
+                padded_row_mask.extend(
+                    depth >= active_verify_len
+                    for depth in range(speculative_num_draft_tokens)
+                )
+                row_depths.extend(range(speculative_num_draft_tokens))
+                row_to_table_idx.extend(
+                    [int(req.table_idx)] * speculative_num_draft_tokens
+                )
+                row_to_batch_index.extend(
+                    [int(entry.get("batch_index", -1))] * speculative_num_draft_tokens
+                )
                 cursor += speculative_num_draft_tokens
 
             verify_batch = Batch(
@@ -1585,39 +1707,27 @@ class Engine:
             )
             verify_lens = [speculative_num_draft_tokens for _ in entries]
             verify_batch.dsv4_target_verify_metadata = {
+                "runtime": self.dsv4_target_verify_runtime.mode,
+                "attention_mode": self.dsv4_target_verify_runtime.attention_mode,
+                "kv_store_mode": self.dsv4_target_verify_runtime.kv_store_mode,
                 "speculative_num_draft_tokens": speculative_num_draft_tokens,
                 "extend_lens": verify_lens,
                 "active_verify_lens": active_verify_lens,
                 "committed_seq_lens": [
                     int(entry["committed_seq_len"]) for entry in entries
                 ],
+                "active_row_mask": active_row_mask,
+                "padded_row_mask": padded_row_mask,
+                "row_depths": row_depths,
+                "row_to_table_idx": row_to_table_idx,
+                "row_to_batch_index": row_to_batch_index,
                 "num_tokens": int(total_verify_tokens),
             }
-            parent_batch_size = max(
-                int(entry.get("parent_batch_size", len(entries))) for entry in entries
+            self.dsv4_target_verify_runtime.apply_to_batch(
+                verify_batch,
+                entries,
+                active_verify_lens,
             )
-            if _env_flag(_DSV4_MTP_VERIFY_SPLITK_ATTENTION_ENV):
-                verify_batch.dsv4_target_verify_decode_rows = True
-            force_torch_target_verify = (
-                _env_flag(_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV)
-                or parent_batch_size > 2
-            )
-            single_active_verify_row = (
-                len(entries) == 1
-                and len(active_verify_lens) == 1
-                and int(active_verify_lens[0]) == 1
-            )
-            verify_batch.dsv4_force_exact_kv_store = bool(
-                parent_batch_size <= 2 or not single_active_verify_row
-            )
-            if force_torch_target_verify:
-                # The bs>2 accepted-commit path exposes request-local drift when
-                # mini's SM80 sparse-attention fast paths produce TARGET_VERIFY rows
-                # that are not causal-identical to the following sequential target
-                # decode. Keep bs=1/2 on their already-exact fast path, and use the
-                # torch attention fallback for larger parent batches until the fast
-                # kernels carry that TARGET_VERIFY contract explicitly.
-                verify_batch.dsv4_force_torch_attention = True
             self.attn_backend.prepare_metadata(verify_batch)
             self._record_mtp_target_verify_contract_trace(verify_batch, entries)
             return verify_batch, restore, total_verify_tokens
@@ -1655,6 +1765,38 @@ class Engine:
             "hidden_states": output.hidden_states,
             "hidden_states_before_norm": output.hidden_states_before_norm,
         }
+
+    def _mtp_target_verify_copy_rows(
+        self,
+        *,
+        active_verify_len: int,
+        padded_verify_len: int,
+        draft_count: int,
+        accepted_prefix: int,
+        mismatch_depth: int | None,
+    ) -> int:
+        active_verify_len = int(active_verify_len)
+        padded_verify_len = int(padded_verify_len)
+        draft_count = int(draft_count)
+        accepted_prefix = int(accepted_prefix)
+        if active_verify_len < 0 or padded_verify_len < active_verify_len:
+            raise RuntimeError(
+                "DeepSeek V4 MTP target-verify copy_rows got invalid row masks: "
+                f"active={active_verify_len}, padded={padded_verify_len}."
+            )
+        if mismatch_depth is not None:
+            copy_rows = int(mismatch_depth) + 1
+        elif active_verify_len > draft_count:
+            copy_rows = min(active_verify_len, draft_count + 1)
+        else:
+            copy_rows = min(active_verify_len, accepted_prefix)
+        if copy_rows < 0 or copy_rows > active_verify_len:
+            raise RuntimeError(
+                "DeepSeek V4 MTP target-verify copy_rows selected an inactive row: "
+                f"copy_rows={copy_rows}, active={active_verify_len}, "
+                f"padded={padded_verify_len}, mismatch_depth={mismatch_depth}."
+            )
+        return int(copy_rows)
 
     def _record_mtp_row0_normal_oracle_debug(self, entries: list[dict[str, Any]]) -> None:
         if not self._mtp_row0_debug_or_layer_parity_enabled():
@@ -2859,16 +3001,20 @@ class Engine:
                 mismatch_depth = depth
                 correction_token_candidates += 1
                 candidate_emitted.append(target_token)
-                candidate_copy_rows = depth + 1
                 break
 
             if mismatch_depth is None and active_verify_len > len(drafts):
                 target_token = row_tokens[len(drafts) : len(drafts) + 1].contiguous()
                 bonus_token_candidates += 1
                 candidate_emitted.append(target_token)
-                candidate_copy_rows = min(active_verify_len, len(drafts) + 1)
-            elif mismatch_depth is None:
-                candidate_copy_rows = min(active_verify_len, accepted_prefix)
+
+            candidate_copy_rows = self._mtp_target_verify_copy_rows(
+                active_verify_len=active_verify_len,
+                padded_verify_len=padded_verify_len,
+                draft_count=len(drafts),
+                accepted_prefix=accepted_prefix,
+                mismatch_depth=mismatch_depth,
+            )
 
             accepted_candidates += accepted_prefix
             if allow_accepted_commit:
