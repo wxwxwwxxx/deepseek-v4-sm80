@@ -105,9 +105,12 @@ class Engine:
             "acceptance_histogram": acceptance_histogram,
             "target_calls": 0,
             "target_verify_calls": 0,
+            "target_commit_kv_copies": 0,
             "draft_calls": 0,
             "target_latency_s": 0.0,
             "target_verify_latency_s": 0.0,
+            "target_commit_latency_s": 0.0,
+            "target_rollback_latency_s": 0.0,
             "draft_latency_s": 0.0,
             "scheduler_overhead_s": 0.0,
             "finite_failures": 0,
@@ -115,7 +118,24 @@ class Engine:
             "fallback_missing_mtp_batches": 0,
             "fallback_page_boundary_tokens": 0,
             "fallback_empty_draft_batches": 0,
+            "fallback_temp_kv_unsupported_batches": 0,
+            "fallback_temp_kv_capacity_batches": 0,
+            "flattened_verify_tokens": 0,
+            "target_verify_temp_kv_bytes": 0,
+            "accepted_kv_copied_bytes": 0,
+            "accepted_kv_copied_tokens": 0,
+            "accepted_kv_commit_fail_closed": False,
+            "accepted_kv_commit_blocker": "",
+            "accepted_kv_commit_blocked_rows": 0,
+            "draft_tokens_accept_candidates": 0,
+            "target_correction_token_candidates": 0,
+            "target_bonus_token_candidates": 0,
+            "target_bonus_tokens": 0,
+            "recompute_tokens": 0,
+            "rejected_tail_isolation_checks": 0,
             "target_verify_batch_shapes": [],
+            "target_verify_contract_trace": [],
+            "c128_mtp_lifecycle_events": [],
             "last_batch": {},
         }
         self.ctx = Context(config.page_size)
@@ -697,6 +717,741 @@ class Engine:
             key = str(int(accepted_len))
             histogram[key] = int(histogram.get(key, 0)) + 1
 
+    def _mtp_has_c128_layers(self) -> bool:
+        kv_cache = getattr(self, "kv_cache", None)
+        layer_mapping = tuple(getattr(kv_cache, "layer_mapping", ()))
+        return any(int(getattr(mapping, "compress_ratio", 0)) == 128 for mapping in layer_mapping)
+
+    def _mtp_accepted_commit_blocker(self) -> str | None:
+        if not self._mtp_has_c128_layers():
+            return None
+        kv_cache = getattr(self, "kv_cache", None)
+        required = (
+            "get_online_c128_mtp_pending_seq_lens",
+            "get_online_c128_mtp_state_slot_offset",
+            "get_online_c128_mtp_max_draft_tokens",
+        )
+        if kv_cache is None or not all(callable(getattr(kv_cache, name, None)) for name in required):
+            return "c128_online_mtp_pending_write_commit_not_ported"
+        return "c128_online_mtp_write_prefix_kernel_not_bound"
+
+    def _record_mtp_c128_lifecycle_event(self, event: dict[str, Any]) -> None:
+        events = self.mtp_spec_stats.setdefault("c128_mtp_lifecycle_events", [])
+        events.append(event)
+        if len(events) > 32:
+            del events[:-32]
+
+    def _record_mtp_target_verify_contract_trace(
+        self,
+        verify_batch: Batch,
+        entries: list[dict[str, Any]],
+    ) -> None:
+        trace_log = self.mtp_spec_stats.setdefault("target_verify_contract_trace", [])
+        core = getattr(getattr(verify_batch, "attn_metadata", None), "core_metadata", None)
+
+        def _tolist(tensor: torch.Tensor | None, limit: int = 32) -> list[int]:
+            if tensor is None:
+                return []
+            flat = tensor.detach().reshape(-1)[:limit].to("cpu")
+            return [int(x) for x in flat.tolist()]
+
+        metadata = getattr(verify_batch, "dsv4_target_verify_metadata", {})
+        trace_log.append(
+            {
+                "mode": "target_verify",
+                "speculative_num_draft_tokens": int(
+                    metadata.get("speculative_num_draft_tokens", 0)
+                ),
+                "batch_size": int(len(entries)),
+                "num_tokens": int(getattr(verify_batch, "input_ids").numel()),
+                "verify_lens": [int(entry["verify_len"]) for entry in entries],
+                "committed_seq_lens": [
+                    int(entry.get("committed_seq_len", -1)) for entry in entries
+                ],
+                "input_tokens": _tolist(getattr(verify_batch, "input_ids", None)),
+                "positions": _tolist(getattr(verify_batch, "positions", None)),
+                "out_cache_loc": _tolist(getattr(verify_batch, "out_loc", None)),
+                "seq_lens": _tolist(getattr(core, "seq_lens", None)),
+                "extend_lens": _tolist(getattr(core, "extend_lens", None)),
+                "req_seq_lens": _tolist(getattr(core, "req_seq_lens", None)),
+                "c4_out_loc": _tolist(getattr(core, "c4_out_loc", None)),
+                "c128_out_loc": _tolist(getattr(core, "c128_out_loc", None)),
+                "c128_pending_write_commit": (
+                    "not_applicable"
+                    if not self._mtp_has_c128_layers()
+                    else "not_ported_fail_closed"
+                ),
+            }
+        )
+        if len(trace_log) > 16:
+            del trace_log[:-16]
+
+    def _mtp_temp_kv_unsupported_reason(self) -> str | None:
+        kv_cache = getattr(self, "kv_cache", None)
+        if kv_cache is None:
+            return "missing_kv_cache"
+        if bool(getattr(kv_cache, "component_loc_ownership_enabled", False)):
+            return "route_b_component_loc_ownership"
+        if bool(getattr(kv_cache, "swa_independent_lifecycle_enabled", False)):
+            return "swa_independent_lifecycle"
+        return None
+
+    def _mtp_scratch_token_start(self) -> int:
+        kv_cache = getattr(self, "kv_cache", None)
+        return int(
+            getattr(
+                kv_cache,
+                "dummy_token_start",
+                int(self.num_pages) * int(self.ctx.page_size),
+            )
+        )
+
+    def _make_mtp_flattened_temp_verify_batch(
+        self,
+        entries: list[dict[str, Any]],
+    ) -> tuple[Batch, list[tuple[Req, int, torch.Tensor, torch.Tensor]], int]:
+        total_verify_tokens = sum(int(entry["verify_len"]) for entry in entries)
+        scratch_capacity = int(self.ctx.page_size)
+        if total_verify_tokens > scratch_capacity:
+            self.mtp_spec_stats["fallback_temp_kv_capacity_batches"] = int(
+                self.mtp_spec_stats["fallback_temp_kv_capacity_batches"]
+            ) + 1
+            raise RuntimeError(
+                "DeepSeek V4 MTP flattened verify scratch page is too small: "
+                f"tokens={total_verify_tokens}, capacity={scratch_capacity}."
+            )
+
+        scratch_start = self._mtp_scratch_token_start()
+        restore: list[tuple[Req, int, torch.Tensor, torch.Tensor]] = []
+        input_chunks: list[torch.Tensor] = []
+        position_chunks: list[torch.Tensor] = []
+        out_loc_chunks: list[torch.Tensor] = []
+        cursor = 0
+        layer_mapping = tuple(getattr(self.kv_cache, "layer_mapping", ()))
+        has_c4 = any(int(m.compress_ratio) == 4 for m in layer_mapping)
+        has_c128 = any(int(m.compress_ratio) == 128 for m in layer_mapping)
+        used_scratch_offsets: set[int] = set()
+        used_c4_slots: set[int] = set()
+        used_c128_slots: set[int] = set()
+
+        def _alloc_scratch_offset(position: int) -> int:
+            is_c4_boundary = has_c4 and (int(position) + 1) % 4 == 0
+            is_c128_boundary = has_c128 and (int(position) + 1) % 128 == 0
+
+            def _valid(offset: int) -> bool:
+                if offset in used_scratch_offsets:
+                    return False
+                if is_c4_boundary and (offset // 4) in used_c4_slots:
+                    return False
+                if is_c128_boundary and (offset // 128) in used_c128_slots:
+                    return False
+                return True
+
+            candidates: range
+            if is_c128_boundary:
+                candidates = range(127, scratch_capacity, 128)
+            else:
+                candidates = range(int(position) % 4, scratch_capacity, 4)
+            for offset in candidates:
+                if _valid(offset):
+                    used_scratch_offsets.add(offset)
+                    if is_c4_boundary:
+                        used_c4_slots.add(offset // 4)
+                    if is_c128_boundary:
+                        used_c128_slots.add(offset // 128)
+                    return offset
+            self.mtp_spec_stats["fallback_temp_kv_capacity_batches"] = int(
+                self.mtp_spec_stats["fallback_temp_kv_capacity_batches"]
+            ) + 1
+            raise RuntimeError(
+                "DeepSeek V4 MTP flattened verify scratch page cannot assign "
+                f"a unique compressed temp slot for position={position}, "
+                f"capacity={scratch_capacity}."
+            )
+
+        try:
+            for entry in entries:
+                req = entry["req"]
+                verify_len = int(entry["verify_len"])
+                base_pos = int(req.cached_len)
+                old_device_len = int(req.device_len)
+                positions = torch.arange(
+                    base_pos,
+                    base_pos + verify_len,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                if positions.numel() == 0:
+                    continue
+                if int(positions[-1].item()) >= int(self.page_table.shape[1]):
+                    raise RuntimeError(
+                        "DeepSeek V4 MTP flattened verify exceeded page-table width: "
+                        f"position={int(positions[-1].item())}, "
+                        f"width={int(self.page_table.shape[1])}."
+                    )
+                original_locs = self.page_table[int(req.table_idx), positions].clone()
+                scratch_offsets = [
+                    _alloc_scratch_offset(int(position)) for position in positions.tolist()
+                ]
+                temp_locs = torch.tensor(
+                    [scratch_start + offset for offset in scratch_offsets],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                self.page_table[int(req.table_idx), positions] = temp_locs
+                req.device_len = base_pos + verify_len
+                restore.append((req, old_device_len, positions, original_locs))
+
+                entry["row_start"] = cursor
+                entry["positions_tensor"] = positions.to(dtype=torch.int32)
+                entry["temp_locs"] = temp_locs
+                entry["real_locs"] = original_locs.to(dtype=torch.int32)
+                input_chunks.extend(entry["verify_inputs"])
+                position_chunks.append(entry["positions_tensor"])
+                out_loc_chunks.append(temp_locs)
+                cursor += verify_len
+
+            verify_batch = Batch(
+                reqs=[entry["req"] for entry in entries],
+                phase="decode",
+                frozen_kv_read_only=False,
+            )
+            verify_batch.padded_reqs = verify_batch.reqs
+            verify_batch.input_ids = torch.cat(input_chunks, dim=0).to(
+                device=self.device,
+                dtype=torch.int32,
+            )
+            verify_batch.positions = torch.cat(position_chunks, dim=0).to(
+                device=self.device,
+                dtype=torch.int32,
+            )
+            verify_batch.out_loc = torch.cat(out_loc_chunks, dim=0).to(
+                device=self.device,
+                dtype=torch.int32,
+            )
+            self.attn_backend.prepare_metadata(verify_batch)
+            return verify_batch, restore, total_verify_tokens
+        except Exception:
+            self._restore_mtp_flattened_temp_verify_batch(restore)
+            raise
+
+    def _restore_mtp_flattened_temp_verify_batch(
+        self,
+        restore: list[tuple[Req, int, torch.Tensor, torch.Tensor]],
+    ) -> None:
+        for req, old_device_len, positions, original_locs in restore:
+            self.page_table[int(req.table_idx), positions] = original_locs
+            req.device_len = int(old_device_len)
+
+    def _make_mtp_flattened_verify_batch(
+        self,
+        entries: list[dict[str, Any]],
+    ) -> tuple[Batch, list[tuple[Req, int]], int]:
+        total_verify_tokens = sum(int(entry["verify_len"]) for entry in entries)
+        restore: list[tuple[Req, int]] = []
+        input_chunks: list[torch.Tensor] = []
+        position_chunks: list[torch.Tensor] = []
+        out_loc_chunks: list[torch.Tensor] = []
+        cursor = 0
+        try:
+            for entry in entries:
+                req = entry["req"]
+                verify_len = int(entry["verify_len"])
+                base_pos = int(req.cached_len)
+                old_device_len = int(req.device_len)
+                positions = torch.arange(
+                    base_pos,
+                    base_pos + verify_len,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                if positions.numel() == 0:
+                    continue
+                if int(positions[-1].item()) >= int(self.page_table.shape[1]):
+                    raise RuntimeError(
+                        "DeepSeek V4 MTP flattened verify exceeded page-table width: "
+                        f"position={int(positions[-1].item())}, "
+                        f"width={int(self.page_table.shape[1])}."
+                    )
+                real_locs = self.page_table[int(req.table_idx), positions].clone()
+                req.device_len = base_pos + verify_len
+                restore.append((req, old_device_len))
+
+                entry["row_start"] = cursor
+                entry["committed_seq_len"] = base_pos
+                entry["positions_tensor"] = positions.to(dtype=torch.int32)
+                entry["temp_locs"] = real_locs.to(dtype=torch.int32)
+                entry["real_locs"] = real_locs.to(dtype=torch.int32)
+                input_chunks.extend(entry["verify_inputs"])
+                position_chunks.append(entry["positions_tensor"])
+                out_loc_chunks.append(entry["real_locs"])
+                cursor += verify_len
+
+            verify_batch = Batch(
+                reqs=[entry["req"] for entry in entries],
+                phase="decode",
+                frozen_kv_read_only=False,
+            )
+            verify_batch.padded_reqs = verify_batch.reqs
+            verify_batch.input_ids = torch.cat(input_chunks, dim=0).to(
+                device=self.device,
+                dtype=torch.int32,
+            )
+            verify_batch.positions = torch.cat(position_chunks, dim=0).to(
+                device=self.device,
+                dtype=torch.int32,
+            )
+            verify_batch.out_loc = torch.cat(out_loc_chunks, dim=0).to(
+                device=self.device,
+                dtype=torch.int32,
+            )
+            verify_lens = [int(entry["verify_len"]) for entry in entries]
+            if len(set(verify_lens)) != 1:
+                raise RuntimeError(
+                    "DeepSeek V4 MTP target-verify metadata requires a fixed "
+                    "active verify length per request in one flattened batch; "
+                    f"got verify_lens={verify_lens}."
+                )
+            speculative_num_draft_tokens = int(verify_lens[0])
+            verify_batch.dsv4_target_verify_metadata = {
+                "speculative_num_draft_tokens": speculative_num_draft_tokens,
+                "extend_lens": verify_lens,
+                "committed_seq_lens": [
+                    int(entry["committed_seq_len"]) for entry in entries
+                ],
+                "num_tokens": int(total_verify_tokens),
+            }
+            self.attn_backend.prepare_metadata(verify_batch)
+            self._record_mtp_target_verify_contract_trace(verify_batch, entries)
+            return verify_batch, restore, total_verify_tokens
+        except Exception:
+            self._restore_mtp_flattened_verify_batch(restore)
+            raise
+
+    def _restore_mtp_flattened_verify_batch(
+        self,
+        restore: list[tuple[Req, int]],
+    ) -> None:
+        for req, old_device_len in restore:
+            req.device_len = int(old_device_len)
+
+    def _forward_mtp_flattened_verify_with_hidden(
+        self,
+        verify_batch: Batch,
+    ) -> dict[str, torch.Tensor]:
+        inner_model = getattr(self.model, "model", None)
+        lm_head = getattr(self.model, "lm_head", None)
+        if inner_model is not None and lm_head is not None:
+            output, hidden_before_norm = inner_model.forward(
+                verify_batch.input_ids,
+                return_hidden_states_before_norm=True,
+            )
+            logits = lm_head.linear(output)
+            return {
+                "logits": logits,
+                "hidden_states": output,
+                "hidden_states_before_norm": hidden_before_norm,
+            }
+        output = self.model.forward_with_hidden()
+        return {
+            "logits": output.logits,
+            "hidden_states": output.hidden_states,
+            "hidden_states_before_norm": output.hidden_states_before_norm,
+        }
+
+    def _estimate_mtp_kv_bytes(
+        self,
+        full_locs: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> int:
+        if full_locs.numel() == 0:
+            return 0
+        kv_cache = self.kv_cache
+        rows = int(full_locs.numel())
+        bytes_total = 0
+        layer_mapping = tuple(getattr(kv_cache, "layer_mapping", ()))
+        num_layers = len(layer_mapping) or int(getattr(kv_cache, "_num_layers", 0) or 0)
+        if num_layers:
+            sample = kv_cache.swa_cache(0)
+            bytes_total += rows * num_layers * int(sample.shape[-1]) * int(sample.element_size())
+
+        def _compressed_loc_count(ratio: int) -> int:
+            locs = kv_cache.compressed_locs_from_full_locs(
+                full_locs,
+                ratio,  # type: ignore[arg-type]
+                positions,
+            )
+            return int(locs.numel())
+
+        c4_layers = [m.layer_id for m in layer_mapping if int(m.compress_ratio) == 4]
+        c128_layers = [m.layer_id for m in layer_mapping if int(m.compress_ratio) == 128]
+        c4_count = _compressed_loc_count(4) if c4_layers else 0
+        c128_count = _compressed_loc_count(128) if c128_layers else 0
+        for layer_id in c4_layers:
+            cache = kv_cache.c4_cache(int(layer_id))
+            bytes_total += c4_count * int(cache.shape[-1]) * int(cache.element_size())
+            if self._mtp_indexer_uses_fp8_cache(kv_cache):
+                bytes_total += c4_count * (
+                    int(getattr(kv_cache, "_index_head_dim", cache.shape[-1])) + 4
+                )
+            else:
+                indexer_cache = kv_cache.indexer_cache(int(layer_id))
+                bytes_total += (
+                    c4_count
+                    * int(indexer_cache.shape[-1])
+                    * int(indexer_cache.element_size())
+                )
+        for layer_id in c128_layers:
+            cache = kv_cache.c128_cache(int(layer_id))
+            bytes_total += c128_count * int(cache.shape[-1]) * int(cache.element_size())
+        return int(bytes_total)
+
+    def _snapshot_mtp_kv_rows(
+        self,
+        full_locs: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> dict[str, Any]:
+        snapshot: dict[str, Any] = {"items": [], "bytes": 0}
+        if full_locs.numel() == 0:
+            return snapshot
+        kv_cache = self.kv_cache
+        full_locs = full_locs.to(device=self.device, dtype=torch.long)
+        positions = positions.to(device=self.device, dtype=torch.long)
+
+        def _add(cache: torch.Tensor, locs: torch.Tensor) -> None:
+            valid_locs = locs.to(device=self.device, dtype=torch.long)
+            valid_locs = valid_locs[(valid_locs >= 0) & (valid_locs < int(cache.shape[0]))]
+            if valid_locs.numel() == 0:
+                return
+            valid_locs = torch.unique(valid_locs)
+            values = cache[valid_locs].clone()
+            snapshot["items"].append(("tensor", cache, valid_locs, values))
+            snapshot["bytes"] = int(snapshot["bytes"]) + (
+                int(values.numel()) * int(values.element_size())
+            )
+
+        layer_mapping = tuple(getattr(kv_cache, "layer_mapping", ()))
+        num_layers = len(layer_mapping) or int(getattr(kv_cache, "_num_layers", 0) or 0)
+        if num_layers:
+            swa_locs = kv_cache.translate_full_locs_to_swa_locs(full_locs)
+            for layer_id in range(num_layers):
+                _add(kv_cache.swa_cache(int(layer_id)), swa_locs)
+
+        c4_layers = [m.layer_id for m in layer_mapping if int(m.compress_ratio) == 4]
+        c128_layers = [m.layer_id for m in layer_mapping if int(m.compress_ratio) == 128]
+        if c4_layers:
+            c4_locs = kv_cache.compressed_locs_from_full_locs(full_locs, 4, positions)
+            c4_state_locs = self._mtp_state_locs_from_full_locs(
+                kv_cache,
+                full_locs,
+                4,
+                component="attention",
+            )
+            indexer_state_locs = self._mtp_state_locs_from_full_locs(
+                kv_cache,
+                full_locs,
+                4,
+                component="indexer",
+            )
+            for layer_id in c4_layers:
+                _add(kv_cache.c4_cache(int(layer_id)), c4_locs)
+                self._snapshot_mtp_indexer_kv(snapshot, kv_cache, int(layer_id), c4_locs)
+                self._snapshot_mtp_state_pool(
+                    snapshot,
+                    getattr(kv_cache, "attention_compress_state", None),
+                    int(layer_id),
+                    c4_state_locs,
+                )
+                self._snapshot_mtp_state_pool(
+                    snapshot,
+                    getattr(kv_cache, "indexer_compress_state", None),
+                    int(layer_id),
+                    indexer_state_locs,
+                )
+        if c128_layers:
+            c128_locs = kv_cache.compressed_locs_from_full_locs(full_locs, 128, positions)
+            c128_state_locs = self._mtp_state_locs_from_full_locs(
+                kv_cache,
+                full_locs,
+                128,
+                component="attention",
+            )
+            for layer_id in c128_layers:
+                _add(kv_cache.c128_cache(int(layer_id)), c128_locs)
+                self._snapshot_mtp_state_pool(
+                    snapshot,
+                    getattr(kv_cache, "attention_compress_state", None),
+                    int(layer_id),
+                    c128_state_locs,
+                )
+        return snapshot
+
+    def _mtp_state_locs_from_full_locs(
+        self,
+        kv_cache: Any,
+        full_locs: torch.Tensor,
+        ratio: int,
+        *,
+        component: str,
+    ) -> torch.Tensor:
+        state_locs = getattr(kv_cache, "state_locs_from_full_locs", None)
+        if not callable(state_locs):
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        try:
+            return state_locs(full_locs, ratio, component=component).to(
+                device=self.device,
+                dtype=torch.long,
+            )
+        except Exception:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+
+    def _snapshot_mtp_state_pool(
+        self,
+        snapshot: dict[str, Any],
+        pool_getter: Any,
+        layer_id: int,
+        locs: torch.Tensor,
+    ) -> None:
+        if not callable(pool_getter) or locs.numel() == 0:
+            return
+        pool = pool_getter(layer_id)
+        buffer = pool.kv_score_buffer.kv_score
+        valid_locs = locs.to(device=buffer.device, dtype=torch.long)
+        valid_locs = valid_locs[(valid_locs >= 0) & (valid_locs < int(buffer.shape[0]))]
+        if valid_locs.numel() == 0:
+            return
+        valid_locs = torch.unique(valid_locs)
+        values = buffer[valid_locs].clone()
+        snapshot["items"].append(("tensor", buffer, valid_locs, values))
+        snapshot["bytes"] = int(snapshot["bytes"]) + (
+            int(values.numel()) * int(values.element_size())
+        )
+
+    def _snapshot_mtp_indexer_kv(
+        self,
+        snapshot: dict[str, Any],
+        kv_cache: Any,
+        layer_id: int,
+        locs: torch.Tensor,
+    ) -> None:
+        valid_locs = locs.to(device=self.device, dtype=torch.long)
+        valid_locs = valid_locs[valid_locs >= 0]
+        if valid_locs.numel() == 0:
+            return
+        valid_locs = torch.unique(valid_locs)
+        if self._mtp_indexer_uses_fp8_cache(kv_cache):
+            if (
+                hasattr(kv_cache, "has_indexer_fp8_paged_cache")
+                and kv_cache.has_indexer_fp8_paged_cache()
+            ):
+                packed = kv_cache.indexer_fp8_paged_cache(layer_id)
+                page_size = int(kv_cache.indexer_fp8_page_size)
+                dim = int(getattr(kv_cache, "_index_head_dim", 0))
+                page_bytes = int(packed.shape[-1])
+                pages = valid_locs // page_size
+                offsets = valid_locs - pages * page_size
+                data = packed.as_strided(
+                    (packed.shape[0], page_size, dim),
+                    (page_bytes, dim, 1),
+                )
+                scales = packed.as_strided(
+                    (packed.shape[0], page_size, 4),
+                    (page_bytes, 4, 1),
+                    storage_offset=page_size * dim,
+                )
+                data_values = data[pages, offsets].clone()
+                scale_values = scales[pages, offsets].clone()
+                snapshot["items"].append(
+                    ("indexer_fp8_paged", packed, page_size, dim, pages, offsets, data_values, scale_values)
+                )
+                snapshot["bytes"] = int(snapshot["bytes"]) + (
+                    int(data_values.numel()) * int(data_values.element_size())
+                    + int(scale_values.numel()) * int(scale_values.element_size())
+                )
+                return
+
+            values, scales = kv_cache.indexer_fp8_cache(layer_id)
+            values_snapshot = values[valid_locs].clone()
+            scales_snapshot = scales[valid_locs].clone()
+            snapshot["items"].append(
+                ("indexer_fp8", values, scales, valid_locs, values_snapshot, scales_snapshot)
+            )
+            snapshot["bytes"] = int(snapshot["bytes"]) + (
+                int(values_snapshot.numel()) * int(values_snapshot.element_size())
+                + int(scales_snapshot.numel()) * int(scales_snapshot.element_size())
+            )
+            return
+
+        cache = kv_cache.indexer_cache(layer_id)
+        valid_locs = valid_locs[valid_locs < int(cache.shape[0])]
+        if valid_locs.numel() == 0:
+            return
+        values = cache[valid_locs].clone()
+        snapshot["items"].append(("tensor", cache, valid_locs, values))
+        snapshot["bytes"] = int(snapshot["bytes"]) + (
+            int(values.numel()) * int(values.element_size())
+        )
+
+    def _restore_mtp_kv_snapshot(self, snapshot: dict[str, Any]) -> None:
+        for item in snapshot.get("items", []):
+            kind = item[0]
+            if kind == "tensor":
+                _, cache, locs, values = item
+                cache[locs] = values
+            elif kind == "indexer_fp8_paged":
+                _, packed, page_size, dim, pages, offsets, data_values, scale_values = item
+                page_bytes = int(packed.shape[-1])
+                data = packed.as_strided(
+                    (packed.shape[0], page_size, dim),
+                    (page_bytes, dim, 1),
+                )
+                scales = packed.as_strided(
+                    (packed.shape[0], page_size, 4),
+                    (page_bytes, 4, 1),
+                    storage_offset=page_size * dim,
+                )
+                data[pages, offsets] = data_values
+                scales[pages, offsets] = scale_values
+            elif kind == "indexer_fp8":
+                _, values, scales, locs, values_snapshot, scales_snapshot = item
+                values[locs] = values_snapshot
+                scales[locs] = scales_snapshot
+
+    def _mtp_indexer_uses_fp8_cache(self, kv_cache: Any) -> bool:
+        has_fp8 = getattr(kv_cache, "has_indexer_fp8_cache", None)
+        return bool(callable(has_fp8) and has_fp8())
+
+    def _copy_mtp_temp_kv_to_committed(
+        self,
+        temp_locs: torch.Tensor,
+        real_locs: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> int:
+        if temp_locs.numel() == 0:
+            return 0
+        kv_cache = self.kv_cache
+        temp_locs = temp_locs.to(device=self.device, dtype=torch.long)
+        real_locs = real_locs.to(device=self.device, dtype=torch.long)
+        positions = positions.to(device=self.device, dtype=torch.long)
+        if temp_locs.shape != real_locs.shape or temp_locs.shape != positions.shape:
+            raise RuntimeError(
+                "DeepSeek V4 MTP temp KV copy shape mismatch: "
+                f"temp={tuple(temp_locs.shape)}, real={tuple(real_locs.shape)}, "
+                f"positions={tuple(positions.shape)}."
+            )
+        if bool(torch.any(real_locs < 0).item()):
+            raise RuntimeError("DeepSeek V4 MTP temp KV copy found negative committed loc.")
+
+        copied_bytes = 0
+        layer_mapping = tuple(getattr(kv_cache, "layer_mapping", ()))
+        num_layers = len(layer_mapping) or int(getattr(kv_cache, "_num_layers", 0) or 0)
+        if num_layers:
+            src_swa = kv_cache.translate_full_locs_to_swa_locs(temp_locs)
+            dst_swa = kv_cache.translate_full_locs_to_swa_locs(real_locs)
+            if bool(torch.any((src_swa < 0) | (dst_swa < 0)).item()):
+                raise RuntimeError("DeepSeek V4 MTP temp KV copy found invalid SWA loc.")
+            src_swa = src_swa.to(dtype=torch.long)
+            dst_swa = dst_swa.to(dtype=torch.long)
+            for layer_id in range(num_layers):
+                cache = kv_cache.swa_cache(int(layer_id))
+                cache[dst_swa] = cache[src_swa]
+                copied_bytes += (
+                    int(dst_swa.numel()) * int(cache.shape[-1]) * int(cache.element_size())
+                )
+
+        c4_layers = [m.layer_id for m in layer_mapping if int(m.compress_ratio) == 4]
+        c128_layers = [m.layer_id for m in layer_mapping if int(m.compress_ratio) == 128]
+        if c4_layers:
+            src_c4 = kv_cache.compressed_locs_from_full_locs(temp_locs, 4, positions).to(
+                device=self.device,
+                dtype=torch.long,
+            )
+            dst_c4 = kv_cache.compressed_locs_from_full_locs(real_locs, 4, positions).to(
+                device=self.device,
+                dtype=torch.long,
+            )
+            if src_c4.shape != dst_c4.shape:
+                raise RuntimeError("DeepSeek V4 MTP C4 temp KV copy loc mismatch.")
+            for layer_id in c4_layers:
+                cache = kv_cache.c4_cache(int(layer_id))
+                if dst_c4.numel() > 0:
+                    cache[dst_c4] = cache[src_c4]
+                copied_bytes += (
+                    int(dst_c4.numel()) * int(cache.shape[-1]) * int(cache.element_size())
+                )
+                copied_bytes += self._copy_mtp_temp_indexer_kv(
+                    kv_cache,
+                    int(layer_id),
+                    src_c4,
+                    dst_c4,
+                )
+        if c128_layers:
+            src_c128 = kv_cache.compressed_locs_from_full_locs(temp_locs, 128, positions).to(
+                device=self.device,
+                dtype=torch.long,
+            )
+            dst_c128 = kv_cache.compressed_locs_from_full_locs(real_locs, 128, positions).to(
+                device=self.device,
+                dtype=torch.long,
+            )
+            if src_c128.shape != dst_c128.shape:
+                raise RuntimeError("DeepSeek V4 MTP C128 temp KV copy loc mismatch.")
+            for layer_id in c128_layers:
+                cache = kv_cache.c128_cache(int(layer_id))
+                if dst_c128.numel() > 0:
+                    cache[dst_c128] = cache[src_c128]
+                copied_bytes += (
+                    int(dst_c128.numel()) * int(cache.shape[-1]) * int(cache.element_size())
+                )
+        return int(copied_bytes)
+
+    def _copy_mtp_temp_indexer_kv(
+        self,
+        kv_cache: Any,
+        layer_id: int,
+        src_locs: torch.Tensor,
+        dst_locs: torch.Tensor,
+    ) -> int:
+        if src_locs.numel() == 0:
+            return 0
+        if self._mtp_indexer_uses_fp8_cache(kv_cache):
+            if (
+                hasattr(kv_cache, "has_indexer_fp8_paged_cache")
+                and kv_cache.has_indexer_fp8_paged_cache()
+            ):
+                packed = kv_cache.indexer_fp8_paged_cache(layer_id)
+                page_size = int(kv_cache.indexer_fp8_page_size)
+                dim = int(getattr(kv_cache, "_index_head_dim", 0))
+                page_bytes = int(packed.shape[-1])
+                data = packed.as_strided(
+                    (packed.shape[0], page_size, dim),
+                    (page_bytes, dim, 1),
+                )
+                scales = packed.as_strided(
+                    (packed.shape[0], page_size, 4),
+                    (page_bytes, 4, 1),
+                    storage_offset=page_size * dim,
+                )
+                src_pages = src_locs // page_size
+                dst_pages = dst_locs // page_size
+                src_offsets = src_locs - src_pages * page_size
+                dst_offsets = dst_locs - dst_pages * page_size
+                data[dst_pages, dst_offsets] = data[src_pages, src_offsets]
+                scales[dst_pages, dst_offsets] = scales[src_pages, src_offsets]
+                return int(src_locs.numel()) * (dim + 4)
+
+            values, scales = kv_cache.indexer_fp8_cache(layer_id)
+            values[dst_locs] = values[src_locs]
+            scales[dst_locs] = scales[src_locs]
+            return int(src_locs.numel()) * (
+                int(values.shape[-1]) * int(values.element_size())
+                + int(scales.shape[-1]) * int(scales.element_size())
+            )
+
+        cache = kv_cache.indexer_cache(layer_id)
+        cache[dst_locs] = cache[src_locs]
+        return int(src_locs.numel()) * int(cache.shape[-1]) * int(cache.element_size())
+
     def _propose_mtp_spec_drafts(
         self,
         batch: Batch,
@@ -791,7 +1546,356 @@ class Engine:
             "draft_tokens_by_index": draft_tokens_by_index,
         }
 
+    def _verify_mtp_spec_drafts_flattened(
+        self,
+        batch: Batch,
+        first_tokens_gpu: torch.Tensor,
+        draft_tokens_by_index: dict[int, list[torch.Tensor]],
+        emitted_tokens: list[list[torch.Tensor]],
+    ) -> dict[str, Any]:
+        unsupported_reason = self._mtp_temp_kv_unsupported_reason()
+        if unsupported_reason is not None:
+            self.mtp_spec_stats["fallback_temp_kv_unsupported_batches"] = int(
+                self.mtp_spec_stats["fallback_temp_kv_unsupported_batches"]
+            ) + 1
+            raise RuntimeError(
+                "DeepSeek V4 MTP flattened temp-KV verify is fail-closed for "
+                f"{unsupported_reason}. Keep MTP speculative disabled for this "
+                "ownership mode until accepted-KV movement covers Route-B "
+                "component/SWA state."
+            )
+
+        entries: list[dict[str, Any]] = []
+        page_boundary_stops = 0
+        accepted_prefix_lens = [0] * len(batch.reqs)
+        for i, req in enumerate(batch.reqs):
+            drafts = draft_tokens_by_index.get(i, [])
+            if not (drafts and req.can_decode):
+                continue
+            available_slots = max(
+                int(self._allocated_kv_token_limit(req)) - int(req.cached_len),
+                0,
+            )
+            if available_slots <= 0:
+                page_boundary_stops += 1
+                continue
+            draft_count = min(len(drafts), max(int(req.remain_len), 0))
+            has_bonus_row = int(req.remain_len) > draft_count
+            verify_len = min(draft_count + (1 if has_bonus_row else 0), available_slots)
+            if verify_len <= 0:
+                page_boundary_stops += 1
+                continue
+            verify_inputs = [first_tokens_gpu[i : i + 1].contiguous()]
+            verify_inputs.extend(tok.contiguous() for tok in drafts[: max(verify_len - 1, 0)])
+            if len(verify_inputs) != verify_len:
+                raise RuntimeError(
+                    "DeepSeek V4 MTP flattened verify input construction mismatch: "
+                    f"inputs={len(verify_inputs)}, verify_len={verify_len}."
+                )
+            entries.append(
+                {
+                    "batch_index": i,
+                    "req": req,
+                    "drafts": drafts[:draft_count],
+                    "verify_len": verify_len,
+                    "verify_inputs": verify_inputs,
+                }
+            )
+
+        if not entries:
+            self._record_mtp_acceptance_histogram(accepted_prefix_lens)
+            self.mtp_spec_stats["fallback_page_boundary_tokens"] = int(
+                self.mtp_spec_stats["fallback_page_boundary_tokens"]
+            ) + page_boundary_stops
+            return {
+                "verified": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "correction_tokens": 0,
+                "target_fallback_tokens": 0,
+                "page_boundary_stops": page_boundary_stops,
+                "accepted_prefix_lens": accepted_prefix_lens,
+                "verify_shapes": [],
+            }
+
+        verified = 0
+        accepted = 0
+        rejected = 0
+        correction_tokens = 0
+        target_fallback_tokens = 0
+        verify_shapes: list[list[int]] = []
+        max_verify_len = max(int(entry["verify_len"]) for entry in entries)
+        verify_batch, restore, total_verify_tokens = self._make_mtp_flattened_verify_batch(
+            entries
+        )
+        all_real_locs = verify_batch.out_loc.to(device=self.device, dtype=torch.long)
+        all_positions = verify_batch.positions.to(device=self.device, dtype=torch.long)
+        pre_verify_snapshot = self._snapshot_mtp_kv_rows(all_real_locs, all_positions)
+        temp_kv_bytes = int(pre_verify_snapshot.get("bytes", 0))
+        start_s = time.perf_counter()
+        target_output = None
+        try:
+            self._sync_device_for_mtp_spec()
+            start_s = time.perf_counter()
+            with self.ctx.forward_batch(verify_batch):
+                self.graph_runner.record_eager_decode(verify_batch)
+                target_output = self.model.forward_with_hidden()
+                self._debug_sync_forward(
+                    "after_mtp_flattened_temp_verify",
+                    verify_batch,
+                    "mtp_spec_flattened_temp_verify",
+                )
+            self._sync_device_for_mtp_spec()
+        except Exception:
+            self._restore_mtp_kv_snapshot(pre_verify_snapshot)
+            self._sync_device_for_mtp_spec()
+            raise
+        finally:
+            self._restore_mtp_flattened_verify_batch(restore)
+
+        elapsed = time.perf_counter() - start_s
+        self.mtp_spec_stats["target_latency_s"] = float(
+            self.mtp_spec_stats["target_latency_s"]
+        ) + elapsed
+        self.mtp_spec_stats["target_verify_latency_s"] = float(
+            self.mtp_spec_stats["target_verify_latency_s"]
+        ) + elapsed
+        self.mtp_spec_stats["target_calls"] = int(self.mtp_spec_stats["target_calls"]) + 1
+        self.mtp_spec_stats["target_verify_calls"] = int(
+            self.mtp_spec_stats["target_verify_calls"]
+        ) + 1
+        self.mtp_spec_stats["flattened_verify_tokens"] = int(
+            self.mtp_spec_stats["flattened_verify_tokens"]
+        ) + int(total_verify_tokens)
+        self.mtp_spec_stats["target_verify_temp_kv_bytes"] = int(
+            self.mtp_spec_stats["target_verify_temp_kv_bytes"]
+        ) + int(temp_kv_bytes)
+        verify_shapes.append([len(entries), max_verify_len, int(total_verify_tokens)])
+
+        logits = target_output.logits[:total_verify_tokens]
+        if not bool(torch.isfinite(logits).all().item()):
+            self._restore_mtp_kv_snapshot(pre_verify_snapshot)
+            self._sync_device_for_mtp_spec()
+            self.mtp_spec_stats["finite_failures"] = int(
+                self.mtp_spec_stats["finite_failures"]
+            ) + 1
+            raise RuntimeError("DeepSeek V4 MTP flattened target verify produced NaN/Inf logits.")
+        target_tokens = torch.argmax(logits, dim=-1).to(torch.int32)
+
+        commit_loc_chunks: list[torch.Tensor] = []
+        commit_position_chunks: list[torch.Tensor] = []
+        copy_rows_by_entry: list[tuple[Req, int]] = []
+        bonus_tokens = 0
+        accepted_candidates = 0
+        correction_token_candidates = 0
+        bonus_token_candidates = 0
+        blocked_commit_rows = 0
+        accepted_commit_blocker = self._mtp_accepted_commit_blocker()
+        allow_accepted_commit = accepted_commit_blocker is None
+        if accepted_commit_blocker is not None:
+            self.mtp_spec_stats["accepted_kv_commit_fail_closed"] = True
+            self.mtp_spec_stats["accepted_kv_commit_blocker"] = accepted_commit_blocker
+            self._record_mtp_c128_lifecycle_event(
+                {
+                    "event": "accepted_commit_fail_closed",
+                    "blocker": accepted_commit_blocker,
+                    "verify_tokens": int(total_verify_tokens),
+                    "reason": "missing OnlineC128MTPController pending/write/commit owner",
+                }
+            )
+        trace_enabled = _env_flag("MINISGL_DSV4_MTP_SPEC_TRACE")
+        trace_entries: list[dict[str, Any]] = []
+
+        for entry in entries:
+            batch_index = int(entry["batch_index"])
+            req = entry["req"]
+            drafts = entry["drafts"]
+            verify_len = int(entry["verify_len"])
+            row_start = int(entry["row_start"])
+            row_tokens = target_tokens[row_start : row_start + verify_len]
+            emitted_before = len(emitted_tokens[batch_index])
+            accepted_prefix = 0
+            copy_rows = 0
+            candidate_copy_rows = 0
+            candidate_emitted: list[torch.Tensor] = []
+            mismatch_depth: int | None = None
+
+            comparable = min(len(drafts), verify_len)
+            for depth in range(comparable):
+                target_token = row_tokens[depth : depth + 1].contiguous()
+                draft_token = drafts[depth]
+                verified += 1
+                if bool((target_token == draft_token.to(device=self.device)).all().item()):
+                    accepted_prefix += 1
+                    candidate_emitted.append(draft_token.contiguous())
+                    continue
+
+                rejected += 1
+                mismatch_depth = depth
+                correction_token_candidates += 1
+                candidate_emitted.append(target_token)
+                candidate_copy_rows = depth + 1
+                break
+
+            if mismatch_depth is None and verify_len > len(drafts):
+                target_token = row_tokens[len(drafts) : len(drafts) + 1].contiguous()
+                bonus_token_candidates += 1
+                candidate_emitted.append(target_token)
+                candidate_copy_rows = min(verify_len, len(drafts) + 1)
+            elif mismatch_depth is None:
+                candidate_copy_rows = min(verify_len, accepted_prefix)
+
+            accepted_candidates += accepted_prefix
+            if allow_accepted_commit:
+                accepted += accepted_prefix
+                correction_tokens += 1 if mismatch_depth is not None else 0
+                if mismatch_depth is None and verify_len > len(drafts):
+                    bonus_tokens += 1
+                accepted_prefix_lens[batch_index] = int(accepted_prefix)
+                emitted_tokens[batch_index].extend(candidate_emitted)
+                copy_rows = int(candidate_copy_rows)
+            elif accepted_prefix > 0:
+                blocked_commit_rows += int(max(candidate_copy_rows, accepted_prefix))
+
+            if copy_rows > 0:
+                commit_loc_chunks.append(entry["real_locs"][:copy_rows])
+                commit_position_chunks.append(entry["positions_tensor"][:copy_rows])
+                copy_rows_by_entry.append((req, copy_rows))
+            if trace_enabled:
+                emitted_now = emitted_tokens[batch_index][emitted_before:]
+                trace_entries.append(
+                    {
+                        "uid": int(getattr(req, "uid", -1)),
+                        "batch_index": int(batch_index),
+                        "cached_len": int(getattr(req, "cached_len", -1)),
+                        "device_len": int(getattr(req, "device_len", -1)),
+                        "verify_len": int(verify_len),
+                        "target_tokens": [int(x) for x in row_tokens.tolist()],
+                        "draft_tokens": [int(tok.reshape(-1)[0].item()) for tok in drafts],
+                        "accepted_prefix": int(accepted_prefix),
+                        "accepted_commit_blocker": accepted_commit_blocker or "",
+                        "candidate_copy_rows": int(candidate_copy_rows),
+                        "copy_rows": int(copy_rows),
+                        "emitted_tail": [
+                            int(tok.reshape(-1)[0].item()) for tok in emitted_now
+                        ],
+                    }
+                )
+
+        commit_start_s = time.perf_counter()
+        copied_bytes = 0
+        copied_tokens = 0
+        rollback_start_s = time.perf_counter()
+        if commit_loc_chunks:
+            commit_locs = torch.cat(commit_loc_chunks, dim=0).to(
+                device=self.device,
+                dtype=torch.long,
+            )
+            commit_positions = torch.cat(commit_position_chunks, dim=0).to(
+                device=self.device,
+                dtype=torch.long,
+            )
+            copied_tokens = int(commit_locs.numel())
+            committed_snapshot = self._snapshot_mtp_kv_rows(commit_locs, commit_positions)
+            copied_bytes = int(committed_snapshot.get("bytes", 0))
+            self._restore_mtp_kv_snapshot(pre_verify_snapshot)
+            self._restore_mtp_kv_snapshot(committed_snapshot)
+            for req, copy_rows in copy_rows_by_entry:
+                for _ in range(int(copy_rows)):
+                    req.complete_one()
+        else:
+            self._restore_mtp_kv_snapshot(pre_verify_snapshot)
+        self._sync_device_for_mtp_spec()
+        rollback_elapsed = time.perf_counter() - rollback_start_s
+        commit_elapsed = time.perf_counter() - commit_start_s
+        self.mtp_spec_stats["target_commit_latency_s"] = float(
+            self.mtp_spec_stats["target_commit_latency_s"]
+        ) + commit_elapsed
+        self.mtp_spec_stats["target_rollback_latency_s"] = float(
+            self.mtp_spec_stats.get("target_rollback_latency_s", 0.0)
+        ) + rollback_elapsed
+        self.mtp_spec_stats["target_commit_kv_copies"] = int(
+            self.mtp_spec_stats["target_commit_kv_copies"]
+        ) + (1 if copied_tokens else 0)
+        self.mtp_spec_stats["accepted_kv_copied_bytes"] = int(
+            self.mtp_spec_stats["accepted_kv_copied_bytes"]
+        ) + int(copied_bytes)
+        self.mtp_spec_stats["accepted_kv_copied_tokens"] = int(
+            self.mtp_spec_stats["accepted_kv_copied_tokens"]
+        ) + int(copied_tokens)
+        self.mtp_spec_stats["accepted_kv_commit_blocked_rows"] = int(
+            self.mtp_spec_stats["accepted_kv_commit_blocked_rows"]
+        ) + int(blocked_commit_rows)
+        self.mtp_spec_stats["draft_tokens_accept_candidates"] = int(
+            self.mtp_spec_stats["draft_tokens_accept_candidates"]
+        ) + int(accepted_candidates)
+        self.mtp_spec_stats["target_correction_token_candidates"] = int(
+            self.mtp_spec_stats["target_correction_token_candidates"]
+        ) + int(correction_token_candidates)
+        self.mtp_spec_stats["target_bonus_token_candidates"] = int(
+            self.mtp_spec_stats["target_bonus_token_candidates"]
+        ) + int(bonus_token_candidates)
+        self.mtp_spec_stats["target_bonus_tokens"] = int(
+            self.mtp_spec_stats["target_bonus_tokens"]
+        ) + int(bonus_tokens)
+        self.mtp_spec_stats["rejected_tail_isolation_checks"] = int(
+            self.mtp_spec_stats["rejected_tail_isolation_checks"]
+        ) + int(len(entries))
+        if trace_entries:
+            trace_log = self.mtp_spec_stats.setdefault("debug_trace", [])
+            trace_log.extend(trace_entries)
+            if len(trace_log) > 64:
+                del trace_log[:-64]
+
+        self._record_mtp_acceptance_histogram(accepted_prefix_lens)
+        self.mtp_spec_stats["draft_tokens_verified"] = int(
+            self.mtp_spec_stats["draft_tokens_verified"]
+        ) + verified
+        self.mtp_spec_stats["draft_tokens_accepted"] = int(
+            self.mtp_spec_stats["draft_tokens_accepted"]
+        ) + accepted
+        self.mtp_spec_stats["draft_tokens_rejected"] = int(
+            self.mtp_spec_stats["draft_tokens_rejected"]
+        ) + rejected
+        self.mtp_spec_stats["target_correction_tokens"] = int(
+            self.mtp_spec_stats["target_correction_tokens"]
+        ) + correction_tokens
+        self.mtp_spec_stats["target_fallback_tokens"] = int(
+            self.mtp_spec_stats.get("target_fallback_tokens", 0)
+        ) + target_fallback_tokens
+        self.mtp_spec_stats["fallback_page_boundary_tokens"] = int(
+            self.mtp_spec_stats["fallback_page_boundary_tokens"]
+        ) + page_boundary_stops
+        shape_log = self.mtp_spec_stats["target_verify_batch_shapes"]
+        shape_log.extend(verify_shapes)
+        if len(shape_log) > 64:
+            del shape_log[:-64]
+        return {
+            "verified": verified,
+            "accepted": accepted,
+            "rejected": rejected,
+            "correction_tokens": correction_tokens,
+            "target_fallback_tokens": target_fallback_tokens,
+            "page_boundary_stops": page_boundary_stops,
+            "accepted_prefix_lens": accepted_prefix_lens,
+            "verify_shapes": verify_shapes,
+        }
+
     def _verify_mtp_spec_drafts(
+        self,
+        batch: Batch,
+        first_tokens_gpu: torch.Tensor,
+        draft_tokens_by_index: dict[int, list[torch.Tensor]],
+        emitted_tokens: list[list[torch.Tensor]],
+    ) -> dict[str, Any]:
+        return self._verify_mtp_spec_drafts_flattened(
+            batch,
+            first_tokens_gpu,
+            draft_tokens_by_index,
+            emitted_tokens,
+        )
+
+    def _verify_mtp_spec_drafts_serial(
         self,
         batch: Batch,
         first_tokens_gpu: torch.Tensor,

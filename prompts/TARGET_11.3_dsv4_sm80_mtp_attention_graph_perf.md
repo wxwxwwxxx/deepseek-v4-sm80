@@ -2,13 +2,13 @@
 
 ## Goal
 
-After TARGET 11.27 proves exact greedy frozen-KV MTP with flattened
-verify/temp-KV commit and useful eager target-pass reduction, align the DSV4
+After TARGET 11.29 proves exact accepted-KV commit for flattened verify and a
+rerun of the eager path proves useful target-pass reduction, align the DSV4
 attention/compressed metadata and CUDA graph path with SGLang enough to decide
 whether MTP should be kept as an opt-in, optimized further, or promoted.
 
-Do not run this target before TARGET 11.27 exactness and target-pass reduction
-gates pass.
+Do not run this target before accepted-KV commit exactness and target-pass
+reduction gates pass.
 
 ## Primary Question
 

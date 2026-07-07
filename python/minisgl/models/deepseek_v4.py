@@ -1584,10 +1584,14 @@ class DSV4Attention(BaseOP):
         attn_metadata = getattr(batch, "attn_metadata", None)
         use_dsv4_backend = isinstance(attn_metadata, DSV4AttentionMetadata)
         read_only_frozen_kv = bool(getattr(batch, "frozen_kv_read_only", False))
+        force_verify_exact_kv_store = bool(
+            getattr(batch, "dsv4_force_torch_attention", False)
+        )
         kv_norm_rope_store_enabled = (
             use_dsv4_backend
             and attn_backend is not None
             and not read_only_frozen_kv
+            and not force_verify_exact_kv_store
             and x.is_cuda
             and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_KV_BF16")
         )
