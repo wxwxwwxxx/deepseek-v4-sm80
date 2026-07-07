@@ -8,6 +8,7 @@ Prefer the root-level route files:
 - `prompts/target.md`
 - `prompts/TARGET_08_radix_prefix_dsv4.md`
 - `prompts/TARGET_09_dsv4_sm80_low_precision_research.md`
+- `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md`
 - `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md`
 
 Use archived files only when:
@@ -27,5 +28,10 @@ Useful summary files in this archive:
 - `TARGET_08.27_dsv4_sm80_sglang_aligned_route_b_metadata_lifetime.md`
 - `TARGET_08.28_dsv4_sm80_route_b_lifetime_cache_promotion_gate.md`
 - `TARGET_08.30_dsv4_sm80_post_prefix_reprofile_next_bottleneck.md`
+- `TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md`
+- `TARGET_08.40_dsv4_sm80_marlin_wna16_release_component_clear_promotion.md`
+- `TARGET_08.45_dsv4_sm80_swa_independent_lifecycle_contract.md`
+- `TARGET_08.48_dsv4_sm80_marlin_swa_auto_cross_case_lifecycle_fix.md`
+- `TARGET_08.55_dsv4_sm80_compressed_metadata_boundary_replay_cleanup.md`
 
 The files here are historical source material, not active todos.

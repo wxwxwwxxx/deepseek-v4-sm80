@@ -2,11 +2,12 @@
 
 ## Goal
 
-After TARGET 11.2 proves exact greedy MTP, align the DSV4 attention/compressed
-metadata and CUDA graph path with SGLang enough to decide whether MTP should be
-kept as an opt-in, optimized further, or promoted.
+After TARGET 11.25 proves exact greedy frozen-KV MTP with multi-token
+verify/accept, align the DSV4 attention/compressed metadata and CUDA graph path
+with SGLang enough to decide whether MTP should be kept as an opt-in, optimized
+further, or promoted.
 
-Do not run this target before exactness passes.
+Do not run this target before TARGET 11.25 exactness and acceptance gates pass.
 
 ## Primary Question
 
@@ -110,4 +111,3 @@ Include:
 - small-workload and macro profile summaries;
 - promotion decision;
 - next optimization target if MTP remains promising.
-

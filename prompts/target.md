@@ -49,7 +49,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed prefix baseline plus SWA/metadata history | Built DSV4 radix prefix cache, Route-B ownership, SWA lifecycle work, and direct replay metadata cleanup; detailed child targets remain as history for prefix/SWA correctness and capacity work. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | deferred | Low-precision research is paused after the INT8 MoE feasibility pass did not show an obvious short win; keep the evidence for later INT8/FP8 work. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
-| TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | planned | New MTP speculative decoding route: first load/run MTP weights as an oracle, then add top-k 1 greedy verify runtime, then close DSV4 attention/graph/perf parity against SGLang. |
+| TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | active MTP route | New MTP speculative decoding route: weights/oracle and V1 sidecar exactness passed; next is frozen-KV multi-token verify/accept before DSV4 attention/graph/perf parity against SGLang. |
 
 ## Current Milestones
 
@@ -115,196 +115,26 @@ repeat-stable positive with zero-eager graph replay. TARGET 10.27 explained the
 cost, not a hot-path regression, and captured rank-scoped full-model Nsight
 traces with CUDA kernel/memcpy/NCCL/graph activity.
 
-TARGET 09.45 result:
+TARGET 08/09 follow-up summary:
 
 ```text
-Do not run TARGET 09.5 yet.  Run
-prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md first.
+TARGET 08 child prompts are archived under prompts/archive/target08/.
+TARGET 09 child prompts are archived under prompts/archive/target09/.
 ```
 
-Rationale: current mini keeps SWA as a full 43-layer, 128-page BF16 pool, so
-SWA-only FP8 appears to save about `0.576 GiB/rank`.  A SGLang-aligned
-independent SWA lifecycle may reduce real long-prefix/prefix-wave SWA retention
-to about `4` to `16` tail pages, making SWA-only FP8 much smaller
-(`0.018` to `0.072 GiB/rank`) while BF16 lifecycle itself can recover around
-`1 GiB/rank` of persistent headroom.  Prove that lifecycle and its runtime
-counters before reopening FP8 KV/cache E2E.
+TARGET 08 post-prefix work is now summarized in `prompts/TARGET_08_radix_prefix_dsv4.md`:
 
-TARGET 08.31 result:
+- TARGET 08.31-08.48 implemented and contract-audited SWA independent lifecycle, fixed large-capacity dummy-token mapping, stale prefix-handle tombstones, and same-Engine Marlin release + SWA address issues.
+- TARGET 08.34-08.40 identified Marlin WNA16 lazy cache creation as the large warmup/capacity owner, then made original routed expert weight release safe by clearing component slots on page allocation.  This recovers about `17 GiB/rank` of raw expert storage for KV/component capacity.
+- TARGET 08.49-08.55 reduced SWA/prefix metadata overhead through page-table caching, direct token metadata, graph/copy attribution, and direct replay metadata fusion.  The remaining metadata kernels are no longer worth polishing without a fresh profile showing them as top bottlenecks.
+- Prefix cache and SWA lifecycle should be treated as important serving/capacity baselines, but TARGET 08 itself is closed unless a future feature changes prefix/SWA/cache ownership.
 
-```text
-prompts/TARGET_08.31_dsv4_sm80_swa_independent_lifecycle.md completed.
-Run prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md next.
-```
+TARGET 09 low-precision work is now summarized in `prompts/TARGET_09_dsv4_sm80_low_precision_research.md`:
 
-Rationale: SWA independent lifecycle now exists and passes correctness tests.
-It keeps C4/C128/indexer/state/component locs valid while SWA tail pages are
-tombstoned/freed, and it remains compatible with TARGET 08.40 Marlin WNA16
-release + component-slot clear.  Runtime counters prove small live SWA tails,
-and Marlin release auto-capacity improved from `2776` to `6636` pages at
-roughly the same KV memory budget.  However, fixed-128 serving still uses a
-conservative 128-page SWA floor, and short offline E2E output throughput
-regressed by about `3%` to `9%`.  TARGET 08.41 should run graph-bucket
-`[1,2,4,8,16]` soak, serving/prefix pressure, overhead attribution, and a
-promotion/opt-in decision before reopening TARGET 09.5.
-
-TARGET 08.41 result:
-
-```text
-prompts/TARGET_08.41_dsv4_sm80_swa_independent_lifecycle_promotion_soak.md completed.
-Run prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md next.
-```
-
-Rationale: fixed-128 SWA independent serving/prefix/eviction is clean with
-graph buckets `[1,2,4,8,16]`, but high-capacity Marlin release + SWA
-independent serving crashes with CUDA illegal memory access at auto capacity
-and at explicit `--num-pages 4096`.  The stack surfaces near
-`_swa_page_refcount`, but likely observes an earlier illegal device access in
-large-capacity SWA mapping/page-table/refcount/free-list behavior.  E2E
-overhead was attributed mainly to decode prepare / attention metadata, but
-correctness must be fixed before overhead optimization or TARGET 09.5 FP8 work.
-TARGET 08.42 should investigate no-weight/partial repros first, then confirm
-with full-model smoke/macro.
-
-TARGET 08.42 result:
-
-```text
-prompts/TARGET_08.42_dsv4_sm80_swa_large_capacity_serving_correctness.md completed.
-Run prompts/TARGET_08.43_dsv4_sm80_swa_independent_post_fix_promotion_soak.md next.
-```
-
-Rationale: the large-capacity Marlin release + SWA independent crash was caused
-by an Engine/KV-cache dummy full-page token contract mismatch.  Engine planned
-`num_tokens = planned_pages * page_size`, allocated `planned_pages + 1` pages
-for the dummy request row, and used `num_tokens` as the dummy full-token start;
-DSV4 KV-cache previously treated `allocated_pages * page_size` as the dummy
-sentinel.  That made graph-padded dummy rows look like real full pages and
-translate to SWA page `-1`, corrupting device memory.  The fix passes
-`dsv4_dummy_token_start=num_tokens` into `DeepSeekV4KVCache` and maps the
-dummy row to the SWA dummy page.  No-weight repros verified the producer, and
-full-model text/serving confirmation passed fixed 128, explicit cap4096, and
-auto-capacity paths with zero eager replay in the tested serving macro.  TARGET
-08.43 should now rerun the promotion soak, quantify remaining overhead, and
-decide promote vs opt-in.
-
-TARGET 08.43 result:
-
-```text
-prompts/TARGET_08.43_dsv4_sm80_swa_independent_post_fix_promotion_soak.md completed.
-Run prompts/TARGET_08.44_dsv4_sm80_swa_stale_prefix_handle_tombstone_fix.md next.
-```
-
-Rationale: TARGET 08.43 confirmed the 08.42 dummy-token fix remained healthy,
-but SWA independent lifecycle still cannot be promoted.  Fixed128 long decode
-`historical_4096_1024_bs4` failed on all ranks with
-`DSV4 KV cache double free detected in SWA page slots`; graph replay was
-healthy before failure (`1277` replay, `0` eager), and the pure SWA independent
-variant failed before Marlin release + SWA independent.  The likely owner is
-stale prefix SWA handles: active decode out-of-window release frees a SWA page,
-then finish-time prefix tombstone revisits an older handle containing the same
-page.  TARGET 08.44 should preserve the no-weight repro as a regression test,
-fix active-release / prefix-handle tombstone synchronization, and pass the
-fixed128 `4096/1024/bs4` SWA gates before rerunning 08.43.
-
-TARGET 08.44 result:
-
-```text
-prompts/TARGET_08.44_dsv4_sm80_swa_stale_prefix_handle_tombstone_fix.md completed.
-Run prompts/TARGET_08.45_dsv4_sm80_swa_independent_lifecycle_contract.md next.
-```
-
-Rationale: TARGET 08.44 reproduced and fixed the no-weight/core stale
-prefix-handle double-free path and kept the true duplicate-release guard
-active.  Focused tests passed (`110 passed`).  However, the TP8 full-model
-fixed128 gate then hit CUDA illegal memory access in the first SWA independent
-case, before the `historical_4096_128_bs4` report was emitted.  This suggests
-the SWA independent lifecycle still lacks a fully closed ownership/metadata
-contract.  Do not continue with ad hoc single-point patches.  TARGET 08.45
-should write `prompts/DSV4_SWA_INDEPENDENT_LIFECYCLE_CONTRACT.md` aligned with
-SGLang, TARGET 08.46 should audit mini implementation against that contract,
-and TARGET 08.47 should apply a unified fix before rerunning TARGET 08.43
-promotion soak.
-
-TARGET 08.32-08.40 CUDA graph / warmup memory follow-up:
-
-```text
-prompts/TARGET_08.32_dsv4_sm80_cuda_graph_private_pool_micro_attribution.md
-prompts/TARGET_08.33_dsv4_sm80_indexer_capture_static_width_audit.md
-prompts/TARGET_08.34_dsv4_sm80_moe_marlin_wna16_cache_lifecycle.md
-prompts/TARGET_08.35_dsv4_sm80_marlin_wna16_release_preset_promotion.md
-prompts/TARGET_08.36_dsv4_sm80_marlin_wna16_release_correctness_attribution.md
-prompts/TARGET_08.37_dsv4_sm80_marlin_wna16_release_storage_reuse_owner.md
-prompts/TARGET_08.38_dsv4_sm80_marlin_wna16_safe_release_arena_capacity.md
-prompts/TARGET_08.39_dsv4_sm80_marlin_wna16_old_address_root_cause.md
-prompts/TARGET_08.40_dsv4_sm80_marlin_wna16_release_component_clear_promotion.md
-```
-
-Rationale: TARGET 08.06/08.07 proved the `~19 GiB/rank` first-graph CUDA graph
-private-pool cost is real and not explained by graph input buffers, greedy
-sampling, captured compressed-loc metadata, `max_seq_len`, `num_pages`, bucket
-count, or BF16 projection/shared-expert caches.  This is likely one of the
-largest remaining capacity/headroom opportunities.  TARGET 08.32 ruled out many
-synthetic owners but did not find the full-model source.  TARGET 08.33 falsified
-the DSV4 C4 indexer-width hypothesis and showed the large movement happens
-during warmup `model.forward()`, before the actual `torch.cuda.graph` block.
-TARGET 08.34 is the next focused investigation: audit whether the default
-`marlin_wna16` MoE backend lazily repacks and retains routed expert weights on
-first forward, creating roughly `17-18 GiB/rank` of persistent backend state
-that should be prebuilt/accounted before KV capacity planning.
-
-TARGET 08.34 result: the hypothesis was confirmed.  Prebuild removes the
-warmup-forward spike by moving Marlin WNA16 cache creation before KV capacity
-planning, and releasing original routed FP4 expert weights recovers about
-`17.13 GiB/rank`, around `400` KV pages or `102k` tokens per rank at page size
-`256`.  TARGET 08.35 should make prebuild+release a named memory-efficient
-preset rather than a loose opt-in, with correctness, graph replay, macro, and
-fail-closed backend gates.
-
-TARGET 08.35 result: naming, env expansion, two-stage prebuild/release, memory
-ledger, and fail-closed semantics landed, but release promotion was rejected.
-Baseline and prebuild-only text smoke passed; the release preset recovered
-`17.1328 GiB/rank` but produced corrupted text.  TARGET 08.36 should attribute
-that correctness blocker before any release preset is promoted.
-
-TARGET 08.36 result: release remains blocked, but the evidence supports
-continuing the release route.  Eager/no-graph release also fails, so CUDA graph
-replay is not the primary cause.  `force-prepacked-with-raw-present`,
-`keep-hidden-ref`, and `release-after-capture` pass, while `weights-only`
-release fails and `scales-only` passes.  The failure follows early physical
-release of large expert-weight storages and likely allocator reuse by a later
-KV/cache/warmup/graph/attention/indexer owner.  TARGET 08.37 should identify
-that owner or the earliest safe release boundary.
-
-TARGET 08.37 result: the unsafe owner was identified as the DSV4 KV/component
-allocation phase after immediate release.  KV/component tensors reused released
-raw expert-weight ranges; releasing after KV allocation passes but does not
-provide pre-KV capacity-planning headroom.  TARGET 08.38 should repair this by
-planning with a release credit while using an arena/guard/allocation-order
-policy to keep live KV/component buffers off unsafe released ranges.
-
-TARGET 08.38 result: a `before_kv_alloc` release with a `3.1875 GiB/rank`
-deterministic guard arena passed short text smokes, graph replay, and the
-historical 4096x128 / 4096x1024 macro shapes.  Auto-planned capacity improved
-from `1,826` to `2,602` pages at page size `256`.  The guard recovered most of
-the `17.1328 GiB/rank` raw-expert release value, but it is still empirical: in
-rank-0 records it maps to the first 32 released items, layers `0-7` with
-`w13_weight`, `w13_weight_scale_inv`, `w2_weight`, and
-`w2_weight_scale_inv`.  TARGET 08.39 should now chase the root cause with old
-expert address NaN/byte poison, KV-as-sentinel probes, stage/layer bisection,
-and stream-lifetime controls, aiming for unguarded release where KV/component
-can safely use the formerly raw expert-weight ranges.
-
-TARGET 08.39 result: the bug was attributed to an uninitialized DSV4 component
-cache read after allocator reuse of old raw expert-weight storage.  The
-effective fix is component-slot clear on page allocation: `clear=component`
-passes, while `clear=none`, `clear=full`, and `clear=state` fail or warn.
-`CUDA_LAUNCH_BLOCKING=1 + clear=none` still fails, making stream lifetime
-unlikely as the root.  Fixed unguarded release passes eager/graph text smoke,
-uses `0` guard bytes, still lets KV/component overlap old raw expert ranges,
-and auto-plans `2,779` pages at page size `256`.  TARGET 08.40 should now
-productionize the fix, add regression coverage, measure page-allocation clear
-overhead, run macro/prefix/serving gates, and decide whether to promote the
-Marlin WNA16 release preset.
+- INT8 MoE remains a possible research lane, but the feasibility pass did not yet identify a low-risk W8A8 backend/quantization path that clearly beats the current MXFP4/WNA16 Marlin expert route.
+- FP8 KV/cache should not proceed as a broad E2E feature until a fresh memory ledger shows real ROI after SWA lifecycle and Marlin release capacity improvements.
+- Dense FP8 projection is currently a memory/capacity feature, not a throughput win.
+- TARGET 09 is deferred while TARGET 11 MTP speculative decoding is explored.
 
 ## Archive Policy
 
@@ -313,19 +143,23 @@ Completed detailed execution prompts live in:
 ```text
 prompts/archive/target07/
 prompts/archive/target08/
+prompts/archive/target09/
 prompts/archive/target10/
 ```
 
 For new child threads, start from:
 
 1. `prompts/target.md`
-2. the active target prompt, currently TARGET 08.55 or a TARGET 09 child
+2. the active target prompt, currently
+   `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md`
 3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
    milestone history
 4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache history and
-   deferred cache work
+   SWA/cache ownership history
 5. `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` for the
    closed communication default and rollback policy
+6. `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` only when reopening
+   deferred low-precision research
 
 Do not ask new threads to read every archived prompt unless they need exact
 historical commands or stop conditions.

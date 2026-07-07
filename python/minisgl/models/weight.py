@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import os
 import re
 from typing import Dict, Iterator, Tuple
 
@@ -30,10 +31,16 @@ _SLOT_NAMES = {
 }
 _EXPERT_PATTERN = re.compile(r"^(?P<prefix>.+\.experts)\.(?P<idx>\d+)\.(?P<name>.+)$")
 _DSV4_EXPERT_PATTERN = re.compile(
-    r"^(?P<prefix>model\.layers\.\d+\.mlp\.experts)\."
+    r"^(?P<prefix>(?:model\.layers\.\d+|mtp\.decoder)\.mlp\.experts)\."
     r"(?P<idx>\d+)\.(?P<proj>gate_proj|up_proj|down_proj)\."
     r"(?P<kind>weight|weight_scale_inv)$"
 )
+_DSV4_MTP_ENV = "MINISGL_DSV4_EXPERIMENTAL_MTP"
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
 
 
 def _shard_tensor(key: str, value: torch.Tensor, r: int, n: int, num_kv_heads: int):
@@ -106,6 +113,56 @@ def _remap_deepseek_v4_weight_name(name: str) -> str:
         name = name.replace(".scale", ".weight_scale_inv")
 
     return name
+
+
+def _remap_deepseek_v4_mtp_weight_name(name: str) -> str | None:
+    if not name.startswith("mtp."):
+        return _remap_deepseek_v4_weight_name(name)
+
+    parts = name.split(".", 2)
+    if len(parts) < 3:
+        return None
+    mtp_idx = int(parts[1])
+    if mtp_idx != 0:
+        raise NotImplementedError(f"Only DeepSeek V4 mtp.0 is supported, got {name}")
+
+    rest = parts[2]
+    if rest.startswith("emb.tok_emb") or rest.startswith("head."):
+        return None
+    if rest == "norm.weight":
+        rest = "shared_head.norm.weight"
+    elif rest == "e_proj.scale":
+        rest = "e_proj.weight_scale_inv"
+    elif rest == "h_proj.scale":
+        rest = "h_proj.weight_scale_inv"
+
+    out_of_decoder_prefixes = (
+        "e_proj",
+        "h_proj",
+        "enorm",
+        "hnorm",
+        "shared_head",
+        "hc_head",
+    )
+    if any(rest.startswith(prefix) for prefix in out_of_decoder_prefixes):
+        mapped = f"mtp.{rest}"
+    else:
+        mapped = f"mtp.decoder.{rest}"
+
+    mapped = mapped.replace(".attn.", ".self_attn.")
+    mapped = mapped.replace(".ffn.", ".mlp.")
+    mapped = mapped.replace(".attn_norm.", ".input_layernorm.")
+    mapped = mapped.replace(".ffn_norm.", ".post_attention_layernorm.")
+    if "self_attn" in mapped:
+        mapped = mapped.replace(".scale", ".weight_scale_inv")
+    mapped = mapped.replace(".gate.tid2eid", ".topk.tid2eid")
+    mapped = mapped.replace(".gate.bias", ".gate.e_score_correction_bias")
+    mapped = mapped.replace(".w1.", ".gate_proj.")
+    mapped = mapped.replace(".w2.", ".down_proj.")
+    mapped = mapped.replace(".w3.", ".up_proj.")
+    if "mlp" in mapped:
+        mapped = mapped.replace(".scale", ".weight_scale_inv")
+    return mapped
 
 
 def _shard_deepseek_v4_tensor(key: str, value: torch.Tensor, r: int, n: int):
@@ -198,8 +255,15 @@ def _load_deepseek_v4_weight(
     files: list[str],
     device: torch.device,
     config,
+    *,
+    enable_dsv4_mtp: bool = False,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     tp_info = get_tp_info()
+    if enable_dsv4_mtp and getattr(config, "num_nextn_predict_layers", 0) != 1:
+        raise ValueError(
+            "DeepSeek V4 experimental MTP loading expects num_nextn_predict_layers == 1, "
+            f"got {getattr(config, 'num_nextn_predict_layers', None)}"
+        )
     merge_buf: Dict[str, Dict[str, torch.Tensor]] = {}
     expert_buf: Dict[str, Dict[int, torch.Tensor | Dict[str, torch.Tensor]]] = {}
 
@@ -220,8 +284,13 @@ def _load_deepseek_v4_weight(
         with safetensors.safe_open(file, framework="pt", device=str(device)) as f:
             for raw_name in f.keys():
                 if raw_name.startswith("mtp."):
-                    continue
-                name = _remap_deepseek_v4_weight_name(raw_name)
+                    if not enable_dsv4_mtp:
+                        continue
+                    name = _remap_deepseek_v4_mtp_weight_name(raw_name)
+                    if name is None:
+                        continue
+                else:
+                    name = _remap_deepseek_v4_weight_name(raw_name)
                 if name.startswith("model.layers."):
                     parts = name.split(".", 3)
                     if len(parts) >= 3 and int(parts[2]) >= config.num_layers:
@@ -255,7 +324,9 @@ def _load_deepseek_v4_weight(
                 if (info := _get_dsv4_expert_pack_info(name)) is not None:
                     packed_key, expert_idx, slot = info
                     if slot in ("gate", "up"):
-                        expert_slots = expert_buf.setdefault(packed_key, {}).setdefault(expert_idx, {})
+                        expert_slots = expert_buf.setdefault(packed_key, {}).setdefault(
+                            expert_idx, {}
+                        )
                         assert isinstance(expert_slots, dict)
                         expert_slots[slot] = tensor
                         if "gate" not in expert_slots or "up" not in expert_slots:
@@ -272,11 +343,20 @@ def _load_deepseek_v4_weight(
 
                 yield name, tensor
 
-    assert not merge_buf, f"Incomplete DeepSeek V4 merge groups in checkpoint: {list(merge_buf.keys())}"
-    assert not expert_buf, f"Incomplete DeepSeek V4 expert tensors in checkpoint: {list(expert_buf.keys())}"
+    assert (
+        not merge_buf
+    ), f"Incomplete DeepSeek V4 merge groups in checkpoint: {list(merge_buf.keys())}"
+    assert (
+        not expert_buf
+    ), f"Incomplete DeepSeek V4 expert tensors in checkpoint: {list(expert_buf.keys())}"
 
 
-def load_weight(model_path: str, device: torch.device) -> Iterator[Tuple[str, torch.Tensor]]:
+def load_weight(
+    model_path: str,
+    device: torch.device,
+    *,
+    enable_dsv4_mtp: bool | None = None,
+) -> Iterator[Tuple[str, torch.Tensor]]:
     """Streaming weight loader. Yields (name, tensor) pairs already sharded, merged,
     and on device. Peak CPU memory: one full tensor + a small merge buffer."""
     from .config import ModelConfig
@@ -286,7 +366,14 @@ def load_weight(model_path: str, device: torch.device) -> Iterator[Tuple[str, to
     files = glob.glob(f"{model_folder}/*.safetensors")
     files = [f for f in files if not f.endswith("consolidated.safetensors")] or files
     if config.is_deepseek_v4:
-        yield from _load_deepseek_v4_weight(files, device, config)
+        if enable_dsv4_mtp is None:
+            enable_dsv4_mtp = _env_flag(_DSV4_MTP_ENV)
+        yield from _load_deepseek_v4_weight(
+            files,
+            device,
+            config,
+            enable_dsv4_mtp=bool(enable_dsv4_mtp),
+        )
         return
 
     tp_info = get_tp_info()

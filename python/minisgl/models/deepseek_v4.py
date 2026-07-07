@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -33,15 +33,9 @@ _MARLIN_WNA16_KEEP_HIDDEN_REF_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_KEEP_HIDDEN
 _MARLIN_WNA16_FORCE_PREPACKED_RAW_PRESENT_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_FORCE_PREPACKED_WITH_RAW_PRESENT"
 )
-_MARLIN_WNA16_RELEASE_LAYER_FILTER_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER"
-)
-_MARLIN_WNA16_RELEASE_WEIGHTS_ONLY_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_WEIGHTS_ONLY"
-)
-_MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_SCALES_ONLY"
-)
+_MARLIN_WNA16_RELEASE_LAYER_FILTER_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER"
+_MARLIN_WNA16_RELEASE_WEIGHTS_ONLY_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_WEIGHTS_ONLY"
+_MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_SCALES_ONLY"
 _MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_AFTER_GRAPH_CAPTURE"
 )
@@ -49,30 +43,25 @@ _MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMI
 _MARLIN_WNA16_POISON_HIDDEN_REF_PATTERN_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_HIDDEN_REF_PATTERN"
 )
-_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
-)
-_MARLIN_WNA16_QUARANTINE_BYTES_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
-)
-_MARLIN_WNA16_QUARANTINE_PATTERN_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
-)
-_MARLIN_WNA16_POISON_THEN_FREE_ENV = (
-    dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV
-)
+_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
+_MARLIN_WNA16_QUARANTINE_BYTES_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
+_MARLIN_WNA16_QUARANTINE_PATTERN_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
+_MARLIN_WNA16_POISON_THEN_FREE_ENV = dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV
 _MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV = (
     dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV
 )
 _MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV = (
     dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV
 )
-_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS"
-)
+_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS_ENV = "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS"
 _MARLIN_WNA16_CACHE_INTEGRITY_MAX_FORWARD_LOGS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_MAX_FORWARD_LOGS"
 )
+DSV4_EXPERIMENTAL_MTP_ENV = "MINISGL_DSV4_EXPERIMENTAL_MTP"
+
+
+def dsv4_experimental_mtp_enabled() -> bool:
+    return dsv4_kernel.dsv4_env_flag(DSV4_EXPERIMENTAL_MTP_ENV)
 
 
 def _dsv4_capture_nvtx(name: str):
@@ -347,7 +336,10 @@ def _owner_timing_prefix(owner_label: str) -> str:
         return "dsv4.owner.attn.q_wqb"
     if owner_label.endswith(".attn.wo_b") or ".attn.wo_b" in owner_label:
         return "dsv4.owner.attn.wo_b"
-    if owner_label.endswith(".shared_experts.down_proj") or ".shared_experts.down_proj" in owner_label:
+    if (
+        owner_label.endswith(".shared_experts.down_proj")
+        or ".shared_experts.down_proj" in owner_label
+    ):
         return "dsv4.owner.shared_down"
     return f"dsv4.owner.{owner_label}"
 
@@ -637,9 +629,7 @@ def _linear_cached_bf16_weight(
     owner_label: str,
 ) -> torch.Tensor:
     if not dsv4_owner_timing.enabled():
-        if not dsv4_kernel.dsv4_env_flag(
-            dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
-        ):
+        if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE):
             return F.linear(x, weight)
         rows = x.numel() // x.shape[-1]
         if rows > 16:
@@ -1326,7 +1316,13 @@ class DSV4Indexer(BaseOP):
 
 
 class DSV4Attention(BaseOP):
-    def __init__(self, config: ModelConfig, layer_id: int):
+    def __init__(
+        self,
+        config: ModelConfig,
+        layer_id: int,
+        *,
+        compress_ratio_override: int | None = None,
+    ):
         tp = get_tp_info()
         self.layer_id = layer_id
         self.num_heads = config.num_qo_heads
@@ -1339,7 +1335,11 @@ class DSV4Attention(BaseOP):
         self.num_local_groups = div_even(config.o_groups, tp.size)
         self.o_lora_rank = config.o_lora_rank
         self.rms_norm_eps = config.rms_norm_eps
-        ratio = config.compress_ratios[layer_id] if layer_id < len(config.compress_ratios) else 0
+        ratio = (
+            compress_ratio_override
+            if compress_ratio_override is not None
+            else (config.compress_ratios[layer_id] if layer_id < len(config.compress_ratios) else 0)
+        )
         self.compress_ratio = ratio
         self.rope_base = (
             config.compress_rope_theta
@@ -1393,9 +1393,9 @@ class DSV4Attention(BaseOP):
             self.indexer = DSV4Indexer(config, layer_id)
 
     @staticmethod
-    def _swa_store_out_loc(attn_backend, batch: Batch) -> torch.Tensor:
-        out_loc = batch.out_loc
-        metadata = getattr(batch, "attn_metadata", None)
+    def _swa_store_out_loc(attn_backend, batch: Batch | torch.Tensor) -> torch.Tensor:
+        out_loc = batch.out_loc if isinstance(batch, Batch) else batch
+        metadata = getattr(batch, "attn_metadata", None) if isinstance(batch, Batch) else None
         if isinstance(metadata, DSV4AttentionMetadata):
             cached = getattr(metadata.core_metadata, "swa_out_loc", None)
             rows = int(out_loc.shape[0])
@@ -2228,9 +2228,7 @@ class DSV4FusedRoutedExperts(BaseOP):
                 "layer_id": self.layer_id,
                 "raw_missing": self._missing_raw_expert_weights(),
                 "released_original": bool(self._marlin_wna16_released_original_expert_weights),
-                "released_original_bytes": int(
-                    self._marlin_wna16_released_original_expert_bytes
-                ),
+                "released_original_bytes": int(self._marlin_wna16_released_original_expert_bytes),
                 "hidden_ref_count": len(self._marlin_wna16_hidden_original_expert_refs),
                 "hidden_ref_bytes": int(
                     sum(
@@ -2435,12 +2433,8 @@ class DSV4FusedRoutedExperts(BaseOP):
                     "weights_only": dsv4_kernel.dsv4_env_flag(
                         _MARLIN_WNA16_RELEASE_WEIGHTS_ONLY_ENV
                     ),
-                    "scales_only": dsv4_kernel.dsv4_env_flag(
-                        _MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV
-                    ),
-                    "keep_hidden_ref": dsv4_kernel.dsv4_env_flag(
-                        _MARLIN_WNA16_KEEP_HIDDEN_REF_ENV
-                    ),
+                    "scales_only": dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV),
+                    "keep_hidden_ref": dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_KEEP_HIDDEN_REF_ENV),
                 },
             )
             if name not in release_names:
@@ -3069,12 +3063,12 @@ class DSV4FusedMoERunner:
 
 
 class DSV4MoE(BaseOP):
-    def __init__(self, config: ModelConfig, layer_id: int):
+    def __init__(self, config: ModelConfig, layer_id: int, *, is_nextn: bool = False):
         tp = get_tp_info()
         self.layer_id = layer_id
         self._tp_size = tp.size
         self._comm = DistributedCommunicator()
-        is_hash_layer = layer_id < config.n_hash_layers
+        is_hash_layer = layer_id < config.n_hash_layers and not is_nextn
         self.topk_count = config.num_experts_per_tok
         self.scoring_func = config.scoring_func or "sqrtsoftplus"
         self.routed_scaling_factor = config.routed_scaling_factor
@@ -3173,13 +3167,24 @@ class DSV4MoE(BaseOP):
 
 
 class DeepseekV4DecoderLayer(BaseOP):
-    def __init__(self, config: ModelConfig, layer_id: int):
+    def __init__(
+        self,
+        config: ModelConfig,
+        layer_id: int,
+        *,
+        is_nextn: bool = False,
+        compress_ratio_override: int | None = None,
+    ):
         self.hc_mult = config.hc_mult
         self.norm_eps = config.rms_norm_eps
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
-        self.self_attn = DSV4Attention(config, layer_id)
-        self.mlp = DSV4MoE(config, layer_id)
+        self.self_attn = DSV4Attention(
+            config,
+            layer_id,
+            compress_ratio_override=compress_ratio_override,
+        )
+        self.mlp = DSV4MoE(config, layer_id, is_nextn=is_nextn)
         self.input_layernorm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
 
@@ -3269,6 +3274,318 @@ class DeepseekV4DecoderLayer(BaseOP):
         _record_warmup_memory("layer.hc_ffn_post", "after", layer_id=layer_id)
         _record_warmup_memory("layer.output", "after", layer_id=layer_id)
         return output
+
+
+@dataclass(frozen=True)
+class DSV4HiddenForwardOutput:
+    logits: torch.Tensor
+    hidden_states: torch.Tensor
+    hidden_states_before_norm: torch.Tensor
+
+
+@dataclass(frozen=True)
+class DSV4MTPForwardOutput:
+    logits: torch.Tensor
+    hidden_states: torch.Tensor
+    hidden_states_before_norm: torch.Tensor
+
+
+class DSV4MTPSharedHead(BaseOP):
+    def __init__(self, config: ModelConfig):
+        self.norm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
+
+
+class DeepseekV4MTPModel(BaseOP):
+    def __init__(self, config: ModelConfig):
+        self.config = config
+        self.hc_mult = config.hc_mult
+        self.hidden_size = config.hidden_size
+        self.backbone_hidden_size = config.hc_mult * config.hidden_size
+        self.rms_norm_eps = config.rms_norm_eps
+        self.hc_eps = config.hc_eps
+        self.enorm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.hnorm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.e_proj = DSV4Linear(
+            config.hidden_size,
+            config.hidden_size,
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
+        )
+        self.h_proj = DSV4Linear(
+            config.hidden_size,
+            config.hidden_size,
+            weight_dtype=dsv4_kernel.fp8_dtype(),
+            scale_dtype=dsv4_kernel.e8m0_dtype(),
+        )
+
+        decoder_config = config
+        if not config.compress_ratios or config.compress_ratios[0] != 0:
+            ratios = [0] + list(config.compress_ratios[1:])
+            decoder_config = replace(config, compress_ratios=ratios)
+        self.decoder = DeepseekV4DecoderLayer(
+            decoder_config,
+            layer_id=0,
+            is_nextn=True,
+            compress_ratio_override=0,
+        )
+        hc_dim = config.hc_mult * config.hidden_size
+        self.hc_head_fn = torch.empty(config.hc_mult, hc_dim, dtype=torch.float32)
+        self.hc_head_base = torch.empty(config.hc_mult, dtype=torch.float32)
+        self.hc_head_scale = torch.empty(1, dtype=torch.float32)
+        self.shared_head = DSV4MTPSharedHead(config)
+        self._hc_head_fn_bf16: torch.Tensor | None = None
+        self._hc_head_fn_bf16_meta: tuple | None = None
+
+    def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
+        q_wqb_reports: list[dict[str, object]] = []
+        report = self.decoder.self_attn.prepare_q_wqb_bf16_weight_cache()
+        if report is not None:
+            q_wqb_reports.append(report)
+
+        q_wqb_marlin_reports: list[dict[str, object]] = []
+        report = self.decoder.self_attn.prepare_q_wqb_marlin_weight_cache()
+        if report is not None:
+            q_wqb_marlin_reports.append(report)
+
+        wo_b_reports: list[dict[str, object]] = []
+        report = self.decoder.self_attn.prepare_wo_b_bf16_weight_cache()
+        if report is not None:
+            wo_b_reports.append(report)
+
+        wo_b_marlin_reports: list[dict[str, object]] = []
+        report = self.decoder.self_attn.prepare_wo_b_marlin_weight_cache()
+        if report is not None:
+            wo_b_marlin_reports.append(report)
+
+        wo_a_reports: list[dict[str, object]] = []
+        report = self.decoder.self_attn.prepare_wo_a_bf16_bmm_cache()
+        if report is not None:
+            wo_a_reports.append(report)
+
+        indexer_wq_b_reports: list[dict[str, object]] = []
+        report = self.decoder.self_attn.prepare_indexer_wq_b_bf16_weight_cache()
+        if report is not None:
+            indexer_wq_b_reports.append(report)
+
+        fused_wqa_wkv_reports: list[dict[str, object]] = []
+        report = self.decoder.self_attn.prepare_fused_wqa_wkv_pretranspose_cache()
+        if report is not None:
+            fused_wqa_wkv_reports.append(report)
+
+        shared_expert_reports: list[dict[str, object]] = []
+        shared_experts = getattr(self.decoder.mlp, "shared_experts", None)
+        if shared_experts is not None:
+            shared_expert_reports.extend(shared_experts.prepare_bf16_weight_cache())
+
+        shared_down_marlin_reports: list[dict[str, object]] = []
+        if shared_experts is not None:
+            report = shared_experts.prepare_down_marlin_weight_cache()
+            if report is not None:
+                shared_down_marlin_reports.append(report)
+
+        moe_marlin_wna16_reports: list[dict[str, object]] = []
+        moe_marlin_backend = dsv4_kernel.dsv4_moe_expert_backend()
+        moe_marlin_prebuild_enabled = dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV
+        )
+        if (
+            moe_marlin_prebuild_enabled
+            and moe_marlin_backend == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
+        ):
+            moe_marlin_wna16_reports.append(
+                self.decoder.mlp.experts.prepare_marlin_wna16_weight_cache(
+                    release_original=False,
+                )
+            )
+
+        total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
+        total_wo_b_bytes = int(sum(int(report["bytes"]) for report in wo_b_reports))
+        total_wo_a_bytes = int(sum(int(report["bytes"]) for report in wo_a_reports))
+        total_indexer_wq_b_bytes = int(sum(int(report["bytes"]) for report in indexer_wq_b_reports))
+        total_shared_expert_bytes = int(
+            sum(int(report["bytes"]) for report in shared_expert_reports)
+        )
+        marlin_reports = q_wqb_marlin_reports + wo_b_marlin_reports + shared_down_marlin_reports
+        total_marlin_persistent_bytes = int(
+            sum(int(report["persistent_bytes"]) for report in marlin_reports)
+        )
+        total_marlin_workspace_bytes = int(
+            sum(int(report["workspace_bytes"]) for report in marlin_reports)
+        )
+        total_moe_marlin_wna16_persistent_bytes = int(
+            sum(int(report["persistent_bytes"]) for report in moe_marlin_wna16_reports)
+        )
+        total_moe_marlin_wna16_source_bytes = int(
+            sum(int(report["source_bytes"]) for report in moe_marlin_wna16_reports)
+        )
+        total_pretransposed_bytes = int(
+            sum(int(report.get("pretransposed_bytes", 0)) for report in fused_wqa_wkv_reports)
+            + sum(int(report.get("pretransposed_bytes", 0)) for report in q_wqb_reports)
+            + sum(int(report.get("pretransposed_bytes", 0)) for report in wo_b_reports)
+            + sum(int(report.get("pretransposed_bytes", 0)) for report in indexer_wq_b_reports)
+            + sum(int(report.get("pretransposed_bytes", 0)) for report in shared_expert_reports)
+        )
+        return {
+            "q_wqb_bf16_weight_cache": {
+                "enabled": bool(q_wqb_reports),
+                "layers_cached": len(q_wqb_reports),
+                "total_bytes": total_q_wqb_bytes,
+                "entries": q_wqb_reports,
+            },
+            "wo_b_bf16_weight_cache": {
+                "enabled": bool(wo_b_reports),
+                "layers_cached": len(wo_b_reports),
+                "total_bytes": total_wo_b_bytes,
+                "entries": wo_b_reports,
+            },
+            "wo_a_bf16_bmm_cache": {
+                "enabled": bool(wo_a_reports),
+                "layers_cached": len(wo_a_reports),
+                "total_bytes": total_wo_a_bytes,
+                "entries": wo_a_reports,
+            },
+            "indexer_wq_b_bf16_weight_cache": {
+                "enabled": bool(indexer_wq_b_reports),
+                "layers_cached": len(indexer_wq_b_reports),
+                "total_bytes": total_indexer_wq_b_bytes,
+                "entries": indexer_wq_b_reports,
+            },
+            "fused_wqa_wkv_bf16_pretranspose_cache": {
+                "enabled": bool(fused_wqa_wkv_reports),
+                "layers_cached": len(fused_wqa_wkv_reports),
+                "total_bytes": int(sum(int(report["bytes"]) for report in fused_wqa_wkv_reports)),
+                "total_pretransposed_bytes": int(
+                    sum(
+                        int(report.get("pretransposed_bytes", 0))
+                        for report in fused_wqa_wkv_reports
+                    )
+                ),
+                "entries": fused_wqa_wkv_reports,
+            },
+            "shared_expert_bf16_weight_cache": {
+                "enabled": bool(shared_expert_reports),
+                "layers_cached": max(
+                    sum(
+                        1
+                        for report in shared_expert_reports
+                        if str(report["owner"]).endswith("gate_up_proj")
+                    ),
+                    sum(
+                        1
+                        for report in shared_expert_reports
+                        if str(report["owner"]).endswith("down_proj")
+                    ),
+                ),
+                "total_bytes": total_shared_expert_bytes,
+                "entries": shared_expert_reports,
+            },
+            "projection_bf16_weight_cache_total": {
+                "total_bytes": (
+                    total_q_wqb_bytes
+                    + total_wo_b_bytes
+                    + total_wo_a_bytes
+                    + total_indexer_wq_b_bytes
+                    + total_shared_expert_bytes
+                ),
+            },
+            "dense_fp8_marlin_projection_cache": {
+                "enabled": bool(marlin_reports),
+                "layers_cached": max(
+                    len(q_wqb_marlin_reports),
+                    len(wo_b_marlin_reports),
+                    len(shared_down_marlin_reports),
+                ),
+                "total_persistent_bytes": total_marlin_persistent_bytes,
+                "total_workspace_bytes": total_marlin_workspace_bytes,
+                "q_wqb": q_wqb_marlin_reports,
+                "wo_b": wo_b_marlin_reports,
+                "shared_down": shared_down_marlin_reports,
+            },
+            "moe_marlin_wna16_cache": {
+                "enabled": bool(moe_marlin_wna16_reports),
+                "backend": moe_marlin_backend,
+                "prebuild_requested": bool(moe_marlin_prebuild_enabled),
+                "layers_cached": len(moe_marlin_wna16_reports),
+                "total_persistent_bytes": total_moe_marlin_wna16_persistent_bytes,
+                "total_source_bytes": total_moe_marlin_wna16_source_bytes,
+                "entries": moe_marlin_wna16_reports,
+            },
+            "bf16_small_gemm_pretranspose_cache_total": {
+                "enabled": total_pretransposed_bytes > 0,
+                "total_pretransposed_bytes": total_pretransposed_bytes,
+            },
+        }
+
+    def _reshape_target_hidden(self, target_hidden_states: torch.Tensor) -> torch.Tensor:
+        if target_hidden_states.ndim == 3:
+            expected = (self.hc_mult, self.hidden_size)
+            if tuple(target_hidden_states.shape[1:]) != expected:
+                raise ValueError(
+                    "DeepSeek V4 MTP target hidden must have trailing shape "
+                    f"{expected}, got {tuple(target_hidden_states.shape[1:])}"
+                )
+            return target_hidden_states
+        if target_hidden_states.ndim != 2:
+            raise ValueError(
+                "DeepSeek V4 MTP target hidden must be [tokens, hc_mult * hidden] "
+                f"or [tokens, hc_mult, hidden], got rank {target_hidden_states.ndim}"
+            )
+        expected_last_dim = self.hc_mult * self.hidden_size
+        if target_hidden_states.shape[-1] != expected_last_dim:
+            raise ValueError(
+                "DeepSeek V4 MTP target hidden last dimension must be "
+                f"{expected_last_dim}, got {target_hidden_states.shape[-1]}"
+            )
+        return target_hidden_states.view(-1, self.hc_mult, self.hidden_size)
+
+    def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
+        hc_head_fn = _cached_hc_bf16_weight(self, "_hc_head_fn_bf16", self.hc_head_fn)
+        return dsv4_kernel.hc_head_fallback(
+            x,
+            hc_head_fn,
+            self.hc_head_scale,
+            self.hc_head_base,
+            eps=self.hc_eps,
+            norm_eps=self.rms_norm_eps,
+        )
+
+    def forward_one_step(
+        self,
+        input_ids: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+        *,
+        embed_tokens: DSV4VocabParallelEmbedding,
+        lm_head: DSV4VocabParallelEmbedding,
+    ) -> DSV4MTPForwardOutput:
+        token_hidden = embed_tokens.forward(input_ids)
+        if token_hidden.shape[0] > 0:
+            target_hidden = self._reshape_target_hidden(target_hidden_states).to(
+                device=token_hidden.device,
+                dtype=token_hidden.dtype,
+            )
+            if target_hidden.shape[0] != token_hidden.shape[0]:
+                raise ValueError(
+                    "DeepSeek V4 MTP input_ids and target hidden must have the same "
+                    f"token count, got {token_hidden.shape[0]} and {target_hidden.shape[0]}"
+                )
+            flat_hidden = target_hidden.reshape(-1, self.hidden_size)
+            h_proj = self.h_proj.forward(self.hnorm.forward(flat_hidden))
+            h_proj = h_proj.view(token_hidden.shape[0], self.hc_mult, self.hidden_size)
+            e_proj = self.e_proj.forward(self.enorm.forward(token_hidden))
+            hidden_states = e_proj[:, None, :] + h_proj
+        else:
+            hidden_states = token_hidden.unsqueeze(1).repeat(1, self.hc_mult, 1)
+
+        hidden_states = self.decoder.forward(hidden_states, input_ids)
+        pre_hc_head = hidden_states.flatten(1)
+        hidden_states = self._hc_head(hidden_states)
+        hidden_states = self.shared_head.norm.forward(hidden_states)
+        logits = lm_head.linear(hidden_states)
+        return DSV4MTPForwardOutput(
+            logits=logits,
+            hidden_states=hidden_states,
+            hidden_states_before_norm=pre_hc_head,
+        )
 
 
 class DeepseekV4Model(BaseOP):
@@ -3390,9 +3707,11 @@ class DeepseekV4Model(BaseOP):
             moe_marlin_wna16_reports = moe_marlin_wna16_prebuild_reports
             self.audit_marlin_wna16_cache_integrity("after_full_model_prebuild")
             if moe_marlin_release_original and not moe_marlin_release_deferred:
-                moe_marlin_wna16_release_reports = self.release_marlin_wna16_original_expert_weights(
-                    stage_label="model_prepare_release",
-                )["entries"]
+                moe_marlin_wna16_release_reports = (
+                    self.release_marlin_wna16_original_expert_weights(
+                        stage_label="model_prepare_release",
+                    )["entries"]
+                )
                 moe_marlin_wna16_reports = moe_marlin_wna16_release_reports
         total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
         total_wo_b_bytes = int(sum(int(report["bytes"]) for report in wo_b_reports))
@@ -3458,9 +3777,7 @@ class DeepseekV4Model(BaseOP):
         return {
             "attribution_disable_toggles": {
                 "env": dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
-                "raw": os.environ.get(
-                    dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, ""
-                ),
+                "raw": os.environ.get(dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, ""),
                 "disabled_toggles": list(dsv4_kernel.dsv4_env_disabled_toggles()),
             },
             "fused_wqa_wkv_bf16_pretranspose_cache": {
@@ -3615,9 +3932,7 @@ class DeepseekV4Model(BaseOP):
                 "release_scales_only": dsv4_kernel.dsv4_env_flag(
                     _MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV
                 ),
-                "keep_hidden_ref": dsv4_kernel.dsv4_env_flag(
-                    _MARLIN_WNA16_KEEP_HIDDEN_REF_ENV
-                ),
+                "keep_hidden_ref": dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_KEEP_HIDDEN_REF_ENV),
                 "layers_cached": len(moe_marlin_wna16_reports),
                 "total_persistent_bytes": total_moe_marlin_wna16_persistent_bytes,
                 "total_source_bytes": total_moe_marlin_wna16_source_bytes,
@@ -3725,10 +4040,14 @@ class DeepseekV4Model(BaseOP):
         if target_bytes is None:
             target_bytes = total_released
         target_bytes = max(0, min(int(target_bytes), total_released))
-        pattern = os.environ.get(
-            _MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV,
-            "nan_byte",
-        ).strip().lower()
+        pattern = (
+            os.environ.get(
+                _MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV,
+                "nan_byte",
+            )
+            .strip()
+            .lower()
+        )
         device = self._marlin_wna16_release_device()
         if device is None or device.type != "cuda":
             return {
@@ -3865,9 +4184,7 @@ class DeepseekV4Model(BaseOP):
                 "source_released_item": item,
                 "tensor": dsv4_memory_debug.tensor_summary(tensor),
             }
-            if dsv4_memory_debug.env_flag(
-                dsv4_memory_debug.DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV
-            ):
+            if dsv4_memory_debug.env_flag(dsv4_memory_debug.DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV):
                 guard_record["initial_integrity"] = dsv4_memory_debug.tensor_integrity_summary(
                     tensor
                 )
@@ -4033,7 +4350,12 @@ class DeepseekV4Model(BaseOP):
             norm_eps=self.norm_eps,
         )
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        return_hidden_states_before_norm: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         _record_warmup_memory("model.embed", "before")
         with _dsv4_capture_nvtx("model.embed"):
             x = self.embed_tokens.forward(input_ids)
@@ -4049,6 +4371,7 @@ class DeepseekV4Model(BaseOP):
             x = layer.forward(x, input_ids)
             _record_warmup_memory("decoder_layer", "after", layer_id=layer_id)
         _record_warmup_memory("model.hc_head", "before")
+        hidden_states_before_norm = x.flatten(1)
         with _dsv4_capture_nvtx("model.hc_head"):
             x = self._hc_head(x)
         _record_warmup_memory("model.hc_head", "after")
@@ -4057,6 +4380,8 @@ class DeepseekV4Model(BaseOP):
             x = self.norm.forward(x)
             _capture_debug_activation("final_norm", x)
             _record_warmup_memory("model.final_norm", "after")
+            if return_hidden_states_before_norm:
+                return x, hidden_states_before_norm
             return x
 
 
@@ -4064,10 +4389,17 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
     def __init__(self, config: ModelConfig):
         self.model = DeepseekV4Model(config)
         self.lm_head = DSV4VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        if dsv4_experimental_mtp_enabled():
+            self.mtp = DeepseekV4MTPModel(config)
         super().__init__()
 
     def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
-        return self.model.prepare_for_cuda_graph_capture()
+        report = self.model.prepare_for_cuda_graph_capture()
+        mtp = getattr(self, "mtp", None)
+        if mtp is not None:
+            report = dict(report)
+            report["mtp"] = mtp.prepare_for_cuda_graph_capture()
+        return report
 
     def release_marlin_wna16_original_expert_weights(
         self,
@@ -4099,5 +4431,48 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
             _record_warmup_memory("lm_head", "after")
             return logits
 
+    def forward_with_hidden(self) -> DSV4HiddenForwardOutput:
+        batch = get_global_ctx().batch
+        output, hidden_states_before_norm = self.model.forward(
+            batch.input_ids,
+            return_hidden_states_before_norm=True,
+        )
+        if batch.is_prefill:
+            last_indices = batch.attn_metadata.get_last_indices(batch.size)
+            output = output[last_indices].contiguous()
+            hidden_states_before_norm = hidden_states_before_norm[last_indices].contiguous()
+        logits = self.lm_head.linear(output)
+        return DSV4HiddenForwardOutput(
+            logits=logits,
+            hidden_states=output,
+            hidden_states_before_norm=hidden_states_before_norm,
+        )
 
-__all__ = ["DeepseekV4ForCausalLM", "DSV4FallbackAttentionMetadata", "DSV4AttentionMetadata"]
+    def mtp_forward_one_step(
+        self,
+        input_ids: torch.Tensor,
+        target_hidden_states: torch.Tensor,
+    ) -> DSV4MTPForwardOutput:
+        mtp = getattr(self, "mtp", None)
+        if mtp is None:
+            raise RuntimeError(
+                f"DeepSeek V4 MTP is not enabled. Set {DSV4_EXPERIMENTAL_MTP_ENV}=1 "
+                "or pass --enable-dsv4-mtp before constructing the model."
+            )
+        return mtp.forward_one_step(
+            input_ids,
+            target_hidden_states,
+            embed_tokens=self.model.embed_tokens,
+            lm_head=self.lm_head,
+        )
+
+
+__all__ = [
+    "DeepseekV4ForCausalLM",
+    "DeepseekV4Model",
+    "DeepseekV4MTPModel",
+    "DSV4FallbackAttentionMetadata",
+    "DSV4AttentionMetadata",
+    "DSV4_EXPERIMENTAL_MTP_ENV",
+    "dsv4_experimental_mtp_enabled",
+]

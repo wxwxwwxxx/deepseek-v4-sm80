@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import timedelta
 from typing import Any, Dict, NamedTuple, Tuple
 
@@ -35,22 +36,25 @@ _MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMI
 _MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_AFTER_GRAPH_CAPTURE"
 )
-_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT"
-)
+_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV = "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT"
 _MARLIN_WNA16_RELEASE_CREDIT_SAFETY_MARGIN_BYTES_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CREDIT_SAFETY_MARGIN_BYTES"
 )
-_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
-)
+_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
 _MARLIN_WNA16_QUARANTINE_BYTES_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
 _DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
+_DSV4_EXPERIMENTAL_MTP_ENV = "MINISGL_DSV4_EXPERIMENTAL_MTP"
+_DSV4_MTP_SPECULATIVE_ENV = "MINISGL_DSV4_MTP_SPECULATIVE"
+_DSV4_MTP_SPEC_DRAFT_LEN_ENV = "MINISGL_DSV4_MTP_SPEC_DRAFT_LEN"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def _case_boundary_debug_enabled() -> bool:
     return os.environ.get(_DSV4_CASE_BOUNDARY_DEBUG_ENV, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
 
 
 class ForwardOutput(NamedTuple):
@@ -73,6 +77,31 @@ class Engine:
         self.dtype = config.dtype
         self._marlin_wna16_debug_release_done = False
         self._marlin_wna16_decode_guard_checks = 0
+        self.enable_dsv4_mtp_speculative = bool(
+            getattr(config, "enable_dsv4_mtp_speculative", False)
+            or _env_flag(_DSV4_MTP_SPECULATIVE_ENV)
+        )
+        self.dsv4_mtp_spec_draft_len = int(
+            getattr(config, "dsv4_mtp_spec_draft_len", 1) or 1
+        )
+        self._mtp_pending_draft_tokens: dict[int, int] = {}
+        self.mtp_spec_stats: dict[str, Any] = {
+            "enabled": bool(self.enable_dsv4_mtp_speculative),
+            "draft_len": int(self.dsv4_mtp_spec_draft_len),
+            "draft_tokens_proposed": 0,
+            "draft_tokens_verified": 0,
+            "draft_tokens_accepted": 0,
+            "draft_tokens_rejected": 0,
+            "acceptance_histogram": {"0": 0, "1": 0},
+            "target_calls": 0,
+            "draft_calls": 0,
+            "target_latency_s": 0.0,
+            "draft_latency_s": 0.0,
+            "finite_failures": 0,
+            "fallback_sampling_batches": 0,
+            "fallback_missing_mtp_batches": 0,
+            "last_batch": {},
+        }
         self.ctx = Context(config.page_size)
         set_global_ctx(self.ctx)
 
@@ -281,9 +310,7 @@ class Engine:
         if not isinstance(report, dict) or not report.get("enabled", False):
             return
         key = f"moe_marlin_wna16_guard_{_sanitize_report_key(stage)}"
-        self.model_prepare_report[key] = {
-            k: v for k, v in report.items() if k != "records"
-        }
+        self.model_prepare_report[key] = {k: v for k, v in report.items() if k != "records"}
         mutated = int(report.get("mutated_count", 0) or 0)
         if mutated:
             logger.error(
@@ -300,14 +327,11 @@ class Engine:
         if not isinstance(report, dict) or not report.get("enabled", False):
             return
         key = f"moe_marlin_wna16_kv_sentinel_{_sanitize_report_key(stage)}"
-        self.model_prepare_report[key] = {
-            k: v for k, v in report.items() if k != "records"
-        }
+        self.model_prepare_report[key] = {k: v for k, v in report.items() if k != "records"}
         mutated = int(report.get("mutated_count", 0) or 0)
         if mutated:
             logger.error(
-                "Marlin WNA16 KV sentinel mutation detected at "
-                f"{stage}: mutated_count={mutated}"
+                "Marlin WNA16 KV sentinel mutation detected at " f"{stage}: mutated_count={mutated}"
             )
 
     def _record_marlin_wna16_owner_allocations(self, stage: str) -> None:
@@ -340,7 +364,16 @@ class Engine:
             }
         else:
             if config.model_config.is_deepseek_v4:
-                return dict(load_weight(config.model_path, self.device))
+                return dict(
+                    load_weight(
+                        config.model_path,
+                        self.device,
+                        enable_dsv4_mtp=bool(
+                            getattr(config, "enable_dsv4_mtp", False)
+                            or _env_flag(_DSV4_EXPERIMENTAL_MTP_ENV)
+                        ),
+                    )
+                )
             return {k: v.to(self.dtype) for k, v in load_weight(config.model_path, self.device)}
 
     def _determine_num_pages(self, old_free_memory: int, config: EngineConfig) -> int:
@@ -353,10 +386,7 @@ class Engine:
         )
         fixed_swa_cache_bytes = 0
         legacy_cache_per_page = cache_per_page
-        if (
-            config.model_config.is_deepseek_v4
-            and self._dsv4_swa_independent_enabled(config)
-        ):
+        if config.model_config.is_deepseek_v4 and self._dsv4_swa_independent_enabled(config):
             dtype_size = torch.bfloat16.itemsize
             planned_swa_pages = self._planned_dsv4_swa_independent_pages(config)
             swa_per_page = (
@@ -469,14 +499,16 @@ class Engine:
             "timing": timing,
             "eligible": bool(eligible),
             "applied_to_num_pages": applied,
-            "ineligible_reason": None
-            if eligible
-            else _marlin_wna16_credit_ineligible_reason(
-                config=config,
-                requested=requested,
-                release_requested=release_requested,
-                timing=timing,
-                source_bytes=source_bytes,
+            "ineligible_reason": (
+                None
+                if eligible
+                else _marlin_wna16_credit_ineligible_reason(
+                    config=config,
+                    requested=requested,
+                    release_requested=release_requested,
+                    timing=timing,
+                    source_bytes=source_bytes,
+                )
             ),
             "source_bytes": source_bytes,
             "gross_release_credit_bytes": gross_credit,
@@ -490,9 +522,7 @@ class Engine:
                 float(net_credit) / float(cache_per_page) if cache_per_page else 0.0
             ),
             "net_release_credit_tokens": (
-                int(net_credit // cache_per_page) * int(config.page_size)
-                if cache_per_page
-                else 0
+                int(net_credit // cache_per_page) * int(config.page_size) if cache_per_page else 0
             ),
         }
 
@@ -560,15 +590,19 @@ class Engine:
             "padded": int(getattr(batch, "padded_size", getattr(batch, "size", -1))),
             "positions_range": _tensor_range(getattr(batch, "positions", None)),
             "out_loc_range": _tensor_range(getattr(batch, "out_loc", None)),
-            "graph_replay_count": int(graph_status.get("replay_count", 0))
-            if isinstance(graph_status, dict)
-            else 0,
-            "graph_greedy_replay_count": int(graph_status.get("greedy_sample_replay_count", 0))
-            if isinstance(graph_status, dict)
-            else 0,
-            "eager_decode_count": int(graph_status.get("eager_decode_count", 0))
-            if isinstance(graph_status, dict)
-            else 0,
+            "graph_replay_count": (
+                int(graph_status.get("replay_count", 0)) if isinstance(graph_status, dict) else 0
+            ),
+            "graph_greedy_replay_count": (
+                int(graph_status.get("greedy_sample_replay_count", 0))
+                if isinstance(graph_status, dict)
+                else 0
+            ),
+            "eager_decode_count": (
+                int(graph_status.get("eager_decode_count", 0))
+                if isinstance(graph_status, dict)
+                else 0
+            ),
             "reqs": reqs,
         }
 
@@ -584,8 +618,269 @@ class Engine:
                 f"stage={stage}, context={context}"
             ) from exc
 
+    def _sync_device_for_mtp_spec(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def _can_run_mtp_spec_greedy(self, batch: Batch, args: BatchSamplingArgs) -> bool:
+        if not self.enable_dsv4_mtp_speculative:
+            return False
+        if args.temperatures is not None:
+            self.mtp_spec_stats["fallback_sampling_batches"] = int(
+                self.mtp_spec_stats["fallback_sampling_batches"]
+            ) + 1
+            return False
+        has_mtp = callable(getattr(self.model, "mtp_forward_one_step", None)) and (
+            getattr(self.model, "mtp", None) is not None
+        )
+        has_hidden_forward = callable(getattr(self.model, "forward_with_hidden", None))
+        if not (has_mtp and has_hidden_forward):
+            self.mtp_spec_stats["fallback_missing_mtp_batches"] = int(
+                self.mtp_spec_stats["fallback_missing_mtp_batches"]
+            ) + 1
+            return False
+        if int(self.dsv4_mtp_spec_draft_len) != 1:
+            raise RuntimeError(
+                "DeepSeek V4 MTP speculative V1 only supports draft_len=1, got "
+                f"{self.dsv4_mtp_spec_draft_len}."
+            )
+        return batch.size > 0
+
+    def _record_mtp_spec_verification(
+        self,
+        batch: Batch,
+        next_tokens_gpu: torch.Tensor,
+    ) -> dict[str, int]:
+        target_tokens = [int(x) for x in next_tokens_gpu.detach().cpu().tolist()]
+        accepted = 0
+        rejected = 0
+        verified = 0
+        for req, target_token in zip(batch.reqs, target_tokens):
+            draft_token = self._mtp_pending_draft_tokens.pop(int(req.uid), None)
+            if draft_token is None:
+                continue
+            verified += 1
+            if int(draft_token) == int(target_token):
+                accepted += 1
+                hist_key = "1"
+            else:
+                rejected += 1
+                hist_key = "0"
+            histogram = self.mtp_spec_stats["acceptance_histogram"]
+            histogram[hist_key] = int(histogram.get(hist_key, 0)) + 1
+
+        self.mtp_spec_stats["draft_tokens_verified"] = int(
+            self.mtp_spec_stats["draft_tokens_verified"]
+        ) + verified
+        self.mtp_spec_stats["draft_tokens_accepted"] = int(
+            self.mtp_spec_stats["draft_tokens_accepted"]
+        ) + accepted
+        self.mtp_spec_stats["draft_tokens_rejected"] = int(
+            self.mtp_spec_stats["draft_tokens_rejected"]
+        ) + rejected
+        return {"verified": verified, "accepted": accepted, "rejected": rejected}
+
+    def _propose_mtp_spec_drafts(
+        self,
+        batch: Batch,
+        next_tokens_gpu: torch.Tensor,
+        hidden_states_before_norm: torch.Tensor,
+        mtp_positions: list[int],
+    ) -> dict[str, Any]:
+        eligible: list[tuple[int, Req]] = [
+            (i, req) for i, req in enumerate(batch.reqs) if bool(req.can_decode)
+        ]
+        for req in batch.reqs:
+            if not req.can_decode:
+                self._mtp_pending_draft_tokens.pop(int(req.uid), None)
+        if not eligible:
+            return {"proposed": 0, "finite": True}
+
+        indices = torch.tensor(
+            [i for i, _ in eligible],
+            dtype=torch.long,
+            device=self.device,
+        )
+        eligible_reqs = [req for _, req in eligible]
+        draft_input = next_tokens_gpu.index_select(0, indices).contiguous()
+        draft_hidden = hidden_states_before_norm.index_select(0, indices).contiguous()
+
+        mtp_batch = Batch(reqs=eligible_reqs, phase="decode")
+        mtp_batch.padded_reqs = eligible_reqs
+        mtp_batch.input_ids = draft_input
+        mtp_batch.positions = torch.tensor(
+            [int(mtp_positions[i]) for i, _ in eligible],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        # No DSV4AttentionMetadata here: V1 lets the draft run as a no-store
+        # sidecar so rejected draft tokens cannot mutate target KV/cache state.
+        mtp_batch.out_loc = torch.empty(len(eligible_reqs), dtype=torch.int32, device=self.device)
+
+        self._sync_device_for_mtp_spec()
+        start_s = time.perf_counter()
+        with self.ctx.forward_batch(mtp_batch):
+            mtp_output = self.model.mtp_forward_one_step(draft_input, draft_hidden)
+            self._debug_sync_forward("after_mtp_forward", mtp_batch, "mtp_spec_no_store_draft")
+        self._sync_device_for_mtp_spec()
+        self.mtp_spec_stats["draft_latency_s"] = float(
+            self.mtp_spec_stats["draft_latency_s"]
+        ) + (time.perf_counter() - start_s)
+        self.mtp_spec_stats["draft_calls"] = int(self.mtp_spec_stats["draft_calls"]) + 1
+
+        mtp_logits = mtp_output.logits[: len(eligible_reqs)]
+        finite = bool(torch.isfinite(mtp_logits).all().item())
+        if not finite:
+            self.mtp_spec_stats["finite_failures"] = int(
+                self.mtp_spec_stats["finite_failures"]
+            ) + 1
+            raise RuntimeError("DeepSeek V4 MTP speculative draft produced NaN/Inf logits.")
+
+        draft_tokens = torch.argmax(mtp_logits, dim=-1).to(torch.int32)
+        draft_tokens_cpu = [int(x) for x in draft_tokens.detach().cpu().tolist()]
+        for req, draft_token in zip(eligible_reqs, draft_tokens_cpu):
+            self._mtp_pending_draft_tokens[int(req.uid)] = int(draft_token)
+
+        proposed = len(eligible_reqs)
+        self.mtp_spec_stats["draft_tokens_proposed"] = int(
+            self.mtp_spec_stats["draft_tokens_proposed"]
+        ) + proposed
+        return {
+            "proposed": proposed,
+            "finite": finite,
+            "draft_tokens": draft_tokens_cpu,
+        }
+
+    def _forward_batch_mtp_spec_greedy(
+        self,
+        batch: Batch,
+        args: BatchSamplingArgs,
+    ) -> ForwardOutput:
+        assert torch.cuda.current_stream() == self.stream
+        forward_source = "mtp_spec_eager_target"
+
+        if batch.is_decode:
+            self._marlin_wna16_decode_guard_checks += 1
+            self._check_marlin_wna16_release_guards(
+                f"before_decode_step_{self._marlin_wna16_decode_guard_checks}"
+            )
+            self._check_marlin_wna16_kv_sentinels(
+                f"before_decode_step_{self._marlin_wna16_decode_guard_checks}"
+            )
+
+        mtp_positions = [int(req.device_len) - 1 for req in batch.reqs]
+        self._sync_device_for_mtp_spec()
+        start_s = time.perf_counter()
+        with self.ctx.forward_batch(batch):
+            self.graph_runner.record_eager_decode(batch)
+            target_output = self.model.forward_with_hidden()
+            self._debug_sync_forward("after_model_forward", batch, forward_source)
+        self._sync_device_for_mtp_spec()
+        self.mtp_spec_stats["target_latency_s"] = float(
+            self.mtp_spec_stats["target_latency_s"]
+        ) + (time.perf_counter() - start_s)
+        self.mtp_spec_stats["target_calls"] = int(self.mtp_spec_stats["target_calls"]) + 1
+
+        logits = target_output.logits[: batch.size]
+        if not bool(torch.isfinite(logits).all().item()):
+            self.mtp_spec_stats["finite_failures"] = int(
+                self.mtp_spec_stats["finite_failures"]
+            ) + 1
+            raise RuntimeError("DeepSeek V4 MTP speculative target produced NaN/Inf logits.")
+
+        debug_recorder = dsv4_prefix_debug.get_dsv4_prefix_debug_recorder()
+        forward_stage = (
+            f"{batch.phase}_bs{int(batch.size)}"
+            f"_padded{int(getattr(batch, 'padded_size', batch.size))}_{forward_source}"
+        )
+        dsv4_memory_debug.record_owner_tensor(
+            owner_label="engine.forward.logits",
+            stage=forward_stage,
+            tensor=logits,
+            include_integrity=False,
+        )
+        dsv4_memory_debug.record_owner_tensors(
+            owner_prefix="engine.sampler.args",
+            stage=forward_stage,
+            tensors={
+                "temperatures": args.temperatures,
+                "top_k": args.top_k,
+                "top_p": args.top_p,
+            },
+        )
+        debug_snapshot = (
+            debug_recorder.capture_pre_sample(
+                batch=batch,
+                logits=logits,
+                forward_source=forward_source,
+            )
+            if debug_recorder is not None
+            else None
+        )
+
+        for req in batch.reqs:
+            req.complete_one()
+
+        with dsv4_direct_copy_nvtx(
+            f"sampler_logits_staging.sample_to_int32.bs{batch.size}",
+            logits=logits,
+        ):
+            next_tokens_gpu = self.sampler.sample(logits, args).to(torch.int32)
+        self._debug_sync_forward("after_sampler", batch, forward_source)
+
+        verification = self._record_mtp_spec_verification(batch, next_tokens_gpu)
+        draft = self._propose_mtp_spec_drafts(
+            batch,
+            next_tokens_gpu,
+            target_output.hidden_states_before_norm[: batch.size],
+            mtp_positions,
+        )
+        self.mtp_spec_stats["last_batch"] = {
+            "phase": batch.phase,
+            "batch_size": int(batch.size),
+            "verified": int(verification["verified"]),
+            "accepted": int(verification["accepted"]),
+            "rejected": int(verification["rejected"]),
+            "proposed": int(draft["proposed"]),
+        }
+
+        dsv4_memory_debug.record_owner_tensor(
+            owner_label="engine.sampler.next_tokens_gpu",
+            stage=forward_stage,
+            tensor=next_tokens_gpu,
+            include_integrity=False,
+        )
+        if debug_recorder is not None:
+            debug_recorder.finish(
+                debug_snapshot,
+                next_tokens=next_tokens_gpu,
+                graph_runner=getattr(self.graph_runner, "capture_status", {}),
+            )
+        if batch.is_decode:
+            self._check_marlin_wna16_release_guards(
+                f"after_decode_step_{self._marlin_wna16_decode_guard_checks}"
+            )
+            self._check_marlin_wna16_kv_sentinels(
+                f"after_decode_step_{self._marlin_wna16_decode_guard_checks}"
+            )
+            self._maybe_release_marlin_wna16_for_timing(
+                timing="after_first_decode",
+                stage_label="after_first_decode_release",
+            )
+        with dsv4_direct_copy_nvtx(
+            f"sampler_logits_staging.next_tokens_to_cpu.bs{batch.size}",
+            next_tokens=next_tokens_gpu,
+        ):
+            next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
+        copy_done_event = self._acquire_copy_done_event()
+        copy_done_event.record(self.stream)
+        return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
+
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
+        if self._can_run_mtp_spec_greedy(batch, args):
+            return self._forward_batch_mtp_spec_greedy(batch, args)
+
         next_tokens_gpu: torch.Tensor | None = None
         logits: torch.Tensor | None = None
         forward_source = "unknown"
@@ -792,6 +1087,39 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(config, attr, value)
 
     if config.model_config.is_deepseek_v4:
+        spec_enabled = bool(getattr(config, "enable_dsv4_mtp_speculative", False)) or _env_flag(
+            _DSV4_MTP_SPECULATIVE_ENV
+        )
+        env_draft_len = os.environ.get(_DSV4_MTP_SPEC_DRAFT_LEN_ENV)
+        draft_len = int(
+            env_draft_len
+            if env_draft_len not in (None, "")
+            else getattr(config, "dsv4_mtp_spec_draft_len", 1)
+        )
+        if spec_enabled:
+            if draft_len != 1:
+                raise ValueError(
+                    "DeepSeek V4 MTP speculative V1 only supports "
+                    f"draft_len=1, got {draft_len}."
+                )
+            override("enable_dsv4_mtp_speculative", True)
+            override("enable_dsv4_mtp", True)
+            override("dsv4_mtp_spec_draft_len", 1)
+            override("allow_dsv4_cuda_graph", False)
+            override("cuda_graph_bs", [])
+            override("cuda_graph_max_bs", 0)
+            override("cuda_graph_capture_greedy_sample", False)
+            os.environ[_DSV4_MTP_SPECULATIVE_ENV] = "1"
+            os.environ[_DSV4_EXPERIMENTAL_MTP_ENV] = "1"
+            logger.info_rank0(
+                "Opting in to experimental DeepSeek V4 greedy MTP speculative "
+                "sidecar: draft_len=1, sampling disabled, CUDA graph disabled."
+            )
+        if getattr(config, "enable_dsv4_mtp", False) or _env_flag(_DSV4_EXPERIMENTAL_MTP_ENV):
+            os.environ[_DSV4_EXPERIMENTAL_MTP_ENV] = "1"
+            logger.info_rank0(
+                "Opting in to experimental DeepSeek V4 MTP weight loading and oracle helpers."
+            )
         if config.attention_backend != "dsv4":
             override("attention_backend", "dsv4")
             logger.info_rank0("Using DSV4 attention backend for DeepSeek V4")

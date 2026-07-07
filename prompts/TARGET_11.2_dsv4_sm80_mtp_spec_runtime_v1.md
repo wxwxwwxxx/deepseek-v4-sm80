@@ -8,6 +8,26 @@ exact greedy output through target verification.
 Start from TARGET 11.1.  Do not begin this target until MTP weights and a
 one-step MTP oracle are healthy.
 
+## Required Preflight From TARGET 11.1
+
+TARGET 11.1 proved the MTP weight surface and a source-derived tiny one-step
+oracle, but it intentionally did not prove full-checkpoint TP8 runtime.  Before
+changing scheduler acceptance semantics, do this short preflight:
+
+1. Run a real `/models/DeepSeek-V4-Flash` TP8 load smoke with
+   `--enable-dsv4-mtp` or `MINISGL_DSV4_EXPERIMENTAL_MTP=1`.
+2. Run one real-weight GPU MTP step for a few prompts with `page_size=256`.
+3. Confirm finite logits, sane top tokens, and no obvious text corruption.
+4. Record extra persistent memory after real MTP load, including any backend
+   cache/prepack side effects beyond the TARGET 11.1 `~0.455 GiB/rank` weight
+   ledger.
+5. If practical, compare one-step logits/top-k against SGLang or a
+   source-derived self-consistency oracle.  If direct parity is not practical,
+   state exactly what was and was not proven.
+
+If this preflight fails, stop and fix the MTP loader/oracle before implementing
+speculative decoding runtime.
+
 ## Runtime Contract
 
 For greedy decoding:
@@ -153,4 +173,3 @@ Include:
 - acceptance metrics;
 - code paths changed;
 - recommendation: proceed to TARGET 11.3, keep opt-in, or stop.
-
