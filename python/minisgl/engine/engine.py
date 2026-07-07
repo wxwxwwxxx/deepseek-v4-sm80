@@ -48,9 +48,13 @@ _DSV4_EXPERIMENTAL_MTP_ENV = "MINISGL_DSV4_EXPERIMENTAL_MTP"
 _DSV4_MTP_SPECULATIVE_ENV = "MINISGL_DSV4_MTP_SPECULATIVE"
 _DSV4_MTP_SPEC_DRAFT_LEN_ENV = "MINISGL_DSV4_MTP_SPEC_DRAFT_LEN"
 _DSV4_MTP_ROW0_DEBUG_ENV = "MINISGL_DSV4_MTP_ROW0_DEBUG"
+_DSV4_MTP_ROW_DEPTH_ORACLE_ENV = "MINISGL_DSV4_MTP_ROW_DEPTH_ORACLE"
 _DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV = (
     "MINISGL_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION"
 )
+_DSV4_MTP_VERIFY_SPLITK_ATTENTION_ENV = "MINISGL_DSV4_MTP_VERIFY_SPLITK_ATTENTION"
+_DSV4_MTP_VERIFY_GROUP_SIZE_ENV = "MINISGL_DSV4_MTP_VERIFY_GROUP_SIZE"
+_DSV4_MTP_STATE_PARITY_TRACE_ENV = "MINISGL_DSV4_MTP_STATE_PARITY_TRACE"
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -60,6 +64,16 @@ def _case_boundary_debug_enabled() -> bool:
 
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
 
 
 class ForwardOutput(NamedTuple):
@@ -143,6 +157,7 @@ class Engine:
             "c128_mtp_lifecycle_events": [],
             "row0_logits_debug": [],
             "row0_layer_parity_debug": [],
+            "row_depth_oracle_debug": [],
             "accepted_commit_row_hashes": [],
             "last_batch": {},
         }
@@ -784,12 +799,29 @@ class Engine:
                 "batch_size": int(len(entries)),
                 "num_tokens": int(getattr(verify_batch, "input_ids").numel()),
                 "verify_lens": [int(entry["verify_len"]) for entry in entries],
+                "active_verify_lens": [
+                    int(entry.get("active_verify_len", entry["verify_len"]))
+                    for entry in entries
+                ],
+                "padded_verify_lens": [
+                    int(entry.get("padded_verify_len", entry["verify_len"]))
+                    for entry in entries
+                ],
                 "committed_seq_lens": [
                     int(entry.get("committed_seq_len", -1)) for entry in entries
                 ],
                 "input_tokens": _tolist(getattr(verify_batch, "input_ids", None)),
                 "positions": _tolist(getattr(verify_batch, "positions", None)),
                 "out_cache_loc": _tolist(getattr(verify_batch, "out_loc", None)),
+                "force_torch_attention": bool(
+                    getattr(verify_batch, "dsv4_force_torch_attention", False)
+                ),
+                "target_verify_decode_rows": bool(
+                    getattr(verify_batch, "dsv4_target_verify_decode_rows", False)
+                ),
+                "force_exact_kv_store": bool(
+                    getattr(verify_batch, "dsv4_force_exact_kv_store", False)
+                ),
                 "seq_lens": _tolist(getattr(core, "seq_lens", None)),
                 "extend_lens": _tolist(getattr(core, "extend_lens", None)),
                 "req_seq_lens": _tolist(getattr(core, "req_seq_lens", None)),
@@ -899,10 +931,20 @@ class Engine:
                     "batch_index": int(entry["batch_index"]),
                     "committed_seq_len": int(entry.get("committed_seq_len", -1)),
                     "verify_len": int(entry["verify_len"]),
+                    "active_verify_len": int(
+                        entry.get("active_verify_len", entry["verify_len"])
+                    ),
+                    "padded_verify_len": int(
+                        entry.get("padded_verify_len", entry["verify_len"])
+                    ),
                     "row_start": int(entry.get("row_start", -1)),
                     "input_tokens": [
                         int(tok.reshape(-1)[0].item())
                         for tok in entry.get("verify_inputs", [])[:8]
+                    ],
+                    "padded_input_tokens": [
+                        int(tok.reshape(-1)[0].item())
+                        for tok in entry.get("verify_inputs_padded", [])[:8]
                     ],
                 }
                 for entry in entries[:4]
@@ -929,6 +971,248 @@ class Engine:
         if len(log) > 16:
             del log[:-16]
         self._mtp_row0_layer_parity_oracle = None
+
+    def _mtp_row_topk_debug(self, row_logits: torch.Tensor, *, k: int = 5) -> dict[str, Any]:
+        if row_logits.numel() == 0:
+            return {"token_ids": [], "logits": [], "top1_top2_margin": None}
+        row = row_logits.detach().reshape(-1).float()
+        top_k = min(int(k), int(row.numel()))
+        if top_k <= 0:
+            return {"token_ids": [], "logits": [], "top1_top2_margin": None}
+        values, token_ids = torch.topk(row, k=top_k)
+        values_cpu = [float(x) for x in values.cpu().tolist()]
+        token_ids_cpu = [int(x) for x in token_ids.cpu().tolist()]
+        return {
+            "token_ids": token_ids_cpu,
+            "logits": values_cpu,
+            "top1_top2_margin": (
+                float(values_cpu[0] - values_cpu[1]) if len(values_cpu) >= 2 else None
+            ),
+        }
+
+    def _mtp_tensor_delta_debug(
+        self,
+        lhs: torch.Tensor | None,
+        rhs: torch.Tensor | None,
+    ) -> dict[str, Any]:
+        if lhs is None or rhs is None:
+            return {"available": False}
+        if lhs.numel() == 0 or rhs.numel() == 0:
+            return {"available": False}
+        lhs_view = lhs.detach().reshape(-1).float()
+        rhs_view = rhs.detach().reshape(-1).float()
+        count = min(int(lhs_view.numel()), int(rhs_view.numel()))
+        if count <= 0:
+            return {"available": False}
+        delta = (lhs_view[:count] - rhs_view[:count]).abs()
+        max_abs = float(delta.max().item())
+        mean_abs = float(delta.mean().item())
+        top_count = min(5, int(delta.numel()))
+        top_values, top_indices = torch.topk(delta, k=top_count)
+        return {
+            "available": True,
+            "count": int(count),
+            "max_abs": max_abs,
+            "mean_abs": mean_abs,
+            "top_abs": [float(x) for x in top_values.cpu().tolist()],
+            "top_indices": [int(x) for x in top_indices.cpu().tolist()],
+        }
+
+    def _mtp_target_row_metadata_debug(self, batch: Batch, row: int) -> dict[str, Any]:
+        core = getattr(getattr(batch, "attn_metadata", None), "core_metadata", None)
+
+        def _scalar(tensor: torch.Tensor | None) -> int | None:
+            if tensor is None or int(row) < 0 or int(row) >= int(tensor.numel()):
+                return None
+            return int(tensor.detach().reshape(-1)[int(row)].item())
+
+        metadata = {
+            "input_id": _scalar(getattr(batch, "input_ids", None)),
+            "position": _scalar(getattr(batch, "positions", None)),
+            "out_cache_loc": _scalar(getattr(batch, "out_loc", None)),
+        }
+        if core is not None:
+            metadata.update(
+                {
+                    "seq_len": _scalar(getattr(core, "seq_lens", None)),
+                    "req_table_index": _scalar(getattr(core, "req_table_indices", None)),
+                    "c4_out_loc": _scalar(getattr(core, "c4_out_loc", None)),
+                    "c128_out_loc": _scalar(getattr(core, "c128_out_loc", None)),
+                    "target_verify_decode_rows": bool(
+                        getattr(core, "target_verify_decode_rows", False)
+                    ),
+                }
+            )
+        return metadata
+
+    def _record_mtp_row_depth_oracle_debug(
+        self,
+        verify_batch: Batch,
+        entries: list[dict[str, Any]],
+        target_output: Any,
+        target_logits: torch.Tensor,
+        target_tokens: torch.Tensor,
+    ) -> None:
+        if not _env_flag(_DSV4_MTP_ROW_DEPTH_ORACLE_ENV):
+            return
+        log = self.mtp_spec_stats.setdefault("row_depth_oracle_debug", [])
+        event: dict[str, Any] = {
+            "trace_index": int(len(log)),
+            "mode": "mtp_target_verify_row_depth_vs_normal_oracle",
+            "entries": [],
+        }
+        owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
+        saved_verify_ctx = getattr(owner, "_verify_ctx", None) if owner is not None else None
+        target_hidden = getattr(target_output, "hidden_states", None)
+        target_hidden_before_norm = getattr(target_output, "hidden_states_before_norm", None)
+        try:
+            for entry in entries[:8]:
+                req = entry["req"]
+                active_verify_len = int(
+                    entry.get("active_verify_len", entry["verify_len"])
+                )
+                padded_verify_len = int(
+                    entry.get("padded_verify_len", entry["verify_len"])
+                )
+                row_start = int(entry.get("row_start", -1))
+                committed_seq_len = int(entry.get("committed_seq_len", req.cached_len))
+                positions = entry["positions_tensor"][:active_verify_len].to(
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                real_locs = entry["real_locs"][:active_verify_len].to(
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                target_rows_snapshot = self._snapshot_mtp_kv_rows(real_locs, positions)
+                old_cached_len = int(req.cached_len)
+                old_device_len = int(req.device_len)
+                entry_event: dict[str, Any] = {
+                    "uid": int(getattr(req, "uid", -1)),
+                    "batch_index": int(entry["batch_index"]),
+                    "committed_seq_len": committed_seq_len,
+                    "active_verify_len": active_verify_len,
+                    "padded_verify_len": padded_verify_len,
+                    "row_start": row_start,
+                    "rows": [],
+                }
+                try:
+                    for depth in range(active_verify_len):
+                        flat_row = row_start + depth
+                        position = committed_seq_len + depth
+                        input_token = entry["verify_inputs"][depth].to(
+                            device=self.device,
+                            dtype=torch.int32,
+                        )
+                        req.cached_len = position
+                        req.device_len = position + 1
+                        oracle_batch = self._make_mtp_frozen_batch(
+                            [req],
+                            input_token,
+                            [position],
+                            read_only=False,
+                        )
+                        self._sync_device_for_mtp_spec()
+                        with self.ctx.forward_batch(oracle_batch):
+                            oracle_output = self.model.forward_with_hidden()
+                            self._debug_sync_forward(
+                                "after_mtp_row_depth_oracle",
+                                oracle_batch,
+                                "mtp_row_depth_oracle",
+                            )
+                        self._sync_device_for_mtp_spec()
+
+                        oracle_logits = oracle_output.logits[:1]
+                        oracle_token = int(
+                            torch.argmax(oracle_logits[0], dim=-1).item()
+                        )
+                        target_token = (
+                            int(target_tokens[flat_row].item())
+                            if 0 <= flat_row < int(target_tokens.numel())
+                            else None
+                        )
+                        drafts = entry.get("drafts", [])
+                        draft_token = (
+                            int(drafts[depth].reshape(-1)[0].item())
+                            if depth < len(drafts)
+                            else None
+                        )
+                        target_row_logits = (
+                            target_logits[flat_row : flat_row + 1]
+                            if 0 <= flat_row < int(target_logits.shape[0])
+                            else None
+                        )
+                        target_hidden_row = (
+                            target_hidden[flat_row : flat_row + 1]
+                            if target_hidden is not None
+                            and 0 <= flat_row < int(target_hidden.shape[0])
+                            else None
+                        )
+                        target_hidden_before_row = (
+                            target_hidden_before_norm[flat_row : flat_row + 1]
+                            if target_hidden_before_norm is not None
+                            and 0 <= flat_row < int(target_hidden_before_norm.shape[0])
+                            else None
+                        )
+                        entry_event["rows"].append(
+                            {
+                                "depth": int(depth),
+                                "flattened_row": int(flat_row),
+                                "input_token": int(input_token.reshape(-1)[0].item()),
+                                "position": int(position),
+                                "target_token": target_token,
+                                "oracle_token": int(oracle_token),
+                                "draft_token": draft_token,
+                                "accepted": (
+                                    bool(target_token == draft_token)
+                                    if draft_token is not None and target_token is not None
+                                    else None
+                                ),
+                                "target_topk": (
+                                    self._mtp_row_topk_debug(target_row_logits[0])
+                                    if target_row_logits is not None
+                                    else {}
+                                ),
+                                "oracle_topk": self._mtp_row_topk_debug(oracle_logits[0]),
+                                "logit_delta": self._mtp_tensor_delta_debug(
+                                    target_row_logits,
+                                    oracle_logits,
+                                ),
+                                "hidden_delta": self._mtp_tensor_delta_debug(
+                                    target_hidden_row,
+                                    oracle_output.hidden_states[:1],
+                                ),
+                                "hidden_before_norm_delta": self._mtp_tensor_delta_debug(
+                                    target_hidden_before_row,
+                                    oracle_output.hidden_states_before_norm[:1],
+                                ),
+                                "target_metadata": self._mtp_target_row_metadata_debug(
+                                    verify_batch,
+                                    flat_row,
+                                ),
+                                "oracle_metadata": self._mtp_row0_metadata_debug(
+                                    oracle_batch
+                                ),
+                            }
+                        )
+                        if owner is not None:
+                            setattr(owner, "_verify_ctx", None)
+                finally:
+                    req.cached_len = old_cached_len
+                    req.device_len = old_device_len
+                    self._restore_mtp_kv_snapshot(target_rows_snapshot)
+                    if owner is not None:
+                        setattr(owner, "_verify_ctx", saved_verify_ctx)
+                    self._sync_device_for_mtp_spec()
+                event["entries"].append(entry_event)
+        except Exception as exc:
+            event["error_type"] = type(exc).__name__
+            event["error"] = str(exc)
+            if owner is not None:
+                setattr(owner, "_verify_ctx", saved_verify_ctx)
+        log.append(event)
+        if len(log) > 16:
+            del log[:-16]
 
     def _mtp_row0_metadata_debug(self, batch: Batch) -> dict[str, Any]:
         core = getattr(getattr(batch, "attn_metadata", None), "core_metadata", None)
@@ -1211,7 +1495,16 @@ class Engine:
         self,
         entries: list[dict[str, Any]],
     ) -> tuple[Batch, list[tuple[Req, int]], int]:
-        total_verify_tokens = sum(int(entry["verify_len"]) for entry in entries)
+        if not entries:
+            raise RuntimeError("DeepSeek V4 MTP flattened verify requires entries.")
+        active_verify_lens = [int(entry["verify_len"]) for entry in entries]
+        speculative_num_draft_tokens = max(active_verify_lens)
+        if speculative_num_draft_tokens <= 0:
+            raise RuntimeError(
+                "DeepSeek V4 MTP flattened verify requires a positive fixed "
+                f"row width, got active_verify_lens={active_verify_lens}."
+            )
+        total_verify_tokens = speculative_num_draft_tokens * len(entries)
         restore: list[tuple[Req, int]] = []
         input_chunks: list[torch.Tensor] = []
         position_chunks: list[torch.Tensor] = []
@@ -1220,12 +1513,23 @@ class Engine:
         try:
             for entry in entries:
                 req = entry["req"]
-                verify_len = int(entry["verify_len"])
+                active_verify_len = int(entry["verify_len"])
+                if active_verify_len <= 0 or active_verify_len > speculative_num_draft_tokens:
+                    raise RuntimeError(
+                        "DeepSeek V4 MTP flattened verify active length is invalid: "
+                        f"active={active_verify_len}, fixed={speculative_num_draft_tokens}."
+                    )
+                verify_inputs = list(entry.get("verify_inputs", []))
+                if len(verify_inputs) != active_verify_len:
+                    raise RuntimeError(
+                        "DeepSeek V4 MTP flattened verify input length mismatch: "
+                        f"inputs={len(verify_inputs)}, active={active_verify_len}."
+                    )
                 base_pos = int(req.cached_len)
                 old_device_len = int(req.device_len)
                 positions = torch.arange(
                     base_pos,
-                    base_pos + verify_len,
+                    base_pos + speculative_num_draft_tokens,
                     dtype=torch.long,
                     device=self.device,
                 )
@@ -1236,20 +1540,30 @@ class Engine:
                         "DeepSeek V4 MTP flattened verify exceeded page-table width: "
                         f"position={int(positions[-1].item())}, "
                         f"width={int(self.page_table.shape[1])}."
-                    )
+                )
                 real_locs = self.page_table[int(req.table_idx), positions].clone()
-                req.device_len = base_pos + verify_len
+                req.device_len = base_pos + speculative_num_draft_tokens
                 restore.append((req, old_device_len))
 
                 entry["row_start"] = cursor
                 entry["committed_seq_len"] = base_pos
+                entry["active_verify_len"] = active_verify_len
+                entry["padded_verify_len"] = speculative_num_draft_tokens
                 entry["positions_tensor"] = positions.to(dtype=torch.int32)
                 entry["temp_locs"] = real_locs.to(dtype=torch.int32)
                 entry["real_locs"] = real_locs.to(dtype=torch.int32)
-                input_chunks.extend(entry["verify_inputs"])
+                padded_inputs = [tok.contiguous() for tok in verify_inputs]
+                if len(padded_inputs) < speculative_num_draft_tokens:
+                    pad_token = padded_inputs[-1]
+                    padded_inputs.extend(
+                        pad_token.contiguous()
+                        for _ in range(speculative_num_draft_tokens - len(padded_inputs))
+                    )
+                entry["verify_inputs_padded"] = padded_inputs
+                input_chunks.extend(padded_inputs)
                 position_chunks.append(entry["positions_tensor"])
                 out_loc_chunks.append(entry["real_locs"])
-                cursor += verify_len
+                cursor += speculative_num_draft_tokens
 
             verify_batch = Batch(
                 reqs=[entry["req"] for entry in entries],
@@ -1269,23 +1583,33 @@ class Engine:
                 device=self.device,
                 dtype=torch.int32,
             )
-            verify_lens = [int(entry["verify_len"]) for entry in entries]
-            if len(set(verify_lens)) != 1:
-                raise RuntimeError(
-                    "DeepSeek V4 MTP target-verify metadata requires a fixed "
-                    "active verify length per request in one flattened batch; "
-                    f"got verify_lens={verify_lens}."
-                )
-            speculative_num_draft_tokens = int(verify_lens[0])
+            verify_lens = [speculative_num_draft_tokens for _ in entries]
             verify_batch.dsv4_target_verify_metadata = {
                 "speculative_num_draft_tokens": speculative_num_draft_tokens,
                 "extend_lens": verify_lens,
+                "active_verify_lens": active_verify_lens,
                 "committed_seq_lens": [
                     int(entry["committed_seq_len"]) for entry in entries
                 ],
                 "num_tokens": int(total_verify_tokens),
             }
-            if _env_flag(_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV):
+            if _env_flag(_DSV4_MTP_VERIFY_SPLITK_ATTENTION_ENV):
+                verify_batch.dsv4_target_verify_decode_rows = True
+            verify_batch.dsv4_force_exact_kv_store = True
+            parent_batch_size = max(
+                int(entry.get("parent_batch_size", len(entries))) for entry in entries
+            )
+            force_torch_target_verify = (
+                _env_flag(_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV)
+                or parent_batch_size > 2
+            )
+            if force_torch_target_verify:
+                # The bs>2 accepted-commit path exposes request-local drift when
+                # mini's SM80 sparse-attention fast paths produce TARGET_VERIFY rows
+                # that are not causal-identical to the following sequential target
+                # decode. Keep bs=1/2 on their already-exact fast path, and use the
+                # torch attention fallback for larger parent batches until the fast
+                # kernels carry that TARGET_VERIFY contract explicitly.
                 verify_batch.dsv4_force_torch_attention = True
             self.attn_backend.prepare_metadata(verify_batch)
             self._record_mtp_target_verify_contract_trace(verify_batch, entries)
@@ -1805,6 +2129,201 @@ class Engine:
             "items": items,
         }
 
+    def _mtp_state_checksum(self, values: torch.Tensor) -> dict[str, Any]:
+        flat = values.detach().float().reshape(-1)
+        if flat.numel() == 0:
+            return {"numel": 0, "sum": 0.0, "abs_sum": 0.0, "max_abs": 0.0}
+        return {
+            "numel": int(flat.numel()),
+            "sum": float(flat.sum(dtype=torch.float64).item()),
+            "abs_sum": float(flat.abs().sum(dtype=torch.float64).item()),
+            "max_abs": float(flat.abs().max().item()),
+            "sample": [float(x) for x in flat[:4].cpu().tolist()],
+        }
+
+    def _mtp_component_mapping_summary(
+        self,
+        req: Req,
+        positions: torch.Tensor,
+        full_locs: torch.Tensor,
+    ) -> dict[str, Any]:
+        kv_cache = self.kv_cache
+
+        def _tolist(tensor: torch.Tensor | None) -> list[int]:
+            if tensor is None:
+                return []
+            return [int(x) for x in tensor.detach().reshape(-1).cpu().tolist()]
+
+        summary: dict[str, Any] = {
+            "positions": _tolist(positions),
+            "full_locs": _tolist(full_locs),
+        }
+        try:
+            summary["swa_locs"] = _tolist(kv_cache.translate_full_locs_to_swa_locs(full_locs))
+        except Exception as exc:
+            summary["swa_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            summary["c4_locs"] = _tolist(
+                kv_cache.compressed_locs_from_full_locs(full_locs, 4, positions)
+            )
+        except Exception as exc:
+            summary["c4_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            summary["c4_indexer_locs"] = _tolist(
+                kv_cache.indexer_locs_from_full_locs(full_locs, positions)
+            )
+        except Exception as exc:
+            summary["c4_indexer_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            summary["c128_locs"] = _tolist(
+                kv_cache.compressed_locs_from_full_locs(full_locs, 128, positions)
+            )
+        except Exception as exc:
+            summary["c128_error"] = f"{type(exc).__name__}: {exc}"
+        for key, ratio, component in (
+            ("c4_attention_state_locs", 4, "attention"),
+            ("c4_indexer_state_locs", 4, "indexer"),
+            ("c128_attention_state_locs", 128, "attention"),
+        ):
+            try:
+                summary[key] = _tolist(
+                    kv_cache.state_locs_from_full_locs(
+                        full_locs,
+                        ratio,  # type: ignore[arg-type]
+                        component=component,  # type: ignore[arg-type]
+                    )
+                )
+            except Exception as exc:
+                summary[f"{key}_error"] = f"{type(exc).__name__}: {exc}"
+        if positions.numel() > 0:
+            start = max(int(positions.min().item()) - 2, 0)
+            stop = min(int(positions.max().item()) + 3, int(self.page_table.shape[1]))
+            row = self.page_table[int(req.table_idx), start:stop].detach().cpu()
+            summary["page_table_window"] = {
+                "start": int(start),
+                "values": [int(x) for x in row.tolist()],
+            }
+        return summary
+
+    def _mtp_online_c128_state_summary(
+        self,
+        req: Req,
+        seq_len: int,
+    ) -> dict[str, Any]:
+        kv_cache = self.kv_cache
+        owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
+        if owner is None or not callable(getattr(owner, "ready", None)) or not owner.ready():
+            return {"available": False}
+        try:
+            pending = kv_cache.get_online_c128_mtp_pending_seq_lens()
+            offset = int(kv_cache.get_online_c128_mtp_state_slot_offset())
+            max_draft = int(kv_cache.get_online_c128_mtp_max_draft_tokens())
+        except Exception as exc:
+            return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+        if seq_len <= 0 or offset <= 0 or max_draft <= 0:
+            return {"available": False}
+
+        chunk_start = ((int(seq_len) - 1) // 128) * 128
+        try:
+            full_loc = self.page_table[int(req.table_idx), int(chunk_start)].to(
+                device=self.device,
+                dtype=torch.long,
+            )
+            swa_loc = kv_cache.translate_full_locs_to_swa_locs(full_loc.reshape(1))[0]
+            slot = int((swa_loc // int(kv_cache.online_c128_mtp_swa_page_size)).item())
+        except Exception as exc:
+            return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+        if slot < 0:
+            return {"available": False, "chunk_start": int(chunk_start), "slot": int(slot)}
+
+        pending_value = None
+        table_idx = int(req.table_idx)
+        if 0 <= table_idx < int(pending.numel()):
+            pending_value = int(pending[table_idx].item())
+
+        layers = []
+        layer_mapping = tuple(getattr(kv_cache, "layer_mapping", ()))
+        c128_layers = [int(m.layer_id) for m in layer_mapping if int(m.compress_ratio) == 128]
+        for layer_id in c128_layers:
+            try:
+                state = kv_cache.get_online_c128_mtp_state(layer_id)
+            except Exception as exc:
+                layers.append(
+                    {
+                        "layer_id": int(layer_id),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            banks = []
+            for bank in range(max_draft + 1):
+                state_loc = slot + bank * offset
+                if state_loc < 0 or state_loc >= int(state.shape[0]):
+                    continue
+                banks.append(
+                    {
+                        "bank": int(bank),
+                        "state_loc": int(state_loc),
+                        "checksum": self._mtp_state_checksum(state[state_loc : state_loc + 1]),
+                    }
+                )
+            layers.append({"layer_id": int(layer_id), "banks": banks})
+        return {
+            "available": True,
+            "pending_seq_len": pending_value,
+            "chunk_start": int(chunk_start),
+            "full_loc": int(full_loc.item()),
+            "swa_loc": int(swa_loc.item()),
+            "slot": int(slot),
+            "state_slot_offset": int(offset),
+            "max_draft_tokens": int(max_draft),
+            "layers": layers,
+        }
+
+    def _record_mtp_state_parity_snapshot(
+        self,
+        event: str,
+        req: Req,
+        *,
+        tail_len: int = 2,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if not _env_flag(_DSV4_MTP_STATE_PARITY_TRACE_ENV):
+            return
+        seq_len = int(getattr(req, "cached_len", 0))
+        if seq_len <= 0:
+            return
+        start = max(seq_len - max(int(tail_len), 1), 0)
+        positions = torch.arange(start, seq_len, dtype=torch.long, device=self.device)
+        if positions.numel() == 0:
+            return
+        table_idx = int(getattr(req, "table_idx", -1))
+        if table_idx < 0 or table_idx >= int(self.page_table.shape[0]):
+            return
+        full_locs = self.page_table[table_idx, positions].to(
+            device=self.device,
+            dtype=torch.long,
+        )
+        snapshot = self._snapshot_mtp_kv_rows(full_locs, positions)
+        log = self.mtp_spec_stats.setdefault("state_parity_trace", [])
+        log.append(
+            {
+                "trace_index": int(len(log)),
+                "event": event,
+                "uid": int(getattr(req, "uid", -1)),
+                "table_idx": int(table_idx),
+                "cached_len": int(getattr(req, "cached_len", -1)),
+                "device_len": int(getattr(req, "device_len", -1)),
+                "tail_len": int(tail_len),
+                "mapping": self._mtp_component_mapping_summary(req, positions, full_locs),
+                "snapshot": self._summarize_mtp_kv_snapshot(snapshot, limit=512),
+                "online_c128_mtp": self._mtp_online_c128_state_summary(req, seq_len),
+                "extra": extra or {},
+            }
+        )
+        if len(log) > 128:
+            del log[:-128]
+
     def _mtp_indexer_uses_fp8_cache(self, kv_cache: Any) -> bool:
         has_fp8 = getattr(kv_cache, "has_indexer_fp8_cache", None)
         return bool(callable(has_fp8) and has_fp8())
@@ -2053,6 +2572,60 @@ class Engine:
                 "component/SWA state."
             )
 
+        configured_group_size = max(1, _env_int(_DSV4_MTP_VERIFY_GROUP_SIZE_ENV, 2))
+        verify_group_size = configured_group_size
+        if (
+            not os.environ.get(_DSV4_MTP_VERIFY_GROUP_SIZE_ENV, "").strip()
+            and len(batch.reqs) > 2
+        ):
+            verify_group_size = 1
+        if len(batch.reqs) > verify_group_size:
+            aggregate = {
+                "verified": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "correction_tokens": 0,
+                "target_fallback_tokens": 0,
+                "page_boundary_stops": 0,
+                "accepted_prefix_lens": [0] * len(batch.reqs),
+                "verify_shapes": [],
+            }
+            for start in range(0, len(batch.reqs), verify_group_size):
+                end = min(start + verify_group_size, len(batch.reqs))
+                sub_batch = Batch(
+                    reqs=batch.reqs[start:end],
+                    phase=batch.phase,
+                    frozen_kv_read_only=batch.frozen_kv_read_only,
+                )
+                sub_batch.dsv4_parent_batch_size = int(len(batch.reqs))
+                sub_first_tokens = first_tokens_gpu[start:end].contiguous()
+                sub_drafts = {
+                    int(index - start): drafts
+                    for index, drafts in draft_tokens_by_index.items()
+                    if start <= int(index) < end
+                }
+                sub_emitted = emitted_tokens[start:end]
+                sub_result = self._verify_mtp_spec_drafts_flattened(
+                    sub_batch,
+                    sub_first_tokens,
+                    sub_drafts,
+                    sub_emitted,
+                )
+                for key in (
+                    "verified",
+                    "accepted",
+                    "rejected",
+                    "correction_tokens",
+                    "target_fallback_tokens",
+                    "page_boundary_stops",
+                ):
+                    aggregate[key] = int(aggregate[key]) + int(sub_result.get(key, 0))
+                sub_lens = list(sub_result.get("accepted_prefix_lens", []))
+                for offset, accepted_len in enumerate(sub_lens[: end - start]):
+                    aggregate["accepted_prefix_lens"][start + offset] = int(accepted_len)
+                aggregate["verify_shapes"].extend(sub_result.get("verify_shapes", []))
+            return aggregate
+
         entries: list[dict[str, Any]] = []
         page_boundary_stops = 0
         accepted_prefix_lens = [0] * len(batch.reqs)
@@ -2085,6 +2658,9 @@ class Engine:
                     "batch_index": i,
                     "req": req,
                     "drafts": drafts[:draft_count],
+                    "parent_batch_size": int(
+                        getattr(batch, "dsv4_parent_batch_size", len(batch.reqs))
+                    ),
                     "verify_len": verify_len,
                     "verify_inputs": verify_inputs,
                 }
@@ -2187,6 +2763,12 @@ class Engine:
                         "batch_index": int(entry["batch_index"]),
                         "committed_seq_len": int(entry["committed_seq_len"]),
                         "verify_len": int(entry["verify_len"]),
+                        "active_verify_len": int(
+                            entry.get("active_verify_len", entry["verify_len"])
+                        ),
+                        "padded_verify_len": int(
+                            entry.get("padded_verify_len", entry["verify_len"])
+                        ),
                         "row_start": int(entry["row_start"]),
                         "draft_tokens": [
                             int(tok.reshape(-1)[0].item())
@@ -2196,10 +2778,21 @@ class Engine:
                             int(tok.reshape(-1)[0].item())
                             for tok in entry.get("verify_inputs", [])[:8]
                         ],
+                        "padded_input_tokens": [
+                            int(tok.reshape(-1)[0].item())
+                            for tok in entry.get("verify_inputs_padded", [])[:8]
+                        ],
                     }
                     for entry in entries[:4]
                 ],
             },
+        )
+        self._record_mtp_row_depth_oracle_debug(
+            verify_batch,
+            entries,
+            target_output,
+            logits,
+            target_tokens,
         )
 
         commit_loc_chunks: list[torch.Tensor] = []
@@ -2230,9 +2823,11 @@ class Engine:
             batch_index = int(entry["batch_index"])
             req = entry["req"]
             drafts = entry["drafts"]
-            verify_len = int(entry["verify_len"])
+            active_verify_len = int(entry.get("active_verify_len", entry["verify_len"]))
+            padded_verify_len = int(entry.get("padded_verify_len", entry["verify_len"]))
             row_start = int(entry["row_start"])
-            row_tokens = target_tokens[row_start : row_start + verify_len]
+            row_tokens_full = target_tokens[row_start : row_start + padded_verify_len]
+            row_tokens = row_tokens_full[:active_verify_len]
             emitted_before = len(emitted_tokens[batch_index])
             accepted_prefix = 0
             copy_rows = 0
@@ -2240,7 +2835,7 @@ class Engine:
             candidate_emitted: list[torch.Tensor] = []
             mismatch_depth: int | None = None
 
-            comparable = min(len(drafts), verify_len)
+            comparable = min(len(drafts), active_verify_len)
             for depth in range(comparable):
                 target_token = row_tokens[depth : depth + 1].contiguous()
                 draft_token = drafts[depth]
@@ -2257,19 +2852,19 @@ class Engine:
                 candidate_copy_rows = depth + 1
                 break
 
-            if mismatch_depth is None and verify_len > len(drafts):
+            if mismatch_depth is None and active_verify_len > len(drafts):
                 target_token = row_tokens[len(drafts) : len(drafts) + 1].contiguous()
                 bonus_token_candidates += 1
                 candidate_emitted.append(target_token)
-                candidate_copy_rows = min(verify_len, len(drafts) + 1)
+                candidate_copy_rows = min(active_verify_len, len(drafts) + 1)
             elif mismatch_depth is None:
-                candidate_copy_rows = min(verify_len, accepted_prefix)
+                candidate_copy_rows = min(active_verify_len, accepted_prefix)
 
             accepted_candidates += accepted_prefix
             if allow_accepted_commit:
                 accepted += accepted_prefix
                 correction_tokens += 1 if mismatch_depth is not None else 0
-                if mismatch_depth is None and verify_len > len(drafts):
+                if mismatch_depth is None and active_verify_len > len(drafts):
                     bonus_tokens += 1
                 accepted_prefix_lens[batch_index] = int(accepted_prefix)
                 emitted_tokens[batch_index].extend(candidate_emitted)
@@ -2289,10 +2884,46 @@ class Engine:
                         "batch_index": int(batch_index),
                         "cached_len": int(getattr(req, "cached_len", -1)),
                         "device_len": int(getattr(req, "device_len", -1)),
-                        "verify_len": int(verify_len),
+                        "verify_len": int(entry["verify_len"]),
+                        "active_verify_len": int(active_verify_len),
+                        "padded_verify_len": int(padded_verify_len),
+                        "row_start": int(row_start),
                         "target_tokens": [int(x) for x in row_tokens.tolist()],
+                        "padded_target_tokens": [
+                            int(x) for x in row_tokens_full.tolist()
+                        ],
                         "draft_tokens": [int(tok.reshape(-1)[0].item()) for tok in drafts],
+                        "input_tokens": [
+                            int(tok.reshape(-1)[0].item())
+                            for tok in entry.get("verify_inputs", [])
+                        ],
+                        "padded_input_tokens": [
+                            int(tok.reshape(-1)[0].item())
+                            for tok in entry.get("verify_inputs_padded", [])
+                        ],
+                        "row_depths": [
+                            {
+                                "depth": int(depth),
+                                "flattened_row": int(row_start + depth),
+                                "input_token": int(
+                                    entry.get("verify_inputs_padded", [])[depth]
+                                    .reshape(-1)[0]
+                                    .item()
+                                ),
+                                "target_token": int(row_tokens_full[depth].item()),
+                                "draft_token": (
+                                    int(drafts[depth].reshape(-1)[0].item())
+                                    if depth < len(drafts)
+                                    else None
+                                ),
+                                "active": bool(depth < active_verify_len),
+                            }
+                            for depth in range(padded_verify_len)
+                        ],
                         "accepted_prefix": int(accepted_prefix),
+                        "mismatch_depth": (
+                            None if mismatch_depth is None else int(mismatch_depth)
+                        ),
                         "accepted_commit_blocker": accepted_commit_blocker or "",
                         "candidate_copy_rows": int(candidate_copy_rows),
                         "copy_rows": int(copy_rows),
@@ -2375,6 +3006,15 @@ class Engine:
             for req, copy_rows, _committed_seq_len in copy_rows_by_entry:
                 for _ in range(int(copy_rows)):
                     req.complete_one()
+                self._record_mtp_state_parity_snapshot(
+                    "mtp_after_accepted_commit",
+                    req,
+                    tail_len=int(copy_rows),
+                    extra={
+                        "copy_rows": int(copy_rows),
+                        "committed_seq_len_before": int(_committed_seq_len),
+                    },
+                )
         else:
             self._restore_mtp_kv_snapshot(pre_verify_snapshot)
             if allow_accepted_commit:
@@ -2774,6 +3414,18 @@ class Engine:
             tensor=next_tokens_gpu,
             include_integrity=False,
         )
+        for i, req in enumerate(batch.reqs):
+            self._record_mtp_state_parity_snapshot(
+                "mtp_after_normal_target_decode",
+                req,
+                tail_len=2,
+                extra={
+                    "next_token": int(next_tokens_gpu[i].item())
+                    if i < int(next_tokens_gpu.numel())
+                    else None,
+                    "forward_source": forward_source,
+                },
+            )
         if debug_recorder is not None:
             debug_recorder.finish(
                 debug_snapshot,
@@ -2897,6 +3549,18 @@ class Engine:
             tensor=next_tokens_gpu,
             include_integrity=False,
         )
+        for i, req in enumerate(batch.reqs):
+            self._record_mtp_state_parity_snapshot(
+                "baseline_after_normal_decode",
+                req,
+                tail_len=2,
+                extra={
+                    "next_token": int(next_tokens_gpu[i].item())
+                    if i < int(next_tokens_gpu.numel())
+                    else None,
+                    "forward_source": forward_source,
+                },
+            )
         if debug_recorder is not None:
             debug_recorder.finish(
                 debug_snapshot,

@@ -1748,7 +1748,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 c4_sparse_source_elided_for_graph=c4_sparse_source_elided,
                 c128_source_elided_for_graph=c128_source_elided,
                 swa_ownership_version=self._current_swa_ownership_version(),
-                target_verify_decode_rows=bool(is_target_verify),
+                target_verify_decode_rows=bool(
+                    is_target_verify
+                    and getattr(batch, "dsv4_target_verify_decode_rows", False)
+                ),
             )
             self._record_metadata_build_bytes(batch, core)
             self._record_marlin_wna16_metadata_owners(batch, core)

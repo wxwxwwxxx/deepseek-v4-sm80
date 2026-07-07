@@ -2,7 +2,7 @@
 
 ## Goal
 
-After TARGET 11.299 proves exact accepted-KV commit for flattened verify and a
+After TARGET 11.5 proves exact accepted-KV commit for `bs=1/2/4` and a
 rerun of the eager path proves useful target-pass reduction, align the DSV4
 attention/compressed metadata and CUDA graph path with SGLang enough to decide
 whether MTP should be kept as an opt-in, optimized further, or promoted.
@@ -18,7 +18,10 @@ graph/perf target starts.  TARGET 11.297 found the first owner at layer0
 `wo_a` projection, so TARGET 11.298 must close that projection batch-shape
 parity issue before this graph/perf target starts.  TARGET 11.298 closed `wo_a`
 for bs=1/2 row0 parity, but multi-request bs=2/bs=4 contract failures remain,
-so TARGET 11.299 must close those before graph/perf starts.
+so TARGET 11.299 must close those before graph/perf starts.  TARGET 11.299
+closed the row/depth and mixed-length class enough to reveal a narrower `bs=4`
+post-commit state drift; TARGET 11.5 must identify and fix the first
+non-equivalent accepted-commit state owner before this graph/perf target starts.
 
 ## Primary Question
 
