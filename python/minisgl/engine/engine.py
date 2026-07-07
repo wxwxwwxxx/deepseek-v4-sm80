@@ -46,6 +46,10 @@ _DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 _DSV4_EXPERIMENTAL_MTP_ENV = "MINISGL_DSV4_EXPERIMENTAL_MTP"
 _DSV4_MTP_SPECULATIVE_ENV = "MINISGL_DSV4_MTP_SPECULATIVE"
 _DSV4_MTP_SPEC_DRAFT_LEN_ENV = "MINISGL_DSV4_MTP_SPEC_DRAFT_LEN"
+_DSV4_MTP_ROW0_DEBUG_ENV = "MINISGL_DSV4_MTP_ROW0_DEBUG"
+_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV = (
+    "MINISGL_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION"
+)
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -136,6 +140,8 @@ class Engine:
             "target_verify_batch_shapes": [],
             "target_verify_contract_trace": [],
             "c128_mtp_lifecycle_events": [],
+            "row0_logits_debug": [],
+            "accepted_commit_row_hashes": [],
             "last_batch": {},
         }
         self.ctx = Context(config.page_size)
@@ -801,6 +807,188 @@ class Engine:
         if len(trace_log) > 16:
             del trace_log[:-16]
 
+    def _record_mtp_row0_logits_debug(
+        self,
+        mode: str,
+        batch: Batch,
+        logits: torch.Tensor | None,
+        *,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if not _env_flag(_DSV4_MTP_ROW0_DEBUG_ENV):
+            return
+        if logits is None or logits.numel() == 0 or logits.ndim < 2:
+            return
+        try:
+            row0 = logits[0].detach().float()
+            k = min(10, int(row0.numel()))
+            top_values, top_ids = torch.topk(row0, k=k)
+            top_values_cpu = [float(x) for x in top_values.cpu().tolist()]
+            top_ids_cpu = [int(x) for x in top_ids.cpu().tolist()]
+            selected_ids = sorted(set(top_ids_cpu[:2] + [223, 582]))
+            selected_logits = {
+                str(token_id): float(row0[token_id].item())
+                for token_id in selected_ids
+                if 0 <= token_id < int(row0.numel())
+            }
+            trace = {
+                "mode": mode,
+                "trace_index": int(
+                    len(self.mtp_spec_stats.setdefault("row0_logits_debug", []))
+                ),
+                "phase": getattr(batch, "phase", "unknown"),
+                "is_target_verify": bool(
+                    getattr(batch, "dsv4_target_verify_metadata", None) is not None
+                ),
+                "batch_size": int(getattr(batch, "size", -1)),
+                "num_logits_rows": int(logits.shape[0]),
+                "top10_token_ids": top_ids_cpu,
+                "top10_logits": top_values_cpu,
+                "top1_token_id": int(top_ids_cpu[0]) if top_ids_cpu else None,
+                "top1_top2_margin": (
+                    float(top_values_cpu[0] - top_values_cpu[1])
+                    if len(top_values_cpu) >= 2
+                    else None
+                ),
+                "selected_token_logits": selected_logits,
+                "metadata": self._mtp_row0_metadata_debug(batch),
+            }
+            if extra:
+                trace.update(extra)
+            log = self.mtp_spec_stats.setdefault("row0_logits_debug", [])
+            log.append(trace)
+            if len(log) > 96:
+                del log[:-96]
+        except Exception as exc:
+            log = self.mtp_spec_stats.setdefault("row0_logits_debug", [])
+            log.append(
+                {
+                    "mode": mode,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+
+    def _mtp_row0_metadata_debug(self, batch: Batch) -> dict[str, Any]:
+        core = getattr(getattr(batch, "attn_metadata", None), "core_metadata", None)
+
+        def _tolist(tensor: torch.Tensor | None, limit: int = 16) -> list[int]:
+            if tensor is None:
+                return []
+            if tensor.numel() == 0:
+                return []
+            flat = tensor.detach().reshape(-1)[:limit].to("cpu")
+            return [int(x) for x in flat.tolist()]
+
+        def _row0(tensor: torch.Tensor | None, limit: int = 16) -> list[int]:
+            if tensor is None or tensor.numel() == 0:
+                return []
+            view = tensor.detach()
+            if view.ndim == 1:
+                view = view[:1]
+            else:
+                view = view[0].reshape(-1)
+            return [int(x) for x in view[:limit].to("cpu").tolist()]
+
+        metadata: dict[str, Any] = {
+            "input_ids": _tolist(getattr(batch, "input_ids", None), 16),
+            "positions": _tolist(getattr(batch, "positions", None), 16),
+            "out_cache_loc": _tolist(getattr(batch, "out_loc", None), 16),
+            "reqs": [
+                {
+                    "uid": int(getattr(req, "uid", -1)),
+                    "table_idx": int(getattr(req, "table_idx", -1)),
+                    "cached_len": int(getattr(req, "cached_len", -1)),
+                    "device_len": int(getattr(req, "device_len", -1)),
+                    "extend_len": int(getattr(req, "extend_len", -1)),
+                }
+                for req in list(getattr(batch, "reqs", []))[:4]
+            ],
+        }
+        if core is not None:
+            metadata.update(
+                {
+                    "raw_out_loc": _tolist(getattr(core, "raw_out_loc", None), 16),
+                    "seq_lens": _tolist(getattr(core, "seq_lens", None), 16),
+                    "req_seq_lens": _tolist(getattr(core, "req_seq_lens", None), 16),
+                    "extend_lens": _tolist(getattr(core, "extend_lens", None), 16),
+                    "swa_topk_lengths": _tolist(
+                        getattr(core, "swa_topk_lengths", None), 16
+                    ),
+                    "c4_out_loc": _tolist(getattr(core, "c4_out_loc", None), 16),
+                    "c4_indexer_out_loc": _tolist(
+                        getattr(core, "c4_indexer_out_loc", None), 16
+                    ),
+                    "c128_out_loc": _tolist(getattr(core, "c128_out_loc", None), 16),
+                    "c4_topk_lengths_raw": _tolist(
+                        getattr(core, "c4_topk_lengths_raw", None), 16
+                    ),
+                    "c4_sparse_topk_lengths": _tolist(
+                        getattr(core, "c4_sparse_topk_lengths", None), 16
+                    ),
+                    "c128_topk_lengths_clamp1": _tolist(
+                        getattr(core, "c128_topk_lengths_clamp1", None), 16
+                    ),
+                    "swa_page_indices_row0": _row0(
+                        getattr(core, "swa_page_indices", None), 32
+                    ),
+                    "c4_sparse_full_indices_row0": _row0(
+                        getattr(core, "c4_sparse_full_indices", None), 32
+                    ),
+                    "c4_sparse_page_indices_row0": _row0(
+                        getattr(core, "c4_sparse_page_indices", None), 32
+                    ),
+                    "c128_full_indices_row0": _row0(
+                        getattr(core, "c128_full_indices", None), 32
+                    ),
+                    "c128_page_indices_row0": _row0(
+                        getattr(core, "c128_page_indices", None), 32
+                    ),
+                    "c4_page_table_row0": _row0(
+                        getattr(core, "c4_page_table", None), 16
+                    ),
+                    "c4_indexer_page_table_row0": _row0(
+                        getattr(core, "c4_indexer_page_table", None), 16
+                    ),
+                    "c128_page_table_row0": _row0(
+                        getattr(core, "c128_page_table", None), 16
+                    ),
+                    "max_seqlen_q": int(getattr(core, "max_seqlen_q", -1)),
+                    "max_seqlen_k": int(getattr(core, "max_seqlen_k", -1)),
+                    "target_verify_decode_rows": bool(
+                        getattr(core, "target_verify_decode_rows", False)
+                    ),
+                }
+            )
+        owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
+        metadata["c128_lifecycle"] = (
+            owner.status() if owner is not None and callable(getattr(owner, "status", None)) else {}
+        )
+        metadata["c128_pending_write_commit"] = (
+            "not_applicable"
+            if not self._mtp_has_c128_layers()
+            else ("ready" if self._mtp_accepted_commit_blocker() is None else self._mtp_accepted_commit_blocker())
+        )
+        try:
+            positions = getattr(batch, "positions", None)
+            reqs = list(getattr(batch, "reqs", []))
+            if positions is not None and positions.numel() > 0 and reqs:
+                table_idx = int(getattr(reqs[0], "table_idx", -1))
+                center = int(positions.detach().reshape(-1)[0].item())
+                start = max(center - 4, 0)
+                stop = min(center + 5, int(self.page_table.shape[1]))
+                if table_idx >= 0 and stop > start:
+                    values = self.page_table[table_idx, start:stop].detach().to("cpu")
+                    metadata["req_to_token_slice"] = {
+                        "table_idx": table_idx,
+                        "start": int(start),
+                        "stop": int(stop),
+                        "values": [int(x) for x in values.tolist()],
+                    }
+        except Exception as exc:
+            metadata["req_to_token_slice_error"] = f"{type(exc).__name__}: {exc}"
+        return metadata
+
     def _mtp_temp_kv_unsupported_reason(self) -> str | None:
         kv_cache = getattr(self, "kv_cache", None)
         if kv_cache is None:
@@ -1036,6 +1224,8 @@ class Engine:
                 ],
                 "num_tokens": int(total_verify_tokens),
             }
+            if _env_flag(_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV):
+                verify_batch.dsv4_force_torch_attention = True
             self.attn_backend.prepare_metadata(verify_batch)
             self._record_mtp_target_verify_contract_trace(verify_batch, entries)
             return verify_batch, restore, total_verify_tokens
@@ -1073,6 +1263,59 @@ class Engine:
             "hidden_states": output.hidden_states,
             "hidden_states_before_norm": output.hidden_states_before_norm,
         }
+
+    def _record_mtp_row0_normal_oracle_debug(self, entries: list[dict[str, Any]]) -> None:
+        if not _env_flag(_DSV4_MTP_ROW0_DEBUG_ENV):
+            return
+        if not entries:
+            return
+        entry = entries[0]
+        req = entry["req"]
+        if not entry.get("verify_inputs"):
+            return
+        position = int(req.cached_len)
+        if position < 0 or position >= int(self.page_table.shape[1]):
+            return
+        input_id = entry["verify_inputs"][0].to(device=self.device, dtype=torch.int32)
+        full_locs = self.page_table[
+            torch.tensor([int(req.table_idx)], dtype=torch.long, device=self.device),
+            torch.tensor([position], dtype=torch.long, device=self.device),
+        ].to(dtype=torch.long)
+        positions = torch.tensor([position], dtype=torch.long, device=self.device)
+        snapshot = self._snapshot_mtp_kv_rows(full_locs, positions)
+        oracle_batch = None
+        try:
+            oracle_batch = self._make_mtp_frozen_batch(
+                [req],
+                input_id,
+                [position],
+                read_only=False,
+            )
+            self._sync_device_for_mtp_spec()
+            with self.ctx.forward_batch(oracle_batch):
+                output = self.model.forward_with_hidden()
+                self._debug_sync_forward(
+                    "after_mtp_row0_normal_oracle",
+                    oracle_batch,
+                    "mtp_row0_normal_oracle",
+                )
+            self._sync_device_for_mtp_spec()
+            self._record_mtp_row0_logits_debug(
+                "mtp_row0_normal_oracle",
+                oracle_batch,
+                output.logits[:1],
+                extra={
+                    "oracle_for_committed_seq_len": int(req.cached_len),
+                    "oracle_for_verify_len": int(entry.get("verify_len", 0)),
+                    "oracle_for_input_tokens": [
+                        int(tok.reshape(-1)[0].item())
+                        for tok in entry.get("verify_inputs", [])[:8]
+                    ],
+                },
+            )
+        finally:
+            self._restore_mtp_kv_snapshot(snapshot)
+            self._sync_device_for_mtp_spec()
 
     def _estimate_mtp_kv_bytes(
         self,
@@ -1133,14 +1376,14 @@ class Engine:
         full_locs = full_locs.to(device=self.device, dtype=torch.long)
         positions = positions.to(device=self.device, dtype=torch.long)
 
-        def _add(cache: torch.Tensor, locs: torch.Tensor) -> None:
+        def _add(label: str, cache: torch.Tensor, locs: torch.Tensor) -> None:
             valid_locs = locs.to(device=self.device, dtype=torch.long)
             valid_locs = valid_locs[(valid_locs >= 0) & (valid_locs < int(cache.shape[0]))]
             if valid_locs.numel() == 0:
                 return
             valid_locs = torch.unique(valid_locs)
             values = cache[valid_locs].clone()
-            snapshot["items"].append(("tensor", cache, valid_locs, values))
+            snapshot["items"].append(("tensor", label, cache, valid_locs, values))
             snapshot["bytes"] = int(snapshot["bytes"]) + (
                 int(values.numel()) * int(values.element_size())
             )
@@ -1150,7 +1393,7 @@ class Engine:
         if num_layers:
             swa_locs = kv_cache.translate_full_locs_to_swa_locs(full_locs)
             for layer_id in range(num_layers):
-                _add(kv_cache.swa_cache(int(layer_id)), swa_locs)
+                _add(f"swa.layer{int(layer_id)}", kv_cache.swa_cache(int(layer_id)), swa_locs)
 
         c4_layers = [m.layer_id for m in layer_mapping if int(m.compress_ratio) == 4]
         c128_layers = [m.layer_id for m in layer_mapping if int(m.compress_ratio) == 128]
@@ -1169,19 +1412,27 @@ class Engine:
                 component="indexer",
             )
             for layer_id in c4_layers:
-                _add(kv_cache.c4_cache(int(layer_id)), c4_locs)
-                self._snapshot_mtp_indexer_kv(snapshot, kv_cache, int(layer_id), c4_locs)
+                _add(f"c4.layer{int(layer_id)}", kv_cache.c4_cache(int(layer_id)), c4_locs)
+                self._snapshot_mtp_indexer_kv(
+                    snapshot,
+                    kv_cache,
+                    int(layer_id),
+                    c4_locs,
+                    label=f"c4_indexer.layer{int(layer_id)}",
+                )
                 self._snapshot_mtp_state_pool(
                     snapshot,
                     getattr(kv_cache, "attention_compress_state", None),
                     int(layer_id),
                     c4_state_locs,
+                    label=f"c4_attention_state.layer{int(layer_id)}",
                 )
                 self._snapshot_mtp_state_pool(
                     snapshot,
                     getattr(kv_cache, "indexer_compress_state", None),
                     int(layer_id),
                     indexer_state_locs,
+                    label=f"c4_indexer_state.layer{int(layer_id)}",
                 )
         if c128_layers:
             c128_locs = kv_cache.compressed_locs_from_full_locs(full_locs, 128, positions)
@@ -1192,12 +1443,17 @@ class Engine:
                 component="attention",
             )
             for layer_id in c128_layers:
-                _add(kv_cache.c128_cache(int(layer_id)), c128_locs)
+                _add(
+                    f"c128.layer{int(layer_id)}",
+                    kv_cache.c128_cache(int(layer_id)),
+                    c128_locs,
+                )
                 self._snapshot_mtp_state_pool(
                     snapshot,
                     getattr(kv_cache, "attention_compress_state", None),
                     int(layer_id),
                     c128_state_locs,
+                    label=f"c128_attention_state.layer{int(layer_id)}",
                 )
         return snapshot
 
@@ -1226,6 +1482,8 @@ class Engine:
         pool_getter: Any,
         layer_id: int,
         locs: torch.Tensor,
+        *,
+        label: str,
     ) -> None:
         if not callable(pool_getter) or locs.numel() == 0:
             return
@@ -1237,7 +1495,7 @@ class Engine:
             return
         valid_locs = torch.unique(valid_locs)
         values = buffer[valid_locs].clone()
-        snapshot["items"].append(("tensor", buffer, valid_locs, values))
+        snapshot["items"].append(("tensor", label, buffer, valid_locs, values))
         snapshot["bytes"] = int(snapshot["bytes"]) + (
             int(values.numel()) * int(values.element_size())
         )
@@ -1248,6 +1506,8 @@ class Engine:
         kv_cache: Any,
         layer_id: int,
         locs: torch.Tensor,
+        *,
+        label: str,
     ) -> None:
         valid_locs = locs.to(device=self.device, dtype=torch.long)
         valid_locs = valid_locs[valid_locs >= 0]
@@ -1277,7 +1537,17 @@ class Engine:
                 data_values = data[pages, offsets].clone()
                 scale_values = scales[pages, offsets].clone()
                 snapshot["items"].append(
-                    ("indexer_fp8_paged", packed, page_size, dim, pages, offsets, data_values, scale_values)
+                    (
+                        "indexer_fp8_paged",
+                        label,
+                        packed,
+                        page_size,
+                        dim,
+                        pages,
+                        offsets,
+                        data_values,
+                        scale_values,
+                    )
                 )
                 snapshot["bytes"] = int(snapshot["bytes"]) + (
                     int(data_values.numel()) * int(data_values.element_size())
@@ -1289,7 +1559,15 @@ class Engine:
             values_snapshot = values[valid_locs].clone()
             scales_snapshot = scales[valid_locs].clone()
             snapshot["items"].append(
-                ("indexer_fp8", values, scales, valid_locs, values_snapshot, scales_snapshot)
+                (
+                    "indexer_fp8",
+                    label,
+                    values,
+                    scales,
+                    valid_locs,
+                    values_snapshot,
+                    scales_snapshot,
+                )
             )
             snapshot["bytes"] = int(snapshot["bytes"]) + (
                 int(values_snapshot.numel()) * int(values_snapshot.element_size())
@@ -1302,7 +1580,7 @@ class Engine:
         if valid_locs.numel() == 0:
             return
         values = cache[valid_locs].clone()
-        snapshot["items"].append(("tensor", cache, valid_locs, values))
+        snapshot["items"].append(("tensor", label, cache, valid_locs, values))
         snapshot["bytes"] = int(snapshot["bytes"]) + (
             int(values.numel()) * int(values.element_size())
         )
@@ -1311,10 +1589,26 @@ class Engine:
         for item in snapshot.get("items", []):
             kind = item[0]
             if kind == "tensor":
-                _, cache, locs, values = item
+                if len(item) == 5:
+                    _, _label, cache, locs, values = item
+                else:
+                    _, cache, locs, values = item
                 cache[locs] = values
             elif kind == "indexer_fp8_paged":
-                _, packed, page_size, dim, pages, offsets, data_values, scale_values = item
+                if len(item) == 9:
+                    (
+                        _,
+                        _label,
+                        packed,
+                        page_size,
+                        dim,
+                        pages,
+                        offsets,
+                        data_values,
+                        scale_values,
+                    ) = item
+                else:
+                    _, packed, page_size, dim, pages, offsets, data_values, scale_values = item
                 page_bytes = int(packed.shape[-1])
                 data = packed.as_strided(
                     (packed.shape[0], page_size, dim),
@@ -1328,9 +1622,104 @@ class Engine:
                 data[pages, offsets] = data_values
                 scales[pages, offsets] = scale_values
             elif kind == "indexer_fp8":
-                _, values, scales, locs, values_snapshot, scales_snapshot = item
+                if len(item) == 7:
+                    _, _label, values, scales, locs, values_snapshot, scales_snapshot = item
+                else:
+                    _, values, scales, locs, values_snapshot, scales_snapshot = item
                 values[locs] = values_snapshot
                 scales[locs] = scales_snapshot
+
+    def _summarize_mtp_kv_snapshot(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        limit: int = 24,
+    ) -> dict[str, Any]:
+        def _checksum(values: torch.Tensor) -> dict[str, Any]:
+            flat = values.detach().float().reshape(-1)
+            if flat.numel() == 0:
+                return {"numel": 0, "sum": 0.0, "abs_sum": 0.0, "max_abs": 0.0}
+            return {
+                "numel": int(flat.numel()),
+                "sum": float(flat.sum(dtype=torch.float64).item()),
+                "abs_sum": float(flat.abs().sum(dtype=torch.float64).item()),
+                "max_abs": float(flat.abs().max().item()),
+                "sample": [float(x) for x in flat[:4].cpu().tolist()],
+            }
+
+        items = []
+        for item in snapshot.get("items", [])[:limit]:
+            kind = item[0]
+            if kind == "tensor":
+                if len(item) == 5:
+                    _, label, _cache, locs, values = item
+                else:
+                    _, _cache, locs, values = item
+                    label = "tensor"
+                items.append(
+                    {
+                        "kind": "tensor",
+                        "label": str(label),
+                        "locs": [int(x) for x in locs.detach().cpu().tolist()[:8]],
+                        "shape": list(values.shape),
+                        "checksum": _checksum(values),
+                    }
+                )
+            elif kind == "indexer_fp8_paged":
+                if len(item) == 9:
+                    (
+                        _,
+                        label,
+                        _packed,
+                        _page_size,
+                        _dim,
+                        pages,
+                        offsets,
+                        data_values,
+                        scale_values,
+                    ) = item
+                else:
+                    (
+                        _,
+                        _packed,
+                        _page_size,
+                        _dim,
+                        pages,
+                        offsets,
+                        data_values,
+                        scale_values,
+                    ) = item
+                    label = "indexer_fp8_paged"
+                items.append(
+                    {
+                        "kind": "indexer_fp8_paged",
+                        "label": str(label),
+                        "pages": [int(x) for x in pages.detach().cpu().tolist()[:8]],
+                        "offsets": [int(x) for x in offsets.detach().cpu().tolist()[:8]],
+                        "data_checksum": _checksum(data_values),
+                        "scale_checksum": _checksum(scale_values),
+                    }
+                )
+            elif kind == "indexer_fp8":
+                if len(item) == 7:
+                    _, label, _values, _scales, locs, values_snapshot, scales_snapshot = item
+                else:
+                    _, _values, _scales, locs, values_snapshot, scales_snapshot = item
+                    label = "indexer_fp8"
+                items.append(
+                    {
+                        "kind": "indexer_fp8",
+                        "label": str(label),
+                        "locs": [int(x) for x in locs.detach().cpu().tolist()[:8]],
+                        "data_checksum": _checksum(values_snapshot),
+                        "scale_checksum": _checksum(scales_snapshot),
+                    }
+                )
+        return {
+            "bytes": int(snapshot.get("bytes", 0)),
+            "item_count": int(len(snapshot.get("items", []))),
+            "items": items,
+        }
 
     def _mtp_indexer_uses_fp8_cache(self, kv_cache: Any) -> bool:
         has_fp8 = getattr(kv_cache, "has_indexer_fp8_cache", None)
@@ -1640,6 +2029,7 @@ class Engine:
         target_fallback_tokens = 0
         verify_shapes: list[list[int]] = []
         max_verify_len = max(int(entry["verify_len"]) for entry in entries)
+        self._record_mtp_row0_normal_oracle_debug(entries)
         verify_batch, restore, total_verify_tokens = self._make_mtp_flattened_verify_batch(
             entries
         )
@@ -1696,6 +2086,32 @@ class Engine:
             ) + 1
             raise RuntimeError("DeepSeek V4 MTP flattened target verify produced NaN/Inf logits.")
         target_tokens = torch.argmax(logits, dim=-1).to(torch.int32)
+        self._record_mtp_row0_logits_debug(
+            "mtp_target_verify",
+            verify_batch,
+            logits,
+            extra={
+                "total_verify_tokens": int(total_verify_tokens),
+                "target_tokens": [int(x) for x in target_tokens.detach().cpu().tolist()[:16]],
+                "entries": [
+                    {
+                        "batch_index": int(entry["batch_index"]),
+                        "committed_seq_len": int(entry["committed_seq_len"]),
+                        "verify_len": int(entry["verify_len"]),
+                        "row_start": int(entry["row_start"]),
+                        "draft_tokens": [
+                            int(tok.reshape(-1)[0].item())
+                            for tok in entry.get("drafts", [])[:8]
+                        ],
+                        "input_tokens": [
+                            int(tok.reshape(-1)[0].item())
+                            for tok in entry.get("verify_inputs", [])[:8]
+                        ],
+                    }
+                    for entry in entries[:4]
+                ],
+            },
+        )
 
         commit_loc_chunks: list[torch.Tensor] = []
         commit_position_chunks: list[torch.Tensor] = []
@@ -1813,6 +2229,31 @@ class Engine:
             copied_tokens = int(commit_locs.numel())
             committed_snapshot = self._snapshot_mtp_kv_rows(commit_locs, commit_positions)
             copied_bytes = int(committed_snapshot.get("bytes", 0))
+            if _env_flag(_DSV4_MTP_ROW0_DEBUG_ENV):
+                commit_log = self.mtp_spec_stats.setdefault("accepted_commit_row_hashes", [])
+                commit_log.append(
+                    {
+                        "trace_index": int(len(commit_log)),
+                        "commit_locs": [
+                            int(x) for x in commit_locs.detach().cpu().tolist()[:16]
+                        ],
+                        "commit_positions": [
+                            int(x) for x in commit_positions.detach().cpu().tolist()[:16]
+                        ],
+                        "copy_rows_by_entry": [
+                            {
+                                "uid": int(getattr(req, "uid", -1)),
+                                "table_idx": int(getattr(req, "table_idx", -1)),
+                                "copy_rows": int(copy_rows),
+                                "committed_seq_len": int(committed_seq_len),
+                            }
+                            for req, copy_rows, committed_seq_len in copy_rows_by_entry
+                        ],
+                        "snapshot": self._summarize_mtp_kv_snapshot(committed_snapshot),
+                    }
+                )
+                if len(commit_log) > 32:
+                    del commit_log[:-32]
             self._restore_mtp_kv_snapshot(pre_verify_snapshot)
             self._restore_mtp_kv_snapshot(committed_snapshot)
             owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
@@ -2165,6 +2606,7 @@ class Engine:
                 self.mtp_spec_stats["finite_failures"]
             ) + 1
             raise RuntimeError("DeepSeek V4 MTP speculative target produced NaN/Inf logits.")
+        self._record_mtp_row0_logits_debug("mtp_normal_target_decode", batch, logits)
 
         debug_recorder = dsv4_prefix_debug.get_dsv4_prefix_debug_recorder()
         forward_stage = (
@@ -2324,6 +2766,11 @@ class Engine:
                 stage=forward_stage,
                 tensor=logits[: batch.size],
                 include_integrity=False,
+            )
+            self._record_mtp_row0_logits_debug(
+                "baseline_normal_decode",
+                batch,
+                logits[: batch.size],
             )
         dsv4_memory_debug.record_owner_tensors(
             owner_prefix="engine.sampler.args",

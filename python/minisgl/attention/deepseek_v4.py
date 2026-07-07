@@ -286,6 +286,7 @@ class DSV4CoreAttentionMetadata(BaseAttnMetadata):
     c4_sparse_source_elided_for_graph: bool = False
     c128_source_elided_for_graph: bool = False
     swa_ownership_version: int = 0
+    target_verify_decode_rows: bool = False
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
         return self.cu_seqlens_q[1 : 1 + bs] - 1
@@ -1745,6 +1746,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 c4_sparse_source_elided_for_graph=c4_sparse_source_elided,
                 c128_source_elided_for_graph=c128_source_elided,
                 swa_ownership_version=self._current_swa_ownership_version(),
+                target_verify_decode_rows=bool(is_target_verify),
             )
             self._record_metadata_build_bytes(batch, core)
             self._record_marlin_wna16_metadata_owners(batch, core)
@@ -3965,7 +3967,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )
             return out
 
-        if metadata.max_seqlen_q <= 1:
+        use_decode_row_splitk = bool(
+            metadata.max_seqlen_q <= 1 or metadata.target_verify_decode_rows
+        )
+        if use_decode_row_splitk:
             with dsv4_direct_copy_nvtx(
                 f"attention_boundary.swa_cache_to_q_dtype.splitk.layer{layer_id}.rows{rows}",
                 src=self.kvcache.swa_cache(layer_id),
@@ -3984,7 +3989,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )
             if fast is not None:
                 self._debug_sync_sparse_attention(
-                    backend="splitk",
+                    backend=(
+                        "splitk_target_verify"
+                        if metadata.target_verify_decode_rows
+                        else "splitk"
+                    ),
                     layer_id=layer_id,
                     rows=rows,
                     metadata=metadata,

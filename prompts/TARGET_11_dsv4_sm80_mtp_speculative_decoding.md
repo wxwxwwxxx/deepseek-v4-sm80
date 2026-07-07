@@ -96,6 +96,7 @@ Run these in order.
 | TARGET 11.29 | `prompts/TARGET_11.29_dsv4_sm80_mtp_target_verify_contract_port.md` | Port the explicit target-verify metadata/front-chain/C128 pending contract needed before accepted-KV commit can be exact. |
 | TARGET 11.295 | `prompts/TARGET_11.295_dsv4_sm80_mtp_online_c128_lifecycle_port.md` | Port or fail-closed the online C128 MTP pending/write/commit lifecycle that blocks accepted target-verify commit. |
 | TARGET 11.296 | `prompts/TARGET_11.296_dsv4_sm80_mtp_row0_logits_parity_after_commit.md` | After C128 lifecycle is ready but exactness still drifts, prove and fix row0 target-verify logits parity after accepted commit. |
+| TARGET 11.297 | `prompts/TARGET_11.297_dsv4_sm80_mtp_target_verify_batch_shape_hidden_parity.md` | After the visible row0 token drift is fixed but logits still differ, bisect normal one-row decode vs flattened target-verify row0 hidden parity. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -183,6 +184,9 @@ Do not promote MTP by default unless all of these are true:
 - If accepted commit is enabled but target-verify row0 logits diverge from
   normal target decode, stop at TARGET 11.296 and fix row0 parity before
   continuing to graph/perf.
+- If visible token exactness passes but row0 full logits still differ enough to
+  threaten stability, stop at TARGET 11.297 and find the first layer/submodule
+  owner before continuing to graph/perf.
 
 ## Deliverables
 

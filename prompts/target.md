@@ -49,7 +49,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed prefix baseline plus SWA/metadata history | Built DSV4 radix prefix cache, Route-B ownership, SWA lifecycle work, and direct replay metadata cleanup; detailed child targets remain as history for prefix/SWA correctness and capacity work. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | deferred | Low-precision research is paused after the INT8 MoE feasibility pass did not show an obvious short win; keep the evidence for later INT8/FP8 work. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
-| TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | active MTP route | MTP weights/oracle, V1 sidecar, and frozen-KV rollback correctness passed; TARGET 11.295 made C128 lifecycle ready but accepted commit still drifts, so next is TARGET 11.296 row0 logits parity before graph/perf. |
+| TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | active MTP route | MTP weights/oracle, V1 sidecar, and frozen-KV rollback correctness passed; TARGET 11.296 fixed visible bs=1 row0 token drift but full logits still differ, so next is TARGET 11.297 hidden-parity bisection before graph/perf. |
 
 ## Current Milestones
 
