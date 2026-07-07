@@ -19,6 +19,7 @@ from minisgl.utils import (
     div_even,
     dsv4_direct_copy_nvtx,
     dsv4_memory_debug,
+    dsv4_mtp_debug,
     dsv4_owner_timing,
     dsv4_prefix_debug,
 )
@@ -223,6 +224,7 @@ def _capture_debug_activation(
             include_integrity=True,
             extra={"activation_name": name},
         )
+    dsv4_mtp_debug.record_row0_tensor(batch, name, tensor)
     dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
 
 
@@ -2059,6 +2061,7 @@ class DSV4Attention(BaseOP):
                     num_local_groups=self.num_local_groups,
                     o_lora_rank=self.o_lora_rank,
                 )
+            _capture_debug_activation(f"layer{self.layer_id}.attention_wo_a_output", o)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_b"):
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
                 out = self.wo_b.forward_fp8_marlin_weight(
@@ -3277,6 +3280,7 @@ class DeepseekV4DecoderLayer(BaseOP):
         _record_warmup_memory("layer.hc_attn_post", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_post"):
             x = self._hc_post(y, residual, post, comb)
+            _capture_debug_activation(f"layer{layer_id}.post_attention_residual", x)
         _record_warmup_memory("layer.hc_attn_post", "after", layer_id=layer_id)
 
         residual = x
@@ -3298,6 +3302,7 @@ class DeepseekV4DecoderLayer(BaseOP):
         _record_warmup_memory("layer.hc_ffn_post", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_ffn_post"):
             output = self._hc_post(y, residual, post, comb)
+            _capture_debug_activation(f"layer{layer_id}.post_moe_residual", output)
         _record_warmup_memory("layer.hc_ffn_post", "after", layer_id=layer_id)
         _record_warmup_memory("layer.output", "after", layer_id=layer_id)
         return output
@@ -4399,6 +4404,7 @@ class DeepseekV4Model(BaseOP):
             _record_warmup_memory("decoder_layer", "after", layer_id=layer_id)
         _record_warmup_memory("model.hc_head", "before")
         hidden_states_before_norm = x.flatten(1)
+        _capture_debug_activation("hidden_before_final_norm", hidden_states_before_norm)
         with _dsv4_capture_nvtx("model.hc_head"):
             x = self._hc_head(x)
         _record_warmup_memory("model.hc_head", "after")
@@ -4469,6 +4475,7 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
             output = output[last_indices].contiguous()
             hidden_states_before_norm = hidden_states_before_norm[last_indices].contiguous()
         logits = self.lm_head.linear(output)
+        _capture_debug_activation("lm_head_logits", logits)
         return DSV4HiddenForwardOutput(
             logits=logits,
             hidden_states=output,

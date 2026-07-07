@@ -16,6 +16,7 @@ from minisgl.moe import create_moe_backend
 from minisgl.utils import (
     dsv4_direct_copy_nvtx,
     dsv4_memory_debug,
+    dsv4_mtp_debug,
     dsv4_prefix_debug,
     init_logger,
     is_sm90_supported,
@@ -141,9 +142,11 @@ class Engine:
             "target_verify_contract_trace": [],
             "c128_mtp_lifecycle_events": [],
             "row0_logits_debug": [],
+            "row0_layer_parity_debug": [],
             "accepted_commit_row_hashes": [],
             "last_batch": {},
         }
+        self._mtp_row0_layer_parity_oracle: dict[str, Any] | None = None
         self.ctx = Context(config.page_size)
         set_global_ctx(self.ctx)
 
@@ -869,6 +872,64 @@ class Engine:
                 }
             )
 
+    def _mtp_row0_debug_or_layer_parity_enabled(self) -> bool:
+        return _env_flag(_DSV4_MTP_ROW0_DEBUG_ENV) or dsv4_mtp_debug.row0_layer_parity_enabled()
+
+    def _record_mtp_row0_layer_parity_debug(
+        self,
+        verify_batch: Batch,
+        entries: list[dict[str, Any]],
+    ) -> None:
+        if not dsv4_mtp_debug.row0_layer_parity_enabled():
+            return
+        oracle = self._mtp_row0_layer_parity_oracle
+        target_trace = dsv4_mtp_debug.get_row0_layer_trace(verify_batch)
+        target_summary = dsv4_mtp_debug.export_row0_layer_trace(target_trace)
+        target_attention = dsv4_mtp_debug.export_attention_backend_trace(verify_batch)
+
+        event: dict[str, Any] = {
+            "trace_index": int(
+                len(self.mtp_spec_stats.setdefault("row0_layer_parity_debug", []))
+            ),
+            "mode": "mtp_target_verify_vs_row0_normal_oracle",
+            "target_trace": target_summary,
+            "target_attention_backend_trace": target_attention,
+            "target_entries": [
+                {
+                    "batch_index": int(entry["batch_index"]),
+                    "committed_seq_len": int(entry.get("committed_seq_len", -1)),
+                    "verify_len": int(entry["verify_len"]),
+                    "row_start": int(entry.get("row_start", -1)),
+                    "input_tokens": [
+                        int(tok.reshape(-1)[0].item())
+                        for tok in entry.get("verify_inputs", [])[:8]
+                    ],
+                }
+                for entry in entries[:4]
+            ],
+        }
+        if oracle is None:
+            event["error"] = "missing row0 normal oracle trace"
+        else:
+            oracle_trace = oracle.get("trace", [])
+            event["oracle_trace"] = oracle.get("trace_summary", [])
+            event["oracle_attention_backend_trace"] = oracle.get(
+                "attention_backend_trace", []
+            )
+            event["oracle_context"] = oracle.get("context", {})
+            event["comparison"] = dsv4_mtp_debug.compare_row0_layer_traces(
+                oracle_trace,
+                target_trace,
+                lhs_label="normal",
+                rhs_label="target_verify",
+            )
+
+        log = self.mtp_spec_stats.setdefault("row0_layer_parity_debug", [])
+        log.append(event)
+        if len(log) > 16:
+            del log[:-16]
+        self._mtp_row0_layer_parity_oracle = None
+
     def _mtp_row0_metadata_debug(self, batch: Batch) -> dict[str, Any]:
         core = getattr(getattr(batch, "attn_metadata", None), "core_metadata", None)
 
@@ -1265,7 +1326,7 @@ class Engine:
         }
 
     def _record_mtp_row0_normal_oracle_debug(self, entries: list[dict[str, Any]]) -> None:
-        if not _env_flag(_DSV4_MTP_ROW0_DEBUG_ENV):
+        if not self._mtp_row0_debug_or_layer_parity_enabled():
             return
         if not entries:
             return
@@ -1291,6 +1352,10 @@ class Engine:
                 [position],
                 read_only=False,
             )
+            dsv4_mtp_debug.reset_row0_layer_trace(
+                oracle_batch,
+                mode="mtp_row0_normal_oracle",
+            )
             self._sync_device_for_mtp_spec()
             with self.ctx.forward_batch(oracle_batch):
                 output = self.model.forward_with_hidden()
@@ -1313,6 +1378,25 @@ class Engine:
                     ],
                 },
             )
+            if dsv4_mtp_debug.row0_layer_parity_enabled():
+                self._mtp_row0_layer_parity_oracle = {
+                    "trace": dsv4_mtp_debug.get_row0_layer_trace(oracle_batch),
+                    "trace_summary": dsv4_mtp_debug.export_row0_layer_trace(
+                        oracle_batch
+                    ),
+                    "attention_backend_trace": (
+                        dsv4_mtp_debug.export_attention_backend_trace(oracle_batch)
+                    ),
+                    "context": {
+                        "oracle_for_committed_seq_len": int(req.cached_len),
+                        "oracle_for_verify_len": int(entry.get("verify_len", 0)),
+                        "oracle_for_input_tokens": [
+                            int(tok.reshape(-1)[0].item())
+                            for tok in entry.get("verify_inputs", [])[:8]
+                        ],
+                        "metadata": self._mtp_row0_metadata_debug(oracle_batch),
+                    },
+                }
         finally:
             self._restore_mtp_kv_snapshot(snapshot)
             self._sync_device_for_mtp_spec()
@@ -2033,6 +2117,10 @@ class Engine:
         verify_batch, restore, total_verify_tokens = self._make_mtp_flattened_verify_batch(
             entries
         )
+        dsv4_mtp_debug.reset_row0_layer_trace(
+            verify_batch,
+            mode="mtp_target_verify",
+        )
         all_real_locs = verify_batch.out_loc.to(device=self.device, dtype=torch.long)
         all_positions = verify_batch.positions.to(device=self.device, dtype=torch.long)
         pre_verify_snapshot = self._snapshot_mtp_kv_rows(all_real_locs, all_positions)
@@ -2076,6 +2164,7 @@ class Engine:
             self.mtp_spec_stats["target_verify_temp_kv_bytes"]
         ) + int(temp_kv_bytes)
         verify_shapes.append([len(entries), max_verify_len, int(total_verify_tokens)])
+        self._record_mtp_row0_layer_parity_debug(verify_batch, entries)
 
         logits = target_output.logits[:total_verify_tokens]
         if not bool(torch.isfinite(logits).all().item()):

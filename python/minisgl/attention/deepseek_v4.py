@@ -14,6 +14,7 @@ from minisgl.utils import (
     div_ceil,
     dsv4_direct_copy_nvtx,
     dsv4_memory_debug,
+    dsv4_mtp_debug,
     dsv4_owner_timing,
     dsv4_prefix_debug,
 )
@@ -234,6 +235,7 @@ def _capture_debug_activation(
         batch = get_global_ctx().batch
     except Exception:
         batch = None
+    dsv4_mtp_debug.record_row0_tensor(batch, name, tensor)
     dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
 
 
@@ -3965,6 +3967,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 attn_sink=attn_sink,
                 merged_output=out,
             )
+            dsv4_mtp_debug.record_attention_backend(
+                get_global_ctx().batch,
+                layer_id=layer_id,
+                backend="force_torch",
+                rows=rows,
+                metadata=metadata,
+                compress_ratio=compress_ratio or 0,
+            )
             return out
 
         use_decode_row_splitk = bool(
@@ -4018,6 +4028,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     attn_sink=attn_sink,
                     merged_output=fast,
                 )
+                dsv4_mtp_debug.record_attention_backend(
+                    get_global_ctx().batch,
+                    layer_id=layer_id,
+                    backend=(
+                        "splitk_target_verify"
+                        if metadata.target_verify_decode_rows
+                        else "splitk"
+                    ),
+                    rows=rows,
+                    metadata=metadata,
+                    compress_ratio=compress_ratio or 0,
+                )
                 return fast
 
         with dsv4_direct_copy_nvtx(
@@ -4063,8 +4085,24 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 attn_sink=attn_sink,
                 merged_output=fast,
             )
+            dsv4_mtp_debug.record_attention_backend(
+                get_global_ctx().batch,
+                layer_id=layer_id,
+                backend="base",
+                rows=rows,
+                metadata=metadata,
+                compress_ratio=compress_ratio or 0,
+            )
             return fast
         if compressed_cache is None:
+            dsv4_mtp_debug.record_attention_backend(
+                get_global_ctx().batch,
+                layer_id=layer_id,
+                backend="none",
+                rows=rows,
+                metadata=metadata,
+                compress_ratio=compress_ratio or 0,
+            )
             return None
         with dsv4_direct_copy_nvtx(
             f"attention_boundary.swa_cache_to_q_dtype.torch_fallback.layer{layer_id}.rows{rows}",
@@ -4095,6 +4133,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
             compress_ratio=compress_ratio,
             attn_sink=attn_sink,
             merged_output=out,
+        )
+        dsv4_mtp_debug.record_attention_backend(
+            get_global_ctx().batch,
+            layer_id=layer_id,
+            backend="torch_fallback",
+            rows=rows,
+            metadata=metadata,
+            compress_ratio=compress_ratio or 0,
         )
         return out
 

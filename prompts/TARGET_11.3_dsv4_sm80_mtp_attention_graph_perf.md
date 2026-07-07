@@ -2,7 +2,7 @@
 
 ## Goal
 
-After TARGET 11.297 proves exact accepted-KV commit for flattened verify and a
+After TARGET 11.298 proves exact accepted-KV commit for flattened verify and a
 rerun of the eager path proves useful target-pass reduction, align the DSV4
 attention/compressed metadata and CUDA graph path with SGLang enough to decide
 whether MTP should be kept as an opt-in, optimized further, or promoted.
@@ -14,7 +14,9 @@ until TARGET 11.295 resolves online C128 MTP pending/write/commit ownership.
 TARGET 11.295 made the C128 lifecycle ready but still found greedy drift.
 TARGET 11.296 fixed the visible bs=1 token drift, but row0 full logits still
 differed enough to require TARGET 11.297 hidden-parity bisection before this
-graph/perf target starts.
+graph/perf target starts.  TARGET 11.297 found the first owner at layer0
+`wo_a` projection, so TARGET 11.298 must close that projection batch-shape
+parity issue before this graph/perf target starts.
 
 ## Primary Question
 
