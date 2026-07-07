@@ -1583,9 +1583,11 @@ class DSV4Attention(BaseOP):
         attn_backend = getattr(get_global_ctx(), "attn_backend", None)
         attn_metadata = getattr(batch, "attn_metadata", None)
         use_dsv4_backend = isinstance(attn_metadata, DSV4AttentionMetadata)
+        read_only_frozen_kv = bool(getattr(batch, "frozen_kv_read_only", False))
         kv_norm_rope_store_enabled = (
             use_dsv4_backend
             and attn_backend is not None
+            and not read_only_frozen_kv
             and x.is_cuda
             and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_KV_BF16")
         )
@@ -1873,7 +1875,11 @@ class DSV4Attention(BaseOP):
                     indexer_kv,
                     row_indices=compressed_debug_rows,
                 )
-            if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
+            if (
+                use_dsv4_backend
+                and not read_only_frozen_kv
+                and hasattr(attn_backend, "store_indexer")
+            ):
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.indexer_store"):
                     indexer_store_norm_weight = None
                     if compress_store_fuses_norm:
@@ -1946,7 +1952,11 @@ class DSV4Attention(BaseOP):
                     compressed_kv,
                     row_indices=compressed_debug_rows,
                 )
-            if use_dsv4_backend and hasattr(attn_backend, "store_compressed"):
+            if (
+                use_dsv4_backend
+                and not read_only_frozen_kv
+                and hasattr(attn_backend, "store_compressed")
+            ):
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.compress_store"):
                     attn_backend.store_compressed(
                         self.layer_id,

@@ -401,10 +401,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 "DSV4AttentionBackend requires DSV4AttentionMetadata. "
                 "Call prepare_metadata before DSV4 model forward."
             )
+        read_only_frozen_kv = bool(getattr(batch, "frozen_kv_read_only", False))
         ratio = compress_ratio
         if ratio is None:
             ratio = self.get_layer_compress_ratio(layer_id)
-        if not swa_cache_written:
+        if not read_only_frozen_kv and not swa_cache_written:
             if layer_id == 0:
                 self._debug_check_swa_write_liveness(
                     batch.out_loc,
@@ -444,6 +445,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> None:
         metadata = batch.attn_metadata
         if not isinstance(metadata, DSV4AttentionMetadata):
+            return
+        if bool(getattr(batch, "frozen_kv_read_only", False)):
             return
         compress_metadata = (
             metadata.c4_compress_metadata
@@ -502,6 +505,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> None:
         metadata = batch.attn_metadata
         if not isinstance(metadata, DSV4AttentionMetadata):
+            return
+        if bool(getattr(batch, "frozen_kv_read_only", False)):
             return
         compress_metadata = metadata.c4_compress_metadata
         if compress_metadata is None:

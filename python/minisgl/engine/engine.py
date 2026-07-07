@@ -61,6 +61,10 @@ class ForwardOutput(NamedTuple):
     next_tokens_gpu: torch.Tensor
     next_tokens_cpu: torch.Tensor
     copy_done_event: torch.cuda.Event
+    accepted_tokens_gpu: torch.Tensor | None = None
+    accepted_tokens_cpu: torch.Tensor | None = None
+    accepted_lens_cpu: torch.Tensor | None = None
+    accepted_lens: tuple[int, ...] | None = None
 
 
 class Engine:
@@ -85,6 +89,9 @@ class Engine:
             getattr(config, "dsv4_mtp_spec_draft_len", 1) or 1
         )
         self._mtp_pending_draft_tokens: dict[int, int] = {}
+        acceptance_histogram = {
+            str(i): 0 for i in range(max(int(self.dsv4_mtp_spec_draft_len), 1) + 1)
+        }
         self.mtp_spec_stats: dict[str, Any] = {
             "enabled": bool(self.enable_dsv4_mtp_speculative),
             "draft_len": int(self.dsv4_mtp_spec_draft_len),
@@ -92,14 +99,23 @@ class Engine:
             "draft_tokens_verified": 0,
             "draft_tokens_accepted": 0,
             "draft_tokens_rejected": 0,
-            "acceptance_histogram": {"0": 0, "1": 0},
+            "target_correction_tokens": 0,
+            "target_fallback_tokens": 0,
+            "emitted_tokens": 0,
+            "acceptance_histogram": acceptance_histogram,
             "target_calls": 0,
+            "target_verify_calls": 0,
             "draft_calls": 0,
             "target_latency_s": 0.0,
+            "target_verify_latency_s": 0.0,
             "draft_latency_s": 0.0,
+            "scheduler_overhead_s": 0.0,
             "finite_failures": 0,
             "fallback_sampling_batches": 0,
             "fallback_missing_mtp_batches": 0,
+            "fallback_page_boundary_tokens": 0,
+            "fallback_empty_draft_batches": 0,
+            "target_verify_batch_shapes": [],
             "last_batch": {},
         }
         self.ctx = Context(config.page_size)
@@ -639,36 +655,277 @@ class Engine:
                 self.mtp_spec_stats["fallback_missing_mtp_batches"]
             ) + 1
             return False
-        if int(self.dsv4_mtp_spec_draft_len) != 1:
+        if int(self.dsv4_mtp_spec_draft_len) not in {1, 2, 4}:
             raise RuntimeError(
-                "DeepSeek V4 MTP speculative V1 only supports draft_len=1, got "
+                "DeepSeek V4 MTP speculative frozen-KV runtime supports "
+                "draft_len in {1, 2, 4}, got "
                 f"{self.dsv4_mtp_spec_draft_len}."
             )
         return batch.size > 0
 
-    def _record_mtp_spec_verification(
+    def _allocated_kv_token_limit(self, req: Req) -> int:
+        page_size = max(int(self.ctx.page_size), 1)
+        return ((int(req.cached_len) + page_size - 1) // page_size) * page_size
+
+    def _is_stop_token_for_req(self, req: Req, token: torch.Tensor) -> bool:
+        eos_token_id = getattr(self, "eos_token_id", None)
+        if eos_token_id is None or req.sampling_params.ignore_eos:
+            return False
+        return int(token.reshape(-1)[0].item()) == int(eos_token_id)
+
+    def _make_mtp_frozen_batch(
+        self,
+        reqs: list[Req],
+        input_ids: torch.Tensor,
+        positions: list[int],
+        *,
+        read_only: bool,
+    ) -> Batch:
+        mtp_batch = Batch(reqs=reqs, phase="decode", frozen_kv_read_only=read_only)
+        mtp_batch.padded_reqs = reqs
+        mtp_batch.input_ids = input_ids.to(device=self.device, dtype=torch.int32)
+        mtp_batch.positions = torch.tensor(positions, dtype=torch.int32, device=self.device)
+        table = torch.tensor([req.table_idx for req in reqs], dtype=torch.long, device=self.device)
+        pos = mtp_batch.positions.to(dtype=torch.long)
+        mtp_batch.out_loc = self.page_table[table, pos].to(dtype=torch.int32)
+        self.attn_backend.prepare_metadata(mtp_batch)
+        return mtp_batch
+
+    def _record_mtp_acceptance_histogram(self, accepted_prefix_lens: list[int]) -> None:
+        histogram = self.mtp_spec_stats["acceptance_histogram"]
+        for accepted_len in accepted_prefix_lens:
+            key = str(int(accepted_len))
+            histogram[key] = int(histogram.get(key, 0)) + 1
+
+    def _propose_mtp_spec_drafts(
         self,
         batch: Batch,
         next_tokens_gpu: torch.Tensor,
-    ) -> dict[str, int]:
-        target_tokens = [int(x) for x in next_tokens_gpu.detach().cpu().tolist()]
+        hidden_states_before_norm: torch.Tensor,
+        mtp_positions: list[int],
+    ) -> dict[str, Any]:
+        draft_len = int(self.dsv4_mtp_spec_draft_len)
+        entries: list[dict[str, Any]] = []
+        for i, req in enumerate(batch.reqs):
+            if self._is_stop_token_for_req(req, next_tokens_gpu[i : i + 1]):
+                continue
+            max_steps = min(draft_len, max(int(req.remain_len), 0))
+            if max_steps <= 0:
+                continue
+            entries.append(
+                {
+                    "batch_index": i,
+                    "req": req,
+                    "max_steps": max_steps,
+                    "position": int(mtp_positions[i]),
+                    "prev_token": next_tokens_gpu[i : i + 1].contiguous(),
+                    "prev_hidden": hidden_states_before_norm[i : i + 1].contiguous(),
+                    "tokens": [],
+                }
+            )
+
+        if not entries:
+            self.mtp_spec_stats["fallback_empty_draft_batches"] = int(
+                self.mtp_spec_stats["fallback_empty_draft_batches"]
+            ) + 1
+            return {"proposed": 0, "finite": True, "draft_tokens_by_index": {}}
+
+        proposed = 0
+        for step in range(draft_len):
+            active = [entry for entry in entries if step < int(entry["max_steps"])]
+            if not active:
+                break
+            draft_input = torch.cat([entry["prev_token"] for entry in active], dim=0).to(
+                device=self.device, dtype=torch.int32
+            )
+            draft_hidden = torch.cat([entry["prev_hidden"] for entry in active], dim=0).contiguous()
+            mtp_batch = self._make_mtp_frozen_batch(
+                [entry["req"] for entry in active],
+                draft_input,
+                [int(entry["position"]) for entry in active],
+                read_only=True,
+            )
+
+            self._sync_device_for_mtp_spec()
+            start_s = time.perf_counter()
+            with self.ctx.forward_batch(mtp_batch):
+                mtp_output = self.model.mtp_forward_one_step(draft_input, draft_hidden)
+                self._debug_sync_forward(
+                    "after_mtp_forward",
+                    mtp_batch,
+                    "mtp_spec_frozen_kv_read_only_draft",
+                )
+            self._sync_device_for_mtp_spec()
+            self.mtp_spec_stats["draft_latency_s"] = float(
+                self.mtp_spec_stats["draft_latency_s"]
+            ) + (time.perf_counter() - start_s)
+            self.mtp_spec_stats["draft_calls"] = int(self.mtp_spec_stats["draft_calls"]) + 1
+
+            mtp_logits = mtp_output.logits[: len(active)]
+            finite = bool(torch.isfinite(mtp_logits).all().item())
+            if not finite:
+                self.mtp_spec_stats["finite_failures"] = int(
+                    self.mtp_spec_stats["finite_failures"]
+                ) + 1
+                raise RuntimeError("DeepSeek V4 MTP speculative draft produced NaN/Inf logits.")
+
+            draft_tokens = torch.argmax(mtp_logits, dim=-1).to(torch.int32)
+            proposed += int(draft_tokens.numel())
+            for row, entry in enumerate(active):
+                token = draft_tokens[row : row + 1].contiguous()
+                entry["tokens"].append(token)
+                entry["prev_token"] = token
+                entry["prev_hidden"] = mtp_output.hidden_states_before_norm[
+                    row : row + 1
+                ].contiguous()
+
+        self.mtp_spec_stats["draft_tokens_proposed"] = int(
+            self.mtp_spec_stats["draft_tokens_proposed"]
+        ) + proposed
+        draft_tokens_by_index = {
+            int(entry["batch_index"]): [tok for tok in entry["tokens"]] for entry in entries
+        }
+        return {
+            "proposed": proposed,
+            "finite": True,
+            "draft_tokens_by_index": draft_tokens_by_index,
+        }
+
+    def _verify_mtp_spec_drafts(
+        self,
+        batch: Batch,
+        first_tokens_gpu: torch.Tensor,
+        draft_tokens_by_index: dict[int, list[torch.Tensor]],
+        emitted_tokens: list[list[torch.Tensor]],
+    ) -> dict[str, Any]:
+        draft_len = int(self.dsv4_mtp_spec_draft_len)
+        states: dict[int, dict[str, Any]] = {}
+        for i, req in enumerate(batch.reqs):
+            drafts = draft_tokens_by_index.get(i, [])
+            if drafts and req.can_decode:
+                states[i] = {
+                    "req": req,
+                    "drafts": drafts,
+                    "prev_token": first_tokens_gpu[i : i + 1].contiguous(),
+                    "accepted_prefix": 0,
+                    "draft_active": True,
+                }
+
+        verified = 0
         accepted = 0
         rejected = 0
-        verified = 0
-        for req, target_token in zip(batch.reqs, target_tokens):
-            draft_token = self._mtp_pending_draft_tokens.pop(int(req.uid), None)
-            if draft_token is None:
-                continue
-            verified += 1
-            if int(draft_token) == int(target_token):
-                accepted += 1
-                hist_key = "1"
-            else:
-                rejected += 1
-                hist_key = "0"
-            histogram = self.mtp_spec_stats["acceptance_histogram"]
-            histogram[hist_key] = int(histogram.get(hist_key, 0)) + 1
+        correction_tokens = 0
+        target_fallback_tokens = 0
+        page_boundary_stops = 0
+        verify_shapes: list[list[int]] = []
+        accepted_prefix_lens = [0] * len(batch.reqs)
 
+        for depth in range(draft_len):
+            rows: list[tuple[int, dict[str, Any]]] = []
+            for batch_index, entry in states.items():
+                req = entry["req"]
+                if not req.can_decode:
+                    continue
+                if int(req.cached_len) >= self._allocated_kv_token_limit(req):
+                    page_boundary_stops += 1
+                    continue
+                rows.append((batch_index, entry))
+            if not rows:
+                break
+
+            input_ids = torch.cat([entry["prev_token"] for _, entry in rows], dim=0).to(
+                device=self.device, dtype=torch.int32
+            )
+            verify_positions = [int(entry["req"].cached_len) for _, entry in rows]
+            verify_batch = self._make_mtp_frozen_batch(
+                [entry["req"] for _, entry in rows],
+                input_ids,
+                verify_positions,
+                read_only=False,
+            )
+
+            self._sync_device_for_mtp_spec()
+            start_s = time.perf_counter()
+            with self.ctx.forward_batch(verify_batch):
+                self.graph_runner.record_eager_decode(verify_batch)
+                target_output = self.model.forward_with_hidden()
+                self._debug_sync_forward(
+                    "after_mtp_target_verify",
+                    verify_batch,
+                    "mtp_spec_target_verify",
+                )
+            self._sync_device_for_mtp_spec()
+            elapsed = time.perf_counter() - start_s
+            self.mtp_spec_stats["target_latency_s"] = float(
+                self.mtp_spec_stats["target_latency_s"]
+            ) + elapsed
+            self.mtp_spec_stats["target_verify_latency_s"] = float(
+                self.mtp_spec_stats["target_verify_latency_s"]
+            ) + elapsed
+            self.mtp_spec_stats["target_calls"] = int(self.mtp_spec_stats["target_calls"]) + 1
+            self.mtp_spec_stats["target_verify_calls"] = int(
+                self.mtp_spec_stats["target_verify_calls"]
+            ) + 1
+            verify_shapes.append([len(rows), 1])
+
+            logits = target_output.logits[: len(rows)]
+            if not bool(torch.isfinite(logits).all().item()):
+                self.mtp_spec_stats["finite_failures"] = int(
+                    self.mtp_spec_stats["finite_failures"]
+                ) + 1
+                raise RuntimeError("DeepSeek V4 MTP target verify produced NaN/Inf logits.")
+            target_tokens = torch.argmax(logits, dim=-1).to(torch.int32)
+
+            next_states: dict[int, dict[str, Any]] = {}
+            for row, (batch_index, entry) in enumerate(rows):
+                req = entry["req"]
+                target_token = target_tokens[row : row + 1].contiguous()
+                req.complete_one()
+
+                draft_token = (
+                    entry["drafts"][depth]
+                    if bool(entry["draft_active"]) and depth < len(entry["drafts"])
+                    else None
+                )
+                if draft_token is not None:
+                    verified += 1
+                    if bool((target_token == draft_token.to(device=self.device)).all().item()):
+                        accepted += 1
+                        entry["accepted_prefix"] = int(entry["accepted_prefix"]) + 1
+                        accepted_prefix_lens[batch_index] = int(entry["accepted_prefix"])
+                        emitted_tokens[batch_index].append(draft_token.contiguous())
+                        entry["prev_token"] = draft_token.contiguous()
+                        if (
+                            req.can_decode
+                            and depth + 1 < draft_len
+                            and not self._is_stop_token_for_req(req, draft_token)
+                        ):
+                            next_states[batch_index] = entry
+                    else:
+                        rejected += 1
+                        correction_tokens += 1
+                        emitted_tokens[batch_index].append(target_token)
+                        entry["prev_token"] = target_token
+                        entry["draft_active"] = False
+                        if (
+                            req.can_decode
+                            and depth + 1 < draft_len
+                            and not self._is_stop_token_for_req(req, target_token)
+                        ):
+                            next_states[batch_index] = entry
+                else:
+                    target_fallback_tokens += 1
+                    emitted_tokens[batch_index].append(target_token)
+                    entry["prev_token"] = target_token
+                    if (
+                        req.can_decode
+                        and depth + 1 < draft_len
+                        and not self._is_stop_token_for_req(req, target_token)
+                    ):
+                        next_states[batch_index] = entry
+            states = next_states
+
+        self._record_mtp_acceptance_histogram(accepted_prefix_lens)
         self.mtp_spec_stats["draft_tokens_verified"] = int(
             self.mtp_spec_stats["draft_tokens_verified"]
         ) + verified
@@ -678,78 +935,49 @@ class Engine:
         self.mtp_spec_stats["draft_tokens_rejected"] = int(
             self.mtp_spec_stats["draft_tokens_rejected"]
         ) + rejected
-        return {"verified": verified, "accepted": accepted, "rejected": rejected}
-
-    def _propose_mtp_spec_drafts(
-        self,
-        batch: Batch,
-        next_tokens_gpu: torch.Tensor,
-        hidden_states_before_norm: torch.Tensor,
-        mtp_positions: list[int],
-    ) -> dict[str, Any]:
-        eligible: list[tuple[int, Req]] = [
-            (i, req) for i, req in enumerate(batch.reqs) if bool(req.can_decode)
-        ]
-        for req in batch.reqs:
-            if not req.can_decode:
-                self._mtp_pending_draft_tokens.pop(int(req.uid), None)
-        if not eligible:
-            return {"proposed": 0, "finite": True}
-
-        indices = torch.tensor(
-            [i for i, _ in eligible],
-            dtype=torch.long,
-            device=self.device,
-        )
-        eligible_reqs = [req for _, req in eligible]
-        draft_input = next_tokens_gpu.index_select(0, indices).contiguous()
-        draft_hidden = hidden_states_before_norm.index_select(0, indices).contiguous()
-
-        mtp_batch = Batch(reqs=eligible_reqs, phase="decode")
-        mtp_batch.padded_reqs = eligible_reqs
-        mtp_batch.input_ids = draft_input
-        mtp_batch.positions = torch.tensor(
-            [int(mtp_positions[i]) for i, _ in eligible],
-            dtype=torch.int32,
-            device=self.device,
-        )
-        # No DSV4AttentionMetadata here: V1 lets the draft run as a no-store
-        # sidecar so rejected draft tokens cannot mutate target KV/cache state.
-        mtp_batch.out_loc = torch.empty(len(eligible_reqs), dtype=torch.int32, device=self.device)
-
-        self._sync_device_for_mtp_spec()
-        start_s = time.perf_counter()
-        with self.ctx.forward_batch(mtp_batch):
-            mtp_output = self.model.mtp_forward_one_step(draft_input, draft_hidden)
-            self._debug_sync_forward("after_mtp_forward", mtp_batch, "mtp_spec_no_store_draft")
-        self._sync_device_for_mtp_spec()
-        self.mtp_spec_stats["draft_latency_s"] = float(
-            self.mtp_spec_stats["draft_latency_s"]
-        ) + (time.perf_counter() - start_s)
-        self.mtp_spec_stats["draft_calls"] = int(self.mtp_spec_stats["draft_calls"]) + 1
-
-        mtp_logits = mtp_output.logits[: len(eligible_reqs)]
-        finite = bool(torch.isfinite(mtp_logits).all().item())
-        if not finite:
-            self.mtp_spec_stats["finite_failures"] = int(
-                self.mtp_spec_stats["finite_failures"]
-            ) + 1
-            raise RuntimeError("DeepSeek V4 MTP speculative draft produced NaN/Inf logits.")
-
-        draft_tokens = torch.argmax(mtp_logits, dim=-1).to(torch.int32)
-        draft_tokens_cpu = [int(x) for x in draft_tokens.detach().cpu().tolist()]
-        for req, draft_token in zip(eligible_reqs, draft_tokens_cpu):
-            self._mtp_pending_draft_tokens[int(req.uid)] = int(draft_token)
-
-        proposed = len(eligible_reqs)
-        self.mtp_spec_stats["draft_tokens_proposed"] = int(
-            self.mtp_spec_stats["draft_tokens_proposed"]
-        ) + proposed
+        self.mtp_spec_stats["target_correction_tokens"] = int(
+            self.mtp_spec_stats["target_correction_tokens"]
+        ) + correction_tokens
+        self.mtp_spec_stats["target_fallback_tokens"] = int(
+            self.mtp_spec_stats.get("target_fallback_tokens", 0)
+        ) + target_fallback_tokens
+        self.mtp_spec_stats["fallback_page_boundary_tokens"] = int(
+            self.mtp_spec_stats["fallback_page_boundary_tokens"]
+        ) + page_boundary_stops
+        shape_log = self.mtp_spec_stats["target_verify_batch_shapes"]
+        shape_log.extend(verify_shapes)
+        if len(shape_log) > 64:
+            del shape_log[:-64]
         return {
-            "proposed": proposed,
-            "finite": finite,
-            "draft_tokens": draft_tokens_cpu,
+            "verified": verified,
+            "accepted": accepted,
+            "rejected": rejected,
+            "correction_tokens": correction_tokens,
+            "target_fallback_tokens": target_fallback_tokens,
+            "page_boundary_stops": page_boundary_stops,
+            "accepted_prefix_lens": accepted_prefix_lens,
+            "verify_shapes": verify_shapes,
         }
+
+    def _pack_accepted_tokens(
+        self,
+        emitted_tokens: list[list[torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, tuple[int, ...]]:
+        bs = len(emitted_tokens)
+        max_len = max((len(tokens) for tokens in emitted_tokens), default=1)
+        accepted_gpu = torch.zeros((bs, max_len), dtype=torch.int32, device=self.device)
+        lens_values = tuple(int(len(tokens)) for tokens in emitted_tokens)
+        lens = torch.tensor(lens_values, dtype=torch.int32, device=self.device)
+        for i, tokens in enumerate(emitted_tokens):
+            if tokens:
+                accepted_gpu[i, : len(tokens)] = torch.cat(tokens, dim=0).to(
+                    device=self.device,
+                    dtype=torch.int32,
+                )
+        first_gpu = accepted_gpu[:, 0].contiguous()
+        accepted_cpu = accepted_gpu.to("cpu", non_blocking=True)
+        lens_cpu = lens.to("cpu", non_blocking=True)
+        return first_gpu, accepted_gpu, accepted_cpu, lens_cpu, lens_values
 
     def _forward_batch_mtp_spec_greedy(
         self,
@@ -828,12 +1056,20 @@ class Engine:
             next_tokens_gpu = self.sampler.sample(logits, args).to(torch.int32)
         self._debug_sync_forward("after_sampler", batch, forward_source)
 
-        verification = self._record_mtp_spec_verification(batch, next_tokens_gpu)
+        emitted_tokens: list[list[torch.Tensor]] = [
+            [next_tokens_gpu[i : i + 1].contiguous()] for i in range(batch.size)
+        ]
         draft = self._propose_mtp_spec_drafts(
             batch,
             next_tokens_gpu,
             target_output.hidden_states_before_norm[: batch.size],
             mtp_positions,
+        )
+        verification = self._verify_mtp_spec_drafts(
+            batch,
+            next_tokens_gpu,
+            draft["draft_tokens_by_index"],
+            emitted_tokens,
         )
         self.mtp_spec_stats["last_batch"] = {
             "phase": batch.phase,
@@ -841,8 +1077,15 @@ class Engine:
             "verified": int(verification["verified"]),
             "accepted": int(verification["accepted"]),
             "rejected": int(verification["rejected"]),
+            "correction_tokens": int(verification["correction_tokens"]),
+            "target_fallback_tokens": int(verification["target_fallback_tokens"]),
             "proposed": int(draft["proposed"]),
+            "accepted_lens": [len(tokens) for tokens in emitted_tokens],
+            "accepted_prefix_lens": verification["accepted_prefix_lens"],
         }
+        self.mtp_spec_stats["emitted_tokens"] = int(self.mtp_spec_stats["emitted_tokens"]) + sum(
+            len(tokens) for tokens in emitted_tokens
+        )
 
         dsv4_memory_debug.record_owner_tensor(
             owner_label="engine.sampler.next_tokens_gpu",
@@ -868,13 +1111,28 @@ class Engine:
                 stage_label="after_first_decode_release",
             )
         with dsv4_direct_copy_nvtx(
-            f"sampler_logits_staging.next_tokens_to_cpu.bs{batch.size}",
+            f"sampler_logits_staging.accepted_tokens_to_cpu.bs{batch.size}",
             next_tokens=next_tokens_gpu,
         ):
-            next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
+            (
+                next_tokens_gpu,
+                accepted_tokens_gpu,
+                accepted_tokens_cpu,
+                accepted_lens_cpu,
+                accepted_lens,
+            ) = self._pack_accepted_tokens(emitted_tokens)
+            next_tokens_cpu = accepted_tokens_cpu[:, 0].contiguous()
         copy_done_event = self._acquire_copy_done_event()
         copy_done_event.record(self.stream)
-        return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
+        return ForwardOutput(
+            next_tokens_gpu,
+            next_tokens_cpu,
+            copy_done_event,
+            accepted_tokens_gpu=accepted_tokens_gpu,
+            accepted_tokens_cpu=accepted_tokens_cpu,
+            accepted_lens_cpu=accepted_lens_cpu,
+            accepted_lens=accepted_lens,
+        )
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
@@ -1097,14 +1355,14 @@ def _adjust_config(config: EngineConfig):
             else getattr(config, "dsv4_mtp_spec_draft_len", 1)
         )
         if spec_enabled:
-            if draft_len != 1:
+            if draft_len not in {1, 2, 4}:
                 raise ValueError(
-                    "DeepSeek V4 MTP speculative V1 only supports "
-                    f"draft_len=1, got {draft_len}."
+                    "DeepSeek V4 MTP speculative frozen-KV runtime supports "
+                    f"draft_len in {{1, 2, 4}}, got {draft_len}."
                 )
             override("enable_dsv4_mtp_speculative", True)
             override("enable_dsv4_mtp", True)
-            override("dsv4_mtp_spec_draft_len", 1)
+            override("dsv4_mtp_spec_draft_len", draft_len)
             override("allow_dsv4_cuda_graph", False)
             override("cuda_graph_bs", [])
             override("cuda_graph_max_bs", 0)
@@ -1113,7 +1371,8 @@ def _adjust_config(config: EngineConfig):
             os.environ[_DSV4_EXPERIMENTAL_MTP_ENV] = "1"
             logger.info_rank0(
                 "Opting in to experimental DeepSeek V4 greedy MTP speculative "
-                "sidecar: draft_len=1, sampling disabled, CUDA graph disabled."
+                f"frozen-KV runtime: draft_len={draft_len}, sampling disabled, "
+                "CUDA graph disabled."
             )
         if getattr(config, "enable_dsv4_mtp", False) or _env_flag(_DSV4_EXPERIMENTAL_MTP_ENV):
             os.environ[_DSV4_EXPERIMENTAL_MTP_ENV] = "1"

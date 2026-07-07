@@ -74,6 +74,7 @@ class Req:
 class Batch:
     reqs: List[Req]
     phase: Literal["prefill", "decode"]
+    frozen_kv_read_only: bool = False
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
     positions: torch.Tensor = field(init=False)

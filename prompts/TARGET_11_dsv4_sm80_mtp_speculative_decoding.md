@@ -91,7 +91,8 @@ Run these in order.
 | TARGET 11.1 | `prompts/TARGET_11.1_dsv4_sm80_mtp_weight_oracle.md` | Load and run the MTP layer/head behind an opt-in, without changing scheduler semantics.  Build a one-step oracle and memory ledger. |
 | TARGET 11.2 | `prompts/TARGET_11.2_dsv4_sm80_mtp_spec_runtime_v1.md` | Add a conservative greedy top-k 1 speculative runtime with target verification and exact-output gates. |
 | TARGET 11.25 | `prompts/TARGET_11.25_dsv4_sm80_mtp_frozen_kv_verify_runtime.md` | Turn the V1 sidecar into a real frozen-KV draft plus multi-token verify/accept runtime, still eager/no-graph. |
-| TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After 11.25 proves exact greedy runtime and useful acceptance, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
+| TARGET 11.27 | `prompts/TARGET_11.27_dsv4_sm80_mtp_flattened_verify_temp_kv.md` | Replace the sequential verifier with a flattened/temp-KV verify path so MTP can reduce target passes while preserving exact ownership. |
+| TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After 11.27 proves useful eager target-pass reduction, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
 

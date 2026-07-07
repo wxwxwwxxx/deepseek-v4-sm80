@@ -147,6 +147,7 @@ class Scheduler(SchedulerIOMixin):
         self.finished_reqs: Set[Req] = set()
         self.tokenizer = load_tokenizer(config.model_path)
         self.eos_token_id = self.tokenizer.eos_token_id
+        self.engine.eos_token_id = self.eos_token_id
         self.token_pool = self.table_manager.token_pool
         self.prefill_budget = config.max_extend_tokens
         self._dsv4_prepare_sync_debug = (
@@ -221,7 +222,9 @@ class Scheduler(SchedulerIOMixin):
         if last_data is None:
             return
 
-        batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
+        batch, forward_output = last_data[0].batch, last_data[1]
+        next_tokens_cpu = forward_output.next_tokens_cpu
+        copy_done = forward_output.copy_done_event
         copy_done.synchronize()
         self.engine.release_copy_done_event(copy_done)
         reply: List[DetokenizeMsg] = []
@@ -230,13 +233,33 @@ class Scheduler(SchedulerIOMixin):
             for i, req in enumerate(batch.reqs):
                 if isinstance(req, ChunkedReq):
                     continue
-                next_token = next_tokens_cpu[i]
-                req.append_host(next_token.unsqueeze(0))
-                next_token = int(next_token.item())
-                finished = not req.can_decode
-                if not req.sampling_params.ignore_eos:
-                    finished |= next_token == self.eos_token_id
-                reply.append(DetokenizeMsg(uid=req.uid, next_token=next_token, finished=finished))
+                accepted_tokens_cpu = forward_output.accepted_tokens_cpu
+                accepted_lens = forward_output.accepted_lens
+                if accepted_tokens_cpu is None or accepted_lens is None:
+                    tokens = next_tokens_cpu[i : i + 1]
+                    token_count = 1
+                else:
+                    token_count = int(accepted_lens[i])
+                    tokens = accepted_tokens_cpu[i, :token_count]
+
+                finished = False
+                for token_idx, next_token_tensor in enumerate(tokens):
+                    req.append_host(next_token_tensor.reshape(1))
+                    next_token = int(next_token_tensor.item())
+                    is_last_emitted = token_idx == token_count - 1
+                    token_finished = is_last_emitted and not req.can_decode
+                    if not req.sampling_params.ignore_eos and next_token == self.eos_token_id:
+                        token_finished = True
+                    finished = bool(token_finished)
+                    reply.append(
+                        DetokenizeMsg(
+                            uid=req.uid,
+                            next_token=next_token,
+                            finished=finished,
+                        )
+                    )
+                    if finished:
+                        break
 
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in self.finished_reqs:
@@ -486,7 +509,17 @@ class Scheduler(SchedulerIOMixin):
             output_mapping=output_mapping[0],
             next_tokens=forward_output.next_tokens_gpu,
         ):
-            self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+            if forward_output.accepted_tokens_gpu is None or forward_output.accepted_lens is None:
+                self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+            else:
+                accepted_tokens = forward_output.accepted_tokens_gpu
+                for i, req in enumerate(batch.reqs):
+                    accepted_len = int(forward_output.accepted_lens[i])
+                    if accepted_len <= 0:
+                        continue
+                    start = int(req.device_len) - accepted_len
+                    end = start + accepted_len
+                    self.token_pool[req.table_idx, start:end] = accepted_tokens[i, :accepted_len]
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 

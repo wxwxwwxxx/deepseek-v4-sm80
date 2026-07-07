@@ -145,8 +145,9 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         type=int,
         default=ServerArgs.dsv4_mtp_spec_draft_len,
         help=(
-            "DeepSeek V4 MTP speculative draft length. V1 only supports 1 and "
-            "does not implement sampling or top-k>1 tree speculation."
+            "DeepSeek V4 MTP speculative draft length. Supports 1, 2, or 4 "
+            "for greedy top-k=1 frozen-KV verification; sampling and top-k>1 "
+            "tree speculation are not implemented."
         ),
     )
 
