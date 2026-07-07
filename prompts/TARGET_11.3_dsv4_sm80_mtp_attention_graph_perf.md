@@ -2,7 +2,7 @@
 
 ## Goal
 
-After TARGET 11.295 proves exact accepted-KV commit for flattened verify and a
+After TARGET 11.296 proves exact accepted-KV commit for flattened verify and a
 rerun of the eager path proves useful target-pass reduction, align the DSV4
 attention/compressed metadata and CUDA graph path with SGLang enough to decide
 whether MTP should be kept as an opt-in, optimized further, or promoted.
@@ -11,6 +11,9 @@ Do not run this target before accepted-KV commit exactness and target-pass
 reduction gates pass.  TARGET 11.29 found that target-verify metadata and
 acceptance bookkeeping can be owned in mini, but accepted commit remains blocked
 until TARGET 11.295 resolves online C128 MTP pending/write/commit ownership.
+TARGET 11.295 made the C128 lifecycle ready but still found greedy drift, so
+TARGET 11.296 must prove row0 target-verify logits parity before this graph/perf
+target starts.
 
 ## Primary Question
 
@@ -79,7 +82,9 @@ baseline.
 Record:
 
 - output tok/s and request latency;
-- average accepted tokens;
+- average accepted draft tokens;
+- committed target-verify rows, separated into accepted draft rows and
+  correction rows where available;
 - target verify batch shape;
 - graph replay/eager counts;
 - CUDA graph memory delta;

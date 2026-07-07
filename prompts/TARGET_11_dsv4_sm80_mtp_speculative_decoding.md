@@ -95,6 +95,7 @@ Run these in order.
 | TARGET 11.28 | `prompts/TARGET_11.28_dsv4_sm80_mtp_accepted_kv_commit_root_cause.md` | Root-cause why accepted flattened verify KV commit changes later greedy output; required after the 11.27 rollback-only no-go. |
 | TARGET 11.29 | `prompts/TARGET_11.29_dsv4_sm80_mtp_target_verify_contract_port.md` | Port the explicit target-verify metadata/front-chain/C128 pending contract needed before accepted-KV commit can be exact. |
 | TARGET 11.295 | `prompts/TARGET_11.295_dsv4_sm80_mtp_online_c128_lifecycle_port.md` | Port or fail-closed the online C128 MTP pending/write/commit lifecycle that blocks accepted target-verify commit. |
+| TARGET 11.296 | `prompts/TARGET_11.296_dsv4_sm80_mtp_row0_logits_parity_after_commit.md` | After C128 lifecycle is ready but exactness still drifts, prove and fix row0 target-verify logits parity after accepted commit. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -112,6 +113,45 @@ similar" text as a passing result.
 For sampling modes, defer exact distributional testing until after greedy
 correctness and throughput are proven.  The first implementation may be greedy
 only.
+
+## Speculative Stats Glossary
+
+Keep MTP stats precise.  Draft acceptance, target correction, and target-verify
+row commit are related but not identical.
+
+```text
+draft_tokens_proposed:
+    tokens produced by the MTP draft path.
+draft_tokens_verified:
+    draft tokens compared against target-verify outputs.
+draft_tokens_accepted:
+    draft tokens whose value matched target verify and became visible output.
+draft_tokens_rejected:
+    draft tokens whose value did not match target verify.
+target_correction_tokens:
+    target-model tokens emitted at the first rejection point.
+target_verify_rows:
+    rows computed by the target verify forward; these may include accepted
+    draft rows, correction rows, and bonus/tail rows.
+target_verify_rows_committed:
+    target-verify rows made visible in target KV/component/state.
+accepted_kv_copied_tokens:
+    historical mini stat for committed target-verify rows.  Do not interpret it
+    as accepted draft token count unless a child target proves the row category.
+```
+
+It is normal for MTP draft tokens to be wrong:
+
+```text
+draft token != target verify token
+```
+
+It is not acceptable for target verification to diverge from the baseline target
+model under the same committed prefix/state:
+
+```text
+normal target decode row0 logits != target-verify row0 logits
+```
 
 ## Promotion Gates
 
@@ -140,6 +180,9 @@ Do not promote MTP by default unless all of these are true:
 - If online C128 MTP pending/write/commit handling is not SGLang-equivalent,
   stop at TARGET 11.295 and fix or fail-closed that lifecycle before continuing
   to graph/perf.
+- If accepted commit is enabled but target-verify row0 logits diverge from
+  normal target decode, stop at TARGET 11.296 and fix row0 parity before
+  continuing to graph/perf.
 
 ## Deliverables
 

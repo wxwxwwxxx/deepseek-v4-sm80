@@ -51,6 +51,20 @@ The desired outcome is either:
 
 Do not silently enable accepted commit by copying partial C128 rows/state.
 
+## Speculative Stats Note
+
+Use the TARGET 11 stats glossary.  In particular:
+
+```text
+draft_tokens_accepted != accepted_kv_copied_tokens
+```
+
+`draft_tokens_accepted` counts accepted draft tokens.  `accepted_kv_copied_tokens`
+is a historical mini stat for committed target-verify rows and may include
+correction or bookkeeping rows.  Reports from this target should spell out which
+rows were committed: accepted draft rows, correction rows, and any bonus/tail
+rows.
+
 ## SGLang References
 
 Use SGLang as the source contract:
@@ -315,5 +329,6 @@ Include:
 - memory overhead ledger;
 - exactness matrix;
 - accepted/verified/rejected token stats;
+- committed row category stats, clarifying `accepted_kv_copied_tokens`;
 - C128 lifecycle diagnostics;
 - whether TARGET 11.3 graph/perf is unblocked.
