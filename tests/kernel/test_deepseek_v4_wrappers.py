@@ -2440,6 +2440,74 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
     assert torch.equal(pool.indexer_cache(0)[indexer_loc.long()], expected_indexer.to(pool.dtype))
 
 
+def test_online_c128_mtp_lifecycle_cpu_oracle_accepts_and_isolates_tail():
+    head_dim = 2
+    state_slot_stride = 4
+    max_draft_tokens = 4
+    state = torch.zeros(
+        (state_slot_stride * (1 + max_draft_tokens), 3 * head_dim),
+        dtype=torch.float32,
+    )
+    pending = torch.full((3,), -1, dtype=torch.int64)
+    seq_lens = torch.tensor([0], dtype=torch.int32)
+    req_pool_indices = torch.tensor([1], dtype=torch.int32)
+    req_to_token = torch.full((3, 128), -1, dtype=torch.int32)
+    req_to_token[1, 0] = 0
+    full_to_swa = torch.arange(128, dtype=torch.int64)
+    ape = torch.zeros((128, head_dim), dtype=torch.float32)
+    kv_score_input = torch.tensor(
+        [
+            [2.0, 4.0, 0.0, 0.0],
+            [6.0, 8.0, 0.0, 0.0],
+            [100.0, 200.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    dsv4_kernel.online_c128_mtp_mark_pending(
+        seq_lens,
+        req_pool_indices,
+        pending,
+        bs=1,
+        max_num_reqs=3,
+        head_dim=head_dim,
+    )
+    dsv4_kernel.online_c128_mtp_write_prefix_states(
+        kv_score_input,
+        seq_lens,
+        req_pool_indices,
+        req_to_token,
+        full_to_swa,
+        ape,
+        state,
+        layer_bs=1,
+        swa_page_size=128,
+        num_verify_tokens=3,
+        state_slot_stride=state_slot_stride,
+    )
+    dsv4_kernel.online_c128_mtp_commit_pending(
+        torch.tensor([2], dtype=torch.int32),
+        req_pool_indices,
+        req_to_token,
+        full_to_swa,
+        pending,
+        state,
+        cur_bs=1,
+        swa_page_size=128,
+        num_verify_tokens=3,
+        state_slot_stride=state_slot_stride,
+        max_num_reqs=3,
+    )
+
+    assert pending.tolist() == [-1, 0, -1]
+    expected_step_1 = torch.tensor([0.0, 0.0, 1.0, 1.0, 2.0, 4.0])
+    expected_step_2 = torch.tensor([0.0, 0.0, 2.0, 2.0, 4.0, 6.0])
+    assert torch.allclose(state[state_slot_stride], expected_step_1)
+    assert torch.allclose(state[state_slot_stride * 2], expected_step_2)
+    assert torch.allclose(state[0], expected_step_2)
+    assert not torch.allclose(state[0], state[state_slot_stride * 3])
+
+
 def test_dsv4_moe_route_plan_groups_and_pads_routes():
     indices = torch.tensor(
         [

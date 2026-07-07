@@ -78,6 +78,7 @@ def _make_dsv4_pool(
     enable_swa_independent_lifecycle: bool = False,
     max_running_req: int | None = None,
     dsv4_dummy_token_start: int | None = None,
+    online_c128_mtp_max_draft_tokens: int = 0,
 ) -> DeepSeekV4KVCache:
     pool = create_kvcache_pool(
         _tiny_dsv4_config(compress_ratios),
@@ -89,6 +90,7 @@ def _make_dsv4_pool(
         enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
         max_running_req=max_running_req,
         dsv4_dummy_token_start=dsv4_dummy_token_start,
+        dsv4_online_c128_mtp_max_draft_tokens=online_c128_mtp_max_draft_tokens,
     )
     assert isinstance(pool, DeepSeekV4KVCache)
     return pool
@@ -108,6 +110,35 @@ def _make_cache_manager(
         ctx.kv_cache = pool
         core.set_global_ctx(ctx)
     return CacheManager(num_pages, page_size, page_table, type=cache_type, kv_cache=pool)
+
+
+def test_online_c128_mtp_lifecycle_buffers_allocate_on_c128_slots():
+    pool = _make_dsv4_pool(
+        [128],
+        num_pages=4,
+        page_size=256,
+        max_running_req=3,
+        online_c128_mtp_max_draft_tokens=8,
+    )
+
+    pending = pool.get_online_c128_mtp_pending_seq_lens()
+    state = pool.get_online_c128_mtp_state(0)
+    assert pending.shape == (4,)
+    assert pending.dtype == torch.int64
+    assert pending.tolist() == [-1, -1, -1, -1]
+    assert pool.get_online_c128_mtp_max_draft_tokens() == 8
+    assert pool.get_online_c128_mtp_state_slot_offset() == 8
+    assert state.shape == (8 * 9, 24)
+    assert state.dtype == torch.float32
+    assert pool.full_to_swa_index_mapping[:4].tolist() == [0, 1, 2, 3]
+    assert pool.online_c128_mtp_swa_page_size == 128
+
+    ledger = pool.online_c128_mtp_memory_ledger()
+    assert ledger["enabled"] is True
+    assert ledger["max_draft_tokens"] == 8
+    assert ledger["state_slot_offset"] == 8
+    assert ledger["pending_seq_lens_bytes"] == pending.numel() * pending.element_size()
+    assert ledger["state_bytes_total"] == state.numel() * state.element_size()
 
 
 def _allocate_req(cm: CacheManager, uid: int, input_len: int) -> Req:

@@ -1959,6 +1959,19 @@ class DSV4Attention(BaseOP):
             if (
                 use_dsv4_backend
                 and not read_only_frozen_kv
+                and self.compress_ratio == 128
+                and hasattr(attn_backend, "write_c128_mtp_prefix_states")
+            ):
+                with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.c128_mtp_prefix"):
+                    attn_backend.write_c128_mtp_prefix_states(
+                        self.layer_id,
+                        self.compressor,
+                        x,
+                        batch,
+                    )
+            if (
+                use_dsv4_backend
+                and not read_only_frozen_kv
                 and hasattr(attn_backend, "store_compressed")
             ):
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.compress_store"):

@@ -2043,6 +2043,273 @@ def _local_dsv4_sparse_attention_module():
     )
 
 
+@lru_cache(maxsize=1)
+def _local_dsv4_online_c128_mtp_module():
+    return load_jit(
+        "dsv4_online_c128_mtp_512",
+        cuda_files=["dsv4_online_c128_mtp.cu"],
+        cuda_wrappers=[
+            ("mark_pending", "OnlineC128MTPMarkPendingKernel<512>::run"),
+            ("write_prefix_states", "OnlineC128MTPWritePrefixKernel<512>::run"),
+            ("commit_pending", "OnlineC128MTPCommitPendingKernel<512>::run"),
+        ],
+        extra_cuda_cflags=["-use_fast_math"],
+    )
+
+
+def _can_use_online_c128_mtp_cuda(*tensors: torch.Tensor, head_dim: int) -> bool:
+    return (
+        head_dim == 512
+        and all(t.device.type == "cuda" for t in tensors)
+        and not _cuda_graph_capture_active(tensors[0].device)
+    )
+
+
+def online_c128_mtp_mark_pending(
+    seq_lens: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    pending_seq_lens: torch.Tensor,
+    *,
+    bs: int | None = None,
+    max_num_reqs: int | None = None,
+    head_dim: int = 512,
+) -> None:
+    bs = int(seq_lens.numel() if bs is None else bs)
+    max_num_reqs = int(pending_seq_lens.numel() if max_num_reqs is None else max_num_reqs)
+    if bs <= 0:
+        return
+    if _can_use_online_c128_mtp_cuda(
+        seq_lens,
+        req_pool_indices,
+        pending_seq_lens,
+        head_dim=int(head_dim),
+    ):
+        _local_dsv4_online_c128_mtp_module().mark_pending(
+            seq_lens,
+            req_pool_indices,
+            pending_seq_lens,
+            bs,
+            max_num_reqs,
+        )
+        return
+    pending_seq_lens[:max_num_reqs].fill_(-1)
+    seq_cpu = seq_lens[:bs].detach().to(device="cpu", dtype=torch.long)
+    req_cpu = req_pool_indices[:bs].detach().to(device="cpu", dtype=torch.long)
+    for seq, req in zip(seq_cpu.tolist(), req_cpu.tolist()):
+        if 0 <= req < max_num_reqs:
+            pending_seq_lens[req] = int(seq)
+
+
+def _online_c128_slot_from_chunk(
+    req_to_token: torch.Tensor,
+    full_to_swa: torch.Tensor,
+    *,
+    req: int,
+    chunk_start: int,
+    swa_page_size: int,
+) -> int:
+    if req < 0 or req >= int(req_to_token.shape[0]):
+        return -1
+    if chunk_start < 0 or chunk_start >= int(req_to_token.shape[1]):
+        return -1
+    full_loc = int(req_to_token[req, chunk_start].item())
+    if full_loc < 0 or full_loc >= int(full_to_swa.shape[0]):
+        return -1
+    swa_loc = int(full_to_swa[full_loc].item())
+    if swa_loc < 0:
+        return -1
+    return swa_loc // max(int(swa_page_size), 1)
+
+
+def online_c128_mtp_write_prefix_states(
+    kv_score_input: torch.Tensor,
+    seq_lens: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    req_to_token: torch.Tensor,
+    full_to_swa: torch.Tensor,
+    ape: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    layer_bs: int,
+    swa_page_size: int,
+    num_verify_tokens: int,
+    state_slot_stride: int,
+) -> None:
+    layer_bs = int(layer_bs)
+    num_verify_tokens = int(num_verify_tokens)
+    state_slot_stride = int(state_slot_stride)
+    head_dim = int(ape.shape[-1])
+    if layer_bs <= 0 or num_verify_tokens <= 0:
+        return
+    if num_verify_tokens > 8:
+        raise RuntimeError(
+            f"online C128 MTP supports at most 8 verify tokens, got {num_verify_tokens}"
+        )
+    if _can_use_online_c128_mtp_cuda(
+        kv_score_input,
+        seq_lens,
+        req_pool_indices,
+        req_to_token,
+        full_to_swa,
+        ape,
+        state,
+        head_dim=head_dim,
+    ):
+        _local_dsv4_online_c128_mtp_module().write_prefix_states(
+            kv_score_input,
+            seq_lens,
+            req_pool_indices,
+            req_to_token,
+            full_to_swa,
+            ape,
+            state,
+            layer_bs,
+            int(swa_page_size),
+            num_verify_tokens,
+            state_slot_stride,
+        )
+        return
+
+    kv_score = kv_score_input.reshape(-1, head_dim * 2).float()
+    seq_cpu = seq_lens[:layer_bs].detach().to(device="cpu", dtype=torch.long)
+    req_cpu = req_pool_indices[:layer_bs].detach().to(device="cpu", dtype=torch.long)
+    for bid, (seq_before, req) in enumerate(zip(seq_cpu.tolist(), req_cpu.tolist())):
+        start_pos = int(seq_before) & 127
+        has_partial = int(seq_before) > 0 and start_pos != 0
+        if has_partial:
+            init_slot = _online_c128_slot_from_chunk(
+                req_to_token,
+                full_to_swa,
+                req=int(req),
+                chunk_start=((int(seq_before) - 1) // 128) * 128,
+                swa_page_size=int(swa_page_size),
+            )
+            if init_slot < 0:
+                continue
+            init = state[init_slot].float()
+            run_max = init[:head_dim].clone()
+            run_sum = init[head_dim : head_dim * 2].clone()
+            run_kv = init[head_dim * 2 : head_dim * 3].clone()
+        else:
+            run_max = torch.zeros(head_dim, dtype=torch.float32, device=state.device)
+            run_sum = torch.zeros_like(run_max)
+            run_kv = torch.zeros_like(run_max)
+
+        for step in range(num_verify_tokens):
+            pos = (start_pos + step) & 127
+            row = kv_score[bid * num_verify_tokens + step].to(device=state.device)
+            kv_step = row[:head_dim]
+            score_step = row[head_dim:] + ape[pos].float()
+            if pos == 0:
+                run_kv = kv_step.clone()
+                run_max = score_step.clone()
+                run_sum = torch.ones_like(score_step)
+            else:
+                new_max = torch.maximum(run_max, score_step)
+                old_sum_scaled = run_sum * torch.exp(run_max - new_max)
+                new_exp = torch.exp(score_step - new_max)
+                new_sum = old_sum_scaled + new_exp
+                run_kv = (run_kv * old_sum_scaled + kv_step * new_exp) / new_sum
+                run_max = new_max
+                run_sum = new_sum
+
+            final_seq = int(seq_before) + step + 1
+            if final_seq & 127:
+                slot = _online_c128_slot_from_chunk(
+                    req_to_token,
+                    full_to_swa,
+                    req=int(req),
+                    chunk_start=((final_seq - 1) // 128) * 128,
+                    swa_page_size=int(swa_page_size),
+                )
+                if slot >= 0:
+                    out = state[slot + (step + 1) * state_slot_stride]
+                    out[:head_dim].copy_(run_max)
+                    out[head_dim : head_dim * 2].copy_(run_sum)
+                    out[head_dim * 2 : head_dim * 3].copy_(run_kv)
+
+            if pos == 127:
+                run_kv.zero_()
+                run_max.zero_()
+                run_sum.zero_()
+
+
+def online_c128_mtp_commit_pending(
+    cur_seq_lens: torch.Tensor,
+    cur_req_pool_indices: torch.Tensor,
+    req_to_token: torch.Tensor,
+    full_to_swa: torch.Tensor,
+    pending_seq_lens: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    cur_bs: int,
+    swa_page_size: int,
+    num_verify_tokens: int,
+    state_slot_stride: int,
+    max_num_reqs: int | None = None,
+) -> None:
+    cur_bs = int(cur_bs)
+    num_verify_tokens = int(num_verify_tokens)
+    state_slot_stride = int(state_slot_stride)
+    head_dim = int(state.shape[-1] // 3)
+    max_num_reqs = int(pending_seq_lens.numel() if max_num_reqs is None else max_num_reqs)
+    if cur_bs <= 0 or num_verify_tokens <= 0:
+        return
+    if num_verify_tokens > 8:
+        raise RuntimeError(
+            f"online C128 MTP supports at most 8 verify tokens, got {num_verify_tokens}"
+        )
+    if _can_use_online_c128_mtp_cuda(
+        cur_seq_lens,
+        cur_req_pool_indices,
+        req_to_token,
+        full_to_swa,
+        pending_seq_lens,
+        state,
+        head_dim=head_dim,
+    ):
+        _local_dsv4_online_c128_mtp_module().commit_pending(
+            cur_seq_lens,
+            cur_req_pool_indices,
+            req_to_token,
+            full_to_swa,
+            pending_seq_lens,
+            state,
+            cur_bs,
+            int(swa_page_size),
+            num_verify_tokens,
+            state_slot_stride,
+            max_num_reqs,
+        )
+        return
+
+    cur_cpu = cur_seq_lens[:cur_bs].detach().to(device="cpu", dtype=torch.long)
+    req_cpu = cur_req_pool_indices[:cur_bs].detach().to(device="cpu", dtype=torch.long)
+    for cur_seq, req in zip(cur_cpu.tolist(), req_cpu.tolist()):
+        if req < 0 or req >= max_num_reqs:
+            continue
+        old_seq = int(pending_seq_lens[req].item())
+        if old_seq < 0:
+            continue
+        accept = max(0, min(int(cur_seq) - old_seq, num_verify_tokens))
+        if accept <= 0:
+            continue
+        final_seq = old_seq + accept
+        if (final_seq & 127) == 0:
+            continue
+        slot = _online_c128_slot_from_chunk(
+            req_to_token,
+            full_to_swa,
+            req=int(req),
+            chunk_start=((final_seq - 1) // 128) * 128,
+            swa_page_size=int(swa_page_size),
+        )
+        if slot < 0:
+            continue
+        src = state[slot + accept * state_slot_stride].clone()
+        state[slot].copy_(src)
+
+
 def dsv4_sparse_attention_two_source_bf16(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
@@ -4934,6 +5201,9 @@ __all__ = [
     "moe_route_dispatch_bf16_marlin_wna16",
     "moe_route_dispatch_bf16_marlin_wna16_prepacked",
     "norm_rope_inplace_fallback",
+    "online_c128_mtp_commit_pending",
+    "online_c128_mtp_mark_pending",
+    "online_c128_mtp_write_prefix_states",
     "paged_mqa_attention_fallback",
     "plan_topk_v2_fallback",
     "q_norm_rope_fallback",

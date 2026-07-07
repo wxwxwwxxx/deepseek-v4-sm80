@@ -187,6 +187,9 @@ class Engine:
                 else None
             ),
             dsv4_dummy_token_start=num_tokens,
+            dsv4_online_c128_mtp_max_draft_tokens=(
+                8 if self.enable_dsv4_mtp_speculative else 0
+            ),
         )
         self._record_marlin_wna16_owner_allocations("after_kv_alloc")
         self._check_marlin_wna16_release_guards("after_kv_alloc")
@@ -733,7 +736,12 @@ class Engine:
         )
         if kv_cache is None or not all(callable(getattr(kv_cache, name, None)) for name in required):
             return "c128_online_mtp_pending_write_commit_not_ported"
-        return "c128_online_mtp_write_prefix_kernel_not_bound"
+        owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
+        if owner is None or not callable(getattr(owner, "ready", None)):
+            return "c128_online_mtp_owner_not_bound"
+        if not bool(owner.ready()):
+            return "c128_online_mtp_write_prefix_kernel_not_bound"
+        return None
 
     def _record_mtp_c128_lifecycle_event(self, event: dict[str, Any]) -> None:
         events = self.mtp_spec_stats.setdefault("c128_mtp_lifecycle_events", [])
@@ -756,6 +764,8 @@ class Engine:
             return [int(x) for x in flat.tolist()]
 
         metadata = getattr(verify_batch, "dsv4_target_verify_metadata", {})
+        commit_blocker = self._mtp_accepted_commit_blocker()
+        owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
         trace_log.append(
             {
                 "mode": "target_verify",
@@ -779,7 +789,12 @@ class Engine:
                 "c128_pending_write_commit": (
                     "not_applicable"
                     if not self._mtp_has_c128_layers()
-                    else "not_ported_fail_closed"
+                    else ("ready" if commit_blocker is None else commit_blocker)
+                ),
+                "c128_lifecycle": (
+                    owner.status()
+                    if owner is not None and callable(getattr(owner, "status", None))
+                    else {}
                 ),
             }
         )
@@ -1684,7 +1699,7 @@ class Engine:
 
         commit_loc_chunks: list[torch.Tensor] = []
         commit_position_chunks: list[torch.Tensor] = []
-        copy_rows_by_entry: list[tuple[Req, int]] = []
+        copy_rows_by_entry: list[tuple[Req, int, int]] = []
         bonus_tokens = 0
         accepted_candidates = 0
         correction_token_candidates = 0
@@ -1760,7 +1775,7 @@ class Engine:
             if copy_rows > 0:
                 commit_loc_chunks.append(entry["real_locs"][:copy_rows])
                 commit_position_chunks.append(entry["positions_tensor"][:copy_rows])
-                copy_rows_by_entry.append((req, copy_rows))
+                copy_rows_by_entry.append((req, copy_rows, int(entry["committed_seq_len"])))
             if trace_enabled:
                 emitted_now = emitted_tokens[batch_index][emitted_before:]
                 trace_entries.append(
@@ -1800,11 +1815,42 @@ class Engine:
             copied_bytes = int(committed_snapshot.get("bytes", 0))
             self._restore_mtp_kv_snapshot(pre_verify_snapshot)
             self._restore_mtp_kv_snapshot(committed_snapshot)
-            for req, copy_rows in copy_rows_by_entry:
+            owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
+            if owner is not None and callable(getattr(owner, "commit_pending", None)):
+                req_pool_indices = torch.tensor(
+                    [int(req.table_idx) for req, _copy_rows, _base in copy_rows_by_entry],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                seq_lens = torch.tensor(
+                    [
+                        int(committed_seq_len) + int(copy_rows)
+                        for _req, copy_rows, committed_seq_len in copy_rows_by_entry
+                    ],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                owner.commit_pending(req_pool_indices, seq_lens)
+                self._record_mtp_c128_lifecycle_event(
+                    {
+                        "event": "accepted_commit",
+                        "rows": int(seq_lens.numel()),
+                        "copied_tokens": int(copied_tokens),
+                        "seq_lens": [int(x) for x in seq_lens.detach().cpu().tolist()],
+                        "owner": owner.status()
+                        if callable(getattr(owner, "status", None))
+                        else {},
+                    }
+                )
+            for req, copy_rows, _committed_seq_len in copy_rows_by_entry:
                 for _ in range(int(copy_rows)):
                     req.complete_one()
         else:
             self._restore_mtp_kv_snapshot(pre_verify_snapshot)
+            if allow_accepted_commit:
+                owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
+                if owner is not None and callable(getattr(owner, "clear", None)):
+                    owner.clear()
         self._sync_device_for_mtp_spec()
         rollback_elapsed = time.perf_counter() - rollback_start_s
         commit_elapsed = time.perf_counter() - commit_start_s

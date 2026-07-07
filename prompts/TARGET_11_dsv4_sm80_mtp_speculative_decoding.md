@@ -94,6 +94,7 @@ Run these in order.
 | TARGET 11.27 | `prompts/TARGET_11.27_dsv4_sm80_mtp_flattened_verify_temp_kv.md` | Replace the sequential verifier with a flattened/temp-KV verify path so MTP can reduce target passes while preserving exact ownership. |
 | TARGET 11.28 | `prompts/TARGET_11.28_dsv4_sm80_mtp_accepted_kv_commit_root_cause.md` | Root-cause why accepted flattened verify KV commit changes later greedy output; required after the 11.27 rollback-only no-go. |
 | TARGET 11.29 | `prompts/TARGET_11.29_dsv4_sm80_mtp_target_verify_contract_port.md` | Port the explicit target-verify metadata/front-chain/C128 pending contract needed before accepted-KV commit can be exact. |
+| TARGET 11.295 | `prompts/TARGET_11.295_dsv4_sm80_mtp_online_c128_lifecycle_port.md` | Port or fail-closed the online C128 MTP pending/write/commit lifecycle that blocks accepted target-verify commit. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -134,9 +135,11 @@ Do not promote MTP by default unless all of these are true:
 - If TARGET 11.2 cannot prove greedy exactness, do not proceed to graph/perf.
 - If acceptance is too low to pay for draft overhead, keep MTP opt-in or close
   the target as negative evidence.
-- If DSV4 target-verify metadata or C128 MTP pending/write/commit handling is
-  not SGLang-equivalent, stop at TARGET 11.29 and fix that contract before
-  continuing to graph/perf.
+- If DSV4 target-verify metadata is not SGLang-equivalent, stop at TARGET
+  11.29 and fix that contract before continuing.
+- If online C128 MTP pending/write/commit handling is not SGLang-equivalent,
+  stop at TARGET 11.295 and fix or fail-closed that lifecycle before continuing
+  to graph/perf.
 
 ## Deliverables
 

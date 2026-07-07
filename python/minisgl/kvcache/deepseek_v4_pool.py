@@ -435,12 +435,19 @@ class DSV4CompressStatePool:
         dtype: torch.dtype,
         device: torch.device,
         page_size: int,
+        online_mtp_max_draft_tokens: int = 0,
+        online_mtp_state_size: int | None = None,
     ) -> None:
         self.ratio = ratio
         self.ring_size = ring_size
         self.overlap = overlap
         self.head_dim = head_dim
         self.page_size = page_size
+        self.online_mtp_max_draft_tokens = (
+            int(online_mtp_max_draft_tokens) if ratio == 128 else 0
+        )
+        self.online_mtp_state_slot_offset = 0
+        self.online_mtp_state: torch.Tensor | None = None
         last_dim = 2 * (1 + int(overlap)) * head_dim
         padded_size = _align_up(size + ring_size + 1, _lcm(ratio, page_size))
         self.last_dim = last_dim
@@ -449,6 +456,17 @@ class DSV4CompressStatePool:
             torch.empty((padded_size, last_dim), dtype=dtype, device=device)
         )
         self.kv_score_buffer[-1].clear()
+        if ratio == 128 and self.online_mtp_max_draft_tokens > 0:
+            state_size = max(int(online_mtp_state_size or size), 1)
+            self.online_mtp_state_slot_offset = state_size
+            self.online_mtp_state = torch.zeros(
+                (
+                    state_size * (1 + self.online_mtp_max_draft_tokens),
+                    3 * head_dim,
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
 
     def translate_from_swa_loc_to_state_loc(self, swa_loc: torch.Tensor) -> torch.Tensor:
         page_size = max(self.page_size, 1)
@@ -503,6 +521,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         max_running_req: int | None = None,
         swa_num_pages: int | None = None,
         dummy_token_start: int | None = None,
+        online_c128_mtp_max_draft_tokens: int = 0,
     ) -> None:
         del dtype
         self._policy = policy or DSV4CacheLayoutPolicy()
@@ -543,6 +562,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._c128_component_page_size = max(div_ceil(page_size, 128), 1)
         self._c4_state_page_size = self.C4_STATE_RING_SIZE
         self._c128_state_page_size = self.C128_STATE_RING_SIZE
+        self._online_c128_mtp_swa_page_size = self.C128_STATE_RING_SIZE
         self._c4_component_pages = div_ceil(self._c4_slots, self._c4_component_page_size)
         self._c128_component_pages = div_ceil(
             self._c128_slots,
@@ -553,6 +573,12 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._normal_layer_count = sum(m.compress_ratio == 0 for m in self._layer_mapping)
         self._c4_layer_count = sum(m.compress_ratio == 4 for m in self._layer_mapping)
         self._c128_layer_count = sum(m.compress_ratio == 128 for m in self._layer_mapping)
+        self._online_c128_mtp_max_draft_tokens = (
+            max(int(online_c128_mtp_max_draft_tokens), 0)
+            if self._c128_layer_count
+            else 0
+        )
+        self._max_req_slots = max(int(max_running_req or 1), 1) + 1
 
         self._swa_tail_pages_per_req = max(div_ceil(self._window_size, page_size), 1)
         env_swa_pages = _env_int(DSV4_SWA_INDEPENDENT_NUM_PAGES_ENV, -1)
@@ -702,6 +728,25 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             dtype=torch.int32,
             device=device,
         )
+        self._online_c128_mtp_pending_seq_lens = (
+            torch.full(
+                (self._max_req_slots,),
+                -1,
+                dtype=torch.int64,
+                device=device,
+            )
+            if self._online_c128_mtp_max_draft_tokens > 0
+            else None
+        )
+        self._full_to_swa_identity_mapping = torch.arange(
+            self._num_tokens + 1,
+            dtype=torch.int64,
+            device=device,
+        )
+        if 0 <= self._dummy_token_start <= self._num_tokens:
+            self._full_to_swa_identity_mapping[self._dummy_token_start] = (
+                int(self._swa_dummy_page) * int(self._page_size)
+            )
 
         self._compress_state_pools: list[DSV4CompressStatePool | None] = [None] * self._num_layers
         self._indexer_compress_state_pools: list[DSV4CompressStatePool | None] = [
@@ -740,6 +785,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                     dtype=self._policy.compress_state_dtype,
                     device=device,
                     page_size=page_size,
+                    online_mtp_max_draft_tokens=self._online_c128_mtp_max_draft_tokens,
+                    online_mtp_state_size=self._c128_slots,
                 )
         self._maybe_install_marlin_wna16_kv_sentinels("after_kv_alloc")
 
@@ -813,12 +860,19 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "kvcache.dsv4.c128_buffer": self._c128_buffer,
             "kvcache.dsv4.c4_indexer_buffer": self._c4_indexer_buffer,
             "kvcache.dsv4.c4_indexer_fp8_paged_cache": self._c4_indexer_fp8_paged_cache,
+            "kvcache.dsv4.online_c128_mtp_pending_seq_lens": (
+                self._online_c128_mtp_pending_seq_lens
+            ),
         }
         for layer_id, pool in enumerate(self._compress_state_pools):
             if pool is not None:
                 tensors[f"kvcache.dsv4.layer{layer_id}.compress_state.kv_score_buffer"] = (
                     pool.kv_score_buffer.kv_score
                 )
+                if pool.online_mtp_state is not None:
+                    tensors[f"kvcache.dsv4.layer{layer_id}.online_c128_mtp_state"] = (
+                        pool.online_mtp_state
+                    )
         for layer_id, pool in enumerate(self._indexer_compress_state_pools):
             if pool is not None:
                 tensors[f"kvcache.dsv4.layer{layer_id}.indexer_state.kv_score_buffer"] = (
@@ -902,6 +956,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "free_c4_state_pages": self._free_c4_state_pages,
             "free_c128_state_pages": self._free_c128_state_pages,
             "free_c4_indexer_state_pages": self._free_c4_indexer_state_pages,
+            "online_c128_mtp_pending_seq_lens": self._online_c128_mtp_pending_seq_lens,
         }
         dsv4_memory_debug.record_owner_tensors(
             owner_prefix="kvcache.dsv4",
@@ -924,6 +979,18 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 tensor=pool.kv_score_buffer.kv_score,
                 extra={"ratio": int(pool.ratio), "kind": "attention"},
             )
+            if pool.online_mtp_state is not None:
+                dsv4_memory_debug.record_owner_tensor(
+                    owner_label=f"kvcache.dsv4.layer{layer_id}.online_c128_mtp_state",
+                    stage=stage,
+                    tensor=pool.online_mtp_state,
+                    extra={
+                        "ratio": int(pool.ratio),
+                        "kind": "online_c128_mtp",
+                        "state_slot_offset": int(pool.online_mtp_state_slot_offset),
+                        "max_draft_tokens": int(pool.online_mtp_max_draft_tokens),
+                    },
+                )
         for layer_id, pool in enumerate(self._indexer_compress_state_pools):
             if pool is None:
                 continue
@@ -1078,6 +1145,82 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         pool = self._compress_state_pools[layer_id]
         assert pool is not None, f"Layer {layer_id} has no attention compress state."
         return pool
+
+    def get_online_c128_mtp_pending_seq_lens(self) -> torch.Tensor:
+        if self._online_c128_mtp_pending_seq_lens is None:
+            raise RuntimeError("DSV4 online C128 MTP pending seq-lens buffer is not allocated")
+        return self._online_c128_mtp_pending_seq_lens
+
+    def get_online_c128_mtp_state_slot_offset(self) -> int:
+        for pool in self._compress_state_pools:
+            if pool is not None and pool.ratio == 128:
+                return int(pool.online_mtp_state_slot_offset)
+        return 0
+
+    def get_online_c128_mtp_max_draft_tokens(self) -> int:
+        for pool in self._compress_state_pools:
+            if pool is not None and pool.ratio == 128:
+                return int(pool.online_mtp_max_draft_tokens)
+        return 0
+
+    def get_online_c128_mtp_state(self, layer_id: int) -> torch.Tensor:
+        pool = self.attention_compress_state(layer_id)
+        if pool.online_mtp_state is None:
+            raise RuntimeError(f"Layer {layer_id} has no online C128 MTP state buffer")
+        return pool.online_mtp_state
+
+    @property
+    def online_c128_mtp_swa_page_size(self) -> int:
+        return int(self._online_c128_mtp_swa_page_size)
+
+    @property
+    def max_online_c128_mtp_num_reqs(self) -> int:
+        if self._online_c128_mtp_pending_seq_lens is not None:
+            return int(self._online_c128_mtp_pending_seq_lens.shape[0])
+        return int(self._max_req_slots)
+
+    @property
+    def full_to_swa_index_mapping(self) -> torch.Tensor:
+        if not self._swa_independent_lifecycle_enabled:
+            return self._full_to_swa_identity_mapping
+        full_locs = torch.arange(self._num_tokens, dtype=torch.long, device=self.device)
+        mapping = torch.full(
+            (self._num_tokens + 1,),
+            -1,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        mapping[: self._num_tokens] = self.translate_full_locs_to_swa_locs(full_locs)
+        if 0 <= self._dummy_token_start <= self._num_tokens:
+            mapping[self._dummy_token_start] = int(self._swa_dummy_page) * int(self._page_size)
+        return mapping
+
+    def online_c128_mtp_memory_ledger(self) -> dict[str, int | bool]:
+        state_rows = 0
+        state_bytes_per_layer = 0
+        layers = 0
+        for pool in self._compress_state_pools:
+            if pool is None or pool.ratio != 128:
+                continue
+            layers += 1
+            if pool.online_mtp_state is not None:
+                state_rows = int(pool.online_mtp_state.shape[0])
+                state_bytes_per_layer = int(
+                    pool.online_mtp_state.numel() * pool.online_mtp_state.element_size()
+                )
+        pending = self._online_c128_mtp_pending_seq_lens
+        pending_bytes = 0 if pending is None else int(pending.numel() * pending.element_size())
+        return {
+            "enabled": bool(self._online_c128_mtp_max_draft_tokens > 0 and layers > 0),
+            "c128_layers": int(layers),
+            "max_draft_tokens": int(self._online_c128_mtp_max_draft_tokens),
+            "state_slot_offset": int(self.get_online_c128_mtp_state_slot_offset()),
+            "state_rows_per_layer": int(state_rows),
+            "state_bytes_per_layer": int(state_bytes_per_layer),
+            "state_bytes_total": int(state_bytes_per_layer * layers),
+            "pending_seq_lens_bytes": int(pending_bytes),
+            "total_bytes": int(state_bytes_per_layer * layers + pending_bytes),
+        }
 
     def indexer_compress_state(self, layer_id: int) -> DSV4CompressStatePool:
         pool = self._indexer_compress_state_pools[layer_id]

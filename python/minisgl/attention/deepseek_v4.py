@@ -311,6 +311,223 @@ class DSV4CompressMetadata:
 
 
 @dataclass
+class _OnlineC128VerifyContext:
+    req_pool_indices: torch.Tensor
+    seq_lens: torch.Tensor
+    num_verify_tokens: int
+
+
+@dataclass
+class _OnlineC128LayerRuntime:
+    layer_id: int
+    head_dim: int
+    state: torch.Tensor
+    state_slot_offset: int
+
+
+class OnlineC128MTPController:
+    def __init__(self, backend: "DSV4AttentionBackend") -> None:
+        self.backend = backend
+        self._verify_ctx: _OnlineC128VerifyContext | None = None
+        self._layer_runtimes: list[_OnlineC128LayerRuntime] | None = None
+        self.mark_pending_calls = 0
+        self.write_prefix_calls = 0
+        self.write_prefix_tokens = 0
+        self.commit_pending_calls = 0
+        self.commit_pending_rows = 0
+
+    def ready(self) -> bool:
+        kv_cache = self.backend.kvcache
+        if not any(m.compress_ratio == 128 for m in kv_cache.layer_mapping):
+            return True
+        try:
+            return (
+                int(kv_cache.get_online_c128_mtp_max_draft_tokens()) > 0
+                and int(kv_cache.get_online_c128_mtp_state_slot_offset()) > 0
+                and kv_cache.get_online_c128_mtp_pending_seq_lens().numel() > 0
+                and bool(list(self._iter_layer_runtimes()))
+            )
+        except Exception:
+            return False
+
+    def has_c128_layers(self) -> bool:
+        return any(m.compress_ratio == 128 for m in self.backend.kvcache.layer_mapping)
+
+    def state_slot_offset(self) -> int:
+        if not self.has_c128_layers():
+            return 0
+        return int(self.backend.kvcache.get_online_c128_mtp_state_slot_offset())
+
+    def max_draft_tokens(self) -> int:
+        if not self.has_c128_layers():
+            return 0
+        return int(self.backend.kvcache.get_online_c128_mtp_max_draft_tokens())
+
+    def clear(self) -> None:
+        self._verify_ctx = None
+
+    def prepare_forward(
+        self,
+        batch: Batch,
+        metadata: DSV4AttentionMetadata,
+    ) -> int:
+        del metadata
+        target_verify_metadata = getattr(batch, "dsv4_target_verify_metadata", None)
+        if target_verify_metadata is None:
+            self.clear()
+            return 0
+        if not self.ready():
+            self.clear()
+            return 0
+        reqs = batch.padded_reqs
+        if not reqs:
+            self.clear()
+            return 0
+        num_verify_tokens = int(target_verify_metadata.get("speculative_num_draft_tokens", 0))
+        max_draft_tokens = self.max_draft_tokens()
+        if num_verify_tokens <= 0 or num_verify_tokens > max_draft_tokens:
+            self.clear()
+            return 0
+        committed_seq_lens = [
+            int(x) for x in target_verify_metadata.get("committed_seq_lens", [])
+        ]
+        if len(committed_seq_lens) != len(reqs):
+            self.clear()
+            return 0
+        req_pool_indices = torch.tensor(
+            [int(req.table_idx) for req in reqs],
+            dtype=torch.int32,
+            device=self.backend.device,
+        )
+        seq_lens = torch.tensor(
+            committed_seq_lens,
+            dtype=torch.int32,
+            device=self.backend.device,
+        )
+        pending = self.backend.kvcache.get_online_c128_mtp_pending_seq_lens()
+        dsv4_kernel.online_c128_mtp_mark_pending(
+            seq_lens,
+            req_pool_indices,
+            pending,
+            bs=int(req_pool_indices.numel()),
+            max_num_reqs=int(self.backend.kvcache.max_online_c128_mtp_num_reqs),
+            head_dim=int(self.backend.config.head_dim),
+        )
+        self._verify_ctx = _OnlineC128VerifyContext(
+            req_pool_indices=req_pool_indices.detach(),
+            seq_lens=seq_lens.detach(),
+            num_verify_tokens=num_verify_tokens,
+        )
+        self.mark_pending_calls += 1
+        return self.state_slot_offset()
+
+    def write_prefix_states(
+        self,
+        layer_id: int,
+        compressor,
+        kv_score_input: torch.Tensor,
+    ) -> None:
+        ctx = self._verify_ctx
+        if ctx is None or not self.ready():
+            return
+        if int(getattr(compressor, "ratio", 0)) != 128 or kv_score_input.numel() == 0:
+            return
+        head_dim = int(getattr(compressor, "head_dim", self.backend.config.head_dim))
+        layer_bs = min(
+            int(ctx.req_pool_indices.numel()),
+            int(ctx.seq_lens.numel()),
+            int(kv_score_input.reshape(-1, head_dim * 2).shape[0])
+            // max(int(ctx.num_verify_tokens), 1),
+        )
+        if layer_bs <= 0:
+            return
+        state = self.backend.kvcache.get_online_c128_mtp_state(layer_id)
+        dsv4_kernel.online_c128_mtp_write_prefix_states(
+            kv_score_input.float(),
+            ctx.seq_lens,
+            ctx.req_pool_indices,
+            get_global_ctx().page_table,
+            self.backend.kvcache.full_to_swa_index_mapping,
+            compressor.ape.reshape(128, head_dim).float(),
+            state,
+            layer_bs=layer_bs,
+            swa_page_size=int(self.backend.kvcache.online_c128_mtp_swa_page_size),
+            num_verify_tokens=int(ctx.num_verify_tokens),
+            state_slot_stride=int(self.backend.kvcache.get_online_c128_mtp_state_slot_offset()),
+        )
+        self.write_prefix_calls += 1
+        self.write_prefix_tokens += int(layer_bs * ctx.num_verify_tokens)
+
+    def commit_pending(
+        self,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> None:
+        ctx = self._verify_ctx
+        if ctx is None:
+            return
+        if not self.ready():
+            self.clear()
+            return
+        cur_bs = min(int(req_pool_indices.numel()), int(seq_lens.numel()))
+        if cur_bs <= 0 or ctx.num_verify_tokens <= 0:
+            self.clear()
+            return
+        pending = self.backend.kvcache.get_online_c128_mtp_pending_seq_lens()
+        for runtime in self._iter_layer_runtimes():
+            dsv4_kernel.online_c128_mtp_commit_pending(
+                seq_lens,
+                req_pool_indices,
+                get_global_ctx().page_table,
+                self.backend.kvcache.full_to_swa_index_mapping,
+                pending,
+                runtime.state,
+                cur_bs=cur_bs,
+                swa_page_size=int(self.backend.kvcache.online_c128_mtp_swa_page_size),
+                num_verify_tokens=int(ctx.num_verify_tokens),
+                state_slot_stride=int(runtime.state_slot_offset),
+                max_num_reqs=int(self.backend.kvcache.max_online_c128_mtp_num_reqs),
+            )
+        self.commit_pending_calls += 1
+        self.commit_pending_rows += int(cur_bs)
+        self.clear()
+
+    def status(self) -> dict[str, int | bool]:
+        return {
+            "has_c128_layers": bool(self.has_c128_layers()),
+            "ready": bool(self.ready()),
+            "state_slot_offset": int(self.state_slot_offset()),
+            "max_draft_tokens": int(self.max_draft_tokens()),
+            "pending_context": bool(self._verify_ctx is not None),
+            "mark_pending_calls": int(self.mark_pending_calls),
+            "write_prefix_calls": int(self.write_prefix_calls),
+            "write_prefix_tokens": int(self.write_prefix_tokens),
+            "commit_pending_calls": int(self.commit_pending_calls),
+            "commit_pending_rows": int(self.commit_pending_rows),
+        }
+
+    def _iter_layer_runtimes(self):
+        if self._layer_runtimes is None:
+            runtimes: list[_OnlineC128LayerRuntime] = []
+            for mapping in self.backend.kvcache.layer_mapping:
+                if mapping.compress_ratio != 128:
+                    continue
+                state = self.backend.kvcache.get_online_c128_mtp_state(mapping.layer_id)
+                runtimes.append(
+                    _OnlineC128LayerRuntime(
+                        layer_id=int(mapping.layer_id),
+                        head_dim=int(state.shape[-1] // 3),
+                        state=state,
+                        state_slot_offset=int(
+                            self.backend.kvcache.get_online_c128_mtp_state_slot_offset()
+                        ),
+                    )
+                )
+            self._layer_runtimes = runtimes
+        return iter(self._layer_runtimes)
+
+
+@dataclass
 class DSV4AttentionMetadata(BaseAttnMetadata):
     core_attn_metadata: DSV4CoreAttentionMetadata
     indexer_metadata: DSV4IndexerMetadata | None = None
@@ -362,6 +579,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._swa_page_table_cache_rows = 0
         self._swa_page_table_cache: torch.Tensor | None = None
         self._swa_page_table_cache_signatures: dict[int, tuple[int, ...]] = {}
+        self.online_c128_mtp = OnlineC128MTPController(self)
         dsv4_kernel.warmup_indexer_fp8_backend(self.device)
 
     @property
@@ -380,7 +598,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
         return self.kvcache.get_layer_mapping(layer_id).compress_ratio
 
     def prepare_metadata(self, batch: Batch) -> None:
-        batch.attn_metadata = self._build_metadata(batch)
+        metadata = self._build_metadata(batch)
+        batch.attn_metadata = metadata
+        self.online_c128_mtp.prepare_forward(batch, metadata)
 
     def forward(
         self,
@@ -499,6 +719,22 @@ class DSV4AttentionBackend(BaseAttnBackend):
             beta_slow=beta_slow,
             cache_type="compressed",
         )
+
+    def write_c128_mtp_prefix_states(
+        self,
+        layer_id: int,
+        compressor,
+        x: torch.Tensor,
+        batch: Batch,
+    ) -> None:
+        if bool(getattr(batch, "frozen_kv_read_only", False)):
+            return
+        if getattr(batch, "dsv4_target_verify_metadata", None) is None:
+            return
+        if not self.online_c128_mtp.ready():
+            return
+        kv_score_input = compressor.wkv_gate.forward(x).float()
+        self.online_c128_mtp.write_prefix_states(layer_id, compressor, kv_score_input)
 
     def store_indexer(
         self,
