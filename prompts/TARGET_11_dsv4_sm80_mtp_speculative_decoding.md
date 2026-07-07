@@ -106,6 +106,8 @@ Run these in order.
 | TARGET 11.9 | `prompts/TARGET_11.9_dsv4_sm80_mtp_sglang_aligned_target_verify_runtime_mode.md` | After 11.8 stops at a contract/no-go for local patching, implement one SGLang-aligned target-verify runtime mode and prove eager exactness through `bs=1/2/4/5/6`. |
 | TARGET 11.10 | `prompts/TARGET_11.10_dsv4_sm80_mtp_target_verify_layer0_attention_kv_producer_parity.md` | After 11.9 makes the SGLang-shaped runtime explicit but non-exact, fix or precisely no-go the first owner at layer0 target-verify attention/KV producer parity. |
 | TARGET 11.11 | `prompts/TARGET_11.11_dsv4_sm80_mtp_attn_wo_b_projection_reduce_parity.md` | After 11.10 fixes attention/KV parity and exposes `layer0.final_attention_output`, fix or precisely no-go `attn.wo_b` row-parallel projection/all-reduce parity. |
+| TARGET 11.12 | `prompts/TARGET_11.12_dsv4_sm80_mtp_rank_local_downstream_parity_census.md` | After 11.11 closes bs=1 `wo_b` parity but the matrix still fails, census rank-local downstream owners such as indexer FP8, MoE, and later-layer attention before the next fix. |
+| TARGET 11.13 | `prompts/TARGET_11.13_dsv4_sm80_mtp_operator_parity_framework_q_norm_rope_pilot.md` | After 11.12 ranks q/RoPE as the top rank-local owner, build a reusable operator-parity framework and use q_norm_rope as the first same-kernel/micro-allclose pilot. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -231,6 +233,14 @@ Do not promote MTP by default unless all of these are true:
   `layer0.final_attention_output`, stop at TARGET 11.11 and fix/prove
   `attn.wo_b` projection/all-reduce parity before graph/perf or C128 boundary
   work.
+- If TARGET 11.11 closes bs=1 `attn.wo_b` parity but the expanded matrix still
+  fails with rank-local downstream owners such as indexer FP8, MoE, or later
+  attention, stop at TARGET 11.12 and build a rank-local owner census before
+  applying another local fix.
+- If TARGET 11.12 shows multiple independent downstream owners and ranks
+  q/RoPE as the earliest common rank-local owner, stop at TARGET 11.13 and build
+  an operator-parity framework with q_norm_rope as the pilot before fixing MoE
+  or indexer.
 
 ## Deliverables
 

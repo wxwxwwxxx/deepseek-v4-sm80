@@ -696,6 +696,94 @@ def _linear_cached_bf16_weight(
         return y.reshape(*x.shape[:-1], weight_t.shape[-1])
 
 
+def _fp8_cached_bf16_weight_local_projection(
+    x: torch.Tensor,
+    cached_weight: torch.Tensor,
+    *,
+    owner: object,
+    cache_name: str,
+    owner_label: str,
+) -> torch.Tensor:
+    if not dsv4_owner_timing.enabled():
+        x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+        return _linear_cached_bf16_weight(
+            x_quant,
+            cached_weight,
+            owner=owner,
+            cache_name=cache_name,
+            owner_label=owner_label,
+        )
+
+    prefix = _owner_timing_prefix(owner_label)
+    metadata = {
+        "owner_label": owner_label,
+        "input": dsv4_owner_timing.tensor_metadata(x),
+        "weight": dsv4_owner_timing.tensor_metadata(cached_weight),
+    }
+    with dsv4_owner_timing.maybe_cuda_range(f"{prefix}.bf16_cache_local_total", metadata):
+        with dsv4_owner_timing.maybe_cuda_range(
+            f"{prefix}.bf16_cache_activation_quantize",
+            metadata,
+        ):
+            x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+        return _linear_cached_bf16_weight(
+            x_quant,
+            cached_weight,
+            owner=owner,
+            cache_name=cache_name,
+            owner_label=owner_label,
+        )
+
+
+def _fp8_cached_bf16_weight_local_projection_row_invariant(
+    x: torch.Tensor,
+    cached_weight: torch.Tensor,
+    *,
+    owner: object,
+    cache_name: str,
+    owner_label: str,
+) -> torch.Tensor:
+    rows = x.numel() // x.shape[-1]
+    if rows <= 1:
+        return _fp8_cached_bf16_weight_local_projection(
+            x,
+            cached_weight,
+            owner=owner,
+            cache_name=cache_name,
+            owner_label=owner_label,
+        )
+    x_2d = x.reshape(rows, x.shape[-1])
+    chunks = [
+        _fp8_cached_bf16_weight_local_projection(
+            x_2d[row : row + 1],
+            cached_weight,
+            owner=owner,
+            cache_name=cache_name,
+            owner_label=owner_label,
+        )
+        for row in range(rows)
+    ]
+    y = torch.cat(chunks, dim=0)
+    return y.reshape(*x.shape[:-1], y.shape[-1])
+
+
+def _row_invariant_all_reduce(
+    comm: DistributedCommunicator,
+    y: torch.Tensor,
+    *,
+    label: str,
+) -> torch.Tensor:
+    rows = y.numel() // y.shape[-1]
+    if rows <= 1:
+        return comm.all_reduce(y, label=label)
+    y_2d = y.reshape(rows, y.shape[-1])
+    chunks = [
+        comm.all_reduce(y_2d[row : row + 1].contiguous(), label=label)
+        for row in range(rows)
+    ]
+    return torch.cat(chunks, dim=0).reshape_as(y)
+
+
 def _prepare_bf16_pretransposed_report(
     owner: object,
     cache_name: str,
@@ -1022,6 +1110,9 @@ class DSV4Linear(BaseOP):
         reduce: bool = True,
         reduce_label: str | None = None,
         fp8_gemm: bool | None = None,
+        debug_pre_reduce_name: str | None = None,
+        debug_post_reduce_name: str | None = None,
+        row_invariant_reduce: bool = False,
     ) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         scale = _cached_projection_scale(self, "_dsv4_weight_scale_fp32_contiguous", scale)
@@ -1037,11 +1128,16 @@ class DSV4Linear(BaseOP):
             )
         else:
             y = F.linear(x, self.weight.to(x.dtype))
+        if debug_pre_reduce_name is not None:
+            _capture_debug_activation(debug_pre_reduce_name, y)
         if reduce and self.row_parallel and self._tp_size > 1:
-            y = self._comm.all_reduce(
-                y,
-                label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
-            )
+            label = reduce_label or "dsv4.row_parallel_projection_all_reduce"
+            if row_invariant_reduce:
+                y = _row_invariant_all_reduce(self._comm, y, label=label)
+            else:
+                y = self._comm.all_reduce(y, label=label)
+        if debug_post_reduce_name is not None:
+            _capture_debug_activation(debug_post_reduce_name, y)
         return y
 
     def prepare_fp8_bf16_weight_cache(
@@ -1105,6 +1201,9 @@ class DSV4Linear(BaseOP):
         owner_label: str,
         reduce: bool = False,
         reduce_label: str | None = None,
+        debug_pre_reduce_name: str | None = None,
+        debug_post_reduce_name: str | None = None,
+        row_invariant_reduce: bool = False,
     ) -> torch.Tensor:
         y = _forward_fp8_marlin_weight(
             self,
@@ -1112,11 +1211,16 @@ class DSV4Linear(BaseOP):
             x,
             owner_label=owner_label,
         )
+        if debug_pre_reduce_name is not None:
+            _capture_debug_activation(debug_pre_reduce_name, y)
         if reduce and self.row_parallel and self._tp_size > 1:
-            y = self._comm.all_reduce(
-                y,
-                label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
-            )
+            label = reduce_label or "dsv4.row_parallel_projection_all_reduce"
+            if row_invariant_reduce:
+                y = _row_invariant_all_reduce(self._comm, y, label=label)
+            else:
+                y = self._comm.all_reduce(y, label=label)
+        if debug_post_reduce_name is not None:
+            _capture_debug_activation(debug_post_reduce_name, y)
         return y
 
     def forward_fp8_cached_bf16_weight(
@@ -1127,6 +1231,10 @@ class DSV4Linear(BaseOP):
         owner_label: str,
         reduce: bool = False,
         reduce_label: str | None = None,
+        debug_pre_reduce_name: str | None = None,
+        debug_post_reduce_name: str | None = None,
+        row_invariant_local: bool = False,
+        row_invariant_reduce: bool = False,
     ) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         cached_weight = _cached_fp8_bf16_weight(
@@ -1138,46 +1246,53 @@ class DSV4Linear(BaseOP):
             allow_build=False,
             owner_label=owner_label,
         )
-        if not dsv4_owner_timing.enabled():
-            x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
-            y = _linear_cached_bf16_weight(
-                x_quant,
-                cached_weight,
-                owner=self,
-                cache_name=cache_name,
-                owner_label=owner_label,
-            )
-            if reduce and self.row_parallel and self._tp_size > 1:
-                y = self._comm.all_reduce(
-                    y,
-                    label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
-                )
-            return y
-        prefix = _owner_timing_prefix(owner_label)
-        metadata = {
-            "owner_label": owner_label,
-            "input": dsv4_owner_timing.tensor_metadata(x),
-            "weight": dsv4_owner_timing.tensor_metadata(cached_weight),
-        }
-        with dsv4_owner_timing.maybe_cuda_range(f"{prefix}.bf16_cache_local_total", metadata):
-            with dsv4_owner_timing.maybe_cuda_range(
-                f"{prefix}.bf16_cache_activation_quantize",
-                metadata,
-            ):
-                x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
-            y = _linear_cached_bf16_weight(
-                x_quant,
-                cached_weight,
-                owner=self,
-                cache_name=cache_name,
-                owner_label=owner_label,
-            )
+        local_projection = (
+            _fp8_cached_bf16_weight_local_projection_row_invariant
+            if row_invariant_local
+            else _fp8_cached_bf16_weight_local_projection
+        )
+        y = local_projection(
+            x,
+            cached_weight,
+            owner=self,
+            cache_name=cache_name,
+            owner_label=owner_label,
+        )
+        if debug_pre_reduce_name is not None:
+            _capture_debug_activation(debug_pre_reduce_name, y)
         if reduce and self.row_parallel and self._tp_size > 1:
-            y = self._comm.all_reduce(
-                y,
-                label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
-            )
+            label = reduce_label or "dsv4.row_parallel_projection_all_reduce"
+            if row_invariant_reduce:
+                y = _row_invariant_all_reduce(self._comm, y, label=label)
+            else:
+                y = self._comm.all_reduce(y, label=label)
+        if debug_post_reduce_name is not None:
+            _capture_debug_activation(debug_post_reduce_name, y)
         return y
+
+    def forward_fp8_cached_bf16_weight_row_invariant(
+        self,
+        x: torch.Tensor,
+        *,
+        cache_name: str,
+        owner_label: str,
+        reduce: bool = False,
+        reduce_label: str | None = None,
+        debug_pre_reduce_name: str | None = None,
+        debug_post_reduce_name: str | None = None,
+        row_invariant_reduce: bool = False,
+    ) -> torch.Tensor:
+        return self.forward_fp8_cached_bf16_weight(
+            x,
+            cache_name=cache_name,
+            owner_label=owner_label,
+            reduce=reduce,
+            reduce_label=reduce_label,
+            debug_pre_reduce_name=debug_pre_reduce_name,
+            debug_post_reduce_name=debug_post_reduce_name,
+            row_invariant_local=True,
+            row_invariant_reduce=row_invariant_reduce,
+        )
 
 
 class DSV4Compressor(BaseOP):
@@ -2096,6 +2211,8 @@ class DSV4Attention(BaseOP):
                 )
             _capture_debug_activation(f"layer{self.layer_id}.attention_wo_a_output", o)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_b"):
+            wo_b_local_name = f"layer{self.layer_id}.attention_wo_b_local_output_before_reduce"
+            wo_b_reduce_name = f"layer{self.layer_id}.attention_wo_b_post_all_reduce_output"
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
                 out = self.wo_b.forward_fp8_marlin_weight(
                     o,
@@ -2103,6 +2220,9 @@ class DSV4Attention(BaseOP):
                     owner_label=self._wo_b_owner_label,
                     reduce=True,
                     reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+                    debug_pre_reduce_name=wo_b_local_name,
+                    debug_post_reduce_name=wo_b_reduce_name,
+                    row_invariant_reduce=is_target_verify,
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
                 return out
@@ -2113,6 +2233,10 @@ class DSV4Attention(BaseOP):
                     owner_label=self._wo_b_owner_label,
                     reduce=True,
                     reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+                    debug_pre_reduce_name=wo_b_local_name,
+                    debug_post_reduce_name=wo_b_reduce_name,
+                    row_invariant_local=is_target_verify,
+                    row_invariant_reduce=is_target_verify,
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
                 return out
@@ -2120,6 +2244,9 @@ class DSV4Attention(BaseOP):
             out = self.wo_b.forward(
                 o,
                 fp8_gemm=wo_b_fp8_gemm if wo_b_fp8_gemm else None,
+                debug_pre_reduce_name=wo_b_local_name,
+                debug_post_reduce_name=wo_b_reduce_name,
+                row_invariant_reduce=is_target_verify,
             )
             _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
             return out
