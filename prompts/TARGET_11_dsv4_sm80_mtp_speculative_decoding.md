@@ -125,6 +125,8 @@ Run these in order.
 | TARGET 11.244 | `prompts/TARGET_11.244_dsv4_sm80_mtp_target_verify_layer0_moe_output_subboundary_parity.md` | After 11.243 proves the first producer boundary is layer0 MoE output, split router, routed expert, shared expert, aggregation, and reduce for the current target-verify rows. |
 | TARGET 11.245 | `prompts/TARGET_11.245_dsv4_sm80_mtp_target_verify_layer0_moe_row_shape_precision_contract.md` | After 11.244 proves target-verify layer0 MoE is row-shape/precision sensitive, define the SGLang-aligned execution contract and test row-stable or shape-stable oracles. |
 | TARGET 11.246 | `prompts/TARGET_11.246_dsv4_sm80_mtp_target_verify_moe_normal_shape_microbatch_runtime.md` | After 11.245 proves normal-shape-compatible MoE microbatching is the only exact oracle under Mini's backend, implement the runtime path and validate the full exactness matrix. |
+| TARGET 11.247 | `prompts/TARGET_11.247_dsv4_sm80_mtp_accepted_commit_state_parity_after_moe_microbatch.md` | After 11.246 fixes focused MoE exactness but bs6 still diverges, find the first accepted-commit state/KV parity owner versus no-spec baseline. |
+| TARGET 11.248 | `prompts/TARGET_11.248_dsv4_sm80_mtp_c128_component_state_publication_parity.md` | After 11.247 identifies C128 layer3 component-state publication as the first remaining owner, determine whether MTP skips, misplaces, clears, or computes the C128 state incorrectly. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -330,6 +332,16 @@ Do not promote MTP by default unless all of these are true:
   exact target-verify MoE oracle under Mini's current SM80 backend, stop at
   TARGET 11.246 and implement that microbatch contract as a real runtime path
   before graph/perf promotion.
+- If TARGET 11.246 makes focused MoE target-verify rows exact and bs1/2/4/5
+  pass but full-schedule bs6 still diverges with target verify agreeing with
+  the current MTP-state normal oracle, stop at TARGET 11.247 and find the
+  accepted-commit state/KV parity owner versus no-spec baseline before further
+  MoE, logits/sampler, or graph/perf work.
+- If TARGET 11.247 shows mapping is aligned and the first remaining owner is
+  zeroed `c128_attention_state` where no-spec baseline has nonzero state, stop
+  at TARGET 11.248 and classify C128 publication as write-skipped, wrong-loc,
+  wrong-value, restore-clear, disabled-contract, or metadata owner before
+  patching downstream attention/logits.
 
 ## Deliverables
 

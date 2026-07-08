@@ -51,6 +51,9 @@ _DSV4_MTP_SPECULATIVE_ENV = "MINISGL_DSV4_MTP_SPECULATIVE"
 _DSV4_MTP_SPEC_DRAFT_LEN_ENV = "MINISGL_DSV4_MTP_SPEC_DRAFT_LEN"
 _DSV4_MTP_ROW0_DEBUG_ENV = "MINISGL_DSV4_MTP_ROW0_DEBUG"
 _DSV4_MTP_ROW_DEPTH_ORACLE_ENV = "MINISGL_DSV4_MTP_ROW_DEPTH_ORACLE"
+_DSV4_MTP_ROW_DEPTH_ORACLE_COMPACT_ENV = (
+    "MINISGL_DSV4_MTP_ROW_DEPTH_ORACLE_COMPACT"
+)
 _DSV4_NORMAL_PRODUCER_TRACE_ENV = "MINISGL_DSV4_NORMAL_PRODUCER_TRACE"
 _DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS_ENV = (
     "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS"
@@ -64,6 +67,7 @@ _DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV = (
 _DSV4_MTP_VERIFY_SPLITK_ATTENTION_ENV = "MINISGL_DSV4_MTP_VERIFY_SPLITK_ATTENTION"
 _DSV4_MTP_VERIFY_GROUP_SIZE_ENV = "MINISGL_DSV4_MTP_VERIFY_GROUP_SIZE"
 _DSV4_MTP_STATE_PARITY_TRACE_ENV = "MINISGL_DSV4_MTP_STATE_PARITY_TRACE"
+_DSV4_MTP_STATE_PARITY_TRACE_LIMIT_ENV = "MINISGL_DSV4_MTP_STATE_PARITY_TRACE_LIMIT"
 _DSV4_TARGET_VERIFY_RUNTIME_ENV = "MINISGL_DSV4_TARGET_VERIFY_RUNTIME"
 _DSV4_TARGET_VERIFY_RUNTIME_LEGACY = "legacy_target11_6"
 _DSV4_TARGET_VERIFY_RUNTIME_SGLANG_PREFILL_EXTEND = "sglang_prefill_extend"
@@ -248,6 +252,11 @@ class Engine:
             "rejected_tail_isolation_checks": 0,
             "target_verify_batch_shapes": [],
             "target_verify_contract_trace": [],
+            "target_verify_moe_original_calls": 0,
+            "target_verify_moe_microbatch_calls": 0,
+            "target_verify_moe_microbatch_timed_calls": 0,
+            "target_verify_moe_microbatch_elapsed_ms": 0.0,
+            "target_verify_moe_microbatch_runtime_trace": [],
             "c128_mtp_lifecycle_events": [],
             "row0_logits_debug": [],
             "row0_layer_parity_debug": [],
@@ -1348,6 +1357,17 @@ class Engine:
     ) -> None:
         if not _env_flag(_DSV4_MTP_ROW_DEPTH_ORACLE_ENV):
             return
+        compact_report = _env_flag(_DSV4_MTP_ROW_DEPTH_ORACLE_COMPACT_ENV)
+
+        def _compact_trace_parity(parity: dict[str, Any]) -> dict[str, Any]:
+            if not compact_report:
+                return parity
+            return {
+                key: value
+                for key, value in parity.items()
+                if key != "comparisons"
+            }
+
         log = self.mtp_spec_stats.setdefault("row_depth_oracle_debug", [])
         event: dict[str, Any] = {
             "trace_index": int(len(log)),
@@ -1517,14 +1537,16 @@ class Engine:
                                     oracle_output.hidden_states_before_norm[:1],
                                 ),
                                 "producer_trace_parity": (
-                                    dsv4_mtp_debug.compare_layer_trace_rows(
-                                        oracle_trace,
-                                        target_trace,
-                                        lhs_label="normal",
-                                        rhs_label="target_verify",
-                                        lhs_row=0,
-                                        rhs_row=flat_row,
-                                        exact=True,
+                                    _compact_trace_parity(
+                                        dsv4_mtp_debug.compare_layer_trace_rows(
+                                            oracle_trace,
+                                            target_trace,
+                                            lhs_label="normal",
+                                            rhs_label="target_verify",
+                                            lhs_row=0,
+                                            rhs_row=flat_row,
+                                            exact=True,
+                                        )
                                     )
                                     if dsv4_mtp_debug.row0_layer_parity_enabled()
                                     else {"enabled": False}
@@ -2888,8 +2910,9 @@ class Engine:
                 "extra": extra or {},
             }
         )
-        if len(log) > 128:
-            del log[:-128]
+        trace_limit = max(_env_int(_DSV4_MTP_STATE_PARITY_TRACE_LIMIT_ENV, 128), 1)
+        if len(log) > trace_limit:
+            del log[:-trace_limit]
 
     def _mtp_indexer_uses_fp8_cache(self, kv_cache: Any) -> bool:
         has_fp8 = getattr(kv_cache, "has_indexer_fp8_cache", None)
@@ -3310,6 +3333,42 @@ class Engine:
             self.mtp_spec_stats["target_verify_temp_kv_bytes"]
         ) + int(temp_kv_bytes)
         verify_shapes.append([len(entries), max_verify_len, int(total_verify_tokens)])
+        moe_microbatch_trace = dsv4_mtp_debug.export_moe_microbatch_runtime_trace(
+            verify_batch
+        )
+        if moe_microbatch_trace:
+            trace_log = self.mtp_spec_stats.setdefault(
+                "target_verify_moe_microbatch_runtime_trace",
+                [],
+            )
+            trace_log.extend(moe_microbatch_trace)
+            if len(trace_log) > 1024:
+                del trace_log[:-1024]
+            original_calls = sum(
+                int(record.get("original_moe_calls", 0))
+                for record in moe_microbatch_trace
+            )
+            runtime_calls = sum(
+                int(record.get("runtime_moe_calls", 0))
+                for record in moe_microbatch_trace
+            )
+            elapsed_values = [
+                float(record["elapsed_ms"])
+                for record in moe_microbatch_trace
+                if record.get("elapsed_ms") is not None
+            ]
+            self.mtp_spec_stats["target_verify_moe_original_calls"] = int(
+                self.mtp_spec_stats.get("target_verify_moe_original_calls", 0)
+            ) + int(original_calls)
+            self.mtp_spec_stats["target_verify_moe_microbatch_calls"] = int(
+                self.mtp_spec_stats.get("target_verify_moe_microbatch_calls", 0)
+            ) + int(runtime_calls)
+            self.mtp_spec_stats["target_verify_moe_microbatch_timed_calls"] = int(
+                self.mtp_spec_stats.get("target_verify_moe_microbatch_timed_calls", 0)
+            ) + int(len(elapsed_values))
+            self.mtp_spec_stats["target_verify_moe_microbatch_elapsed_ms"] = float(
+                self.mtp_spec_stats.get("target_verify_moe_microbatch_elapsed_ms", 0.0)
+            ) + float(sum(elapsed_values))
         self._record_mtp_row0_layer_parity_debug(verify_batch, entries)
 
         logits = target_output.logits[:total_verify_tokens]

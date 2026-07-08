@@ -60,6 +60,12 @@ _MARLIN_WNA16_CACHE_INTEGRITY_MAX_FORWARD_LOGS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_MAX_FORWARD_LOGS"
 )
 DSV4_EXPERIMENTAL_MTP_ENV = "MINISGL_DSV4_EXPERIMENTAL_MTP"
+DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_ENV = (
+    "MINISGL_DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH"
+)
+DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_TIMING_ENV = (
+    "MINISGL_DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_TIMING"
+)
 
 
 def dsv4_experimental_mtp_enabled() -> bool:
@@ -248,6 +254,147 @@ def _dsv4_debug_positions(batch: Batch | None, *, device: torch.device) -> torch
 
 def _dsv4_is_target_verify_batch(batch: Batch | None) -> bool:
     return bool(getattr(batch, "dsv4_target_verify_metadata", None) is not None)
+
+
+def _dsv4_target_verify_moe_microbatch_enabled() -> bool:
+    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_ENV)
+
+
+def _dsv4_target_verify_moe_microbatch_timing_enabled() -> bool:
+    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_TIMING_ENV)
+
+
+@dataclass(frozen=True)
+class _DSV4TargetVerifyMoEMicrobatchContract:
+    batch_size: int
+    verify_width: int
+    rows: int
+    row_order: str
+    chunk_rows: int
+    chunk_count: int
+    active_rows: int
+    padded_rows: int
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "batch_size": int(self.batch_size),
+            "verify_width": int(self.verify_width),
+            "rows": int(self.rows),
+            "row_order": self.row_order,
+            "chunk_rows": int(self.chunk_rows),
+            "chunk_count": int(self.chunk_count),
+            "active_rows": int(self.active_rows),
+            "padded_rows": int(self.padded_rows),
+            "chunking": "contiguous_flattened_chunks",
+        }
+
+
+def _dsv4_target_verify_moe_microbatch_contract(
+    batch: Batch | None,
+    rows: int,
+) -> _DSV4TargetVerifyMoEMicrobatchContract | None:
+    if not _dsv4_target_verify_moe_microbatch_enabled():
+        return None
+    if not _dsv4_is_target_verify_batch(batch):
+        return None
+    metadata = getattr(batch, "dsv4_target_verify_metadata", None)
+    if not isinstance(metadata, dict):
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch requires "
+            "dsv4_target_verify_metadata."
+        )
+    rows = int(rows)
+    if rows <= 0:
+        raise RuntimeError("DeepSeek V4 target-verify MoE microbatch got no rows.")
+
+    extend_lens = metadata.get("extend_lens")
+    if not isinstance(extend_lens, (list, tuple)) or not extend_lens:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch cannot derive B: "
+            "metadata.extend_lens is missing."
+        )
+    batch_size = int(len(extend_lens))
+    if batch_size <= 0:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch cannot derive a positive B."
+        )
+    live_batch_size = int(getattr(batch, "size", 0) or len(getattr(batch, "reqs", [])) or 0)
+    if live_batch_size != batch_size:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch B mismatch: "
+            f"metadata B={batch_size}, batch.size={live_batch_size}."
+        )
+
+    raw_width = metadata.get("speculative_num_draft_tokens")
+    try:
+        verify_width = int(raw_width)
+    except (TypeError, ValueError):
+        verify_width = 0
+    if verify_width <= 0:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch cannot derive W: "
+            "metadata.speculative_num_draft_tokens is missing."
+        )
+    if any(int(length) != verify_width for length in extend_lens):
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch requires fixed-width rows: "
+            f"extend_lens={list(extend_lens)}, W={verify_width}."
+        )
+    if rows != batch_size * verify_width:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch shape mismatch: "
+            f"rows={rows}, B={batch_size}, W={verify_width}."
+        )
+
+    row_depths = metadata.get("row_depths")
+    if not isinstance(row_depths, (list, tuple)) or len(row_depths) != rows:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch cannot derive row order: "
+            "metadata.row_depths is missing or has the wrong length."
+        )
+    depth_values = [int(value) for value in row_depths]
+    request_major = [
+        depth for _request in range(batch_size) for depth in range(verify_width)
+    ]
+    depth_major = [
+        depth for depth in range(verify_width) for _request in range(batch_size)
+    ]
+    if depth_values == request_major:
+        row_order = "request_major"
+    elif depth_values == depth_major:
+        row_order = "depth_major"
+    else:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch cannot generalize row order: "
+            f"row_depths_head={depth_values[: min(len(depth_values), 16)]}, "
+            f"B={batch_size}, W={verify_width}."
+        )
+
+    active_mask = metadata.get("active_row_mask")
+    padded_mask = metadata.get("padded_row_mask")
+    if not isinstance(active_mask, (list, tuple)) or len(active_mask) != rows:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch requires active_row_mask "
+            "with one entry per row."
+        )
+    if not isinstance(padded_mask, (list, tuple)) or len(padded_mask) != rows:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify MoE microbatch requires padded_row_mask "
+            "with one entry per row."
+        )
+    active_rows = sum(1 for value in active_mask if bool(value))
+    padded_rows = sum(1 for value in padded_mask if bool(value))
+
+    return _DSV4TargetVerifyMoEMicrobatchContract(
+        batch_size=batch_size,
+        verify_width=verify_width,
+        rows=rows,
+        row_order=row_order,
+        chunk_rows=batch_size,
+        chunk_count=verify_width,
+        active_rows=active_rows,
+        padded_rows=padded_rows,
+    )
 
 
 def _dsv4_moe_needs_router_logits() -> bool:
@@ -4300,6 +4447,303 @@ class DSV4FusedMoERunner:
                     extra=extra,
                 )
 
+    def _forward_target_verify_microbatch(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
+        *,
+        flat: torch.Tensor,
+        flat_input_ids: torch.Tensor,
+        batch: Batch,
+        positions: torch.Tensor | None,
+        comm: DistributedCommunicator,
+        hash_topk: DSV4TopK | None,
+        common_params: dict[str, object],
+        contract: _DSV4TargetVerifyMoEMicrobatchContract,
+    ) -> torch.Tensor:
+        runtime_params = {
+            **common_params,
+            "target_verify_row_invariant_local": False,
+            "target_verify_moe_microbatch_runtime": True,
+            "target_verify_moe_microbatch_contract": contract.as_record(),
+        }
+        timing_ms: float | None = None
+        timing_enabled = _dsv4_target_verify_moe_microbatch_timing_enabled()
+        start_event = None
+        end_event = None
+        start_s = 0.0
+        if timing_enabled and flat.is_cuda:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+        elif timing_enabled:
+            start_s = time.perf_counter()
+
+        with _dsv4_capture_nvtx(
+            f"layer{self.layer_id}.mlp.runner.target_verify_moe_microbatch"
+        ):
+            tensors = self._contract_run_variant(
+                flat,
+                flat_input_ids,
+                comm=comm,
+                hash_topk=hash_topk,
+                source_rows=list(range(int(flat.shape[0]))),
+                row_invariant_local=False,
+                chunk_size=contract.chunk_rows,
+            )
+
+        if timing_enabled and start_event is not None and end_event is not None:
+            end_event.record()
+            end_event.synchronize()
+            timing_ms = float(start_event.elapsed_time(end_event))
+        elif timing_enabled:
+            timing_ms = float((time.perf_counter() - start_s) * 1000.0)
+
+        output = tensors.get("moe_output")
+        if not isinstance(output, torch.Tensor):
+            raise RuntimeError(
+                "DeepSeek V4 target-verify MoE microbatch did not produce moe_output."
+            )
+        output = output.view_as(hidden_states)
+        weights = tensors.get("topk_weights")
+        indices = tensors.get("topk_ids")
+        routed_raw = tensors.get("routed_expert_output_raw")
+        routed = tensors.get("routed_expert_output")
+        shared_raw = tensors.get("shared_expert_output_raw")
+        shared = tensors.get("shared_expert_output")
+        aggregate = tensors.get("expert_aggregate_before_reduce")
+        reduced = tensors.get("expert_reduce_output")
+
+        route_extra = {
+            "stage": "runner.target_verify_moe_microbatch",
+            "microbatch_contract": contract.as_record(),
+            "runtime_warning": "target-verify MoE executes one route/expert/reduce path per microbatch",
+        }
+        if isinstance(weights, torch.Tensor) and isinstance(indices, torch.Tensor):
+            route_extra.update(
+                _dsv4_moe_route_extra(
+                    weights=weights,
+                    indices=indices,
+                    input_ids=flat_input_ids,
+                    reduce_once=True,
+                    hash_topk=hash_topk is not None,
+                    stage="runner.target_verify_moe_microbatch",
+                )
+            )
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="topk_ids",
+                layer_id=self.layer_id,
+                input_tensor=flat,
+                output_tensor=indices,
+                positions=positions,
+                path="mini.moe.runner.target_verify_microbatch.topk_ids",
+                params=runtime_params,
+                extra=route_extra,
+            )
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="topk_weights",
+                layer_id=self.layer_id,
+                input_tensor=flat,
+                output_tensor=weights,
+                positions=positions,
+                path="mini.moe.runner.target_verify_microbatch.topk_weights",
+                params=runtime_params,
+                extra=route_extra,
+            )
+        router_logits = _dsv4_moe_router_logits_debug(self.gate, flat)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="router_logits",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=router_logits,
+            positions=positions,
+            path="mini.moe.runner.target_verify_microbatch.router_logits.linear_bf16_fp32_debug",
+            params=runtime_params,
+            extra=route_extra,
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="routed_expert_input",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=flat,
+            positions=positions,
+            path="mini.moe.runner.target_verify_microbatch.routed_expert_input",
+            params=runtime_params,
+            extra=route_extra,
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="routed_expert_output_raw",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=routed_raw,
+            positions=positions,
+            path="mini.moe.runner.target_verify_microbatch.routed_experts.forward_raw",
+            params=runtime_params,
+            extra={
+                **route_extra,
+                "stage": "runner.target_verify_microbatch.routed_output_raw",
+            },
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="routed_expert_output",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=routed,
+            positions=positions,
+            path="mini.moe.runner.target_verify_microbatch.routed_experts.forward_fp32_finalize",
+            params=runtime_params,
+            extra={
+                **route_extra,
+                "stage": "runner.target_verify_microbatch.routed_output_fp32_finalize",
+                "raw_output": _dsv4_moe_reduce_tensor_census(routed_raw),
+                "finalized_output": _dsv4_moe_reduce_tensor_census(routed),
+            },
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="shared_expert_input",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=flat,
+            positions=positions,
+            path="mini.moe.runner.target_verify_microbatch.shared_expert_input",
+            params=runtime_params,
+            extra={
+                "stage": "runner.target_verify_microbatch.shared_input",
+                "shared_experts_present": self.shared_experts is not None,
+                "microbatch_contract": contract.as_record(),
+            },
+        )
+        if isinstance(shared_raw, torch.Tensor):
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="shared_expert_output_raw",
+                layer_id=self.layer_id,
+                input_tensor=flat,
+                output_tensor=shared_raw,
+                positions=positions,
+                path="mini.moe.runner.target_verify_microbatch.shared_experts.forward_raw",
+                params=runtime_params,
+                extra={"stage": "runner.target_verify_microbatch.shared_output_raw"},
+            )
+        if isinstance(shared, torch.Tensor):
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="shared_expert_output",
+                layer_id=self.layer_id,
+                input_tensor=flat,
+                output_tensor=shared,
+                positions=positions,
+                path="mini.moe.runner.target_verify_microbatch.shared_experts.forward_fp32",
+                params=runtime_params,
+                extra={
+                    "stage": "runner.target_verify_microbatch.shared_output_fp32_finalize",
+                    "raw_output": _dsv4_moe_reduce_tensor_census(shared_raw),
+                    "finalized_output": _dsv4_moe_reduce_tensor_census(shared),
+                },
+            )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="expert_aggregate_before_reduce",
+            layer_id=self.layer_id,
+            input_tensor=routed,
+            output_tensor=aggregate,
+            positions=positions,
+            path="mini.moe.runner.target_verify_microbatch.routed_plus_shared_fp32",
+            params=runtime_params,
+            extra={
+                "stage": "runner.target_verify_microbatch.aggregate_before_reduce",
+                "shared_experts_present": shared is not None,
+                "routed_input": _dsv4_moe_reduce_tensor_census(routed),
+                "shared_input": _dsv4_moe_reduce_tensor_census(shared),
+                "aggregate_output": _dsv4_moe_reduce_tensor_census(aggregate),
+                "aggregate_order": "routed_fp32_plus_shared_fp32",
+                "microbatch_contract": contract.as_record(),
+            },
+        )
+        reduce_label = "per_microbatch_moe_plan_final_reduce"
+        reduce_boundary_extra = _dsv4_moe_reduce_boundary_base_extra(
+            stage="runner.target_verify_microbatch.post_all_reduce",
+            tp_size=self._tp_size,
+            comm=comm,
+            reduce_label=reduce_label,
+            pre_reduce=aggregate if isinstance(aggregate, torch.Tensor) else flat,
+        )
+        reduce_boundary_extra.update(
+            {
+                "communication_input": _dsv4_moe_reduce_tensor_census_if_enabled(aggregate),
+                "communication_input_dtype": str(getattr(aggregate, "dtype", "")),
+                "post_reduce": _dsv4_moe_reduce_tensor_census_if_enabled(reduced),
+                "communication_output_dtype": str(getattr(reduced, "dtype", "")),
+                "microbatch_contract": contract.as_record(),
+            }
+        )
+        reduce_input_row0 = dsv4_mtp_debug.clone_operator_row0_input(
+            "expert_reduce_output",
+            aggregate,
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="expert_reduce_output",
+            layer_id=self.layer_id,
+            input_tensor=aggregate,
+            output_tensor=reduced,
+            positions=positions,
+            path="mini.moe.runner.target_verify_microbatch.post_all_reduce",
+            params={**runtime_params, "reduce_label": reduce_label},
+            extra={**reduce_boundary_extra, "post_all_reduce": bool(self._tp_size > 1)},
+            input_row0=reduce_input_row0,
+        )
+        moe_output_extra = {
+            "stage": "runner.target_verify_microbatch.moe_output",
+            "final_cast_input": _dsv4_moe_reduce_tensor_census_if_enabled(reduced),
+            "final_cast_output": _dsv4_moe_reduce_tensor_census_if_enabled(output),
+            "final_cast_input_dtype": str(getattr(reduced, "dtype", "")),
+            "final_cast_output_dtype": str(output.dtype),
+            "final_cast_order": "post_reduce_to_hidden_dtype",
+            "microbatch_contract": contract.as_record(),
+        }
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="moe_output",
+            layer_id=self.layer_id,
+            input_tensor=reduced,
+            output_tensor=output,
+            positions=positions,
+            path="mini.moe.runner.target_verify_microbatch.output_to_hidden_dtype",
+            params=runtime_params,
+            extra=moe_output_extra,
+        )
+        dsv4_mtp_debug.record_moe_microbatch_runtime(
+            batch,
+            {
+                "layer_id": int(self.layer_id),
+                "enabled": True,
+                "expert_backend": dsv4_kernel.dsv4_moe_expert_backend(),
+                "original_moe_calls": 1,
+                "runtime_moe_calls": int(contract.chunk_count),
+                "elapsed_ms": timing_ms,
+                **contract.as_record(),
+            },
+        )
+        self._maybe_record_contract_oracle(
+            batch=batch,
+            hidden_states=hidden_states,
+            flat=flat,
+            flat_input_ids=flat_input_ids,
+            positions=positions,
+            comm=comm,
+            hash_topk=hash_topk,
+            common_params=runtime_params,
+        )
+        return output
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -4322,6 +4766,23 @@ class DSV4FusedMoERunner:
             "tp_size": int(self._tp_size),
             "target_verify_row_invariant_local": bool(is_target_verify),
         }
+        microbatch_contract = _dsv4_target_verify_moe_microbatch_contract(
+            batch,
+            int(flat.shape[0]),
+        )
+        if microbatch_contract is not None:
+            return self._forward_target_verify_microbatch(
+                hidden_states,
+                input_ids,
+                flat=flat,
+                flat_input_ids=flat_input_ids,
+                batch=batch,
+                positions=positions,
+                comm=comm,
+                hash_topk=hash_topk,
+                common_params=common_params,
+                contract=microbatch_contract,
+            )
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.route"):
             weights, indices = self.route(
@@ -4675,6 +5136,13 @@ class DSV4MoE(BaseOP):
                 hash_topk=getattr(self, "topk", None),
             )
             return output
+        if is_target_verify and _dsv4_target_verify_moe_microbatch_enabled():
+            raise RuntimeError(
+                "DeepSeek V4 target-verify MoE microbatch runtime requires the "
+                "fused MoE runner path. Enable the A100 victory/fused runner "
+                "MoE backend or disable "
+                f"{DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_ENV}."
+            )
 
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.gate"):

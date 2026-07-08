@@ -171,6 +171,7 @@ def reset_row0_layer_trace(batch: Any, *, mode: str) -> None:
     setattr(batch, "_dsv4_mtp_wo_a_projection_oracle_trace", [])
     setattr(batch, "_dsv4_mtp_wo_b_projection_oracle_trace", [])
     setattr(batch, "_dsv4_mtp_moe_contract_oracle_trace", [])
+    setattr(batch, "_dsv4_mtp_moe_microbatch_runtime_trace", [])
     setattr(batch, "_dsv4_layer2_swa_store_trace", [])
     setattr(batch, "_dsv4_mtp_row0_layer_trace_mode", mode)
 
@@ -499,6 +500,34 @@ def export_moe_contract_oracle_trace(batch_or_trace: Any) -> list[dict[str, Any]
         batch_or_trace
         if isinstance(batch_or_trace, list)
         else get_moe_contract_oracle_trace(batch_or_trace)
+    )
+    return [_strip_private(entry) for entry in trace]
+
+
+def record_moe_microbatch_runtime(batch: Any, record: dict[str, Any]) -> None:
+    if batch is None:
+        return
+    trace = getattr(batch, "_dsv4_mtp_moe_microbatch_runtime_trace", None)
+    if trace is None:
+        trace = []
+        setattr(batch, "_dsv4_mtp_moe_microbatch_runtime_trace", trace)
+    trace.append(_json_dict(record))
+    if len(trace) > 4096:
+        del trace[:-4096]
+
+
+def get_moe_microbatch_runtime_trace(batch: Any) -> list[dict[str, Any]]:
+    trace = getattr(batch, "_dsv4_mtp_moe_microbatch_runtime_trace", None)
+    if not isinstance(trace, list):
+        return []
+    return trace
+
+
+def export_moe_microbatch_runtime_trace(batch_or_trace: Any) -> list[dict[str, Any]]:
+    trace = (
+        batch_or_trace
+        if isinstance(batch_or_trace, list)
+        else get_moe_microbatch_runtime_trace(batch_or_trace)
     )
     return [_strip_private(entry) for entry in trace]
 
@@ -2451,11 +2480,13 @@ __all__ = [
     "export_attention_backend_trace",
     "export_layer2_swa_store_trace",
     "export_moe_contract_oracle_trace",
+    "export_moe_microbatch_runtime_trace",
     "export_operator_trace",
     "export_row0_layer_trace",
     "export_wo_a_projection_oracle_trace",
     "export_wo_b_projection_oracle_trace",
     "get_moe_contract_oracle_trace",
+    "get_moe_microbatch_runtime_trace",
     "get_operator_trace",
     "get_row0_layer_trace",
     "get_wo_a_projection_oracle_trace",
@@ -2477,6 +2508,7 @@ __all__ = [
     "layer2_swa_lifecycle_trace_enabled",
     "moe_contract_oracle_enabled",
     "record_moe_contract_oracle",
+    "record_moe_microbatch_runtime",
     "tensor_compare_stats",
     "wo_a_projection_oracle_enabled",
     "wo_b_projection_oracle_enabled",
