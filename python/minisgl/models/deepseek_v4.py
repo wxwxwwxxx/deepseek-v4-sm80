@@ -246,6 +246,10 @@ def _dsv4_debug_positions(batch: Batch | None, *, device: torch.device) -> torch
         return positions
 
 
+def _dsv4_is_target_verify_batch(batch: Batch | None) -> bool:
+    return bool(getattr(batch, "dsv4_target_verify_metadata", None) is not None)
+
+
 def _dsv4_moe_needs_router_logits() -> bool:
     return any(
         dsv4_mtp_debug.operator_parity_enabled(name)
@@ -2764,8 +2768,34 @@ class DSV4MoEGate(BaseOP):
         scoring_func: str,
         routed_scaling_factor: float,
         hash_topk: DSV4TopK | None = None,
+        row_invariant_local: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         weight = _cached_gate_fp32_weight(self, "_cached_gate_weight_fp32", self.weight)
+        rows = hidden_states.numel() // hidden_states.shape[-1]
+        if row_invariant_local and rows > 1:
+            hidden_2d = hidden_states.reshape(rows, hidden_states.shape[-1])
+            input_ids_1d = None
+            if isinstance(input_ids, torch.Tensor):
+                input_ids_1d = input_ids.reshape(-1)
+            weight_chunks: list[torch.Tensor] = []
+            index_chunks: list[torch.Tensor] = []
+            for row in range(rows):
+                row_input_ids = None
+                if input_ids_1d is not None and row < int(input_ids_1d.numel()):
+                    row_input_ids = input_ids_1d[row : row + 1]
+                row_weights, row_indices = dsv4_kernel.moe_gate_fallback(
+                    hidden_2d[row : row + 1],
+                    weight,
+                    input_ids=row_input_ids,
+                    topk=topk,
+                    scoring_func=scoring_func,
+                    routed_scaling_factor=routed_scaling_factor,
+                    correction_bias=getattr(self, "e_score_correction_bias", None),
+                    hash_topk=hash_topk,
+                )
+                weight_chunks.append(row_weights)
+                index_chunks.append(row_indices)
+            return torch.cat(weight_chunks, dim=0), torch.cat(index_chunks, dim=0)
         return dsv4_kernel.moe_gate_fallback(
             hidden_states,
             weight,
@@ -3488,7 +3518,25 @@ class DSV4SharedExperts(BaseOP):
             owner_label=self._down_owner_label,
         )
 
-    def forward(self, hidden_states: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        reduce: bool = True,
+        row_invariant_local: bool = False,
+    ) -> torch.Tensor:
+        rows = hidden_states.numel() // hidden_states.shape[-1]
+        if row_invariant_local and rows > 1:
+            hidden_2d = hidden_states.reshape(rows, hidden_states.shape[-1])
+            chunks = [
+                self.forward(
+                    hidden_2d[row : row + 1],
+                    reduce=reduce,
+                    row_invariant_local=False,
+                )
+                for row in range(rows)
+            ]
+            return torch.cat(chunks, dim=0).reshape(*hidden_states.shape[:-1], -1)
         fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_SHARED_FP8_GEMM")
         use_bf16_weight_cache = dsv4_kernel.dsv4_env_flag(
             dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
@@ -3598,6 +3646,7 @@ class DSV4FusedMoERunner:
         input_ids: torch.Tensor,
         *,
         hash_topk: DSV4TopK | None,
+        row_invariant_local: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.gate.forward(
             flat,
@@ -3606,6 +3655,7 @@ class DSV4FusedMoERunner:
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             hash_topk=hash_topk,
+            row_invariant_local=row_invariant_local,
         )
 
     def prepare(
@@ -3651,6 +3701,26 @@ class DSV4FusedMoERunner:
             moe_plan=prepared.moe_plan,
         )
 
+    def apply_experts_row_invariant(
+        self,
+        flat: torch.Tensor,
+        prepared: DSV4FusedMoERunnerPrepareResult,
+    ) -> torch.Tensor:
+        rows = flat.numel() // flat.shape[-1]
+        if rows <= 1:
+            return self.apply_experts(flat, prepared)
+        flat_2d = flat.reshape(rows, flat.shape[-1])
+        weights_2d = prepared.weights.reshape(rows, prepared.weights.shape[-1])
+        indices_2d = prepared.indices.reshape(rows, prepared.indices.shape[-1])
+        chunks: list[torch.Tensor] = []
+        for row in range(rows):
+            row_flat = flat_2d[row : row + 1].contiguous()
+            row_weights = weights_2d[row : row + 1].contiguous()
+            row_indices = indices_2d[row : row + 1].contiguous()
+            row_prepared = self.prepare(row_flat, row_weights, row_indices)
+            chunks.append(self.apply_experts(row_flat, row_prepared))
+        return torch.cat(chunks, dim=0).reshape_as(flat)
+
     def finalize_routed(self, routed_output: torch.Tensor) -> torch.Tensor:
         # The current grouped FP4 backend already applies top-k weights and
         # sums routes to [tokens, hidden]. Keep the boundary explicit so a
@@ -3661,15 +3731,32 @@ class DSV4FusedMoERunner:
         ):
             return routed_output.float()
 
-    def apply_shared(self, flat: torch.Tensor) -> torch.Tensor | None:
+    def apply_shared_raw(
+        self,
+        flat: torch.Tensor,
+        *,
+        row_invariant_local: bool = False,
+    ) -> torch.Tensor | None:
         if self.shared_experts is None:
             return None
-        shared = self.shared_experts.forward(flat, reduce=False)
+        return self.shared_experts.forward(
+            flat,
+            reduce=False,
+            row_invariant_local=row_invariant_local,
+        )
+
+    def finalize_shared(self, shared_output: torch.Tensor) -> torch.Tensor:
         with dsv4_direct_copy_nvtx(
             f"moe_shared_expert_staging.runner_shared_to_fp32.layer{self.layer_id}",
-            shared=shared,
+            shared=shared_output,
         ):
-            return shared.float()
+            return shared_output.float()
+
+    def apply_shared(self, flat: torch.Tensor) -> torch.Tensor | None:
+        shared = self.apply_shared_raw(flat)
+        if shared is None:
+            return None
+        return self.finalize_shared(shared)
 
     def maybe_reduce_final(
         self,
@@ -3717,6 +3804,7 @@ class DSV4FusedMoERunner:
         flat_input_ids = input_ids.view(-1)
         batch = _dsv4_debug_batch()
         positions = _dsv4_debug_positions(batch, device=hidden_states.device)
+        is_target_verify = _dsv4_is_target_verify_batch(batch)
         common_params = {
             "runner": True,
             "topk_count": int(self.topk_count),
@@ -3724,10 +3812,16 @@ class DSV4FusedMoERunner:
             "routed_scaling_factor": float(self.routed_scaling_factor),
             "expert_backend": dsv4_kernel.dsv4_moe_expert_backend(),
             "tp_size": int(self._tp_size),
+            "target_verify_row_invariant_local": bool(is_target_verify),
         }
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.route"):
-            weights, indices = self.route(flat, flat_input_ids, hash_topk=hash_topk)
+            weights, indices = self.route(
+                flat,
+                flat_input_ids,
+                hash_topk=hash_topk,
+                row_invariant_local=is_target_verify,
+            )
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
         router_logits = _dsv4_moe_router_logits_debug(self.gate, flat)
         route_extra = _dsv4_moe_route_extra(
@@ -3798,8 +3892,22 @@ class DSV4FusedMoERunner:
         )
         _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.experts"):
-            routed = self.apply_experts(flat, prepared)
+            if is_target_verify:
+                routed = self.apply_experts_row_invariant(flat, prepared)
+            else:
+                routed = self.apply_experts(flat, prepared)
         _record_warmup_memory("moe.routed_experts", "after", layer_id=self.layer_id)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="routed_expert_output_raw",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=routed,
+            positions=positions,
+            path="mini.moe.runner.routed_experts.forward_raw",
+            params=common_params,
+            extra={**route_extra, "stage": "runner.routed_output_raw"},
+        )
         _record_warmup_memory("moe.finalize_routed", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.finalize"):
             y = self.finalize_routed(routed)
@@ -3813,7 +3921,12 @@ class DSV4FusedMoERunner:
             positions=positions,
             path="mini.moe.runner.routed_experts.forward_fp32_finalize",
             params=common_params,
-            extra=route_extra,
+            extra={
+                **route_extra,
+                "stage": "runner.routed_output_fp32_finalize",
+                "raw_output": _dsv4_moe_reduce_tensor_census(routed),
+                "finalized_output": _dsv4_moe_reduce_tensor_census(y),
+            },
         )
         _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
         _dsv4_moe_record_operator(
@@ -3829,9 +3942,25 @@ class DSV4FusedMoERunner:
         )
         routed_for_aggregate = y
         shared = None
+        shared_raw = None
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.shared"):
-            shared = self.apply_shared(flat)
-            if shared is not None:
+            shared_raw = self.apply_shared_raw(
+                flat,
+                row_invariant_local=is_target_verify,
+            )
+            if shared_raw is not None:
+                _dsv4_moe_record_operator(
+                    batch,
+                    operator_name="shared_expert_output_raw",
+                    layer_id=self.layer_id,
+                    input_tensor=flat,
+                    output_tensor=shared_raw,
+                    positions=positions,
+                    path="mini.moe.runner.shared_experts.forward_raw",
+                    params=common_params,
+                    extra={"stage": "runner.shared_output_raw"},
+                )
+                shared = self.finalize_shared(shared_raw)
                 y = y + shared
         _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
         if shared is not None:
@@ -3844,7 +3973,58 @@ class DSV4FusedMoERunner:
                 positions=positions,
                 path="mini.moe.runner.shared_experts.forward_fp32",
                 params=common_params,
-                extra={"stage": "runner.shared_output"},
+                extra={
+                    "stage": "runner.shared_output_fp32_finalize",
+                    "raw_output": _dsv4_moe_reduce_tensor_census(shared_raw),
+                    "finalized_output": _dsv4_moe_reduce_tensor_census(shared),
+                },
+            )
+        if dsv4_mtp_debug.operator_parity_enabled("expert_aggregate_fp32_add_probe"):
+            aggregate_fp32_probe = (
+                routed_for_aggregate + shared
+                if shared is not None
+                else routed_for_aggregate
+            )
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="expert_aggregate_fp32_add_probe",
+                layer_id=self.layer_id,
+                input_tensor=routed_for_aggregate,
+                output_tensor=aggregate_fp32_probe,
+                positions=positions,
+                path="mini.moe.runner.routed_plus_shared_fp32_probe",
+                params=common_params,
+                extra={
+                    "stage": "runner.aggregate_fp32_add_probe",
+                    "shared_experts_present": shared is not None,
+                    "routed_input": _dsv4_moe_reduce_tensor_census(routed_for_aggregate),
+                    "shared_input": _dsv4_moe_reduce_tensor_census(shared),
+                },
+            )
+        if dsv4_mtp_debug.operator_parity_enabled("expert_aggregate_bf16_add_probe"):
+            routed_bf16 = routed_for_aggregate.to(flat.dtype)
+            if shared is None:
+                aggregate_bf16_probe = routed_bf16.float()
+            else:
+                aggregate_bf16_probe = (routed_bf16 + shared.to(flat.dtype)).float()
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="expert_aggregate_bf16_add_probe",
+                layer_id=self.layer_id,
+                input_tensor=routed_bf16,
+                output_tensor=aggregate_bf16_probe,
+                positions=positions,
+                path="mini.moe.runner.routed_plus_shared_hidden_dtype_probe",
+                params=common_params,
+                extra={
+                    "stage": "runner.aggregate_bf16_add_probe",
+                    "hidden_dtype": str(flat.dtype),
+                    "shared_experts_present": shared is not None,
+                    "routed_input": _dsv4_moe_reduce_tensor_census(routed_bf16),
+                    "shared_input": _dsv4_moe_reduce_tensor_census(
+                        shared.to(flat.dtype) if shared is not None else None
+                    ),
+                },
             )
         _dsv4_moe_record_operator(
             batch,
@@ -3858,6 +4038,10 @@ class DSV4FusedMoERunner:
             extra={
                 "stage": "runner.aggregate_before_reduce",
                 "shared_experts_present": shared is not None,
+                "routed_input": _dsv4_moe_reduce_tensor_census(routed_for_aggregate),
+                "shared_input": _dsv4_moe_reduce_tensor_census(shared),
+                "aggregate_output": _dsv4_moe_reduce_tensor_census(y),
+                "aggregate_order": "routed_fp32_plus_shared_fp32",
             },
         )
         y_before_reduce = y
@@ -3943,6 +4127,7 @@ class DSV4MoE(BaseOP):
     def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         batch = _dsv4_debug_batch()
         positions = _dsv4_debug_positions(batch, device=hidden_states.device)
+        is_target_verify = _dsv4_is_target_verify_batch(batch)
         flat = hidden_states.view(-1, hidden_states.shape[-1])
         common_params = {
             "runner": False,
@@ -3951,6 +4136,7 @@ class DSV4MoE(BaseOP):
             "routed_scaling_factor": float(self.routed_scaling_factor),
             "expert_backend": dsv4_kernel.dsv4_moe_expert_backend(),
             "tp_size": int(self._tp_size),
+            "target_verify_row_invariant_local": bool(is_target_verify),
         }
         _dsv4_moe_record_operator(
             batch,
@@ -3981,6 +4167,7 @@ class DSV4MoE(BaseOP):
                 scoring_func=self.scoring_func,
                 routed_scaling_factor=self.routed_scaling_factor,
                 hash_topk=getattr(self, "topk", None),
+                row_invariant_local=is_target_verify,
             )
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
         flat_input_ids = input_ids.view(-1)
@@ -4077,16 +4264,33 @@ class DSV4MoE(BaseOP):
         _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.routed"):
             if moe_plan is None:
-                y = self.experts.forward(flat, weights, indices, reduce=not reduce_once).float()
+                routed_raw = self.experts.forward(
+                    flat,
+                    weights,
+                    indices,
+                    reduce=not reduce_once,
+                )
             else:
-                y = self.experts.forward(
+                routed_raw = self.experts.forward(
                     flat,
                     weights,
                     indices,
                     reduce=not reduce_once,
                     moe_plan=moe_plan,
-                ).float()
+                )
+            y = routed_raw.float()
         _record_warmup_memory("moe.routed_experts", "after", layer_id=self.layer_id)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="routed_expert_output_raw",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=routed_raw,
+            positions=positions,
+            path="mini.moe.routed_experts.forward_raw",
+            params=common_params,
+            extra={**route_extra, "stage": "non_runner.routed_output_raw"},
+        )
         _dsv4_moe_record_operator(
             batch,
             operator_name="routed_expert_output",
@@ -4096,10 +4300,16 @@ class DSV4MoE(BaseOP):
             positions=positions,
             path="mini.moe.routed_experts.forward_fp32",
             params=common_params,
-            extra=route_extra,
+            extra={
+                **route_extra,
+                "stage": "non_runner.routed_output_fp32_finalize",
+                "raw_output": _dsv4_moe_reduce_tensor_census(routed_raw),
+                "finalized_output": _dsv4_moe_reduce_tensor_census(y),
+            },
         )
         routed_for_aggregate = y
         shared = None
+        shared_raw = None
         if hasattr(self, "shared_experts"):
             _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
             _dsv4_moe_record_operator(
@@ -4114,7 +4324,23 @@ class DSV4MoE(BaseOP):
                 extra={"stage": "non_runner.shared_input", "shared_experts_present": True},
             )
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.shared"):
-                shared = self.shared_experts.forward(flat, reduce=not reduce_once).float()
+                shared_raw = self.shared_experts.forward(
+                    flat,
+                    reduce=not reduce_once,
+                    row_invariant_local=is_target_verify,
+                )
+                _dsv4_moe_record_operator(
+                    batch,
+                    operator_name="shared_expert_output_raw",
+                    layer_id=self.layer_id,
+                    input_tensor=flat,
+                    output_tensor=shared_raw,
+                    positions=positions,
+                    path="mini.moe.shared_experts.forward_raw",
+                    params=common_params,
+                    extra={"stage": "non_runner.shared_output_raw"},
+                )
+                shared = shared_raw.float()
                 y = y + shared
             _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
             _dsv4_moe_record_operator(
@@ -4126,7 +4352,58 @@ class DSV4MoE(BaseOP):
                 positions=positions,
                 path="mini.moe.shared_experts.forward_fp32",
                 params=common_params,
-                extra={"stage": "non_runner.shared_output"},
+                extra={
+                    "stage": "non_runner.shared_output_fp32_finalize",
+                    "raw_output": _dsv4_moe_reduce_tensor_census(shared_raw),
+                    "finalized_output": _dsv4_moe_reduce_tensor_census(shared),
+                },
+            )
+        if dsv4_mtp_debug.operator_parity_enabled("expert_aggregate_fp32_add_probe"):
+            aggregate_fp32_probe = (
+                routed_for_aggregate + shared
+                if shared is not None
+                else routed_for_aggregate
+            )
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="expert_aggregate_fp32_add_probe",
+                layer_id=self.layer_id,
+                input_tensor=routed_for_aggregate,
+                output_tensor=aggregate_fp32_probe,
+                positions=positions,
+                path="mini.moe.routed_plus_shared_fp32_probe",
+                params=common_params,
+                extra={
+                    "stage": "non_runner.aggregate_fp32_add_probe",
+                    "shared_experts_present": shared is not None,
+                    "routed_input": _dsv4_moe_reduce_tensor_census(routed_for_aggregate),
+                    "shared_input": _dsv4_moe_reduce_tensor_census(shared),
+                },
+            )
+        if dsv4_mtp_debug.operator_parity_enabled("expert_aggregate_bf16_add_probe"):
+            routed_bf16 = routed_for_aggregate.to(flat.dtype)
+            if shared is None:
+                aggregate_bf16_probe = routed_bf16.float()
+            else:
+                aggregate_bf16_probe = (routed_bf16 + shared.to(flat.dtype)).float()
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="expert_aggregate_bf16_add_probe",
+                layer_id=self.layer_id,
+                input_tensor=routed_bf16,
+                output_tensor=aggregate_bf16_probe,
+                positions=positions,
+                path="mini.moe.routed_plus_shared_hidden_dtype_probe",
+                params=common_params,
+                extra={
+                    "stage": "non_runner.aggregate_bf16_add_probe",
+                    "hidden_dtype": str(flat.dtype),
+                    "shared_experts_present": shared is not None,
+                    "routed_input": _dsv4_moe_reduce_tensor_census(routed_bf16),
+                    "shared_input": _dsv4_moe_reduce_tensor_census(
+                        shared.to(flat.dtype) if shared is not None else None
+                    ),
+                },
             )
         _dsv4_moe_record_operator(
             batch,
@@ -4140,6 +4417,10 @@ class DSV4MoE(BaseOP):
             extra={
                 "stage": "non_runner.aggregate_before_reduce",
                 "shared_experts_present": shared is not None,
+                "routed_input": _dsv4_moe_reduce_tensor_census(routed_for_aggregate),
+                "shared_input": _dsv4_moe_reduce_tensor_census(shared),
+                "aggregate_output": _dsv4_moe_reduce_tensor_census(y),
+                "aggregate_order": "routed_fp32_plus_shared_fp32",
             },
         )
         y_before_reduce = y

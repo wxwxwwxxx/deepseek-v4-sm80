@@ -112,6 +112,7 @@ Run these in order.
 | TARGET 11.15 | `prompts/TARGET_11.15_dsv4_sm80_mtp_moe_output_subboundary_parity.md` | After 11.14 closes the q/wq_b boundary and exposes exact-input MoE drift, split `moe_input -> moe_output` into router/topk, routed expert, shared expert, aggregation, and reduce sub-boundaries. |
 | TARGET 11.16 | `prompts/TARGET_11.16_dsv4_sm80_mtp_moe_post_reduce_parity.md` | After 11.15 proves router/topk, routed expert, shared expert, and pre-reduce aggregation are exact, fix or precisely no-go the MoE post-experts reduce/all-reduce boundary. |
 | TARGET 11.17 | `prompts/TARGET_11.17_dsv4_sm80_mtp_moe_pre_reduce_drifting_rank_parity.md` | After 11.16 proves post-reduce drift is propagated from rank0/rank7 local pre-reduce aggregate drift, find and fix/no-go the drifting-rank MoE sub-boundary. |
+| TARGET 11.18 | `prompts/TARGET_11.18_dsv4_sm80_mtp_post_moe_downstream_owner_census.md` | After 11.17 fixes MoE pre-reduce but the matrix still fails, rank downstream owners such as layer21 `attention_wo_b` and layer32 `indexer_query_fp8_values` before choosing the next fix. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -260,6 +261,10 @@ Do not promote MTP by default unless all of these are true:
   propagating rank0/rank7 local `expert_aggregate_before_reduce` drift, stop at
   TARGET 11.17 and debug the drifting ranks' MoE pre-reduce sub-boundaries
   before changing communication policy or fixing indexer FP8.
+- If TARGET 11.17 fixes the scoped MoE pre-reduce owner but the matrix still
+  fails with post-MoE downstream owners such as layer21 `attention_wo_b` and
+  layer32 `indexer_query_fp8_values`, stop at TARGET 11.18 and build an
+  event/layer/rank owner census before choosing the next local fix.
 
 ## Deliverables
 
