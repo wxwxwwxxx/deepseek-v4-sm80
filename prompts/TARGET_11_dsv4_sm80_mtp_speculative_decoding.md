@@ -110,6 +110,8 @@ Run these in order.
 | TARGET 11.13 | `prompts/TARGET_11.13_dsv4_sm80_mtp_operator_parity_framework_q_norm_rope_pilot.md` | After 11.12 ranks q/RoPE as the top rank-local owner, build a reusable operator-parity framework and use q_norm_rope as the first same-kernel/micro-allclose pilot. |
 | TARGET 11.14 | `prompts/TARGET_11.14_dsv4_sm80_mtp_q_wqb_q_lora_precision_boundary_parity.md` | After 11.13 shows q_norm_rope only amplifies a non-bit-exact `q_wqb_output`, use the operator framework to find and fix/no-go the upstream q_lora/q_norm/wq_b precision boundary. |
 | TARGET 11.15 | `prompts/TARGET_11.15_dsv4_sm80_mtp_moe_output_subboundary_parity.md` | After 11.14 closes the q/wq_b boundary and exposes exact-input MoE drift, split `moe_input -> moe_output` into router/topk, routed expert, shared expert, aggregation, and reduce sub-boundaries. |
+| TARGET 11.16 | `prompts/TARGET_11.16_dsv4_sm80_mtp_moe_post_reduce_parity.md` | After 11.15 proves router/topk, routed expert, shared expert, and pre-reduce aggregation are exact, fix or precisely no-go the MoE post-experts reduce/all-reduce boundary. |
+| TARGET 11.17 | `prompts/TARGET_11.17_dsv4_sm80_mtp_moe_pre_reduce_drifting_rank_parity.md` | After 11.16 proves post-reduce drift is propagated from rank0/rank7 local pre-reduce aggregate drift, find and fix/no-go the drifting-rank MoE sub-boundary. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -250,6 +252,14 @@ Do not promote MTP by default unless all of these are true:
 - If TARGET 11.14 closes the q/wq_b boundary but the next owner is `moe_output`
   with exact `moe_input`, stop at TARGET 11.15 and split the MoE output
   sub-boundaries before fixing indexer FP8 or later attention.
+- If TARGET 11.15 proves the first output-significant MoE owner is
+  `expert_aggregate_before_reduce exact -> expert_reduce_output drift`, stop at
+  TARGET 11.16 and fix/prove the post-experts reduce/all-reduce contract before
+  fixing indexer FP8, later attention, or graph/perf.
+- If TARGET 11.16 proves the post-reduce drift is caused by all-reduce SUM
+  propagating rank0/rank7 local `expert_aggregate_before_reduce` drift, stop at
+  TARGET 11.17 and debug the drifting ranks' MoE pre-reduce sub-boundaries
+  before changing communication policy or fixing indexer FP8.
 
 ## Deliverables
 

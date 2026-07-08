@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from contextlib import nullcontext
@@ -283,11 +284,81 @@ def _dsv4_moe_tensor_brief(tensor: torch.Tensor | None) -> dict[str, object]:
         "shape": [int(x) for x in tensor.shape],
         "dtype": str(tensor.dtype),
         "device": str(tensor.device),
+        "stride": [int(x) for x in tensor.stride()],
+        "storage_offset": int(tensor.storage_offset()),
+        "is_contiguous": bool(tensor.is_contiguous()),
         "head": _dsv4_moe_tensor_head(tensor, limit=16),
     }
     if tensor.ndim > 1 and tensor.shape[0] > 0:
         info["row0_head"] = _dsv4_moe_tensor_head(tensor[0], limit=16)
     return info
+
+
+def _dsv4_moe_row0_checksum(tensor: torch.Tensor | None) -> str | None:
+    if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0 or tensor.ndim == 0:
+        return None
+    try:
+        row = tensor.detach()[0].float().contiguous().cpu()
+        return hashlib.sha256(row.numpy().tobytes()).hexdigest()[:16]
+    except Exception:
+        return None
+
+
+def _dsv4_moe_reduce_tensor_census(tensor: torch.Tensor | None) -> dict[str, object]:
+    info = _dsv4_moe_tensor_brief(tensor)
+    checksum = _dsv4_moe_row0_checksum(tensor)
+    if checksum is not None:
+        info["row0_checksum"] = checksum
+    return info
+
+
+def _dsv4_moe_reduce_census_enabled() -> bool:
+    return dsv4_mtp_debug.operator_parity_enabled(
+        "expert_reduce_output"
+    ) or dsv4_mtp_debug.operator_parity_enabled("moe_output")
+
+
+def _dsv4_moe_reduce_tensor_census_if_enabled(
+    tensor: torch.Tensor | None,
+) -> dict[str, object]:
+    if not _dsv4_moe_reduce_census_enabled():
+        return {"available": False, "disabled": True}
+    return _dsv4_moe_reduce_tensor_census(tensor)
+
+
+def _dsv4_moe_comm_backend_name(comm: DistributedCommunicator) -> str:
+    try:
+        return type(comm.plugins[-1]).__name__
+    except Exception:
+        return "unknown"
+
+
+def _dsv4_moe_reduce_boundary_base_extra(
+    *,
+    stage: str,
+    tp_size: int,
+    comm: DistributedCommunicator,
+    reduce_label: str,
+    pre_reduce: torch.Tensor,
+) -> dict[str, object]:
+    try:
+        tp_rank = int(get_tp_info().rank)
+    except Exception:
+        tp_rank = -1
+    return {
+        "stage": stage,
+        "tp_size": int(tp_size),
+        "tp_rank": tp_rank,
+        "pre_reduce": _dsv4_moe_reduce_tensor_census_if_enabled(pre_reduce),
+        "local_rank_contribution": _dsv4_moe_reduce_tensor_census_if_enabled(pre_reduce),
+        "communication_backend": _dsv4_moe_comm_backend_name(comm),
+        "communication_label": str(reduce_label),
+        "communication_op": "all_reduce" if tp_size > 1 else "none",
+        "all_reduce": bool(tp_size > 1),
+        "reduce_scatter": False,
+        "skip_post_experts_all_reduce": False,
+        "final_cast_site": "moe_output",
+    }
 
 
 def _dsv4_moe_expert_histogram(indices: torch.Tensor | None) -> list[dict[str, int]]:
@@ -3607,7 +3678,14 @@ class DSV4FusedMoERunner:
         comm: DistributedCommunicator,
         hidden_dtype: torch.dtype,
         reduce_label: str,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, object]]:
+        boundary_extra = _dsv4_moe_reduce_boundary_base_extra(
+            stage="runner.post_all_reduce",
+            tp_size=self._tp_size,
+            comm=comm,
+            reduce_label=reduce_label,
+            pre_reduce=output,
+        )
         if self._tp_size > 1:
             output = _dsv4_moe_reduce_once_input(
                 output,
@@ -3615,8 +3693,17 @@ class DSV4FusedMoERunner:
                 layer_id=self.layer_id,
                 path="runner_output",
             )
-            return comm.all_reduce(output, label=reduce_label)
-        return output
+            boundary_extra["communication_input"] = _dsv4_moe_reduce_tensor_census_if_enabled(output)
+            boundary_extra["communication_input_dtype"] = str(output.dtype)
+            output = comm.all_reduce(output, label=reduce_label)
+            boundary_extra["post_reduce"] = _dsv4_moe_reduce_tensor_census_if_enabled(output)
+            boundary_extra["communication_output_dtype"] = str(output.dtype)
+            return output, boundary_extra
+        boundary_extra["communication_input"] = _dsv4_moe_reduce_tensor_census_if_enabled(output)
+        boundary_extra["communication_input_dtype"] = str(output.dtype)
+        boundary_extra["post_reduce"] = _dsv4_moe_reduce_tensor_census_if_enabled(output)
+        boundary_extra["communication_output_dtype"] = str(output.dtype)
+        return output, boundary_extra
 
     def forward(
         self,
@@ -3780,7 +3867,7 @@ class DSV4FusedMoERunner:
         )
         _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.reduce_once"):
-            y = self.maybe_reduce_final(
+            y, reduce_boundary_extra = self.maybe_reduce_final(
                 y,
                 comm=comm,
                 hidden_dtype=flat.dtype,
@@ -3796,10 +3883,7 @@ class DSV4FusedMoERunner:
             positions=positions,
             path="mini.moe.runner.post_all_reduce",
             params={**common_params, "reduce_label": str(prepared.moe_plan.final_reduce_label)},
-            extra={
-                "stage": "runner.post_all_reduce",
-                "post_all_reduce": bool(self._tp_size > 1),
-            },
+            extra={**reduce_boundary_extra, "post_all_reduce": bool(self._tp_size > 1)},
             input_row0=reduce_input_row0,
         )
         with dsv4_direct_copy_nvtx(
@@ -3807,6 +3891,14 @@ class DSV4FusedMoERunner:
             y=y,
         ):
             output = y.to(flat.dtype).view_as(hidden_states)
+        moe_output_extra = {
+            "stage": "runner.moe_output",
+            "final_cast_input": _dsv4_moe_reduce_tensor_census_if_enabled(y),
+            "final_cast_output": _dsv4_moe_reduce_tensor_census_if_enabled(output),
+            "final_cast_input_dtype": str(y.dtype),
+            "final_cast_output_dtype": str(output.dtype),
+            "final_cast_order": "post_reduce_to_hidden_dtype",
+        }
         _dsv4_moe_record_operator(
             batch,
             operator_name="moe_output",
@@ -3816,7 +3908,7 @@ class DSV4FusedMoERunner:
             positions=positions,
             path="mini.moe.runner.output_to_hidden_dtype",
             params=common_params,
-            extra={"stage": "runner.moe_output"},
+            extra=moe_output_extra,
         )
         return output
 
@@ -4055,6 +4147,13 @@ class DSV4MoE(BaseOP):
             "expert_reduce_output",
             y_before_reduce,
         )
+        reduce_boundary_extra = _dsv4_moe_reduce_boundary_base_extra(
+            stage="non_runner.post_all_reduce",
+            tp_size=self._tp_size if reduce_once else 1,
+            comm=self._comm,
+            reduce_label="dsv4.v1_moe_reduce_once_all_reduce",
+            pre_reduce=y_before_reduce,
+        )
         if reduce_once and self._tp_size > 1:
             _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.reduce_once"):
@@ -4064,8 +4163,23 @@ class DSV4MoE(BaseOP):
                     layer_id=self.layer_id,
                     path="non_runner_output",
                 )
+                reduce_boundary_extra["communication_input"] = (
+                    _dsv4_moe_reduce_tensor_census_if_enabled(y)
+                )
+                reduce_boundary_extra["communication_input_dtype"] = str(y.dtype)
                 y = self._comm.all_reduce(y, label="dsv4.v1_moe_reduce_once_all_reduce")
+                reduce_boundary_extra["post_reduce"] = (
+                    _dsv4_moe_reduce_tensor_census_if_enabled(y)
+                )
+                reduce_boundary_extra["communication_output_dtype"] = str(y.dtype)
             _record_warmup_memory("moe.reduce_once", "after", layer_id=self.layer_id)
+        else:
+            reduce_boundary_extra["communication_input"] = (
+                _dsv4_moe_reduce_tensor_census_if_enabled(y)
+            )
+            reduce_boundary_extra["communication_input_dtype"] = str(y.dtype)
+            reduce_boundary_extra["post_reduce"] = _dsv4_moe_reduce_tensor_census_if_enabled(y)
+            reduce_boundary_extra["communication_output_dtype"] = str(y.dtype)
         _dsv4_moe_record_operator(
             batch,
             operator_name="expert_reduce_output",
@@ -4078,12 +4192,20 @@ class DSV4MoE(BaseOP):
             ),
             params={**common_params, "reduce_label": "dsv4.v1_moe_reduce_once_all_reduce"},
             extra={
-                "stage": "non_runner.post_all_reduce",
+                **reduce_boundary_extra,
                 "post_all_reduce": bool(reduce_once and self._tp_size > 1),
             },
             input_row0=reduce_input_row0,
         )
         output = y.to(flat.dtype).view_as(hidden_states)
+        moe_output_extra = {
+            "stage": "moe_output",
+            "final_cast_input": _dsv4_moe_reduce_tensor_census_if_enabled(y),
+            "final_cast_output": _dsv4_moe_reduce_tensor_census_if_enabled(output),
+            "final_cast_input_dtype": str(y.dtype),
+            "final_cast_output_dtype": str(output.dtype),
+            "final_cast_order": "post_reduce_to_hidden_dtype",
+        }
         _dsv4_moe_record_operator(
             batch,
             operator_name="moe_output",
@@ -4093,7 +4215,7 @@ class DSV4MoE(BaseOP):
             positions=positions,
             path="mini.moe.output_to_hidden_dtype",
             params=common_params,
-            extra={"stage": "moe_output"},
+            extra=moe_output_extra,
         )
         return output
 
