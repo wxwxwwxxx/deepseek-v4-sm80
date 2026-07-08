@@ -2539,8 +2539,7 @@ class DSV4Attention(BaseOP):
         q_norm_rope_path = "mini.q_norm_rope_fallback"
         q_kv_norm_rope_cache_written = False
         layer2_swa_lifecycle_trace = (
-            int(self.layer_id) == 2
-            and dsv4_mtp_debug.layer2_swa_lifecycle_trace_enabled()
+            dsv4_mtp_debug.swa_lifecycle_trace_enabled(int(self.layer_id))
             and use_dsv4_backend
             and attn_backend is not None
             and not read_only_frozen_kv

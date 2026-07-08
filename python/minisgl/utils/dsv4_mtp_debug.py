@@ -16,6 +16,7 @@ OPERATOR_PARITY_RTOL_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_RTOL"
 ROW_TRACE_ROWS_ENV = "MINISGL_DSV4_MTP_ROW_TRACE_ROWS"
 ROW_TENSOR_TRACE_ENV = "MINISGL_DSV4_MTP_ROW_TENSOR_TRACE"
 LAYER2_SWA_LIFECYCLE_TRACE_ENV = "MINISGL_DSV4_LAYER2_SWA_LIFECYCLE_TRACE"
+SWA_LIFECYCLE_TRACE_LAYERS_ENV = "MINISGL_DSV4_SWA_LIFECYCLE_TRACE_LAYERS"
 WO_A_PROJECTION_ORACLE_ENV = "MINISGL_DSV4_MTP_WO_A_PROJECTION_ORACLE"
 WO_A_PROJECTION_ORACLE_LAYERS_ENV = "MINISGL_DSV4_MTP_WO_A_PROJECTION_ORACLE_LAYERS"
 WO_B_PROJECTION_ORACLE_ENV = "MINISGL_DSV4_MTP_WO_B_PROJECTION_ORACLE"
@@ -44,6 +45,25 @@ def row_tensor_trace_enabled() -> bool:
 
 def layer2_swa_lifecycle_trace_enabled() -> bool:
     return env_flag(LAYER2_SWA_LIFECYCLE_TRACE_ENV)
+
+
+def swa_lifecycle_trace_layers() -> set[int]:
+    raw = os.environ.get(SWA_LIFECYCLE_TRACE_LAYERS_ENV, "2").strip()
+    try:
+        selected = _parse_int_filter(raw)
+    except ValueError:
+        return {2}
+    if selected is None:
+        return {2}
+    return {int(layer_id) for layer_id in selected}
+
+
+def swa_lifecycle_trace_enabled(layer_id: int | None = None) -> bool:
+    if not layer2_swa_lifecycle_trace_enabled():
+        return False
+    if layer_id is None:
+        return True
+    return int(layer_id) in swa_lifecycle_trace_layers()
 
 
 def row0_layer_parity_atol() -> float:
@@ -832,7 +852,7 @@ def record_layer2_swa_store(
     cache_after: torch.Tensor | None,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    if int(layer_id) != 2 or not layer2_swa_lifecycle_trace_enabled():
+    if not swa_lifecycle_trace_enabled(int(layer_id)):
         return
     if batch is None or not isinstance(kv, torch.Tensor) or kv.numel() == 0:
         return
@@ -2465,6 +2485,7 @@ __all__ = [
     "ROW0_LAYER_PARITY_ENV",
     "ROW0_LAYER_PARITY_ATOL_ENV",
     "LAYER2_SWA_LIFECYCLE_TRACE_ENV",
+    "SWA_LIFECYCLE_TRACE_LAYERS_ENV",
     "MOE_CONTRACT_ORACLE_ENV",
     "MOE_CONTRACT_ORACLE_LAYERS_ENV",
     "WO_A_PROJECTION_ORACLE_ENV",
@@ -2506,6 +2527,8 @@ __all__ = [
     "row0_layer_parity_enabled",
     "row_tensor_trace_enabled",
     "layer2_swa_lifecycle_trace_enabled",
+    "swa_lifecycle_trace_enabled",
+    "swa_lifecycle_trace_layers",
     "moe_contract_oracle_enabled",
     "record_moe_contract_oracle",
     "record_moe_microbatch_runtime",

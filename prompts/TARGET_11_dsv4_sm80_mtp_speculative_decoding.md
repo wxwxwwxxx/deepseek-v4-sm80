@@ -129,6 +129,10 @@ Run these in order.
 | TARGET 11.248 | `prompts/TARGET_11.248_dsv4_sm80_mtp_c128_component_state_publication_parity.md` | After 11.247 identifies C128 layer3 component-state publication as the first remaining owner, determine whether MTP skips, misplaces, clears, or computes the C128 state incorrectly. |
 | TARGET 11.249 | `prompts/TARGET_11.249_dsv4_sm80_mtp_online_c128_main_state_contract_port.md` | After 11.248 classifies Mini's C128 MTP path as a disconnected main-state contract, port or fail-close the online C128 lifecycle and revalidate exactness. |
 | TARGET 11.250 | `prompts/TARGET_11.250_dsv4_sm80_mtp_online_c128_read_surface_port.md` | After 11.249 moves online C128 banks to the main state surface but fail-closes accepted commit, port the SGLang-aligned online C128 read/planner surface and remove the blocker. |
+| TARGET 11.251 | `prompts/TARGET_11.251_dsv4_sm80_mtp_online_c128_parity_planner_next_owner.md` | After 11.250 removes the old C128 read-surface blocker but bs6 still fails, update state parity to understand online C128 chunk/bank mapping and identify the first true checksum owner. |
+| TARGET 11.252 | `prompts/TARGET_11.252_dsv4_sm80_mtp_c4_indexer_state_validity_consume.md` | After 11.251 identifies C4 indexer state as the next analyzer-visible owner but likely uninitialized, instrument validity/write/consume before runtime patching. |
+| TARGET 11.253 | `prompts/TARGET_11.253_dsv4_sm80_mtp_swa_layer1_commit_row_value_parity.md` | After 11.252 skips uninitialized C4 indexer state, classify the first valid SWA layer1 accepted-commit row value owner into producer, copy, or restore/cleanup. |
+| TARGET 11.254 | `prompts/TARGET_11.254_dsv4_sm80_mtp_layer1_swa_producer_boundary_parity.md` | After 11.253 proves accepted commit only preserves an already-wrong SWA row, bisect target-verify producer parity from layer0 through layer1 SWA store input. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -353,6 +357,25 @@ Do not promote MTP by default unless all of these are true:
   `c128_online_main_state_compressor_read_surface_not_ported`, stop at TARGET
   11.250 and port the SGLang-aligned online C128 read/planner surface before
   removing fail-closed accepted commit or starting graph/perf promotion.
+- If TARGET 11.250 removes the old C128 read-surface blocker and target verify
+  plus accepted commit are active, but bs6 bisection still reports a C128
+  `commit_mapping_owner` caused by expected legacy-loc versus online-chunk-loc
+  comparison, stop at TARGET 11.251 and fix the parity planner before patching
+  C4 indexer, C128 values, logits, sampler, or graph/perf behavior.
+- If TARGET 11.251 reclassifies the C128 owner as expected raw-loc remapping and
+  the next analyzer-visible owner is `c4_indexer_state` with huge or NaN-looking
+  baseline rows, stop at TARGET 11.252 and prove validity/write/consume before
+  changing C4 runtime, logits, sampler, or graph/perf behavior.
+- If TARGET 11.252 proves `c4_indexer_state` is uninitialized/unconsumed and the
+  next valid owner is `swa.layer1 / commit_row_value_owner`, stop at TARGET
+  11.253 and split the SWA row lifecycle into target-verify producer,
+  accepted-commit source/destination/copy, and restore/cleanup before changing
+  logits, sampler, graph/perf, or unrelated component state.
+- If TARGET 11.253 proves accepted-commit source/destination/copy and
+  snapshot/restore are aligned but the SWA row is already wrong at target-verify
+  layer1 store input, stop at TARGET 11.254 and bisect the target-verify
+  producer boundary from layer0 output through layer1 SWA store input before
+  changing accepted commit, logits, sampler, graph/perf, or unrelated state.
 
 ## Deliverables
 

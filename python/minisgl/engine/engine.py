@@ -2693,9 +2693,15 @@ class Engine:
     def _layer2_swa_snapshot_summary(self, snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
         if not isinstance(snapshot, dict):
             return []
+        labels = tuple(
+            f"swa.layer{int(layer_id)}"
+            for layer_id in sorted(dsv4_mtp_debug.swa_lifecycle_trace_layers())
+        )
+        if not labels:
+            labels = ("swa.layer2",)
         return self._summarize_mtp_kv_snapshot_labels(
             snapshot,
-            labels=("swa.layer2",),
+            labels=labels,
         )
 
     def _tensor_int_list(self, tensor: torch.Tensor | None, limit: int = 64) -> list[int]:
