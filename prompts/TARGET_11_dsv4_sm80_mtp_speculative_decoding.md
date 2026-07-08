@@ -128,6 +128,7 @@ Run these in order.
 | TARGET 11.247 | `prompts/TARGET_11.247_dsv4_sm80_mtp_accepted_commit_state_parity_after_moe_microbatch.md` | After 11.246 fixes focused MoE exactness but bs6 still diverges, find the first accepted-commit state/KV parity owner versus no-spec baseline. |
 | TARGET 11.248 | `prompts/TARGET_11.248_dsv4_sm80_mtp_c128_component_state_publication_parity.md` | After 11.247 identifies C128 layer3 component-state publication as the first remaining owner, determine whether MTP skips, misplaces, clears, or computes the C128 state incorrectly. |
 | TARGET 11.249 | `prompts/TARGET_11.249_dsv4_sm80_mtp_online_c128_main_state_contract_port.md` | After 11.248 classifies Mini's C128 MTP path as a disconnected main-state contract, port or fail-close the online C128 lifecycle and revalidate exactness. |
+| TARGET 11.250 | `prompts/TARGET_11.250_dsv4_sm80_mtp_online_c128_read_surface_port.md` | After 11.249 moves online C128 banks to the main state surface but fail-closes accepted commit, port the SGLang-aligned online C128 read/planner surface and remove the blocker. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -348,6 +349,10 @@ Do not promote MTP by default unless all of these are true:
   11.249 and port the SGLang-aligned main-state lifecycle or implement a
   fail-closed exact path before chasing downstream logits, sampler, or
   graph/perf behavior.
+- If TARGET 11.249 reaches `fail_closed_exact` with blocker
+  `c128_online_main_state_compressor_read_surface_not_ported`, stop at TARGET
+  11.250 and port the SGLang-aligned online C128 read/planner surface before
+  removing fail-closed accepted commit or starting graph/perf promotion.
 
 ## Deliverables
 

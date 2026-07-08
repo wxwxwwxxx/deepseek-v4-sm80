@@ -2881,12 +2881,24 @@ class DSV4Attention(BaseOP):
                 and hasattr(attn_backend, "write_c128_mtp_prefix_states")
             ):
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.c128_mtp_prefix"):
-                    attn_backend.write_c128_mtp_prefix_states(
+                    online_compressed_kv = attn_backend.write_c128_mtp_prefix_states(
                         self.layer_id,
                         self.compressor,
                         x,
                         batch,
+                        apply_norm=not compress_store_fuses_norm,
                     )
+                    if online_compressed_kv is not None:
+                        compressed_kv = online_compressed_kv
+                        _capture_debug_activation(
+                            f"layer{self.layer_id}.compressor_output_online_c128",
+                            compressed_kv,
+                            row_indices=_compressed_debug_row_indices(
+                                positions,
+                                self.compress_ratio,
+                                batch,
+                            ),
+                        )
             if (
                 use_dsv4_backend
                 and not read_only_frozen_kv

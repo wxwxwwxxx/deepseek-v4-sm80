@@ -2508,6 +2508,50 @@ def test_online_c128_mtp_lifecycle_cpu_oracle_accepts_and_isolates_tail():
     assert not torch.allclose(state[0], state[state_slot_stride * 3])
 
 
+def test_online_c128_mtp_boundary_compressor_reads_committed_bank0():
+    head_dim = 2
+    state_slot_stride = 4
+    state = torch.zeros((state_slot_stride * 3, 3 * head_dim), dtype=torch.float32)
+    state[0, :head_dim] = torch.tensor([0.0, 0.0])
+    state[0, head_dim : head_dim * 2] = torch.tensor([2.0, 2.0])
+    state[0, head_dim * 2 : head_dim * 3] = torch.tensor([10.0, 20.0])
+    req_pool_indices = torch.tensor([1], dtype=torch.int32)
+    req_to_token = torch.full((3, 256), -1, dtype=torch.int32)
+    req_to_token[1, 0] = 0
+    full_to_swa = torch.arange(256, dtype=torch.int64)
+    ape = torch.zeros((128, head_dim), dtype=torch.float32)
+    kv_score_input = torch.tensor([[14.0, 28.0, 0.0, 0.0]], dtype=torch.float32)
+
+    out = dsv4_kernel.online_c128_mtp_boundary_compressed_rows(
+        kv_score_input,
+        torch.tensor([127], dtype=torch.int32),
+        req_pool_indices,
+        req_to_token,
+        full_to_swa,
+        ape,
+        state,
+        layer_bs=1,
+        swa_page_size=128,
+        num_verify_tokens=1,
+    )
+    expected = torch.tensor([[34.0 / 3.0, 68.0 / 3.0]], dtype=torch.float32)
+    assert torch.allclose(out, expected, atol=1e-6, rtol=1e-6)
+
+    no_boundary = dsv4_kernel.online_c128_mtp_boundary_compressed_rows(
+        kv_score_input,
+        torch.tensor([126], dtype=torch.int32),
+        req_pool_indices,
+        req_to_token,
+        full_to_swa,
+        ape,
+        state,
+        layer_bs=1,
+        swa_page_size=128,
+        num_verify_tokens=1,
+    )
+    assert no_boundary.shape == (0, head_dim)
+
+
 def test_dsv4_moe_route_plan_groups_and_pads_routes():
     indices = torch.tensor(
         [

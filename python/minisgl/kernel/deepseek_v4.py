@@ -2234,6 +2234,90 @@ def online_c128_mtp_write_prefix_states(
                 run_sum.zero_()
 
 
+def online_c128_mtp_boundary_compressed_rows(
+    kv_score_input: torch.Tensor,
+    seq_lens: torch.Tensor,
+    req_pool_indices: torch.Tensor,
+    req_to_token: torch.Tensor,
+    full_to_swa: torch.Tensor,
+    ape: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    layer_bs: int,
+    swa_page_size: int,
+    num_verify_tokens: int,
+) -> torch.Tensor:
+    layer_bs = int(layer_bs)
+    num_verify_tokens = int(num_verify_tokens)
+    head_dim = int(ape.shape[-1])
+    if layer_bs <= 0 or num_verify_tokens <= 0:
+        return kv_score_input.new_empty((0, head_dim))
+    if num_verify_tokens > 8:
+        raise RuntimeError(
+            f"online C128 MTP supports at most 8 verify tokens, got {num_verify_tokens}"
+        )
+
+    kv_score = kv_score_input.reshape(-1, head_dim * 2).float()
+    seq_cpu = seq_lens[:layer_bs].detach().to(device="cpu", dtype=torch.long)
+    req_cpu = req_pool_indices[:layer_bs].detach().to(device="cpu", dtype=torch.long)
+    outputs: list[torch.Tensor] = []
+    for bid, (seq_before, req) in enumerate(zip(seq_cpu.tolist(), req_cpu.tolist())):
+        start_pos = int(seq_before) & 127
+        has_partial = int(seq_before) > 0 and start_pos != 0
+        if has_partial:
+            init_slot = _online_c128_slot_from_chunk(
+                req_to_token,
+                full_to_swa,
+                req=int(req),
+                chunk_start=((int(seq_before) - 1) // 128) * 128,
+                swa_page_size=int(swa_page_size),
+            )
+            if init_slot < 0:
+                raise RuntimeError(
+                    "online C128 MTP boundary compressor could not read committed bank0 state"
+                )
+            init = state[init_slot].float()
+            run_max = init[:head_dim].clone()
+            run_sum = init[head_dim : head_dim * 2].clone()
+            run_kv = init[head_dim * 2 : head_dim * 3].clone()
+        else:
+            run_max = torch.zeros(head_dim, dtype=torch.float32, device=state.device)
+            run_sum = torch.zeros_like(run_max)
+            run_kv = torch.zeros_like(run_max)
+
+        for step in range(num_verify_tokens):
+            flat_row = bid * num_verify_tokens + step
+            if flat_row >= int(kv_score.shape[0]):
+                break
+            pos = (start_pos + step) & 127
+            row = kv_score[flat_row].to(device=state.device)
+            kv_step = row[:head_dim]
+            score_step = row[head_dim:] + ape[pos].to(device=state.device, dtype=torch.float32)
+            if pos == 0:
+                run_kv = kv_step.clone()
+                run_max = score_step.clone()
+                run_sum = torch.ones_like(score_step)
+            else:
+                new_max = torch.maximum(run_max, score_step)
+                old_sum_scaled = run_sum * torch.exp(run_max - new_max)
+                new_exp = torch.exp(score_step - new_max)
+                new_sum = old_sum_scaled + new_exp
+                run_kv = (run_kv * old_sum_scaled + kv_step * new_exp) / new_sum
+                run_max = new_max
+                run_sum = new_sum
+
+            final_seq = int(seq_before) + step + 1
+            if (final_seq & 127) == 0:
+                outputs.append(run_kv.clone())
+                run_kv.zero_()
+                run_max.zero_()
+                run_sum.zero_()
+
+    if not outputs:
+        return kv_score_input.new_empty((0, head_dim))
+    return torch.stack(outputs, dim=0)
+
+
 def online_c128_mtp_commit_pending(
     cur_seq_lens: torch.Tensor,
     cur_req_pool_indices: torch.Tensor,
@@ -5201,6 +5285,7 @@ __all__ = [
     "moe_route_dispatch_bf16_marlin_wna16",
     "moe_route_dispatch_bf16_marlin_wna16_prepacked",
     "norm_rope_inplace_fallback",
+    "online_c128_mtp_boundary_compressed_rows",
     "online_c128_mtp_commit_pending",
     "online_c128_mtp_mark_pending",
     "online_c128_mtp_write_prefix_states",

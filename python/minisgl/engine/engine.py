@@ -244,6 +244,7 @@ class Engine:
             "accepted_kv_commit_fail_closed": False,
             "accepted_kv_commit_blocker": "",
             "accepted_kv_commit_blocked_rows": 0,
+            "fail_closed_exact_batches": 0,
             "draft_tokens_accept_candidates": 0,
             "target_correction_token_candidates": 0,
             "target_bonus_token_candidates": 0,
@@ -869,7 +870,51 @@ class Engine:
             return "c128_online_mtp_owner_not_bound"
         if not bool(owner.ready()):
             return "c128_online_mtp_write_prefix_kernel_not_bound"
+        main_state_surface = bool(
+            getattr(kv_cache, "_c128_online_mtp_main_state", False)
+        )
+        read_surface_ready = (
+            bool(owner.read_surface_ready())
+            if callable(getattr(owner, "read_surface_ready", None))
+            else False
+        )
+        if main_state_surface and not read_surface_ready:
+            return "c128_online_main_state_compressor_read_surface_not_ported"
         return None
+
+    def _fail_closed_mtp_exact(
+        self,
+        batch: Batch,
+        *,
+        blocker: str,
+    ) -> dict[str, Any]:
+        self.mtp_spec_stats["accepted_kv_commit_fail_closed"] = True
+        self.mtp_spec_stats["accepted_kv_commit_blocker"] = blocker
+        self.mtp_spec_stats["fail_closed_exact_batches"] = int(
+            self.mtp_spec_stats.get("fail_closed_exact_batches", 0)
+        ) + 1
+        accepted_prefix_lens = [0] * len(batch.reqs)
+        self._record_mtp_acceptance_histogram(accepted_prefix_lens)
+        self._record_mtp_c128_lifecycle_event(
+            {
+                "event": "accepted_commit_fail_closed",
+                "blocker": blocker,
+                "reason": (
+                    "MTP exactness is protected until Mini's C128 online main-state "
+                    "compressor/read surface is fully ported."
+                ),
+            }
+        )
+        return {
+            "verified": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "correction_tokens": 0,
+            "target_fallback_tokens": 0,
+            "page_boundary_stops": 0,
+            "accepted_prefix_lens": accepted_prefix_lens,
+            "verify_shapes": [],
+        }
 
     def _record_mtp_c128_lifecycle_event(self, event: dict[str, Any]) -> None:
         events = self.mtp_spec_stats.setdefault("c128_mtp_lifecycle_events", [])
@@ -2859,6 +2904,7 @@ class Engine:
             layers.append({"layer_id": int(layer_id), "banks": banks})
         return {
             "available": True,
+            "storage": "main_kv_score_buffer",
             "pending_seq_len": pending_value,
             "chunk_start": int(chunk_start),
             "full_loc": int(full_loc.item()),
@@ -3161,6 +3207,12 @@ class Engine:
                 "ownership mode until accepted-KV movement covers Route-B "
                 "component/SWA state."
             )
+        accepted_commit_blocker = self._mtp_accepted_commit_blocker()
+        if accepted_commit_blocker is not None:
+            return self._fail_closed_mtp_exact(
+                batch,
+                blocker=accepted_commit_blocker,
+            )
 
         configured_group_size = max(1, _env_int(_DSV4_MTP_VERIFY_GROUP_SIZE_ENV, 2))
         verify_group_size = configured_group_size
@@ -3431,6 +3483,15 @@ class Engine:
             if layer2_swa_lifecycle_trace_enabled
             else None
         )
+        owner_after_verify = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
+        if owner_after_verify is not None and callable(getattr(owner_after_verify, "status", None)):
+            self._record_mtp_c128_lifecycle_event(
+                {
+                    "event": "target_verify_after_forward",
+                    "total_verify_tokens": int(total_verify_tokens),
+                    "owner": owner_after_verify.status(),
+                }
+            )
         lifecycle_entries: list[dict[str, Any]] = []
 
         commit_loc_chunks: list[torch.Tensor] = []

@@ -448,27 +448,32 @@ class DSV4CompressStatePool:
         )
         self.online_mtp_state_slot_offset = 0
         self.online_mtp_state: torch.Tensor | None = None
-        last_dim = 2 * (1 + int(overlap)) * head_dim
-        padded_size = _align_up(size + ring_size + 1, _lcm(ratio, page_size))
-        self.last_dim = last_dim
-        self.logical_size = size
-        self.kv_score_buffer = DSV4KVAndScore(
-            torch.empty((padded_size, last_dim), dtype=dtype, device=device)
+        self.online_mtp_uses_main_state = bool(
+            ratio == 128 and self.online_mtp_max_draft_tokens > 0
         )
-        self.kv_score_buffer[-1].clear()
-        if ratio == 128 and self.online_mtp_max_draft_tokens > 0:
+        if self.online_mtp_uses_main_state:
             state_size = max(int(online_mtp_state_size or size), 1)
             self.online_mtp_state_slot_offset = state_size
-            self.online_mtp_state = torch.zeros(
-                (
-                    state_size * (1 + self.online_mtp_max_draft_tokens),
-                    3 * head_dim,
-                ),
-                dtype=torch.float32,
-                device=device,
-            )
+            last_dim = 3 * head_dim
+            padded_size = state_size * (1 + self.online_mtp_max_draft_tokens)
+        else:
+            last_dim = 2 * (1 + int(overlap)) * head_dim
+            padded_size = _align_up(size + ring_size + 1, _lcm(ratio, page_size))
+        self.last_dim = last_dim
+        self.logical_size = state_size if self.online_mtp_uses_main_state else size
+        backing = (
+            torch.zeros((padded_size, last_dim), dtype=torch.float32, device=device)
+            if self.online_mtp_uses_main_state
+            else torch.empty((padded_size, last_dim), dtype=dtype, device=device)
+        )
+        self.kv_score_buffer = DSV4KVAndScore(backing)
+        if not self.online_mtp_uses_main_state:
+            self.kv_score_buffer[-1].clear()
 
     def translate_from_swa_loc_to_state_loc(self, swa_loc: torch.Tensor) -> torch.Tensor:
+        if self.online_mtp_uses_main_state:
+            state_loc = swa_loc.div(128, rounding_mode="floor")
+            return torch.where(swa_loc < 0, -1, state_loc)
         page_size = max(self.page_size, 1)
         swa_pages = swa_loc // page_size
         state_loc = swa_pages * self.ring_size + (swa_loc % self.ring_size)
@@ -479,20 +484,33 @@ class DSV4CompressStatePool:
 
     def set_state_by_state_loc(self, state_loc: torch.Tensor, value: DSV4KVAndScore) -> None:
         self.kv_score_buffer[state_loc] = value
-        self.kv_score_buffer[-1].clear()
+        if not self.online_mtp_uses_main_state:
+            self.kv_score_buffer[-1].clear()
 
     def clear_state_locs(self, state_locs: torch.Tensor) -> None:
         if state_locs.numel() == 0:
             return
         buffer = self.kv_score_buffer.kv_score
         locs = torch.unique(state_locs.to(device=buffer.device, dtype=torch.long))
+        if self.online_mtp_uses_main_state:
+            offset = max(int(self.online_mtp_state_slot_offset), 1)
+            banks = torch.arange(
+                1 + int(self.online_mtp_max_draft_tokens),
+                dtype=locs.dtype,
+                device=locs.device,
+            )
+            locs = (locs.reshape(-1, 1) + banks.reshape(1, -1) * offset).reshape(-1)
         locs = locs[(locs >= 0) & (locs < self.kv_score_buffer.kv_score.shape[0])]
         if locs.numel() == 0:
             return
-        item_size = self.kv_score_buffer._item_size
-        buffer.index_fill_(0, locs, 0)
-        buffer[:, item_size:].index_fill_(0, locs, float("-inf"))
-        self.kv_score_buffer[-1].clear()
+        locs = torch.unique(locs)
+        if self.online_mtp_uses_main_state:
+            buffer.index_fill_(0, locs, 0)
+        else:
+            item_size = self.kv_score_buffer._item_size
+            buffer.index_fill_(0, locs, 0)
+            buffer[:, item_size:].index_fill_(0, locs, float("-inf"))
+            self.kv_score_buffer[-1].clear()
 
 
 class DeepSeekV4KVCache(BaseKVCachePool):
@@ -561,6 +579,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._c4_component_page_size = max(div_ceil(page_size, 4), 1)
         self._c128_component_page_size = max(div_ceil(page_size, 128), 1)
         self._c4_state_page_size = self.C4_STATE_RING_SIZE
+        self._c128_online_mtp_main_state = False
         self._c128_state_page_size = self.C128_STATE_RING_SIZE
         self._online_c128_mtp_swa_page_size = self.C128_STATE_RING_SIZE
         self._c4_component_pages = div_ceil(self._c4_slots, self._c4_component_page_size)
@@ -577,6 +596,12 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             max(int(online_c128_mtp_max_draft_tokens), 0)
             if self._c128_layer_count
             else 0
+        )
+        self._c128_online_mtp_main_state = self._online_c128_mtp_max_draft_tokens > 0
+        self._c128_state_page_size = (
+            self._c128_component_page_size
+            if self._c128_online_mtp_main_state
+            else self.C128_STATE_RING_SIZE
         )
         self._max_req_slots = max(int(max_running_req or 1), 1) + 1
 
@@ -681,8 +706,13 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             dtype=torch.int16,
             device=device,
         )
+        self._c128_state_slots = (
+            self._c128_slots
+            if self._c128_online_mtp_main_state
+            else self._num_pages * self._c128_state_page_size
+        )
         self._c128_state_refcount = torch.zeros(
-            self._num_pages * self._c128_state_page_size,
+            self._c128_state_slots,
             dtype=torch.int16,
             device=device,
         )
@@ -718,8 +748,9 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             dtype=torch.int32,
             device=device,
         )
+        self._c128_state_pages = max(div_ceil(self._c128_state_slots, self._c128_state_page_size), 1)
         self._free_c128_state_pages = torch.arange(
-            self._num_pages,
+            self._c128_state_pages,
             dtype=torch.int32,
             device=device,
         )
@@ -786,7 +817,11 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                     device=device,
                     page_size=page_size,
                     online_mtp_max_draft_tokens=self._online_c128_mtp_max_draft_tokens,
-                    online_mtp_state_size=self._c128_slots,
+                    online_mtp_state_size=(
+                        self._c128_state_slots
+                        if self._c128_online_mtp_main_state
+                        else self._c128_slots
+                    ),
                 )
         self._maybe_install_marlin_wna16_kv_sentinels("after_kv_alloc")
 
@@ -979,7 +1014,19 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 tensor=pool.kv_score_buffer.kv_score,
                 extra={"ratio": int(pool.ratio), "kind": "attention"},
             )
-            if pool.online_mtp_state is not None:
+            if pool.online_mtp_uses_main_state:
+                dsv4_memory_debug.record_owner_tensor(
+                    owner_label=f"kvcache.dsv4.layer{layer_id}.online_c128_mtp_main_state",
+                    stage=stage,
+                    tensor=pool.kv_score_buffer.kv_score,
+                    extra={
+                        "ratio": int(pool.ratio),
+                        "kind": "online_c128_mtp_main_state",
+                        "state_slot_offset": int(pool.online_mtp_state_slot_offset),
+                        "max_draft_tokens": int(pool.online_mtp_max_draft_tokens),
+                    },
+                )
+            elif pool.online_mtp_state is not None:
                 dsv4_memory_debug.record_owner_tensor(
                     owner_label=f"kvcache.dsv4.layer{layer_id}.online_c128_mtp_state",
                     stage=stage,
@@ -1165,6 +1212,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
 
     def get_online_c128_mtp_state(self, layer_id: int) -> torch.Tensor:
         pool = self.attention_compress_state(layer_id)
+        if pool.online_mtp_uses_main_state:
+            return pool.kv_score_buffer.kv_score
         if pool.online_mtp_state is None:
             raise RuntimeError(f"Layer {layer_id} has no online C128 MTP state buffer")
         return pool.online_mtp_state
@@ -1203,7 +1252,13 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             if pool is None or pool.ratio != 128:
                 continue
             layers += 1
-            if pool.online_mtp_state is not None:
+            if pool.online_mtp_uses_main_state:
+                state_rows = int(pool.kv_score_buffer.kv_score.shape[0])
+                state_bytes_per_layer = int(
+                    pool.kv_score_buffer.kv_score.numel()
+                    * pool.kv_score_buffer.kv_score.element_size()
+                )
+            elif pool.online_mtp_state is not None:
                 state_rows = int(pool.online_mtp_state.shape[0])
                 state_bytes_per_layer = int(
                     pool.online_mtp_state.numel() * pool.online_mtp_state.element_size()
@@ -1220,6 +1275,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "state_bytes_total": int(state_bytes_per_layer * layers),
             "pending_seq_lens_bytes": int(pending_bytes),
             "total_bytes": int(state_bytes_per_layer * layers + pending_bytes),
+            "main_state_surface": bool(self._c128_online_mtp_main_state),
         }
 
     def indexer_compress_state(self, layer_id: int) -> DSV4CompressStatePool:
@@ -1371,7 +1427,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._record_alloc_clear("kvcache.dsv4.c4_indexer_state", locs.numel())
 
     def _clear_c128_state_locs(self, locs: torch.Tensor) -> None:
-        locs = self._sanitize_locs(locs, self._num_pages * self._c128_state_page_size)
+        locs = self._sanitize_locs(locs, self._c128_state_slots)
         if locs.numel() == 0:
             return
         for pool in self._compress_state_pools:
@@ -1433,7 +1489,9 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             layers = sum(
                 1 for pool in self._compress_state_pools if pool is not None and pool.ratio == 128
             )
-            return layers * loc_count * 2 * self._head_dim * state_dtype_size
+            width = 3 if self._c128_online_mtp_main_state else 2
+            banks = 1 + int(self._online_c128_mtp_max_draft_tokens or 0)
+            return layers * loc_count * width * self._head_dim * state_dtype_size * banks
         return 0
 
     def on_pages_allocated(self, page_starts: torch.Tensor, page_size: int) -> None:
@@ -1617,9 +1675,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         c128_slots = retained_pages * div_ceil(page_size, 128) if self._c128_layer_count else 0
         c4_indexer_slots = c4_slots if self._c4_layer_count else 0
         c4_state_slots = retained_pages * self.C4_STATE_RING_SIZE if self._c4_layer_count else 0
-        c128_state_slots = (
-            retained_pages * self.C128_STATE_RING_SIZE if self._c128_layer_count else 0
-        )
+        c128_state_slots = retained_pages * self._c128_state_page_size if self._c128_layer_count else 0
         c4_indexer_state_slots = c4_state_slots if self._c4_layer_count else 0
 
         dtype_size = self._dtype.itemsize
@@ -1661,10 +1717,11 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         c128_state_bytes = (
             self._c128_layer_count
             * retained_pages
-            * self.C128_STATE_RING_SIZE
-            * 2
+            * self._c128_state_page_size
+            * (3 if self._c128_online_mtp_main_state else 2)
             * self._head_dim
             * state_dtype_size
+            * (1 + int(self._online_c128_mtp_max_draft_tokens or 0))
         )
         retained_memory_bytes = (
             swa_bytes
@@ -1928,6 +1985,23 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         full_locs = full_locs.to(device=self.device, dtype=torch.long)
         if full_locs.numel() == 0:
             return full_locs
+        if ratio == 128 and self._c128_online_mtp_main_state:
+            page_size = max(self._page_size, 1)
+            if not self._component_loc_ownership_enabled:
+                state_locs = full_locs.div(128, rounding_mode="floor")
+                return torch.where(full_locs < 0, torch.full_like(state_locs, -1), state_locs)
+            full_pages = full_locs.div(page_size, rounding_mode="floor")
+            offsets = (full_locs % page_size).div(128, rounding_mode="floor")
+            valid = (full_locs >= 0) & (full_pages >= 0) & (full_pages < self._num_pages)
+            out = torch.full_like(full_locs, -1)
+            if bool(torch.any(valid)):
+                state_pages = mapping[full_pages[valid]]
+                if torch.any(state_pages < 0):
+                    raise RuntimeError(
+                        "DSV4 online C128 state loc requested without active state mapping"
+                    )
+                out[valid] = state_pages.to(torch.long) * state_page_size + offsets[valid]
+            return out
         if not self._component_loc_ownership_enabled:
             page_size = max(self._page_size, 1)
             pages = full_locs.div(page_size, rounding_mode="floor")

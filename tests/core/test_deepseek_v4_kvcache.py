@@ -130,15 +130,32 @@ def test_online_c128_mtp_lifecycle_buffers_allocate_on_c128_slots():
     assert pool.get_online_c128_mtp_state_slot_offset() == 8
     assert state.shape == (8 * 9, 24)
     assert state.dtype == torch.float32
+    assert state is pool.attention_compress_state(0).kv_score_buffer.kv_score
+    assert pool.attention_compress_state(0).last_dim == 24
+    assert pool.attention_compress_state(0).online_mtp_uses_main_state is True
     assert pool.full_to_swa_index_mapping[:4].tolist() == [0, 1, 2, 3]
     assert pool.online_c128_mtp_swa_page_size == 128
+    assert pool.state_locs_from_full_locs(
+        torch.tensor([0, 127, 128, 255, 256], dtype=torch.long),
+        128,
+        component="attention",
+    ).tolist() == [0, 0, 1, 1, 2]
 
     ledger = pool.online_c128_mtp_memory_ledger()
     assert ledger["enabled"] is True
+    assert ledger["main_state_surface"] is True
     assert ledger["max_draft_tokens"] == 8
     assert ledger["state_slot_offset"] == 8
     assert ledger["pending_seq_lens_bytes"] == pending.numel() * pending.element_size()
     assert ledger["state_bytes_total"] == state.numel() * state.element_size()
+
+    state[0].fill_(1)
+    state[8].fill_(2)
+    state[16].fill_(3)
+    pool.attention_compress_state(0).clear_state_locs(torch.tensor([0]))
+    assert torch.count_nonzero(state[0]).item() == 0
+    assert torch.count_nonzero(state[8]).item() == 0
+    assert torch.count_nonzero(state[16]).item() == 0
 
 
 def _allocate_req(cm: CacheManager, uid: int, input_len: int) -> Req:
