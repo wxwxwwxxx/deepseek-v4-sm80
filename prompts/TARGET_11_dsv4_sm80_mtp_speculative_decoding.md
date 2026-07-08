@@ -127,6 +127,7 @@ Run these in order.
 | TARGET 11.246 | `prompts/TARGET_11.246_dsv4_sm80_mtp_target_verify_moe_normal_shape_microbatch_runtime.md` | After 11.245 proves normal-shape-compatible MoE microbatching is the only exact oracle under Mini's backend, implement the runtime path and validate the full exactness matrix. |
 | TARGET 11.247 | `prompts/TARGET_11.247_dsv4_sm80_mtp_accepted_commit_state_parity_after_moe_microbatch.md` | After 11.246 fixes focused MoE exactness but bs6 still diverges, find the first accepted-commit state/KV parity owner versus no-spec baseline. |
 | TARGET 11.248 | `prompts/TARGET_11.248_dsv4_sm80_mtp_c128_component_state_publication_parity.md` | After 11.247 identifies C128 layer3 component-state publication as the first remaining owner, determine whether MTP skips, misplaces, clears, or computes the C128 state incorrectly. |
+| TARGET 11.249 | `prompts/TARGET_11.249_dsv4_sm80_mtp_online_c128_main_state_contract_port.md` | After 11.248 classifies Mini's C128 MTP path as a disconnected main-state contract, port or fail-close the online C128 lifecycle and revalidate exactness. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -342,6 +343,11 @@ Do not promote MTP by default unless all of these are true:
   at TARGET 11.248 and classify C128 publication as write-skipped, wrong-loc,
   wrong-value, restore-clear, disabled-contract, or metadata owner before
   patching downstream attention/logits.
+- If TARGET 11.248 classifies the owner as Mini's online C128 side-buffer being
+  disconnected from the main C128 component-state contract, stop at TARGET
+  11.249 and port the SGLang-aligned main-state lifecycle or implement a
+  fail-closed exact path before chasing downstream logits, sampler, or
+  graph/perf behavior.
 
 ## Deliverables
 
