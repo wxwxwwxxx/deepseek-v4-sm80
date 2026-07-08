@@ -4,7 +4,7 @@ import os
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -226,6 +226,179 @@ def _capture_debug_activation(
         )
     dsv4_mtp_debug.record_row0_tensor(batch, name, tensor)
     dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
+
+
+def _dsv4_debug_batch() -> Batch | None:
+    try:
+        return get_global_ctx().batch
+    except Exception:
+        return None
+
+
+def _dsv4_debug_positions(batch: Batch | None, *, device: torch.device) -> torch.Tensor | None:
+    positions = getattr(batch, "positions", None)
+    if not isinstance(positions, torch.Tensor) or positions.numel() == 0:
+        return None
+    try:
+        return positions.to(device=device, dtype=torch.long)
+    except Exception:
+        return positions
+
+
+def _dsv4_moe_needs_router_logits() -> bool:
+    return any(
+        dsv4_mtp_debug.operator_parity_enabled(name)
+        for name in ("router_logits", "topk_ids", "topk_weights")
+    )
+
+
+def _dsv4_moe_tensor_head(tensor: torch.Tensor | None, *, limit: int = 16) -> list[object]:
+    if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+        return []
+    try:
+        flat = tensor.detach().reshape(-1)[: int(limit)].cpu()
+        values = flat.tolist()
+        if not isinstance(values, list):
+            values = [values]
+        out: list[object] = []
+        for value in values:
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, bool):
+                out.append(bool(value))
+            elif isinstance(value, int):
+                out.append(int(value))
+            else:
+                out.append(float(value))
+        return out
+    except Exception:
+        return []
+
+
+def _dsv4_moe_tensor_brief(tensor: torch.Tensor | None) -> dict[str, object]:
+    if not isinstance(tensor, torch.Tensor):
+        return {"available": False}
+    info: dict[str, object] = {
+        "available": True,
+        "shape": [int(x) for x in tensor.shape],
+        "dtype": str(tensor.dtype),
+        "device": str(tensor.device),
+        "head": _dsv4_moe_tensor_head(tensor, limit=16),
+    }
+    if tensor.ndim > 1 and tensor.shape[0] > 0:
+        info["row0_head"] = _dsv4_moe_tensor_head(tensor[0], limit=16)
+    return info
+
+
+def _dsv4_moe_expert_histogram(indices: torch.Tensor | None) -> list[dict[str, int]]:
+    if not isinstance(indices, torch.Tensor) or indices.numel() == 0:
+        return []
+    try:
+        flat = indices.detach().reshape(-1).cpu().long()
+        valid = flat[flat >= 0]
+        if valid.numel() == 0:
+            return []
+        experts, counts = torch.unique(valid, sorted=True, return_counts=True)
+        return [
+            {"expert_id": int(expert), "count": int(count)}
+            for expert, count in zip(experts.tolist()[:32], counts.tolist()[:32])
+        ]
+    except Exception:
+        return []
+
+
+def _dsv4_moe_route_extra(
+    *,
+    weights: torch.Tensor | None,
+    indices: torch.Tensor | None,
+    input_ids: torch.Tensor | None = None,
+    moe_plan: dsv4_kernel.DSV4MoEExecutionPlan | None = None,
+    reduce_once: bool | None = None,
+    hash_topk: bool | None = None,
+    stage: str | None = None,
+) -> dict[str, object]:
+    extra: dict[str, object] = {}
+    if stage is not None:
+        extra["stage"] = stage
+    if reduce_once is not None:
+        extra["reduce_once"] = bool(reduce_once)
+    if hash_topk is not None:
+        extra["hash_topk"] = bool(hash_topk)
+    if isinstance(input_ids, torch.Tensor):
+        extra["input_ids"] = _dsv4_moe_tensor_brief(input_ids)
+    if isinstance(indices, torch.Tensor):
+        extra.update(
+            {
+                "topk_ids": _dsv4_moe_tensor_brief(indices),
+                "expert_histogram": _dsv4_moe_expert_histogram(indices),
+            }
+        )
+        if indices.ndim >= 2:
+            extra["tokens"] = int(indices.shape[0])
+            extra["topk"] = int(indices.shape[1])
+    if isinstance(weights, torch.Tensor):
+        extra["topk_weights"] = _dsv4_moe_tensor_brief(weights)
+    if moe_plan is not None:
+        route_plan = moe_plan.route_plan
+        extra["moe_plan"] = {
+            "tokens": int(moe_plan.tokens),
+            "hidden": int(moe_plan.hidden),
+            "num_experts": int(moe_plan.num_experts),
+            "reduce_once": bool(moe_plan.reduce_once),
+            "final_reduce_label": str(moe_plan.final_reduce_label),
+            "route_count": int(route_plan.route_count),
+            "topk": int(route_plan.topk),
+            "block_size_m": int(route_plan.block_size_m),
+            "sorted_route_ids": _dsv4_moe_tensor_brief(route_plan.sorted_route_ids),
+            "expert_ids": _dsv4_moe_tensor_brief(route_plan.expert_ids),
+            "num_tokens_post_padded": _dsv4_moe_tensor_brief(
+                route_plan.num_tokens_post_padded
+            ),
+        }
+    return extra
+
+
+def _dsv4_moe_record_operator(
+    batch: Batch | None,
+    *,
+    operator_name: str,
+    layer_id: int,
+    input_tensor: torch.Tensor | None,
+    output_tensor: torch.Tensor | None,
+    positions: torch.Tensor | None,
+    path: str,
+    params: dict[str, object] | None = None,
+    extra: dict[str, object] | None = None,
+    input_row0: torch.Tensor | None = None,
+) -> None:
+    if not dsv4_mtp_debug.operator_parity_enabled(operator_name):
+        return
+    if input_row0 is None:
+        input_row0 = dsv4_mtp_debug.clone_operator_row0_input(operator_name, input_tensor)
+    dsv4_mtp_debug.record_operator_capture(
+        batch,
+        operator_name=operator_name,
+        layer_id=int(layer_id),
+        input_row0=input_row0,
+        output_tensor=output_tensor,
+        positions=positions,
+        path=path,
+        params=params,
+        extra=extra,
+    )
+
+
+def _dsv4_moe_router_logits_debug(
+    gate: "DSV4MoEGate",
+    flat: torch.Tensor,
+) -> torch.Tensor | None:
+    if not _dsv4_moe_needs_router_logits():
+        return None
+    try:
+        weight = _cached_gate_fp32_weight(gate, "_cached_gate_weight_fp32", gate.weight)
+        return F.linear(flat.float(), weight.float())
+    except Exception:
+        return None
 
 
 def _debug_can_materialize_tensor(tensor: torch.Tensor) -> bool:
@@ -1715,6 +1888,75 @@ class DSV4Attention(BaseOP):
             attn_sink=self.attn_sink,
         )
 
+    def _q_wqb_per_row_probe(
+        self,
+        q_lora: torch.Tensor,
+        q_batched: torch.Tensor,
+        *,
+        path: str,
+    ) -> dict[str, object] | None:
+        if not dsv4_mtp_debug.operator_parity_enabled("wq_b"):
+            return None
+        rows = q_lora.numel() // q_lora.shape[-1]
+        if rows <= 1:
+            return {
+                "available": False,
+                "reason": "single row",
+                "rows": int(rows),
+            }
+        try:
+            q_lora_2d = q_lora.reshape(rows, q_lora.shape[-1])
+            if dsv4_kernel.dense_fp8_marlin_projection_enabled():
+                chunks = [
+                    self.wq_b.forward_fp8_marlin_weight(
+                        q_lora_2d[row : row + 1],
+                        cache_name=self._q_wqb_marlin_weight_cache_name,
+                        owner_label=self._q_wqb_owner_label,
+                    )
+                    for row in range(rows)
+                ]
+            elif dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
+                chunks = [
+                    self.wq_b.forward_fp8_cached_bf16_weight(
+                        q_lora_2d[row : row + 1],
+                        cache_name=self._q_wqb_bf16_weight_cache_name,
+                        owner_label=self._q_wqb_owner_label,
+                    )
+                    for row in range(rows)
+                ]
+            else:
+                q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+                    "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
+                )
+                chunks = [
+                    self.wq_b.forward(
+                        q_lora_2d[row : row + 1],
+                        fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
+                    )
+                    for row in range(rows)
+                ]
+            q_per_row = torch.cat(chunks, dim=0).view_as(q_batched)
+            if q_per_row.is_cuda:
+                torch.cuda.synchronize(q_per_row.device)
+            return {
+                "available": True,
+                "source": "same q_wqb path executed one row at a time",
+                "path": path,
+                "rows": int(rows),
+                "per_row_vs_batched": dsv4_mtp_debug.tensor_compare_stats(
+                    q_per_row,
+                    q_batched,
+                ),
+            }
+        except Exception as exc:
+            return {
+                "available": False,
+                "path": path,
+                "rows": int(rows),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
         with dsv4_direct_copy_nvtx(
@@ -1746,6 +1988,21 @@ class DSV4Attention(BaseOP):
             kv_norm_rope_store_enabled
             and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE")
         )
+        q_hidden_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
+            "q_path_hidden_input",
+            x,
+        )
+        dsv4_mtp_debug.record_operator_capture(
+            batch,
+            operator_name="q_path_hidden_input",
+            layer_id=int(self.layer_id),
+            input_row0=q_hidden_debug_input,
+            output_tensor=x,
+            positions=positions,
+            path="mini.attention.q_path_hidden_input",
+            params={"hidden_size": int(x.shape[-1])},
+            extra={"is_target_verify": bool(is_target_verify)},
+        )
         kv_from_shared_wqa_wkv = None
         kv = None
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_proj"):
@@ -1755,6 +2012,8 @@ class DSV4Attention(BaseOP):
             fused_wqa_wkv_shared_act = dsv4_kernel.dsv4_sm80_triton_enabled(
                 "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT"
             )
+            wq_a_debug_input = dsv4_mtp_debug.clone_operator_row0_input("wq_a", x)
+            wq_a_path = "mini.wq_a.quantized_linear_ref"
             if fused_wqa_wkv_shared_act:
                 cached_fused_weight = _cached_fused_wqa_wkv_fp8_weight(
                     self,
@@ -1766,6 +2025,7 @@ class DSV4Attention(BaseOP):
                     out_dtype=x.dtype,
                 )
                 if cached_fused_weight is not None:
+                    wq_a_path = "mini.fused_wqa_wkv.cached_bf16_weight.shared_fp8_activation"
                     x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
                     qkv = _linear_cached_bf16_weight(
                         x_quant,
@@ -1779,6 +2039,7 @@ class DSV4Attention(BaseOP):
                         dim=-1,
                     )
                 else:
+                    wq_a_path = "mini.fused_wqa_wkv.quantized_linear_fp8_pair_shared_activation_ref"
                     q_lora_raw, kv_from_shared_wqa_wkv = (
                         dsv4_kernel.quantized_linear_fp8_pair_shared_activation_ref(
                             x,
@@ -1789,19 +2050,56 @@ class DSV4Attention(BaseOP):
                         )
                     )
             else:
+                if q_wqa_fp8_gemm:
+                    wq_a_path = "mini.wq_a.quantized_linear_ref.fp8_gemm"
                 q_lora_raw = self.wq_a.forward(
                     x,
                     fp8_gemm=q_wqa_fp8_gemm if q_wqa_fp8_gemm else None,
                 )
             _capture_debug_activation(f"layer{self.layer_id}.wqa_output", q_lora_raw)
+            dsv4_mtp_debug.record_operator_capture(
+                batch,
+                operator_name="wq_a",
+                layer_id=int(self.layer_id),
+                input_row0=wq_a_debug_input,
+                output_tensor=q_lora_raw,
+                positions=positions,
+                path=wq_a_path,
+                params={
+                    "input_size": int(x.shape[-1]),
+                    "q_lora_rank": int(q_lora_raw.shape[-1]),
+                    "fused_wqa_wkv_shared_act": bool(fused_wqa_wkv_shared_act),
+                    "q_wqa_fp8_gemm": bool(q_wqa_fp8_gemm),
+                },
+                extra={"output_boundary": "q_lora_raw"},
+            )
             if kv_from_shared_wqa_wkv is not None:
                 _capture_debug_activation(
                     f"layer{self.layer_id}.wkv_shared_activation_output",
                     kv_from_shared_wqa_wkv,
                 )
             if not fused_q_kv_rmsnorm:
+                q_norm_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
+                    "q_norm",
+                    q_lora_raw,
+                )
                 q_lora = self.q_norm.forward(q_lora_raw)
                 _capture_debug_activation(f"layer{self.layer_id}.q_lora_after_norm", q_lora)
+                dsv4_mtp_debug.record_operator_capture(
+                    batch,
+                    operator_name="q_norm",
+                    layer_id=int(self.layer_id),
+                    input_row0=q_norm_debug_input,
+                    output_tensor=q_lora,
+                    positions=positions,
+                    path="mini.DSV4RMSNorm.forward",
+                    params={
+                        "rms_norm_eps": float(self.rms_norm_eps),
+                        "q_lora_rank": int(q_lora.shape[-1]),
+                    },
+                    extra={"output_boundary": "q_norm_output_and_wq_b_input"},
+                    private={"q_norm_weight": self.q_norm.weight},
+                )
         if fused_q_kv_rmsnorm:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
                 kv = (
@@ -1811,6 +2109,10 @@ class DSV4Attention(BaseOP):
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.wkv_output", kv)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_kv_rmsnorm"):
+                q_norm_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
+                    "q_norm",
+                    q_lora_raw,
+                )
                 q_lora, kv = dsv4_kernel.rms_norm_pair_fallback(
                     q_lora_raw,
                     kv,
@@ -1820,28 +2122,102 @@ class DSV4Attention(BaseOP):
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.q_lora_after_norm", q_lora)
                 _capture_debug_activation(f"layer{self.layer_id}.kv_after_kv_norm", kv)
+                dsv4_mtp_debug.record_operator_capture(
+                    batch,
+                    operator_name="q_norm",
+                    layer_id=int(self.layer_id),
+                    input_row0=q_norm_debug_input,
+                    output_tensor=q_lora,
+                    positions=positions,
+                    path="mini.rms_norm_pair_fallback.q_branch",
+                    params={
+                        "rms_norm_eps": float(self.rms_norm_eps),
+                        "q_lora_rank": int(q_lora.shape[-1]),
+                        "fused_q_kv_rmsnorm": bool(fused_q_kv_rmsnorm),
+                    },
+                    extra={"output_boundary": "q_norm_output_and_wq_b_input"},
+                    private={"q_norm_weight": self.q_norm.weight},
+                )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_wqb"):
+            wq_b_debug_input = dsv4_mtp_debug.clone_operator_row0_input("wq_b", q_lora)
+            q_wqb_path = "mini.wq_b.quantized_linear_ref"
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
+                q_wqb_path = "mini.wq_b.forward_fp8_marlin_weight"
                 q = self.wq_b.forward_fp8_marlin_weight(
                     q_lora,
                     cache_name=self._q_wqb_marlin_weight_cache_name,
                     owner_label=self._q_wqb_owner_label,
                 ).view(-1, self.num_local_heads, self.head_dim)
             elif dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
+                q_wqb_path = "mini.wq_b.forward_fp8_cached_bf16_weight"
+                if is_target_verify:
+                    q_wqb_path = "mini.wq_b.forward_fp8_cached_bf16_weight.row_invariant_local"
                 q = self.wq_b.forward_fp8_cached_bf16_weight(
                     q_lora,
                     cache_name=self._q_wqb_bf16_weight_cache_name,
                     owner_label=self._q_wqb_owner_label,
+                    row_invariant_local=is_target_verify,
                 ).view(-1, self.num_local_heads, self.head_dim)
             else:
                 q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
                     "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
                 )
+                if q_wqb_fp8_gemm:
+                    q_wqb_path = "mini.wq_b.quantized_linear_ref.fp8_gemm"
                 q = self.wq_b.forward(
                     q_lora,
                     fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
                 ).view(-1, self.num_local_heads, self.head_dim)
             _capture_debug_activation(f"layer{self.layer_id}.q_wqb_output", q)
+            q_wqb_per_row_probe = self._q_wqb_per_row_probe(
+                q_lora,
+                q,
+                path=q_wqb_path,
+            )
+            dsv4_mtp_debug.record_operator_capture(
+                batch,
+                operator_name="wq_b",
+                layer_id=int(self.layer_id),
+                input_row0=wq_b_debug_input,
+                output_tensor=q,
+                positions=positions,
+                path=q_wqb_path,
+                params={
+                    "q_lora_rank": int(q_lora.shape[-1]),
+                    "num_local_heads": int(self.num_local_heads),
+                    "head_dim": int(self.head_dim),
+                    "q_wqb_bf16_weight_cache": bool(
+                        dsv4_kernel.dsv4_env_flag(
+                            dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
+                        )
+                    ),
+                    "dense_fp8_marlin_projection": bool(
+                        dsv4_kernel.dense_fp8_marlin_projection_enabled()
+                    ),
+                },
+                extra={
+                    "output_boundary": "wq_b_local_output_q_wqb_output",
+                    "per_row_probe": q_wqb_per_row_probe,
+                },
+            )
+            q_wqb_output_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
+                "q_wqb_output",
+                q,
+            )
+            dsv4_mtp_debug.record_operator_capture(
+                batch,
+                operator_name="q_wqb_output",
+                layer_id=int(self.layer_id),
+                input_row0=q_wqb_output_debug_input,
+                output_tensor=q,
+                positions=positions,
+                path=q_wqb_path,
+                params={
+                    "num_local_heads": int(self.num_local_heads),
+                    "head_dim": int(self.head_dim),
+                },
+                extra={"boundary": "q_wqb_output"},
+            )
         if fused_q_kv_norm_rope_store and kv is None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
                 kv = (
@@ -3252,14 +3628,87 @@ class DSV4FusedMoERunner:
     ) -> torch.Tensor:
         flat = hidden_states.view(-1, hidden_states.shape[-1])
         flat_input_ids = input_ids.view(-1)
+        batch = _dsv4_debug_batch()
+        positions = _dsv4_debug_positions(batch, device=hidden_states.device)
+        common_params = {
+            "runner": True,
+            "topk_count": int(self.topk_count),
+            "scoring_func": str(self.scoring_func),
+            "routed_scaling_factor": float(self.routed_scaling_factor),
+            "expert_backend": dsv4_kernel.dsv4_moe_expert_backend(),
+            "tp_size": int(self._tp_size),
+        }
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.route"):
             weights, indices = self.route(flat, flat_input_ids, hash_topk=hash_topk)
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
+        router_logits = _dsv4_moe_router_logits_debug(self.gate, flat)
+        route_extra = _dsv4_moe_route_extra(
+            weights=weights,
+            indices=indices,
+            input_ids=flat_input_ids,
+            reduce_once=True,
+            hash_topk=hash_topk is not None,
+            stage="runner.route",
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="router_logits",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=router_logits,
+            positions=positions,
+            path="mini.moe.runner.router_logits.linear_bf16_fp32_debug",
+            params=common_params,
+            extra=route_extra,
+        )
+        topk_input = router_logits if router_logits is not None else flat
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="topk_ids",
+            layer_id=self.layer_id,
+            input_tensor=topk_input,
+            output_tensor=indices,
+            positions=positions,
+            path="mini.moe.runner.topk_ids",
+            params=common_params,
+            extra=route_extra,
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="topk_weights",
+            layer_id=self.layer_id,
+            input_tensor=topk_input,
+            output_tensor=weights,
+            positions=positions,
+            path="mini.moe.runner.topk_weights",
+            params=common_params,
+            extra=route_extra,
+        )
         _record_warmup_memory("moe.route_plan", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.prepare"):
             prepared = self.prepare(flat, weights, indices)
         _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
+        route_extra = _dsv4_moe_route_extra(
+            weights=weights,
+            indices=indices,
+            input_ids=flat_input_ids,
+            moe_plan=prepared.moe_plan,
+            reduce_once=True,
+            hash_topk=hash_topk is not None,
+            stage="runner.prepare",
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="routed_expert_input",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=flat,
+            positions=positions,
+            path="mini.moe.runner.routed_expert_input",
+            params=common_params,
+            extra=route_extra,
+        )
         _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.experts"):
             routed = self.apply_experts(flat, prepared)
@@ -3268,12 +3717,67 @@ class DSV4FusedMoERunner:
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.finalize"):
             y = self.finalize_routed(routed)
         _record_warmup_memory("moe.finalize_routed", "after", layer_id=self.layer_id)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="routed_expert_output",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=y,
+            positions=positions,
+            path="mini.moe.runner.routed_experts.forward_fp32_finalize",
+            params=common_params,
+            extra=route_extra,
+        )
         _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="shared_expert_input",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=flat,
+            positions=positions,
+            path="mini.moe.runner.shared_expert_input",
+            params=common_params,
+            extra={"stage": "runner.shared_input", "shared_experts_present": self.shared_experts is not None},
+        )
+        routed_for_aggregate = y
+        shared = None
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.shared"):
             shared = self.apply_shared(flat)
             if shared is not None:
                 y = y + shared
         _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
+        if shared is not None:
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="shared_expert_output",
+                layer_id=self.layer_id,
+                input_tensor=flat,
+                output_tensor=shared,
+                positions=positions,
+                path="mini.moe.runner.shared_experts.forward_fp32",
+                params=common_params,
+                extra={"stage": "runner.shared_output"},
+            )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="expert_aggregate_before_reduce",
+            layer_id=self.layer_id,
+            input_tensor=routed_for_aggregate,
+            output_tensor=y,
+            positions=positions,
+            path="mini.moe.runner.routed_plus_shared_fp32",
+            params=common_params,
+            extra={
+                "stage": "runner.aggregate_before_reduce",
+                "shared_experts_present": shared is not None,
+            },
+        )
+        y_before_reduce = y
+        reduce_input_row0 = dsv4_mtp_debug.clone_operator_row0_input(
+            "expert_reduce_output",
+            y_before_reduce,
+        )
         _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.reduce_once"):
             y = self.maybe_reduce_final(
@@ -3283,11 +3787,38 @@ class DSV4FusedMoERunner:
                 reduce_label=prepared.moe_plan.final_reduce_label,
             )
         _record_warmup_memory("moe.reduce_once", "after", layer_id=self.layer_id)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="expert_reduce_output",
+            layer_id=self.layer_id,
+            input_tensor=y_before_reduce,
+            output_tensor=y,
+            positions=positions,
+            path="mini.moe.runner.post_all_reduce",
+            params={**common_params, "reduce_label": str(prepared.moe_plan.final_reduce_label)},
+            extra={
+                "stage": "runner.post_all_reduce",
+                "post_all_reduce": bool(self._tp_size > 1),
+            },
+            input_row0=reduce_input_row0,
+        )
         with dsv4_direct_copy_nvtx(
             f"moe_shared_expert_staging.runner_output_to_flat_dtype.layer{self.layer_id}",
             y=y,
         ):
-            return y.to(flat.dtype).view_as(hidden_states)
+            output = y.to(flat.dtype).view_as(hidden_states)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="moe_output",
+            layer_id=self.layer_id,
+            input_tensor=y,
+            output_tensor=output,
+            positions=positions,
+            path="mini.moe.runner.output_to_hidden_dtype",
+            params=common_params,
+            extra={"stage": "runner.moe_output"},
+        )
+        return output
 
 
 class DSV4MoE(BaseOP):
@@ -3318,15 +3849,37 @@ class DSV4MoE(BaseOP):
         )
 
     def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        batch = _dsv4_debug_batch()
+        positions = _dsv4_debug_positions(batch, device=hidden_states.device)
+        flat = hidden_states.view(-1, hidden_states.shape[-1])
+        common_params = {
+            "runner": False,
+            "topk_count": int(self.topk_count),
+            "scoring_func": str(self.scoring_func),
+            "routed_scaling_factor": float(self.routed_scaling_factor),
+            "expert_backend": dsv4_kernel.dsv4_moe_expert_backend(),
+            "tp_size": int(self._tp_size),
+        }
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="moe_input",
+            layer_id=self.layer_id,
+            input_tensor=hidden_states,
+            output_tensor=hidden_states,
+            positions=positions,
+            path="mini.moe.input",
+            params=common_params,
+            extra={"stage": "moe_input"},
+        )
         if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE):
-            return self._runner.forward(
+            output = self._runner.forward(
                 hidden_states,
                 input_ids,
                 comm=self._comm,
                 hash_topk=getattr(self, "topk", None),
             )
+            return output
 
-        flat = hidden_states.view(-1, hidden_states.shape[-1])
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.gate"):
             weights, indices = self.gate.forward(
@@ -3338,6 +3891,53 @@ class DSV4MoE(BaseOP):
                 hash_topk=getattr(self, "topk", None),
             )
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
+        flat_input_ids = input_ids.view(-1)
+        router_logits = _dsv4_moe_router_logits_debug(self.gate, flat)
+        reduce_once = dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE
+        ) or dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
+        route_extra = _dsv4_moe_route_extra(
+            weights=weights,
+            indices=indices,
+            input_ids=flat_input_ids,
+            reduce_once=reduce_once,
+            hash_topk=hasattr(self, "topk"),
+            stage="non_runner.route",
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="router_logits",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=router_logits,
+            positions=positions,
+            path="mini.moe.router_logits.linear_bf16_fp32_debug",
+            params=common_params,
+            extra=route_extra,
+        )
+        topk_input = router_logits if router_logits is not None else flat
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="topk_ids",
+            layer_id=self.layer_id,
+            input_tensor=topk_input,
+            output_tensor=indices,
+            positions=positions,
+            path="mini.moe.topk_ids",
+            params=common_params,
+            extra=route_extra,
+        )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="topk_weights",
+            layer_id=self.layer_id,
+            input_tensor=topk_input,
+            output_tensor=weights,
+            positions=positions,
+            path="mini.moe.topk_weights",
+            params=common_params,
+            extra=route_extra,
+        )
         moe_v2 = dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE)
         reduce_once = moe_v2 or dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
         moe_plan = None
@@ -3362,6 +3962,26 @@ class DSV4MoE(BaseOP):
                 reduce_once=reduce_once,
             )
             _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
+            route_extra = _dsv4_moe_route_extra(
+                weights=weights,
+                indices=indices,
+                input_ids=flat_input_ids,
+                moe_plan=moe_plan,
+                reduce_once=reduce_once,
+                hash_topk=hasattr(self, "topk"),
+                stage="non_runner.route_plan",
+            )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="routed_expert_input",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=flat,
+            positions=positions,
+            path="mini.moe.routed_expert_input",
+            params=common_params,
+            extra=route_extra,
+        )
         _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.routed"):
             if moe_plan is None:
@@ -3375,11 +3995,66 @@ class DSV4MoE(BaseOP):
                     moe_plan=moe_plan,
                 ).float()
         _record_warmup_memory("moe.routed_experts", "after", layer_id=self.layer_id)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="routed_expert_output",
+            layer_id=self.layer_id,
+            input_tensor=flat,
+            output_tensor=y,
+            positions=positions,
+            path="mini.moe.routed_experts.forward_fp32",
+            params=common_params,
+            extra=route_extra,
+        )
+        routed_for_aggregate = y
+        shared = None
         if hasattr(self, "shared_experts"):
             _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="shared_expert_input",
+                layer_id=self.layer_id,
+                input_tensor=flat,
+                output_tensor=flat,
+                positions=positions,
+                path="mini.moe.shared_expert_input",
+                params=common_params,
+                extra={"stage": "non_runner.shared_input", "shared_experts_present": True},
+            )
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.shared"):
-                y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()
+                shared = self.shared_experts.forward(flat, reduce=not reduce_once).float()
+                y = y + shared
             _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
+            _dsv4_moe_record_operator(
+                batch,
+                operator_name="shared_expert_output",
+                layer_id=self.layer_id,
+                input_tensor=flat,
+                output_tensor=shared,
+                positions=positions,
+                path="mini.moe.shared_experts.forward_fp32",
+                params=common_params,
+                extra={"stage": "non_runner.shared_output"},
+            )
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="expert_aggregate_before_reduce",
+            layer_id=self.layer_id,
+            input_tensor=routed_for_aggregate,
+            output_tensor=y,
+            positions=positions,
+            path="mini.moe.routed_plus_shared_fp32",
+            params=common_params,
+            extra={
+                "stage": "non_runner.aggregate_before_reduce",
+                "shared_experts_present": shared is not None,
+            },
+        )
+        y_before_reduce = y
+        reduce_input_row0 = dsv4_mtp_debug.clone_operator_row0_input(
+            "expert_reduce_output",
+            y_before_reduce,
+        )
         if reduce_once and self._tp_size > 1:
             _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.reduce_once"):
@@ -3391,7 +4066,36 @@ class DSV4MoE(BaseOP):
                 )
                 y = self._comm.all_reduce(y, label="dsv4.v1_moe_reduce_once_all_reduce")
             _record_warmup_memory("moe.reduce_once", "after", layer_id=self.layer_id)
-        return y.to(flat.dtype).view_as(hidden_states)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="expert_reduce_output",
+            layer_id=self.layer_id,
+            input_tensor=y_before_reduce,
+            output_tensor=y,
+            positions=positions,
+            path=(
+                "mini.moe.post_all_reduce" if reduce_once else "mini.moe.no_final_reduce"
+            ),
+            params={**common_params, "reduce_label": "dsv4.v1_moe_reduce_once_all_reduce"},
+            extra={
+                "stage": "non_runner.post_all_reduce",
+                "post_all_reduce": bool(reduce_once and self._tp_size > 1),
+            },
+            input_row0=reduce_input_row0,
+        )
+        output = y.to(flat.dtype).view_as(hidden_states)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="moe_output",
+            layer_id=self.layer_id,
+            input_tensor=y,
+            output_tensor=output,
+            positions=positions,
+            path="mini.moe.output_to_hidden_dtype",
+            params=common_params,
+            extra={"stage": "moe_output"},
+        )
+        return output
 
 
 class DeepseekV4DecoderLayer(BaseOP):

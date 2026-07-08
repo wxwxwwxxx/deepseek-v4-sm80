@@ -109,6 +109,7 @@ Run these in order.
 | TARGET 11.12 | `prompts/TARGET_11.12_dsv4_sm80_mtp_rank_local_downstream_parity_census.md` | After 11.11 closes bs=1 `wo_b` parity but the matrix still fails, census rank-local downstream owners such as indexer FP8, MoE, and later-layer attention before the next fix. |
 | TARGET 11.13 | `prompts/TARGET_11.13_dsv4_sm80_mtp_operator_parity_framework_q_norm_rope_pilot.md` | After 11.12 ranks q/RoPE as the top rank-local owner, build a reusable operator-parity framework and use q_norm_rope as the first same-kernel/micro-allclose pilot. |
 | TARGET 11.14 | `prompts/TARGET_11.14_dsv4_sm80_mtp_q_wqb_q_lora_precision_boundary_parity.md` | After 11.13 shows q_norm_rope only amplifies a non-bit-exact `q_wqb_output`, use the operator framework to find and fix/no-go the upstream q_lora/q_norm/wq_b precision boundary. |
+| TARGET 11.15 | `prompts/TARGET_11.15_dsv4_sm80_mtp_moe_output_subboundary_parity.md` | After 11.14 closes the q/wq_b boundary and exposes exact-input MoE drift, split `moe_input -> moe_output` into router/topk, routed expert, shared expert, aggregation, and reduce sub-boundaries. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -246,6 +247,9 @@ Do not promote MTP by default unless all of these are true:
   target verify and only amplifies a non-bit-exact `q_wqb_output`, stop at
   TARGET 11.14 and identify the upstream q_lora/q_norm/wq_b precision boundary
   before fixing MoE or indexer.
+- If TARGET 11.14 closes the q/wq_b boundary but the next owner is `moe_output`
+  with exact `moe_input`, stop at TARGET 11.15 and split the MoE output
+  sub-boundaries before fixing indexer FP8 or later attention.
 
 ## Deliverables
 

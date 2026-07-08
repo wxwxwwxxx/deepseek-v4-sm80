@@ -166,6 +166,7 @@ def record_operator_capture(
     path: str,
     params: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
+    private: dict[str, Any] | None = None,
 ) -> None:
     if not operator_parity_enabled(operator_name):
         return
@@ -186,18 +187,21 @@ def record_operator_capture(
     }
     if extra:
         entry["extra"] = _json_dict(extra)
+    if private:
+        for key, value in private.items():
+            entry[f"_{key}"] = value
     try:
         if isinstance(input_row0, torch.Tensor):
-            row = input_row0.detach().float().contiguous().cpu()
+            row = input_row0.detach().contiguous().cpu()
             entry["input_tensor_metadata"] = _tensor_metadata(input_row0)
-            entry["input_summary"] = _tensor_summary(row)
+            entry["input_summary"] = _tensor_summary(row.float())
             entry["_input_row0_tensor"] = row
         else:
             entry["input_tensor_metadata"] = {"available": False}
         if isinstance(output_tensor, torch.Tensor) and output_tensor.numel() > 0:
-            row = output_tensor.detach()[0].float().contiguous().cpu()
+            row = output_tensor.detach()[0].contiguous().cpu()
             entry["output_tensor_metadata"] = _tensor_metadata(output_tensor, row0=True)
-            entry["output_summary"] = _tensor_summary(row)
+            entry["output_summary"] = _tensor_summary(row.float())
             entry["_output_row0_tensor"] = row
         else:
             entry["output_tensor_metadata"] = {"available": False}
@@ -511,6 +515,10 @@ def _compare_operator_pair(
         "operator_name": operator_name,
         "normal_kernel_or_path": normal.get("path"),
         "target_verify_kernel_or_path": target.get("path") if isinstance(target, dict) else None,
+        "normal_params": normal.get("params"),
+        "target_verify_params": target.get("params") if isinstance(target, dict) else None,
+        "normal_extra": normal.get("extra"),
+        "target_verify_extra": target.get("extra") if isinstance(target, dict) else None,
         "normal_context": normal_context,
         "target_verify_context": target_context,
         "input_tensor_metadata": {
@@ -545,6 +553,8 @@ def _compare_operator_pair(
         {
             "input_allclose_result": bool(input_stats.get("allclose", False)),
             "allclose_result": bool(output_stats.get("allclose", False)),
+            "input_bit_exact_result": bool(input_stats.get("bit_exact", False)),
+            "bit_exact_result": bool(output_stats.get("bit_exact", False)),
             "input_max_delta": input_stats.get("max_delta"),
             "input_mean_delta": input_stats.get("mean_delta"),
             "max_delta": output_stats.get("max_delta"),
@@ -563,21 +573,45 @@ def _compare_operator_pair(
             atol=atol,
             rtol=rtol,
         )
+    elif operator_name == "q_norm":
+        base["micro_allclose_probe"] = _q_norm_micro_probe(
+            normal,
+            target,
+            atol=atol,
+            rtol=rtol,
+        )
 
     if not input_stats.get("available"):
         verdict = "insufficient evidence"
-    elif not bool(input_stats.get("allclose", False)):
+    elif not bool(input_stats.get("bit_exact", False)):
         verdict = "input already drifted"
-    elif bool(output_stats.get("allclose", False)):
+    elif bool(output_stats.get("bit_exact", False)):
         verdict = "operator parity pass"
     elif _probe_has_reference_oracle_mismatch(base.get("micro_allclose_probe")):
         verdict = "reference-oracle mismatch"
     elif normal.get("path") != target.get("path"):
         verdict = "dispatch/path mismatch"
+    elif bool(output_stats.get("allclose", False)):
+        verdict = "near-exact precision drift"
     else:
         verdict = "same-kernel output drift"
     base["owner_verdict"] = verdict
     return base
+
+
+def tensor_compare_stats(
+    lhs: Any,
+    rhs: Any,
+    *,
+    atol: float | None = None,
+    rtol: float | None = None,
+) -> dict[str, Any]:
+    return _tensor_allclose_stats(
+        lhs,
+        rhs,
+        atol=operator_parity_atol() if atol is None else float(atol),
+        rtol=operator_parity_rtol() if rtol is None else float(rtol),
+    )
 
 
 def _q_norm_rope_micro_probe(
@@ -663,6 +697,101 @@ def _q_norm_rope_micro_probe(
             }
         )
     return probe
+
+
+def _q_norm_micro_probe(
+    normal: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    atol: float,
+    rtol: float,
+) -> dict[str, Any]:
+    from minisgl.kernel import deepseek_v4 as dsv4_kernel
+
+    params = dict(normal.get("params", {}))
+    normal_input = normal.get("_input_row0_tensor")
+    target_input = target.get("_input_row0_tensor")
+    normal_output = normal.get("_output_row0_tensor")
+    target_output = target.get("_output_row0_tensor")
+    weight = normal.get("_q_norm_weight", target.get("_q_norm_weight"))
+    if not isinstance(normal_input, torch.Tensor) or not isinstance(target_input, torch.Tensor):
+        return {"available": False, "reason": "missing captured input"}
+    if not isinstance(normal_output, torch.Tensor) or not isinstance(target_output, torch.Tensor):
+        return {"available": False, "reason": "missing captured output"}
+    if not isinstance(weight, torch.Tensor):
+        return {"available": False, "reason": "missing q_norm weight"}
+
+    probe: dict[str, Any] = {
+        "available": True,
+        "source": "captured row0 tensors",
+        "rms_norm_eps": float(params.get("rms_norm_eps", 1.0e-6)),
+    }
+    try:
+        device = weight.device
+        eps = float(params.get("rms_norm_eps", 1.0e-6))
+        normal_replay = dsv4_kernel.rms_norm_fallback(
+            normal_input.to(device=device, dtype=normal_input.dtype).unsqueeze(0),
+            weight,
+            eps=eps,
+        ).detach()[0].cpu()
+        target_replay = dsv4_kernel.rms_norm_fallback(
+            target_input.to(device=device, dtype=target_input.dtype).unsqueeze(0),
+            weight,
+            eps=eps,
+        ).detach()[0].cpu()
+        if normal_replay.is_cuda:
+            torch.cuda.synchronize(normal_replay.device)
+        if target_replay.is_cuda:
+            torch.cuda.synchronize(target_replay.device)
+        normal_ref = _run_rms_norm_reference(normal_input, weight.detach().cpu(), eps=eps)
+        target_ref = _run_rms_norm_reference(target_input, weight.detach().cpu(), eps=eps)
+        probe.update(
+            {
+                "mini_runtime_replay": {
+                    "normal_input_vs_normal_output": _tensor_allclose_stats(
+                        normal_replay, normal_output, atol=atol, rtol=rtol
+                    ),
+                    "target_input_vs_target_output": _tensor_allclose_stats(
+                        target_replay, target_output, atol=atol, rtol=rtol
+                    ),
+                    "normal_input_vs_target_input_replay": _tensor_allclose_stats(
+                        normal_replay, target_replay, atol=atol, rtol=rtol
+                    ),
+                },
+                "torch_reference": {
+                    "normal_input_vs_normal_output": _tensor_allclose_stats(
+                        normal_ref, normal_output, atol=atol, rtol=rtol
+                    ),
+                    "target_input_vs_target_output": _tensor_allclose_stats(
+                        target_ref, target_output, atol=atol, rtol=rtol
+                    ),
+                    "normal_input_vs_target_input_reference": _tensor_allclose_stats(
+                        normal_ref, target_ref, atol=atol, rtol=rtol
+                    ),
+                },
+            }
+        )
+    except Exception as exc:
+        probe.update(
+            {
+                "available": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        )
+    return probe
+
+
+def _run_rms_norm_reference(
+    input_row0: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    eps: float,
+) -> torch.Tensor:
+    dtype = input_row0.dtype
+    y = input_row0.detach().cpu().float()
+    y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + float(eps))
+    return (y * weight.detach().cpu().float()).to(dtype)
 
 
 def _run_mini_q_norm_rope_replay(
@@ -780,20 +909,29 @@ def _tensor_allclose_stats(
 ) -> dict[str, Any]:
     if not isinstance(lhs, torch.Tensor) or not isinstance(rhs, torch.Tensor):
         return {"available": False, "allclose": False, "reason": "missing tensor"}
-    lhs_flat = lhs.detach().float().reshape(-1).cpu()
-    rhs_flat = rhs.detach().float().reshape(-1).cpu()
+    lhs_cpu = lhs.detach().contiguous().cpu()
+    rhs_cpu = rhs.detach().contiguous().cpu()
+    lhs_flat_original = lhs_cpu.reshape(-1)
+    rhs_flat_original = rhs_cpu.reshape(-1)
+    lhs_flat = lhs_flat_original.float()
+    rhs_flat = rhs_flat_original.float()
     if lhs_flat.shape != rhs_flat.shape:
         return {
             "available": False,
             "allclose": False,
+            "bit_exact": False,
             "reason": "shape mismatch",
             "lhs_shape": [int(x) for x in lhs_flat.shape],
             "rhs_shape": [int(x) for x in rhs_flat.shape],
         }
+    dtype_equal = lhs_cpu.dtype == rhs_cpu.dtype
+    bit_exact = bool(dtype_equal and torch.equal(lhs_flat_original, rhs_flat_original))
     if lhs_flat.numel() == 0:
         return {
             "available": True,
             "allclose": True,
+            "bit_exact": True,
+            "dtype_equal": bool(dtype_equal),
             "max_delta": 0.0,
             "mean_delta": 0.0,
             "first_differing_index": None,
@@ -811,6 +949,10 @@ def _tensor_allclose_stats(
     return {
         "available": True,
         "allclose": bool(torch.allclose(lhs_flat, rhs_flat, atol=float(atol), rtol=float(rtol))),
+        "bit_exact": bit_exact,
+        "dtype_equal": bool(dtype_equal),
+        "lhs_dtype": str(lhs_cpu.dtype),
+        "rhs_dtype": str(rhs_cpu.dtype),
         "rtol": float(rtol),
         "atol": float(atol),
         "max_delta": max_delta,
@@ -1028,4 +1170,5 @@ __all__ = [
     "reset_row0_layer_trace",
     "row0_layer_parity_atol",
     "row0_layer_parity_enabled",
+    "tensor_compare_stats",
 ]

@@ -2,7 +2,7 @@
 
 ## Goal
 
-After TARGET 11.14 proves the unified target-verify runtime contract and exact
+After TARGET 11.15 proves the unified target-verify runtime contract and exact
 accepted-KV commit / batch-shape correctness for `bs=1/2/4/5/6` and a
 rerun of the eager path proves useful target-pass reduction, align the DSV4
 attention/compressed metadata and CUDA graph path with SGLang enough to decide
@@ -48,7 +48,10 @@ operator-parity framework and close or precisely no-go the q_norm_rope pilot
 before this graph/perf target starts. TARGET 11.13 showed q_norm_rope is a
 same-kernel amplifier for a non-bit-exact `q_wqb_output`, so TARGET 11.14 must
 close or precisely no-go the upstream q_lora/q_norm/wq_b precision boundary
-before this graph/perf target starts.
+before this graph/perf target starts. TARGET 11.14 closed that q/wq_b boundary
+for the required rows and exposed exact-input MoE drift, so TARGET 11.15 must
+close or precisely no-go the MoE output sub-boundary before this graph/perf
+target starts.
 
 ## Primary Question
 
