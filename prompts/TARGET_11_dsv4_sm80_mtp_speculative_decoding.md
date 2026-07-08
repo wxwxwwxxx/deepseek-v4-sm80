@@ -116,6 +116,10 @@ Run these in order.
 | TARGET 11.19 | `prompts/TARGET_11.19_dsv4_sm80_mtp_accepted_commit_lifecycle_state_parity.md` | After 11.18 ranks accepted-commit lifecycle/post-commit state above local operator fixes, find the first event/state component that makes Mini self-consistent but baseline-divergent. |
 | TARGET 11.20 | `prompts/TARGET_11.20_dsv4_sm80_mtp_row_depth_committed_state_baseline_parity.md` | After 11.19 narrows the owner to bs4 uid0 event4 depth1 committed correction-row state, compare MTP committed rows against baseline greedy state hashes. |
 | TARGET 11.21 | `prompts/TARGET_11.21_dsv4_sm80_mtp_target_verify_row_depth_producer_parity.md` | After 11.20 proves logical ownership is correct but `swa.layer1` row values differ, find the layer0-to-layer1 producer boundary that first diverges. |
+| TARGET 11.22 | `prompts/TARGET_11.22_dsv4_sm80_mtp_layer0_wo_a_projection_contract_parity.md` | After 11.21 identifies layer0 `attention_wo_a_output` as the first producer mismatch, align target-verify `wo_a` projection with baseline/SGLang semantics. |
+| TARGET 11.23 | `prompts/TARGET_11.23_dsv4_sm80_mtp_layer0_wo_b_projection_reduce_parity.md` | After 11.22 closes `wo_a` and exposes layer0 `wo_b` local/post-all-reduce drift, fix or precisely no-go the `wo_b` projection/reduce contract. |
+| TARGET 11.24 | `prompts/TARGET_11.24_dsv4_sm80_mtp_post_layer1_logits_owner_census.md` | After 11.23 closes layer0->layer1 for the old anchor but bs2/bs6 still drift, bisect from layer1 through final logits/sampler/commit to find the next owner. |
+| TARGET 11.241 | `prompts/TARGET_11.241_dsv4_sm80_mtp_layer2_attention_committed_kv_state_owner.md` | After 11.24 proves the next first boundary is layer2 attention output, split current Q compute from consumed committed KV/SWA/C128/page metadata, with bs6 as a full-matrix lifecycle guard. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -280,6 +284,23 @@ Do not promote MTP by default unless all of these are true:
   `swa.layer1` values differ between baseline greedy and MTP target verify,
   stop at TARGET 11.21 and trace the producer-side layer0-to-layer1 boundary
   before patching attention, indexer, C128, or graph/perf.
+- If TARGET 11.21 proves the first output-significant producer mismatch is
+  layer0 `attention_wo_a_output`, stop at TARGET 11.22 and align the target
+  verify `wo_a` projection contract with baseline/SGLang before patching later
+  attention, indexer, C128, or graph/perf.
+- If TARGET 11.22 closes the `wo_a` contract but layer0 `wo_b` local or
+  post-all-reduce output remains the first output-significant mismatch, stop at
+  TARGET 11.23 and fix/prove the `wo_b` projection/reduce contract before
+  patching indexer, C128, lifecycle ownership, or graph/perf.
+- If TARGET 11.23 closes layer0 `wo_b`, layer0 post-MoE, layer1 input, and
+  layer1 KV for the old anchor but the broad matrix still fails at bs2/bs6,
+  stop at TARGET 11.24 and bisect from layer1 through final logits, sampler,
+  and visible commit before reopening layer0, indexer, C128, lifecycle
+  ownership, or graph/perf.
+- If TARGET 11.24 proves hidden states are exact through layer2 input but first
+  diverge at layer2 attention output, stop at TARGET 11.241 and split layer2
+  attention into current Q compute versus consumed committed KV/SWA/C128/page
+  metadata before patching logits, sampler, graph/perf, or low-precision paths.
 
 ## Deliverables
 

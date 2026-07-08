@@ -951,7 +951,14 @@ def _fp8_cached_bf16_weight_local_projection(
     owner: object,
     cache_name: str,
     owner_label: str,
+    accum_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
+    if accum_dtype is not None:
+        x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+        return F.linear(
+            x_quant.to(accum_dtype),
+            cached_weight.to(accum_dtype),
+        ).to(x.dtype)
     if not dsv4_owner_timing.enabled():
         x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
         return _linear_cached_bf16_weight(
@@ -990,6 +997,7 @@ def _fp8_cached_bf16_weight_local_projection_row_invariant(
     owner: object,
     cache_name: str,
     owner_label: str,
+    accum_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     rows = x.numel() // x.shape[-1]
     if rows <= 1:
@@ -999,6 +1007,7 @@ def _fp8_cached_bf16_weight_local_projection_row_invariant(
             owner=owner,
             cache_name=cache_name,
             owner_label=owner_label,
+            accum_dtype=accum_dtype,
         )
     x_2d = x.reshape(rows, x.shape[-1])
     chunks = [
@@ -1008,6 +1017,7 @@ def _fp8_cached_bf16_weight_local_projection_row_invariant(
             owner=owner,
             cache_name=cache_name,
             owner_label=owner_label,
+            accum_dtype=accum_dtype,
         )
         for row in range(rows)
     ]
@@ -1030,6 +1040,25 @@ def _row_invariant_all_reduce(
         for row in range(rows)
     ]
     return torch.cat(chunks, dim=0).reshape_as(y)
+
+
+def _projection_all_reduce(
+    comm: DistributedCommunicator,
+    y: torch.Tensor,
+    *,
+    label: str,
+    row_invariant_reduce: bool = False,
+    reduce_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    original_dtype = y.dtype
+    reduce_input = y if reduce_dtype is None or y.dtype == reduce_dtype else y.to(reduce_dtype)
+    if row_invariant_reduce:
+        reduced = _row_invariant_all_reduce(comm, reduce_input, label=label)
+    else:
+        reduced = comm.all_reduce(reduce_input, label=label)
+    if reduced.dtype != original_dtype:
+        reduced = reduced.to(original_dtype)
+    return reduced
 
 
 def _prepare_bf16_pretransposed_report(
@@ -1191,6 +1220,32 @@ def _wo_a_bf16_bmm_projection_row_invariant(
         ],
         dim=0,
     )
+
+
+def _wo_a_bf16_sglang_style_einsum_projection(
+    o: torch.Tensor,
+    cached_weight: torch.Tensor,
+    *,
+    owner_label: str,
+) -> torch.Tensor:
+    if o.dtype != torch.bfloat16:
+        raise RuntimeError(
+            f"{owner_label} SGLang-style wo_a projection requires bf16 activations, "
+            f"got {o.dtype}."
+        )
+    if cached_weight.dtype != torch.bfloat16:
+        raise RuntimeError(
+            f"{owner_label} SGLang-style wo_a projection requires bf16 cached weight, "
+            f"got {cached_weight.dtype}."
+        )
+    if o.ndim != 3 or cached_weight.ndim != 3:
+        raise RuntimeError(
+            f"{owner_label} SGLang-style wo_a projection expects o=[tokens, groups, d] "
+            f"and weight=[groups, d, rank], got o={tuple(o.shape)} "
+            f"weight={tuple(cached_weight.shape)}."
+        )
+    weight = cached_weight.transpose(1, 2).contiguous()
+    return torch.einsum("tgd,grd->tgr", o, weight).reshape(o.shape[0], -1)
 
 
 def _cached_gate_fp32_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
@@ -1361,6 +1416,7 @@ class DSV4Linear(BaseOP):
         debug_pre_reduce_name: str | None = None,
         debug_post_reduce_name: str | None = None,
         row_invariant_reduce: bool = False,
+        reduce_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         scale = _cached_projection_scale(self, "_dsv4_weight_scale_fp32_contiguous", scale)
@@ -1380,10 +1436,13 @@ class DSV4Linear(BaseOP):
             _capture_debug_activation(debug_pre_reduce_name, y)
         if reduce and self.row_parallel and self._tp_size > 1:
             label = reduce_label or "dsv4.row_parallel_projection_all_reduce"
-            if row_invariant_reduce:
-                y = _row_invariant_all_reduce(self._comm, y, label=label)
-            else:
-                y = self._comm.all_reduce(y, label=label)
+            y = _projection_all_reduce(
+                self._comm,
+                y,
+                label=label,
+                row_invariant_reduce=row_invariant_reduce,
+                reduce_dtype=reduce_dtype,
+            )
         if debug_post_reduce_name is not None:
             _capture_debug_activation(debug_post_reduce_name, y)
         return y
@@ -1452,6 +1511,7 @@ class DSV4Linear(BaseOP):
         debug_pre_reduce_name: str | None = None,
         debug_post_reduce_name: str | None = None,
         row_invariant_reduce: bool = False,
+        reduce_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         y = _forward_fp8_marlin_weight(
             self,
@@ -1463,10 +1523,13 @@ class DSV4Linear(BaseOP):
             _capture_debug_activation(debug_pre_reduce_name, y)
         if reduce and self.row_parallel and self._tp_size > 1:
             label = reduce_label or "dsv4.row_parallel_projection_all_reduce"
-            if row_invariant_reduce:
-                y = _row_invariant_all_reduce(self._comm, y, label=label)
-            else:
-                y = self._comm.all_reduce(y, label=label)
+            y = _projection_all_reduce(
+                self._comm,
+                y,
+                label=label,
+                row_invariant_reduce=row_invariant_reduce,
+                reduce_dtype=reduce_dtype,
+            )
         if debug_post_reduce_name is not None:
             _capture_debug_activation(debug_post_reduce_name, y)
         return y
@@ -1483,6 +1546,8 @@ class DSV4Linear(BaseOP):
         debug_post_reduce_name: str | None = None,
         row_invariant_local: bool = False,
         row_invariant_reduce: bool = False,
+        local_accum_dtype: torch.dtype | None = None,
+        reduce_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         cached_weight = _cached_fp8_bf16_weight(
@@ -1505,15 +1570,19 @@ class DSV4Linear(BaseOP):
             owner=self,
             cache_name=cache_name,
             owner_label=owner_label,
+            accum_dtype=local_accum_dtype,
         )
         if debug_pre_reduce_name is not None:
             _capture_debug_activation(debug_pre_reduce_name, y)
         if reduce and self.row_parallel and self._tp_size > 1:
             label = reduce_label or "dsv4.row_parallel_projection_all_reduce"
-            if row_invariant_reduce:
-                y = _row_invariant_all_reduce(self._comm, y, label=label)
-            else:
-                y = self._comm.all_reduce(y, label=label)
+            y = _projection_all_reduce(
+                self._comm,
+                y,
+                label=label,
+                row_invariant_reduce=row_invariant_reduce,
+                reduce_dtype=reduce_dtype,
+            )
         if debug_post_reduce_name is not None:
             _capture_debug_activation(debug_post_reduce_name, y)
         return y
@@ -1529,6 +1598,7 @@ class DSV4Linear(BaseOP):
         debug_pre_reduce_name: str | None = None,
         debug_post_reduce_name: str | None = None,
         row_invariant_reduce: bool = False,
+        reduce_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         return self.forward_fp8_cached_bf16_weight(
             x,
@@ -1540,6 +1610,8 @@ class DSV4Linear(BaseOP):
             debug_post_reduce_name=debug_post_reduce_name,
             row_invariant_local=True,
             row_invariant_reduce=row_invariant_reduce,
+            local_accum_dtype=None,
+            reduce_dtype=reduce_dtype,
         )
 
 
@@ -2673,12 +2745,42 @@ class DSV4Attention(BaseOP):
                     allow_build=False,
                     owner_label=self._wo_a_owner_label,
                 )
-                if is_target_verify:
-                    o = _wo_a_bf16_bmm_projection_row_invariant(
+                if dsv4_mtp_debug.wo_a_projection_oracle_enabled(self.layer_id):
+                    actual_row_o = _wo_a_bf16_bmm_projection(
                         o,
                         cached_wo_a,
                         owner_label=self._wo_a_owner_label,
                     )
+                    row_invariant_o = _wo_a_bf16_bmm_projection_row_invariant(
+                        o,
+                        cached_wo_a,
+                        owner_label=self._wo_a_owner_label,
+                    )
+                    sglang_einsum_o = _wo_a_bf16_sglang_style_einsum_projection(
+                        o,
+                        cached_wo_a,
+                        owner_label=self._wo_a_owner_label,
+                    )
+                    dsv4_mtp_debug.record_wo_a_projection_oracle(
+                        batch,
+                        layer_id=self.layer_id,
+                        input_tensor=o,
+                        cached_weight=cached_wo_a,
+                        outputs={
+                            "actual_row_bf16_bmm": actual_row_o,
+                            "row_invariant_bf16_bmm": row_invariant_o,
+                            "sglang_style_bf16_einsum": sglang_einsum_o,
+                        },
+                        selected_output="actual_row_bf16_bmm",
+                        backend_path="mini.cached_bf16_bmm.actual_row",
+                        extra={
+                            "is_target_verify": bool(is_target_verify),
+                            "num_local_groups": int(self.num_local_groups),
+                            "d_per_group": int(d_per_group),
+                            "o_lora_rank": int(self.o_lora_rank),
+                        },
+                    )
+                    o = actual_row_o
                 else:
                     o = _wo_a_bf16_bmm_projection(
                         o,
@@ -2711,11 +2813,74 @@ class DSV4Attention(BaseOP):
                     reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
                     debug_pre_reduce_name=wo_b_local_name,
                     debug_post_reduce_name=wo_b_reduce_name,
-                    row_invariant_reduce=is_target_verify,
+                    row_invariant_reduce=False,
+                    reduce_dtype=torch.float32,
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
                 return out
             if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE):
+                if dsv4_mtp_debug.wo_b_projection_oracle_enabled(self.layer_id):
+                    wo_b_scale = getattr(self.wo_b, "weight_scale_inv", None)
+                    cached_wo_b = _cached_fp8_bf16_weight(
+                        self.wo_b,
+                        self._wo_b_bf16_weight_cache_name,
+                        self.wo_b.weight,
+                        wo_b_scale,
+                        out_dtype=o.dtype,
+                        allow_build=False,
+                        owner_label=self._wo_b_owner_label,
+                    )
+                    actual_row_local = _fp8_cached_bf16_weight_local_projection(
+                        o,
+                        cached_wo_b,
+                        owner=self.wo_b,
+                        cache_name=self._wo_b_bf16_weight_cache_name,
+                        owner_label=self._wo_b_owner_label,
+                    )
+                    actual_row_fp32_accum_local = (
+                        _fp8_cached_bf16_weight_local_projection(
+                            o,
+                            cached_wo_b,
+                            owner=self.wo_b,
+                            cache_name=self._wo_b_bf16_weight_cache_name,
+                            owner_label=self._wo_b_owner_label,
+                            accum_dtype=torch.float32,
+                        )
+                    )
+                    row_invariant_local = (
+                        _fp8_cached_bf16_weight_local_projection_row_invariant(
+                            o,
+                            cached_wo_b,
+                            owner=self.wo_b,
+                            cache_name=self._wo_b_bf16_weight_cache_name,
+                            owner_label=self._wo_b_owner_label,
+                        )
+                    )
+                    dsv4_mtp_debug.record_wo_b_projection_oracle(
+                        batch,
+                        layer_id=self.layer_id,
+                        input_tensor=o,
+                        cached_weight=cached_wo_b,
+                        outputs={
+                            "actual_row_cached_bf16_linear": actual_row_local,
+                            "actual_row_cached_fp32_accum_linear": (
+                                actual_row_fp32_accum_local
+                            ),
+                            "row_invariant_cached_bf16_linear": row_invariant_local,
+                        },
+                        selected_output=(
+                            "actual_row_cached_fp32_accum_linear"
+                        ),
+                        backend_path="mini.fp8_cached_bf16_weight.actual_row_fp32_accum",
+                        extra={
+                            "is_target_verify": bool(is_target_verify),
+                            "local_accum_dtype": "torch.float32",
+                            "reduce_label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+                            "row_invariant_local": False,
+                            "row_invariant_reduce": False,
+                            "reduce_dtype": "torch.float32",
+                        },
+                    )
                 out = self.wo_b.forward_fp8_cached_bf16_weight(
                     o,
                     cache_name=self._wo_b_bf16_weight_cache_name,
@@ -2724,8 +2889,10 @@ class DSV4Attention(BaseOP):
                     reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
                     debug_pre_reduce_name=wo_b_local_name,
                     debug_post_reduce_name=wo_b_reduce_name,
-                    row_invariant_local=is_target_verify,
-                    row_invariant_reduce=is_target_verify,
+                    row_invariant_local=False,
+                    row_invariant_reduce=False,
+                    local_accum_dtype=torch.float32,
+                    reduce_dtype=torch.float32,
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
                 return out
@@ -2735,7 +2902,8 @@ class DSV4Attention(BaseOP):
                 fp8_gemm=wo_b_fp8_gemm if wo_b_fp8_gemm else None,
                 debug_pre_reduce_name=wo_b_local_name,
                 debug_post_reduce_name=wo_b_reduce_name,
-                row_invariant_reduce=is_target_verify,
+                row_invariant_reduce=False,
+                reduce_dtype=torch.float32,
             )
             _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
             return out

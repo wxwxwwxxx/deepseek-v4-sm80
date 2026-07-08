@@ -52,6 +52,9 @@ _DSV4_MTP_SPEC_DRAFT_LEN_ENV = "MINISGL_DSV4_MTP_SPEC_DRAFT_LEN"
 _DSV4_MTP_ROW0_DEBUG_ENV = "MINISGL_DSV4_MTP_ROW0_DEBUG"
 _DSV4_MTP_ROW_DEPTH_ORACLE_ENV = "MINISGL_DSV4_MTP_ROW_DEPTH_ORACLE"
 _DSV4_NORMAL_PRODUCER_TRACE_ENV = "MINISGL_DSV4_NORMAL_PRODUCER_TRACE"
+_DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS_ENV = (
+    "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS"
+)
 _DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV = (
     "MINISGL_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION"
 )
@@ -1025,6 +1028,12 @@ class Engine:
         target_attention = dsv4_mtp_debug.export_attention_backend_trace(verify_batch)
         target_operator_trace = dsv4_mtp_debug.get_operator_trace(verify_batch)
         target_operator_summary = dsv4_mtp_debug.export_operator_trace(target_operator_trace)
+        target_wo_a_oracle = dsv4_mtp_debug.export_wo_a_projection_oracle_trace(
+            verify_batch
+        )
+        target_wo_b_oracle = dsv4_mtp_debug.export_wo_b_projection_oracle_trace(
+            verify_batch
+        )
 
         event: dict[str, Any] = {
             "trace_index": int(
@@ -1034,6 +1043,8 @@ class Engine:
             "target_trace": target_summary,
             "target_attention_backend_trace": target_attention,
             "target_operator_trace": target_operator_summary,
+            "target_wo_a_projection_oracle": target_wo_a_oracle,
+            "target_wo_b_projection_oracle": target_wo_b_oracle,
             "target_entries": [
                 {
                     "batch_index": int(entry["batch_index"]),
@@ -1067,6 +1078,12 @@ class Engine:
                 "attention_backend_trace", []
             )
             event["oracle_operator_trace"] = oracle.get("operator_trace_summary", [])
+            event["oracle_wo_a_projection_oracle"] = oracle.get(
+                "wo_a_projection_oracle", []
+            )
+            event["oracle_wo_b_projection_oracle"] = oracle.get(
+                "wo_b_projection_oracle", []
+            )
             event["oracle_context"] = oracle.get("context", {})
             event["comparison"] = dsv4_mtp_debug.compare_row0_layer_traces(
                 oracle_trace,
@@ -1111,6 +1128,13 @@ class Engine:
     def _normal_producer_trace_name_selected(self, name: str) -> bool:
         if name in {"embedding", "hidden_before_final_norm", "final_norm", "lm_head_logits"}:
             return True
+        if _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS_ENV):
+            coarse_boundaries = (
+                ".input",
+                ".final_attention_output",
+                ".post_moe_residual",
+            )
+            return name.startswith("layer") and name.endswith(coarse_boundaries)
         return name.startswith("layer0.") or name.startswith("layer1.")
 
     def _record_normal_producer_trace_debug(
@@ -1192,6 +1216,12 @@ class Engine:
                     for req in list(getattr(batch, "reqs", []))[:16]
                 ],
                 "producer_trace": records,
+                "wo_a_projection_oracle": (
+                    dsv4_mtp_debug.export_wo_a_projection_oracle_trace(batch)
+                ),
+                "wo_b_projection_oracle": (
+                    dsv4_mtp_debug.export_wo_b_projection_oracle_trace(batch)
+                ),
                 "stored_row_snapshot": snapshot_items,
                 "metadata": self._mtp_row0_metadata_debug(batch),
             }
@@ -1293,6 +1323,12 @@ class Engine:
         target_hidden = getattr(target_output, "hidden_states", None)
         target_hidden_before_norm = getattr(target_output, "hidden_states_before_norm", None)
         target_trace = dsv4_mtp_debug.get_row0_layer_trace(verify_batch)
+        event["target_wo_a_projection_oracle"] = (
+            dsv4_mtp_debug.export_wo_a_projection_oracle_trace(verify_batch)
+        )
+        event["target_wo_b_projection_oracle"] = (
+            dsv4_mtp_debug.export_wo_b_projection_oracle_trace(verify_batch)
+        )
         try:
             for entry in entries[:8]:
                 req = entry["req"]
@@ -1358,6 +1394,16 @@ class Engine:
                             )
                         self._sync_device_for_mtp_spec()
                         oracle_trace = dsv4_mtp_debug.get_row0_layer_trace(oracle_batch)
+                        oracle_wo_a_projection_oracle = (
+                            dsv4_mtp_debug.export_wo_a_projection_oracle_trace(
+                                oracle_batch
+                            )
+                        )
+                        oracle_wo_b_projection_oracle = (
+                            dsv4_mtp_debug.export_wo_b_projection_oracle_trace(
+                                oracle_batch
+                            )
+                        )
                         oracle_row_snapshot = self._snapshot_mtp_kv_rows(
                             real_locs[depth : depth + 1],
                             positions[depth : depth + 1],
@@ -1439,6 +1485,12 @@ class Engine:
                                     )
                                     if dsv4_mtp_debug.row0_layer_parity_enabled()
                                     else {"enabled": False}
+                                ),
+                                "oracle_wo_a_projection_oracle": (
+                                    oracle_wo_a_projection_oracle
+                                ),
+                                "oracle_wo_b_projection_oracle": (
+                                    oracle_wo_b_projection_oracle
                                 ),
                                 "target_stored_row_snapshot": (
                                     self._summarize_mtp_kv_snapshot_labels(
@@ -2027,6 +2079,16 @@ class Engine:
                     "operator_trace": dsv4_mtp_debug.get_operator_trace(oracle_batch),
                     "operator_trace_summary": (
                         dsv4_mtp_debug.export_operator_trace(oracle_batch)
+                    ),
+                    "wo_a_projection_oracle": (
+                        dsv4_mtp_debug.export_wo_a_projection_oracle_trace(
+                            oracle_batch
+                        )
+                    ),
+                    "wo_b_projection_oracle": (
+                        dsv4_mtp_debug.export_wo_b_projection_oracle_trace(
+                            oracle_batch
+                        )
                     ),
                     "context": {
                         "oracle_for_committed_seq_len": int(req.cached_len),
