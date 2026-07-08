@@ -121,6 +121,10 @@ Run these in order.
 | TARGET 11.24 | `prompts/TARGET_11.24_dsv4_sm80_mtp_post_layer1_logits_owner_census.md` | After 11.23 closes layer0->layer1 for the old anchor but bs2/bs6 still drift, bisect from layer1 through final logits/sampler/commit to find the next owner. |
 | TARGET 11.241 | `prompts/TARGET_11.241_dsv4_sm80_mtp_layer2_attention_committed_kv_state_owner.md` | After 11.24 proves the next first boundary is layer2 attention output, split current Q compute from consumed committed KV/SWA/C128/page metadata, with bs6 as a full-matrix lifecycle guard. |
 | TARGET 11.242 | `prompts/TARGET_11.242_dsv4_sm80_mtp_layer2_swa_commit_state_producer_owner.md` | After 11.241 proves layer2 consumed SWA cache values are non-equivalent, trace the bad SWA locs through producer, store, snapshot restore, and accepted commit. |
+| TARGET 11.243 | `prompts/TARGET_11.243_dsv4_sm80_mtp_target_verify_layer2_input_producer_parity.md` | After 11.242 proves the bad SWA store inputs are already non-equivalent, trace target-verify writer rows from embedding through layer2 input and classify the first producer boundary. |
+| TARGET 11.244 | `prompts/TARGET_11.244_dsv4_sm80_mtp_target_verify_layer0_moe_output_subboundary_parity.md` | After 11.243 proves the first producer boundary is layer0 MoE output, split router, routed expert, shared expert, aggregation, and reduce for the current target-verify rows. |
+| TARGET 11.245 | `prompts/TARGET_11.245_dsv4_sm80_mtp_target_verify_layer0_moe_row_shape_precision_contract.md` | After 11.244 proves target-verify layer0 MoE is row-shape/precision sensitive, define the SGLang-aligned execution contract and test row-stable or shape-stable oracles. |
+| TARGET 11.246 | `prompts/TARGET_11.246_dsv4_sm80_mtp_target_verify_moe_normal_shape_microbatch_runtime.md` | After 11.245 proves normal-shape-compatible MoE microbatching is the only exact oracle under Mini's backend, implement the runtime path and validate the full exactness matrix. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -307,6 +311,25 @@ Do not promote MTP by default unless all of these are true:
   TARGET 11.242 and trace the bad SWA locs through producer, store, snapshot
   restore, accepted commit, and later read before patching attention kernels or
   downstream logits/sampler.
+- If TARGET 11.242 proves SWA store, snapshot restore, commit, and later read
+  preserve their inputs but the bad SWA rows are already non-equivalent at
+  target-verify writer `layer2.input`, stop at TARGET 11.243 and trace the
+  writer rows from embedding through layer2 input before patching SWA cache
+  lifecycle again.
+- If TARGET 11.243 proves row identity, embedding, layer0 attention, and
+  `layer0.moe_input` are equivalent but bad rows first diverge at
+  `layer0.moe_output`, stop at TARGET 11.244 and split layer0 MoE into router,
+  routed expert, shared expert, aggregation, and reduce before reopening SWA or
+  layer2 attention.
+- If TARGET 11.244 proves router logits/topk ids are exact but target-verify
+  layer0 MoE remains row-shape/precision sensitive across topk weights, expert
+  backends, reduce, and final BF16 materialization, stop at TARGET 11.245 and
+  define the SGLang-aligned target-verify MoE shape/precision contract before
+  implementing a runtime fix.
+- If TARGET 11.245 proves normal-shape-compatible microbatching is the only
+  exact target-verify MoE oracle under Mini's current SM80 backend, stop at
+  TARGET 11.246 and implement that microbatch contract as a real runtime path
+  before graph/perf promotion.
 
 ## Deliverables
 

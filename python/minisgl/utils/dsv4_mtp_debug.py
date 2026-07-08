@@ -10,6 +10,7 @@ ROW0_LAYER_PARITY_ENV = "MINISGL_DSV4_MTP_ROW0_LAYER_PARITY"
 ROW0_LAYER_PARITY_ATOL_ENV = "MINISGL_DSV4_MTP_ROW0_LAYER_PARITY_ATOL"
 OPERATOR_PARITY_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY"
 OPERATOR_PARITY_OPERATORS_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_OPERATORS"
+OPERATOR_PARITY_LAYERS_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_LAYERS"
 OPERATOR_PARITY_ATOL_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_ATOL"
 OPERATOR_PARITY_RTOL_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_RTOL"
 ROW_TRACE_ROWS_ENV = "MINISGL_DSV4_MTP_ROW_TRACE_ROWS"
@@ -19,6 +20,8 @@ WO_A_PROJECTION_ORACLE_ENV = "MINISGL_DSV4_MTP_WO_A_PROJECTION_ORACLE"
 WO_A_PROJECTION_ORACLE_LAYERS_ENV = "MINISGL_DSV4_MTP_WO_A_PROJECTION_ORACLE_LAYERS"
 WO_B_PROJECTION_ORACLE_ENV = "MINISGL_DSV4_MTP_WO_B_PROJECTION_ORACLE"
 WO_B_PROJECTION_ORACLE_LAYERS_ENV = "MINISGL_DSV4_MTP_WO_B_PROJECTION_ORACLE_LAYERS"
+MOE_CONTRACT_ORACLE_ENV = "MINISGL_DSV4_MTP_MOE_CONTRACT_ORACLE"
+MOE_CONTRACT_ORACLE_LAYERS_ENV = "MINISGL_DSV4_MTP_MOE_CONTRACT_ORACLE_LAYERS"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
@@ -32,7 +35,11 @@ def row0_layer_parity_enabled() -> bool:
 
 
 def row_tensor_trace_enabled() -> bool:
-    return row0_layer_parity_enabled() or env_flag(ROW_TENSOR_TRACE_ENV)
+    return (
+        row0_layer_parity_enabled()
+        or env_flag(ROW_TENSOR_TRACE_ENV)
+        or moe_contract_oracle_enabled()
+    )
 
 
 def layer2_swa_lifecycle_trace_enabled() -> bool:
@@ -59,6 +66,19 @@ def operator_parity_enabled(operator_name: str | None = None) -> bool:
         return True
     selected = {part.strip() for part in raw.split(",") if part.strip()}
     return operator_name in selected
+
+
+def operator_parity_layer_enabled(layer_id: int | None = None) -> bool:
+    if layer_id is None:
+        return True
+    raw = os.environ.get(OPERATOR_PARITY_LAYERS_ENV, "").strip()
+    if not raw or raw.lower() in {"all", "*"}:
+        return True
+    try:
+        selected = _parse_int_filter(raw)
+    except ValueError:
+        return True
+    return selected is None or int(layer_id) in selected
 
 
 def operator_parity_atol() -> float:
@@ -127,6 +147,21 @@ def wo_b_projection_oracle_enabled(layer_id: int | None = None) -> bool:
     return selected is None or int(layer_id) in selected
 
 
+def moe_contract_oracle_enabled(layer_id: int | None = None) -> bool:
+    if not env_flag(MOE_CONTRACT_ORACLE_ENV):
+        return False
+    raw = os.environ.get(MOE_CONTRACT_ORACLE_LAYERS_ENV, "0").strip()
+    if not raw or raw.lower() in {"all", "*"}:
+        return True
+    if layer_id is None:
+        return True
+    try:
+        selected = _parse_int_filter(raw)
+    except ValueError:
+        return True
+    return selected is None or int(layer_id) in selected
+
+
 def reset_row0_layer_trace(batch: Any, *, mode: str) -> None:
     if not row_tensor_trace_enabled():
         return
@@ -135,6 +170,7 @@ def reset_row0_layer_trace(batch: Any, *, mode: str) -> None:
     setattr(batch, "_dsv4_mtp_operator_trace", [])
     setattr(batch, "_dsv4_mtp_wo_a_projection_oracle_trace", [])
     setattr(batch, "_dsv4_mtp_wo_b_projection_oracle_trace", [])
+    setattr(batch, "_dsv4_mtp_moe_contract_oracle_trace", [])
     setattr(batch, "_dsv4_layer2_swa_store_trace", [])
     setattr(batch, "_dsv4_mtp_row0_layer_trace_mode", mode)
 
@@ -193,6 +229,7 @@ def record_row0_tensor(
                 "shape": [int(x) for x in tensor.shape],
                 "row0_shape": [int(x) for x in row0.shape],
                 "dtype": str(tensor.dtype),
+                "tensor_metadata": _tensor_metadata(tensor),
                 "summary": _tensor_summary(row0),
                 "row_summaries": row_summaries,
                 "_row0_tensor": row0,
@@ -243,6 +280,7 @@ def record_operator_capture(
     operator_name: str,
     layer_id: int,
     input_row0: torch.Tensor | None,
+    input_tensor: torch.Tensor | None = None,
     output_tensor: torch.Tensor | None,
     positions: torch.Tensor | None,
     path: str,
@@ -251,6 +289,8 @@ def record_operator_capture(
     private: dict[str, Any] | None = None,
 ) -> None:
     if not operator_parity_enabled(operator_name):
+        return
+    if not operator_parity_layer_enabled(layer_id):
         return
     if batch is None:
         return
@@ -273,6 +313,15 @@ def record_operator_capture(
         for key, value in private.items():
             entry[f"_{key}"] = value
     try:
+        selected_source = output_tensor if isinstance(output_tensor, torch.Tensor) else input_tensor
+        selected_rows = (
+            _selected_trace_rows(selected_source)
+            if isinstance(selected_source, torch.Tensor)
+            else [0]
+        )
+        input_row_tensors: dict[int, torch.Tensor] = {}
+        output_row_tensors: dict[int, torch.Tensor] = {}
+        row_records: list[dict[str, Any]] = []
         if isinstance(input_row0, torch.Tensor):
             row = input_row0.detach().contiguous().cpu()
             entry["input_tensor_metadata"] = _tensor_metadata(input_row0)
@@ -287,6 +336,42 @@ def record_operator_capture(
             entry["_output_row0_tensor"] = row
         else:
             entry["output_tensor_metadata"] = {"available": False}
+        for row_idx in selected_rows:
+            row_record: dict[str, Any] = {
+                "row": int(row_idx),
+                "context": _operator_row_context(batch, positions, int(row_idx)),
+            }
+            if (
+                isinstance(input_tensor, torch.Tensor)
+                and input_tensor.ndim > 0
+                and 0 <= int(row_idx) < int(input_tensor.shape[0])
+            ):
+                input_row = input_tensor.detach()[int(row_idx)].contiguous().cpu()
+                input_row_tensors[int(row_idx)] = input_row
+                row_record["input"] = _row_tensor_record(input_row)
+            elif int(row_idx) == 0 and isinstance(input_row0, torch.Tensor):
+                input_row = input_row0.detach().contiguous().cpu()
+                input_row_tensors[0] = input_row
+                row_record["input"] = _row_tensor_record(input_row)
+            else:
+                row_record["input"] = {"available": False}
+            if (
+                isinstance(output_tensor, torch.Tensor)
+                and output_tensor.ndim > 0
+                and 0 <= int(row_idx) < int(output_tensor.shape[0])
+            ):
+                output_row = output_tensor.detach()[int(row_idx)].contiguous().cpu()
+                output_row_tensors[int(row_idx)] = output_row
+                row_record["output"] = _row_tensor_record(output_row)
+            else:
+                row_record["output"] = {"available": False}
+            row_records.append(row_record)
+        if input_row_tensors:
+            entry["_input_row_tensors"] = input_row_tensors
+        if output_row_tensors:
+            entry["_output_row_tensors"] = output_row_tensors
+        entry["selected_rows"] = [int(row_idx) for row_idx in selected_rows]
+        entry["row_records"] = row_records
     except Exception as exc:
         entry["error_type"] = type(exc).__name__
         entry["error"] = str(exc)
@@ -305,6 +390,115 @@ def export_operator_trace(batch_or_trace: Any) -> list[dict[str, Any]]:
         batch_or_trace
         if isinstance(batch_or_trace, list)
         else get_operator_trace(batch_or_trace)
+    )
+    return [_strip_private(entry) for entry in trace]
+
+
+def record_moe_contract_oracle(
+    batch: Any,
+    *,
+    layer_id: int,
+    variant: str,
+    source_rows: list[int] | tuple[int, ...],
+    tensors: dict[str, torch.Tensor | None],
+    positions: torch.Tensor | None,
+    params: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+    reference_tensor: torch.Tensor | None = None,
+) -> None:
+    if not moe_contract_oracle_enabled(layer_id):
+        return
+    if batch is None:
+        return
+    if not tensors:
+        return
+    try:
+        if any(
+            isinstance(tensor, torch.Tensor)
+            and tensor.is_cuda
+            and torch.cuda.is_current_stream_capturing()
+            for tensor in tensors.values()
+        ):
+            return
+    except Exception:
+        return
+
+    trace = getattr(batch, "_dsv4_mtp_moe_contract_oracle_trace", None)
+    if trace is None:
+        trace = []
+        setattr(batch, "_dsv4_mtp_moe_contract_oracle_trace", trace)
+
+    source_rows_list = [int(row) for row in source_rows]
+    if reference_tensor is None:
+        for tensor in tensors.values():
+            if isinstance(tensor, torch.Tensor) and tensor.ndim > 0:
+                reference_tensor = tensor
+                break
+    selected_source_rows: set[int] = set()
+    if isinstance(reference_tensor, torch.Tensor) and reference_tensor.ndim > 0:
+        selected_source_rows.update(_selected_trace_rows(reference_tensor))
+    if not selected_source_rows and source_rows_list:
+        selected_source_rows.add(source_rows_list[0])
+
+    entry: dict[str, Any] = {
+        "variant": str(variant),
+        "layer_id": int(layer_id),
+        "mode": str(getattr(batch, "_dsv4_mtp_row0_layer_trace_mode", "")),
+        "is_target_verify": bool(
+            getattr(batch, "dsv4_target_verify_metadata", None) is not None
+        ),
+        "params": _json_dict(params or {}),
+        "extra": _json_dict(extra or {}),
+        "source_rows": [int(row) for row in source_rows_list],
+        "tensor_metadata": {},
+        "row_records": [],
+    }
+    for name, tensor in tensors.items():
+        if isinstance(tensor, torch.Tensor):
+            entry["tensor_metadata"][str(name)] = _tensor_metadata(tensor)
+        else:
+            entry["tensor_metadata"][str(name)] = {"available": False}
+
+    try:
+        for variant_row, source_row in enumerate(source_rows_list):
+            if int(source_row) not in selected_source_rows:
+                continue
+            record: dict[str, Any] = {
+                "row": int(variant_row),
+                "source_row": int(source_row),
+                "context": _operator_row_context(batch, positions, int(source_row)),
+                "boundaries": {},
+            }
+            for name, tensor in tensors.items():
+                if (
+                    isinstance(tensor, torch.Tensor)
+                    and tensor.ndim > 0
+                    and 0 <= int(variant_row) < int(tensor.shape[0])
+                ):
+                    row_tensor = tensor.detach()[int(variant_row)].contiguous().cpu()
+                    record["boundaries"][str(name)] = _row_tensor_record(row_tensor)
+                else:
+                    record["boundaries"][str(name)] = {"available": False}
+            entry["row_records"].append(record)
+    except Exception as exc:
+        entry["error_type"] = type(exc).__name__
+        entry["error"] = str(exc)
+
+    trace.append(entry)
+
+
+def get_moe_contract_oracle_trace(batch: Any) -> list[dict[str, Any]]:
+    trace = getattr(batch, "_dsv4_mtp_moe_contract_oracle_trace", None)
+    if not isinstance(trace, list):
+        return []
+    return trace
+
+
+def export_moe_contract_oracle_trace(batch_or_trace: Any) -> list[dict[str, Any]]:
+    trace = (
+        batch_or_trace
+        if isinstance(batch_or_trace, list)
+        else get_moe_contract_oracle_trace(batch_or_trace)
     )
     return [_strip_private(entry) for entry in trace]
 
@@ -1101,6 +1295,62 @@ def compare_operator_traces(
     }
 
 
+def compare_operator_trace_rows(
+    normal_trace: list[dict[str, Any]],
+    target_trace: list[dict[str, Any]],
+    *,
+    case_prefix: str,
+    verify_event_id: int,
+    rank: int,
+    normal_row: int = 0,
+    target_row: int = 0,
+) -> dict[str, Any]:
+    if not operator_parity_enabled():
+        return {"enabled": False, "records": []}
+    atol = operator_parity_atol()
+    rtol = operator_parity_rtol()
+    target_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    for entry in target_trace:
+        key = (str(entry.get("operator_name", "")), int(entry.get("layer_id", -1)))
+        if key[0] and key not in target_by_key:
+            target_by_key[key] = entry
+
+    records: list[dict[str, Any]] = []
+    for normal_entry in normal_trace:
+        operator_name = str(normal_entry.get("operator_name", ""))
+        layer_id = int(normal_entry.get("layer_id", -1))
+        if not operator_parity_enabled(operator_name):
+            continue
+        target_entry = target_by_key.get((operator_name, layer_id))
+        record = _compare_operator_pair_rows(
+            normal_entry,
+            target_entry,
+            case_prefix=case_prefix,
+            verify_event_id=verify_event_id,
+            rank=rank,
+            normal_row=int(normal_row),
+            target_row=int(target_row),
+            atol=atol,
+            rtol=rtol,
+        )
+        records.append(record)
+    first_owner = None
+    for record in records:
+        if record.get("owner_verdict") not in {"operator parity pass"}:
+            first_owner = record
+            break
+    return {
+        "enabled": True,
+        "rtol": float(rtol),
+        "atol": float(atol),
+        "normal_row": int(normal_row),
+        "target_row": int(target_row),
+        "num_records": int(len(records)),
+        "first_owner": first_owner,
+        "records": records,
+    }
+
+
 def _compare_trace_entry(
     lhs: dict[str, Any],
     rhs: dict[str, Any],
@@ -1212,6 +1462,8 @@ def _compare_trace_entry_rows(
         "rhs_shape": [int(x) for x in rhs_tensor.shape]
         if isinstance(rhs_tensor, torch.Tensor)
         else None,
+        "lhs_tensor_metadata": lhs.get("tensor_metadata"),
+        "rhs_tensor_metadata": rhs.get("tensor_metadata"),
     }
     if not isinstance(lhs_tensor, torch.Tensor) or not isinstance(rhs_tensor, torch.Tensor):
         base.update(
@@ -1239,6 +1491,127 @@ def _compare_trace_entry_rows(
             f"{rhs_label}_sample": stats.get("rhs_sample"),
         }
     )
+    return base
+
+
+def _compare_operator_pair_rows(
+    normal: dict[str, Any],
+    target: dict[str, Any] | None,
+    *,
+    case_prefix: str,
+    verify_event_id: int,
+    rank: int,
+    normal_row: int,
+    target_row: int,
+    atol: float,
+    rtol: float,
+) -> dict[str, Any]:
+    operator_name = str(normal.get("operator_name", ""))
+    layer_id = int(normal.get("layer_id", -1))
+    normal_context = _operator_record_row_context(normal, normal_row)
+    target_context = (
+        _operator_record_row_context(target, target_row)
+        if isinstance(target, dict)
+        else {}
+    )
+    request_id = target_context.get("request_id", normal_context.get("request_id"))
+    row_depth = target_context.get("row_depth", normal_context.get("row_depth"))
+    position = target_context.get("position", normal_context.get("position"))
+    input_token = target_context.get("input_token", normal_context.get("input_token"))
+    case_id = (
+        f"{case_prefix}.rank{rank}.event{verify_event_id}."
+        f"layer{layer_id}.{operator_name}.req{request_id}."
+        f"depth{row_depth}.pos{position}.tok{input_token}."
+        f"nrow{normal_row}.trow{target_row}"
+    )
+    base: dict[str, Any] = {
+        "case_id": case_id,
+        "rank": int(rank),
+        "layer": int(layer_id),
+        "request_id": request_id,
+        "verify_event_id": int(verify_event_id),
+        "row_depth": row_depth,
+        "position": position,
+        "input_token": input_token,
+        "operator_name": operator_name,
+        "normal_row": int(normal_row),
+        "target_row": int(target_row),
+        "normal_kernel_or_path": normal.get("path"),
+        "target_verify_kernel_or_path": target.get("path") if isinstance(target, dict) else None,
+        "normal_params": normal.get("params"),
+        "target_verify_params": target.get("params") if isinstance(target, dict) else None,
+        "normal_extra": normal.get("extra"),
+        "target_verify_extra": target.get("extra") if isinstance(target, dict) else None,
+        "normal_context": normal_context,
+        "target_verify_context": target_context,
+        "input_tensor_metadata": {
+            "normal": normal.get("input_tensor_metadata"),
+            "target_verify": target.get("input_tensor_metadata") if isinstance(target, dict) else None,
+        },
+        "output_tensor_metadata": {
+            "normal": normal.get("output_tensor_metadata"),
+            "target_verify": target.get("output_tensor_metadata") if isinstance(target, dict) else None,
+        },
+        "rtol": float(rtol),
+        "atol": float(atol),
+    }
+    if target is None:
+        base.update(
+            {
+                "allclose_result": False,
+                "input_allclose_result": False,
+                "owner_verdict": "insufficient evidence",
+                "reason": "missing target-verify operator capture",
+            }
+        )
+        return base
+
+    normal_input = _operator_row_tensor(normal, normal_row, "input")
+    target_input = _operator_row_tensor(target, target_row, "input")
+    normal_output = _operator_row_tensor(normal, normal_row, "output")
+    target_output = _operator_row_tensor(target, target_row, "output")
+    input_stats = _tensor_allclose_stats(normal_input, target_input, atol=atol, rtol=rtol)
+    output_stats = _tensor_allclose_stats(normal_output, target_output, atol=atol, rtol=rtol)
+    base.update(
+        {
+            "input_allclose_result": bool(input_stats.get("allclose", False)),
+            "allclose_result": bool(output_stats.get("allclose", False)),
+            "input_bit_exact_result": bool(input_stats.get("bit_exact", False)),
+            "bit_exact_result": bool(output_stats.get("bit_exact", False)),
+            "input_max_delta": input_stats.get("max_delta"),
+            "input_mean_delta": input_stats.get("mean_delta"),
+            "max_delta": output_stats.get("max_delta"),
+            "mean_delta": output_stats.get("mean_delta"),
+            "first_differing_index": output_stats.get("first_differing_index"),
+            "normal_raw_sha256": (
+                _raw_checksum(normal_output)
+                if isinstance(normal_output, torch.Tensor)
+                else None
+            ),
+            "target_verify_raw_sha256": (
+                _raw_checksum(target_output)
+                if isinstance(target_output, torch.Tensor)
+                else None
+            ),
+            "normal_sample": output_stats.get("lhs_sample"),
+            "target_verify_sample": output_stats.get("rhs_sample"),
+            "input_comparison": input_stats,
+            "output_comparison": output_stats,
+        }
+    )
+    if not input_stats.get("available"):
+        verdict = "insufficient evidence"
+    elif not bool(input_stats.get("bit_exact", False)):
+        verdict = "input already drifted"
+    elif bool(output_stats.get("bit_exact", False)):
+        verdict = "operator parity pass"
+    elif normal.get("path") != target.get("path"):
+        verdict = "dispatch/path mismatch"
+    elif bool(output_stats.get("allclose", False)):
+        verdict = "near-exact precision drift"
+    else:
+        verdict = "same-kernel output drift"
+    base["owner_verdict"] = verdict
     return base
 
 
@@ -1780,6 +2153,60 @@ def _operator_batch_context(batch: Any, positions: torch.Tensor | None) -> dict[
     return _json_dict(ctx)
 
 
+def _operator_row_context(
+    batch: Any,
+    positions: torch.Tensor | None,
+    row: int,
+) -> dict[str, Any]:
+    ctx = _operator_batch_context(batch, positions)
+    ctx["row"] = int(row)
+
+    def _scalar(tensor: Any) -> int | None:
+        try:
+            if isinstance(tensor, torch.Tensor) and tensor.numel() > int(row) >= 0:
+                return int(tensor.detach().reshape(-1)[int(row)].cpu().item())
+        except Exception:
+            return None
+        return None
+
+    input_token = _scalar(getattr(batch, "input_ids", None))
+    position = _scalar(positions)
+    out_loc = _scalar(getattr(batch, "out_loc", None))
+    if input_token is not None:
+        ctx["input_token"] = input_token
+    if position is not None:
+        ctx["position"] = position
+    if out_loc is not None:
+        ctx["out_cache_loc"] = out_loc
+
+    metadata = getattr(batch, "dsv4_target_verify_metadata", None)
+    if isinstance(metadata, dict):
+        for src, dst in (
+            ("row_depths", "row_depth"),
+            ("row_to_batch_index", "row_to_batch_index"),
+        ):
+            value = metadata.get(src)
+            try:
+                if isinstance(value, torch.Tensor) and value.numel() > int(row) >= 0:
+                    ctx[dst] = int(value.detach().reshape(-1)[int(row)].cpu().item())
+                elif isinstance(value, (list, tuple)) and 0 <= int(row) < len(value):
+                    ctx[dst] = int(value[int(row)])
+            except Exception:
+                pass
+    return _json_dict(ctx)
+
+
+def _operator_record_row_context(entry: dict[str, Any] | None, row: int) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        return {}
+    for record in entry.get("row_records", []):
+        if int(record.get("row", -1)) == int(row):
+            context = record.get("context", {})
+            return dict(context) if isinstance(context, dict) else {}
+    context = entry.get("batch_context", {})
+    return dict(context) if isinstance(context, dict) else {}
+
+
 def _tensor_metadata(tensor: torch.Tensor, *, row0: bool = False) -> dict[str, Any]:
     shape = [int(x) for x in tensor.shape]
     if row0 and shape:
@@ -1898,6 +2325,35 @@ def _trace_row_tensor(entry: dict[str, Any], row: int) -> torch.Tensor | None:
     return None
 
 
+def _operator_row_tensor(
+    entry: dict[str, Any],
+    row: int,
+    kind: str,
+) -> torch.Tensor | None:
+    key = "_input_row_tensors" if kind == "input" else "_output_row_tensors"
+    row_tensors = entry.get(key)
+    if isinstance(row_tensors, dict):
+        tensor = row_tensors.get(int(row))
+        if isinstance(tensor, torch.Tensor):
+            return tensor
+    if int(row) == 0:
+        fallback = "_input_row0_tensor" if kind == "input" else "_output_row0_tensor"
+        tensor = entry.get(fallback)
+        if isinstance(tensor, torch.Tensor):
+            return tensor
+    return None
+
+
+def _row_tensor_record(row_tensor: torch.Tensor) -> dict[str, Any]:
+    return {
+        "available": True,
+        "shape": [int(x) for x in row_tensor.shape],
+        "dtype": str(row_tensor.dtype),
+        "raw_sha256": _raw_checksum(row_tensor),
+        "summary": _tensor_summary(row_tensor.float()),
+    }
+
+
 def _row_record(tensor: torch.Tensor, row: int) -> dict[str, Any]:
     row_tensor = tensor.detach()[int(row)].contiguous().cpu()
     return {
@@ -1974,32 +2430,39 @@ def _jsonable(values: list[Any]) -> list[Any]:
 __all__ = [
     "OPERATOR_PARITY_ATOL_ENV",
     "OPERATOR_PARITY_ENV",
+    "OPERATOR_PARITY_LAYERS_ENV",
     "OPERATOR_PARITY_OPERATORS_ENV",
     "OPERATOR_PARITY_RTOL_ENV",
     "ROW0_LAYER_PARITY_ENV",
     "ROW0_LAYER_PARITY_ATOL_ENV",
     "LAYER2_SWA_LIFECYCLE_TRACE_ENV",
+    "MOE_CONTRACT_ORACLE_ENV",
+    "MOE_CONTRACT_ORACLE_LAYERS_ENV",
     "WO_A_PROJECTION_ORACLE_ENV",
     "WO_A_PROJECTION_ORACLE_LAYERS_ENV",
     "WO_B_PROJECTION_ORACLE_ENV",
     "WO_B_PROJECTION_ORACLE_LAYERS_ENV",
     "capture_cache_rows",
     "clone_operator_row0_input",
+    "compare_operator_trace_rows",
     "compare_operator_traces",
     "compare_row0_layer_traces",
     "env_flag",
     "export_attention_backend_trace",
     "export_layer2_swa_store_trace",
+    "export_moe_contract_oracle_trace",
     "export_operator_trace",
     "export_row0_layer_trace",
     "export_wo_a_projection_oracle_trace",
     "export_wo_b_projection_oracle_trace",
+    "get_moe_contract_oracle_trace",
     "get_operator_trace",
     "get_row0_layer_trace",
     "get_wo_a_projection_oracle_trace",
     "get_wo_b_projection_oracle_trace",
     "operator_parity_atol",
     "operator_parity_enabled",
+    "operator_parity_layer_enabled",
     "operator_parity_rtol",
     "record_attention_backend",
     "record_layer2_swa_store",
@@ -2012,6 +2475,8 @@ __all__ = [
     "row0_layer_parity_enabled",
     "row_tensor_trace_enabled",
     "layer2_swa_lifecycle_trace_enabled",
+    "moe_contract_oracle_enabled",
+    "record_moe_contract_oracle",
     "tensor_compare_stats",
     "wo_a_projection_oracle_enabled",
     "wo_b_projection_oracle_enabled",

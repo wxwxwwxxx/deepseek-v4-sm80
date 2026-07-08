@@ -455,6 +455,7 @@ def _dsv4_moe_record_operator(
         operator_name=operator_name,
         layer_id=int(layer_id),
         input_row0=input_row0,
+        input_tensor=input_tensor,
         output_tensor=output_tensor,
         positions=positions,
         path=path,
@@ -4026,6 +4027,279 @@ class DSV4FusedMoERunner:
         boundary_extra["communication_output_dtype"] = str(output.dtype)
         return output, boundary_extra
 
+    def _contract_active_source_rows(self, batch: Batch | None, rows: int) -> list[int]:
+        metadata = getattr(batch, "dsv4_target_verify_metadata", None)
+        if not isinstance(metadata, dict):
+            return list(range(int(rows)))
+        mask = metadata.get("active_row_mask")
+        if isinstance(mask, torch.Tensor):
+            values = [bool(x) for x in mask.detach().reshape(-1).cpu().tolist()]
+        elif isinstance(mask, (list, tuple)):
+            values = [bool(x) for x in mask]
+        else:
+            values = []
+        if len(values) < int(rows):
+            return list(range(int(rows)))
+        return [idx for idx, active in enumerate(values[: int(rows)]) if active]
+
+    def _contract_chunk_size(self, batch: Batch | None, rows: int) -> int:
+        raw = os.environ.get("MINISGL_DSV4_MTP_MOE_CONTRACT_ORACLE_MICROBATCH", "").strip()
+        if raw:
+            try:
+                value = int(raw)
+                if value > 0:
+                    return min(value, int(rows))
+            except ValueError:
+                pass
+        size = int(getattr(batch, "size", 0) or len(getattr(batch, "reqs", [])) or 0)
+        if size <= 0:
+            size = 1
+        return min(size, int(rows))
+
+    @staticmethod
+    def _contract_cat_optional(chunks: list[torch.Tensor | None]) -> torch.Tensor | None:
+        tensors = [chunk for chunk in chunks if isinstance(chunk, torch.Tensor)]
+        if not tensors:
+            return None
+        if len(tensors) != len(chunks):
+            return None
+        return torch.cat(tensors, dim=0)
+
+    def _contract_run_once(
+        self,
+        flat: torch.Tensor,
+        flat_input_ids: torch.Tensor,
+        *,
+        comm: DistributedCommunicator,
+        hash_topk: DSV4TopK | None,
+        row_invariant_local: bool,
+    ) -> dict[str, torch.Tensor | None]:
+        weights, indices = self.route(
+            flat,
+            flat_input_ids,
+            hash_topk=hash_topk,
+            row_invariant_local=row_invariant_local,
+        )
+        prepared = self.prepare(flat, weights, indices)
+        if row_invariant_local:
+            routed_raw = self.apply_experts_row_invariant(flat, prepared)
+        else:
+            routed_raw = self.apply_experts(flat, prepared)
+        routed = self.finalize_routed(routed_raw)
+        shared_raw = self.apply_shared_raw(
+            flat,
+            row_invariant_local=row_invariant_local,
+        )
+        shared = self.finalize_shared(shared_raw) if shared_raw is not None else None
+        aggregate = routed + shared if shared is not None else routed
+        reduced, _reduce_extra = self.maybe_reduce_final(
+            aggregate,
+            comm=comm,
+            hidden_dtype=flat.dtype,
+            reduce_label=prepared.moe_plan.final_reduce_label,
+        )
+        output = reduced.to(flat.dtype)
+        return {
+            "topk_ids": indices,
+            "topk_weights": weights,
+            "routed_expert_output_raw": routed_raw,
+            "routed_expert_output": routed,
+            "shared_expert_output_raw": shared_raw,
+            "shared_expert_output": shared,
+            "expert_aggregate_before_reduce": aggregate,
+            "expert_reduce_output": reduced,
+            "moe_output": output,
+        }
+
+    def _contract_run_variant(
+        self,
+        flat: torch.Tensor,
+        flat_input_ids: torch.Tensor,
+        *,
+        comm: DistributedCommunicator,
+        hash_topk: DSV4TopK | None,
+        source_rows: list[int],
+        row_invariant_local: bool,
+        chunk_size: int | None = None,
+    ) -> dict[str, torch.Tensor | None]:
+        rows = int(flat.shape[0])
+        if chunk_size is None or int(chunk_size) <= 0 or int(chunk_size) >= rows:
+            return self._contract_run_once(
+                flat,
+                flat_input_ids,
+                comm=comm,
+                hash_topk=hash_topk,
+                row_invariant_local=row_invariant_local,
+            )
+        by_name: dict[str, list[torch.Tensor | None]] = {}
+        for start in range(0, rows, int(chunk_size)):
+            end = min(start + int(chunk_size), rows)
+            chunk = self._contract_run_once(
+                flat[start:end].contiguous(),
+                flat_input_ids[start:end].contiguous(),
+                comm=comm,
+                hash_topk=hash_topk,
+                row_invariant_local=row_invariant_local,
+            )
+            for name, tensor in chunk.items():
+                by_name.setdefault(name, []).append(tensor)
+        return {
+            name: self._contract_cat_optional(chunks)
+            for name, chunks in by_name.items()
+        }
+
+    def _record_contract_variant(
+        self,
+        batch: Batch | None,
+        *,
+        variant: str,
+        source_rows: list[int],
+        tensors: dict[str, torch.Tensor | None],
+        positions: torch.Tensor | None,
+        reference_tensor: torch.Tensor,
+        params: dict[str, object],
+        extra: dict[str, object],
+    ) -> None:
+        dsv4_mtp_debug.record_moe_contract_oracle(
+            batch,
+            layer_id=self.layer_id,
+            variant=variant,
+            source_rows=source_rows,
+            tensors=tensors,
+            positions=positions,
+            params=params,
+            extra=extra,
+            reference_tensor=reference_tensor,
+        )
+
+    def _maybe_record_contract_oracle(
+        self,
+        *,
+        batch: Batch | None,
+        hidden_states: torch.Tensor,
+        flat: torch.Tensor,
+        flat_input_ids: torch.Tensor,
+        positions: torch.Tensor | None,
+        comm: DistributedCommunicator,
+        hash_topk: DSV4TopK | None,
+        common_params: dict[str, object],
+    ) -> None:
+        if not dsv4_mtp_debug.moe_contract_oracle_enabled(self.layer_id):
+            return
+        if not _dsv4_is_target_verify_batch(batch):
+            return
+        if flat.ndim != 2 or flat.shape[0] <= 0:
+            return
+        try:
+            if flat.is_cuda and torch.cuda.is_current_stream_capturing():
+                return
+        except Exception:
+            return
+        rows = int(flat.shape[0])
+        source_rows = list(range(rows))
+        active_rows = self._contract_active_source_rows(batch, rows)
+        if not active_rows:
+            active_rows = source_rows
+        microbatch = self._contract_chunk_size(batch, rows)
+        variants: list[tuple[str, list[int], torch.Tensor, torch.Tensor, bool, int | None, dict[str, object]]] = [
+            (
+                "target_full_batch",
+                source_rows,
+                flat,
+                flat_input_ids,
+                False,
+                None,
+                {
+                    "contract": "full target verify batch",
+                    "runtime_warning": "debug-only oracle; replays MoE and all-reduce",
+                },
+            ),
+            (
+                "target_active_only",
+                active_rows,
+                flat[active_rows].contiguous(),
+                flat_input_ids[active_rows].contiguous(),
+                False,
+                None,
+                {
+                    "contract": "active-only target rows",
+                    "active_rows": active_rows,
+                    "runtime_warning": "debug-only oracle; replays MoE and all-reduce",
+                },
+            ),
+            (
+                "target_row_by_row_reference",
+                source_rows,
+                flat,
+                flat_input_ids,
+                False,
+                1,
+                {
+                    "contract": "row-by-row reference",
+                    "runtime_warning": "slow correctness oracle; one MoE/reduce per row",
+                },
+            ),
+            (
+                "target_normal_shape_microbatch",
+                source_rows,
+                flat,
+                flat_input_ids,
+                False,
+                microbatch,
+                {
+                    "contract": "normal-shape-compatible microbatch",
+                    "microbatch_rows": int(microbatch),
+                    "runtime_warning": "debug-only oracle; one MoE/reduce per microbatch",
+                },
+            ),
+            (
+                "target_current_row_invariant_replay",
+                source_rows,
+                flat,
+                flat_input_ids,
+                True,
+                None,
+                {
+                    "contract": "Mini current target row-invariant local replay",
+                    "runtime_warning": "debug-only replay of current local contract",
+                },
+            ),
+        ]
+        with torch.no_grad():
+            for (
+                variant,
+                variant_source_rows,
+                variant_flat,
+                variant_input_ids,
+                row_invariant_local,
+                chunk_size,
+                extra,
+            ) in variants:
+                tensors = self._contract_run_variant(
+                    variant_flat,
+                    variant_input_ids,
+                    comm=comm,
+                    hash_topk=hash_topk,
+                    source_rows=variant_source_rows,
+                    row_invariant_local=row_invariant_local,
+                    chunk_size=chunk_size,
+                )
+                self._record_contract_variant(
+                    batch,
+                    variant=variant,
+                    source_rows=variant_source_rows,
+                    tensors=tensors,
+                    positions=positions,
+                    reference_tensor=hidden_states,
+                    params={
+                        **common_params,
+                        "contract_oracle": True,
+                        "row_invariant_local": bool(row_invariant_local),
+                        "chunk_size": None if chunk_size is None else int(chunk_size),
+                    },
+                    extra=extra,
+                )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -4327,6 +4601,16 @@ class DSV4FusedMoERunner:
             path="mini.moe.runner.output_to_hidden_dtype",
             params=common_params,
             extra=moe_output_extra,
+        )
+        self._maybe_record_contract_oracle(
+            batch=batch,
+            hidden_states=hidden_states,
+            flat=flat,
+            flat_input_ids=flat_input_ids,
+            positions=positions,
+            comm=comm,
+            hash_topk=hash_topk,
+            common_params=common_params,
         )
         return output
 

@@ -1037,6 +1037,9 @@ class Engine:
         target_wo_b_oracle = dsv4_mtp_debug.export_wo_b_projection_oracle_trace(
             verify_batch
         )
+        target_moe_contract_oracle = (
+            dsv4_mtp_debug.export_moe_contract_oracle_trace(verify_batch)
+        )
 
         event: dict[str, Any] = {
             "trace_index": int(
@@ -1048,6 +1051,7 @@ class Engine:
             "target_operator_trace": target_operator_summary,
             "target_wo_a_projection_oracle": target_wo_a_oracle,
             "target_wo_b_projection_oracle": target_wo_b_oracle,
+            "target_moe_contract_oracle": target_moe_contract_oracle,
             "target_entries": [
                 {
                     "batch_index": int(entry["batch_index"]),
@@ -1175,6 +1179,7 @@ class Engine:
                     "boundary": entry.get("boundary"),
                     "shape": entry.get("shape"),
                     "dtype": entry.get("dtype"),
+                    "tensor_metadata": entry.get("tensor_metadata"),
                     "row_summaries": entry.get("row_summaries", []),
                 }
             )
@@ -1233,6 +1238,14 @@ class Engine:
                     for req in list(getattr(batch, "reqs", []))[:16]
                 ],
                 "producer_trace": records,
+                "operator_trace": (
+                    dsv4_mtp_debug.export_operator_trace(batch)
+                    if dsv4_mtp_debug.operator_parity_enabled()
+                    else []
+                ),
+                "moe_contract_oracle": (
+                    dsv4_mtp_debug.export_moe_contract_oracle_trace(batch)
+                ),
                 "wo_a_projection_oracle": (
                     dsv4_mtp_debug.export_wo_a_projection_oracle_trace(batch)
                 ),
@@ -1346,6 +1359,10 @@ class Engine:
         target_hidden = getattr(target_output, "hidden_states", None)
         target_hidden_before_norm = getattr(target_output, "hidden_states_before_norm", None)
         target_trace = dsv4_mtp_debug.get_row0_layer_trace(verify_batch)
+        target_operator_trace = dsv4_mtp_debug.get_operator_trace(verify_batch)
+        event["target_operator_trace"] = dsv4_mtp_debug.export_operator_trace(
+            target_operator_trace
+        )
         event["target_wo_a_projection_oracle"] = (
             dsv4_mtp_debug.export_wo_a_projection_oracle_trace(verify_batch)
         )
@@ -1417,6 +1434,9 @@ class Engine:
                             )
                         self._sync_device_for_mtp_spec()
                         oracle_trace = dsv4_mtp_debug.get_row0_layer_trace(oracle_batch)
+                        oracle_operator_trace = dsv4_mtp_debug.get_operator_trace(
+                            oracle_batch
+                        )
                         oracle_wo_a_projection_oracle = (
                             dsv4_mtp_debug.export_wo_a_projection_oracle_trace(
                                 oracle_batch
@@ -1508,6 +1528,31 @@ class Engine:
                                     )
                                     if dsv4_mtp_debug.row0_layer_parity_enabled()
                                     else {"enabled": False}
+                                ),
+                                "operator_parity": (
+                                    dsv4_mtp_debug.compare_operator_trace_rows(
+                                        oracle_operator_trace,
+                                        target_operator_trace,
+                                        case_prefix=(
+                                            "mtp_target_verify_row_depth_vs_normal_oracle"
+                                        ),
+                                        verify_event_id=int(event["trace_index"]),
+                                        rank=int(
+                                            os.environ.get(
+                                                "LOCAL_RANK",
+                                                os.environ.get("RANK", "0"),
+                                            )
+                                        ),
+                                        normal_row=0,
+                                        target_row=flat_row,
+                                    )
+                                    if dsv4_mtp_debug.operator_parity_enabled()
+                                    else {"enabled": False}
+                                ),
+                                "oracle_operator_trace": (
+                                    dsv4_mtp_debug.export_operator_trace(
+                                        oracle_operator_trace
+                                    )
                                 ),
                                 "oracle_wo_a_projection_oracle": (
                                     oracle_wo_a_projection_oracle
@@ -2102,6 +2147,9 @@ class Engine:
                     "operator_trace": dsv4_mtp_debug.get_operator_trace(oracle_batch),
                     "operator_trace_summary": (
                         dsv4_mtp_debug.export_operator_trace(oracle_batch)
+                    ),
+                    "moe_contract_oracle": (
+                        dsv4_mtp_debug.export_moe_contract_oracle_trace(oracle_batch)
                     ),
                     "wo_a_projection_oracle": (
                         dsv4_mtp_debug.export_wo_a_projection_oracle_trace(
