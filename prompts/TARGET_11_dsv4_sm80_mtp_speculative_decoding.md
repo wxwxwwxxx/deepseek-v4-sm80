@@ -120,6 +120,7 @@ Run these in order.
 | TARGET 11.23 | `prompts/TARGET_11.23_dsv4_sm80_mtp_layer0_wo_b_projection_reduce_parity.md` | After 11.22 closes `wo_a` and exposes layer0 `wo_b` local/post-all-reduce drift, fix or precisely no-go the `wo_b` projection/reduce contract. |
 | TARGET 11.24 | `prompts/TARGET_11.24_dsv4_sm80_mtp_post_layer1_logits_owner_census.md` | After 11.23 closes layer0->layer1 for the old anchor but bs2/bs6 still drift, bisect from layer1 through final logits/sampler/commit to find the next owner. |
 | TARGET 11.241 | `prompts/TARGET_11.241_dsv4_sm80_mtp_layer2_attention_committed_kv_state_owner.md` | After 11.24 proves the next first boundary is layer2 attention output, split current Q compute from consumed committed KV/SWA/C128/page metadata, with bs6 as a full-matrix lifecycle guard. |
+| TARGET 11.242 | `prompts/TARGET_11.242_dsv4_sm80_mtp_layer2_swa_commit_state_producer_owner.md` | After 11.241 proves layer2 consumed SWA cache values are non-equivalent, trace the bad SWA locs through producer, store, snapshot restore, and accepted commit. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -301,6 +302,11 @@ Do not promote MTP by default unless all of these are true:
   diverge at layer2 attention output, stop at TARGET 11.241 and split layer2
   attention into current Q compute versus consumed committed KV/SWA/C128/page
   metadata before patching logits, sampler, graph/perf, or low-precision paths.
+- If TARGET 11.241 proves current Q, metadata, C4 cache, and attention backend
+  dispatch are equivalent but consumed layer2 SWA cache values differ, stop at
+  TARGET 11.242 and trace the bad SWA locs through producer, store, snapshot
+  restore, accepted commit, and later read before patching attention kernels or
+  downstream logits/sampler.
 
 ## Deliverables
 

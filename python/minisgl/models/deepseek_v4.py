@@ -2390,16 +2390,31 @@ class DSV4Attention(BaseOP):
         }
         q_norm_rope_path = "mini.q_norm_rope_fallback"
         q_kv_norm_rope_cache_written = False
+        layer2_swa_lifecycle_trace = (
+            int(self.layer_id) == 2
+            and dsv4_mtp_debug.layer2_swa_lifecycle_trace_enabled()
+            and use_dsv4_backend
+            and attn_backend is not None
+            and not read_only_frozen_kv
+            and isinstance(batch, Batch)
+        )
         if fused_q_kv_norm_rope_store and kv is not None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_kv_norm_rope_store"):
+                swa_store_out_loc = self._swa_store_out_loc(attn_backend, batch)
+                swa_cache = attn_backend.kvcache.swa_cache(self.layer_id)
+                swa_cache_before = (
+                    dsv4_mtp_debug.capture_cache_rows(swa_cache, swa_store_out_loc)
+                    if layer2_swa_lifecycle_trace
+                    else None
+                )
                 q_kv_norm_rope_cache_written = dsv4_kernel.q_kv_norm_rope_cache_fallback(
                     q,
                     kv,
                     positions,
                     norm_weight=self.kv_norm.weight,
                     rms_norm_eps=self.rms_norm_eps,
-                    cache=attn_backend.kvcache.swa_cache(self.layer_id),
-                    out_loc=self._swa_store_out_loc(attn_backend, batch),
+                    cache=swa_cache,
+                    out_loc=swa_store_out_loc,
                     rotary_dim=self.rope_head_dim,
                     base=float(self.rope_base),
                     original_seq_len=self.original_seq_len,
@@ -2408,6 +2423,28 @@ class DSV4Attention(BaseOP):
                     beta_slow=self.beta_slow,
                 )
                 if q_kv_norm_rope_cache_written:
+                    dsv4_mtp_debug.record_layer2_swa_store(
+                        batch,
+                        layer_id=int(self.layer_id),
+                        path="q_kv_norm_rope_cache_fallback",
+                        kv=kv,
+                        full_out_loc=getattr(batch, "out_loc", None),
+                        swa_out_loc=swa_store_out_loc,
+                        positions=positions,
+                        cache_before=swa_cache_before,
+                        cache_after=(
+                            dsv4_mtp_debug.capture_cache_rows(
+                                swa_cache,
+                                swa_store_out_loc,
+                            )
+                            if layer2_swa_lifecycle_trace
+                            else None
+                        ),
+                        extra={
+                            "fused_q_kv_norm_rope_store": True,
+                            "is_target_verify": bool(is_target_verify),
+                        },
+                    )
                     q_norm_rope_path = "mini.q_kv_norm_rope_cache_fallback"
                     _capture_debug_activation(f"layer{self.layer_id}.q_after_q_norm_rope", q)
                     _capture_debug_activation(f"layer{self.layer_id}.kv_after_kv_norm_rope", kv)
@@ -2459,19 +2496,48 @@ class DSV4Attention(BaseOP):
         if kv_norm_rope_store_enabled:
             if not q_kv_norm_rope_cache_written:
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_norm_rope_store"):
+                    swa_store_out_loc = self._swa_store_out_loc(attn_backend, batch)
+                    swa_cache = attn_backend.kvcache.swa_cache(self.layer_id)
+                    swa_cache_before = (
+                        dsv4_mtp_debug.capture_cache_rows(swa_cache, swa_store_out_loc)
+                        if layer2_swa_lifecycle_trace
+                        else None
+                    )
                     dsv4_kernel.k_norm_rope_cache_fallback(
                         kv,
                         positions,
                         norm_weight=self.kv_norm.weight,
                         rms_norm_eps=self.rms_norm_eps,
-                        cache=attn_backend.kvcache.swa_cache(self.layer_id),
-                        out_loc=self._swa_store_out_loc(attn_backend, batch),
+                        cache=swa_cache,
+                        out_loc=swa_store_out_loc,
                         rotary_dim=self.rope_head_dim,
                         base=float(self.rope_base),
                         original_seq_len=self.original_seq_len,
                         factor=self.rope_factor,
                         beta_fast=self.beta_fast,
                         beta_slow=self.beta_slow,
+                    )
+                    dsv4_mtp_debug.record_layer2_swa_store(
+                        batch,
+                        layer_id=int(self.layer_id),
+                        path="kv_norm_rope_cache_fallback",
+                        kv=kv,
+                        full_out_loc=getattr(batch, "out_loc", None),
+                        swa_out_loc=swa_store_out_loc,
+                        positions=positions,
+                        cache_before=swa_cache_before,
+                        cache_after=(
+                            dsv4_mtp_debug.capture_cache_rows(
+                                swa_cache,
+                                swa_store_out_loc,
+                            )
+                            if layer2_swa_lifecycle_trace
+                            else None
+                        ),
+                        extra={
+                            "fused_q_kv_norm_rope_store": False,
+                            "is_target_verify": bool(is_target_verify),
+                        },
                     )
                     _capture_debug_activation(
                         f"layer{self.layer_id}.kv_after_kv_norm_rope",

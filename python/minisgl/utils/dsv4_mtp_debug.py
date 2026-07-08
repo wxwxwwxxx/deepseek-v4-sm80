@@ -13,6 +13,8 @@ OPERATOR_PARITY_OPERATORS_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_OPERATORS"
 OPERATOR_PARITY_ATOL_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_ATOL"
 OPERATOR_PARITY_RTOL_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_RTOL"
 ROW_TRACE_ROWS_ENV = "MINISGL_DSV4_MTP_ROW_TRACE_ROWS"
+ROW_TENSOR_TRACE_ENV = "MINISGL_DSV4_MTP_ROW_TENSOR_TRACE"
+LAYER2_SWA_LIFECYCLE_TRACE_ENV = "MINISGL_DSV4_LAYER2_SWA_LIFECYCLE_TRACE"
 WO_A_PROJECTION_ORACLE_ENV = "MINISGL_DSV4_MTP_WO_A_PROJECTION_ORACLE"
 WO_A_PROJECTION_ORACLE_LAYERS_ENV = "MINISGL_DSV4_MTP_WO_A_PROJECTION_ORACLE_LAYERS"
 WO_B_PROJECTION_ORACLE_ENV = "MINISGL_DSV4_MTP_WO_B_PROJECTION_ORACLE"
@@ -27,6 +29,14 @@ def env_flag(name: str) -> bool:
 
 def row0_layer_parity_enabled() -> bool:
     return env_flag(ROW0_LAYER_PARITY_ENV) or operator_parity_enabled()
+
+
+def row_tensor_trace_enabled() -> bool:
+    return row0_layer_parity_enabled() or env_flag(ROW_TENSOR_TRACE_ENV)
+
+
+def layer2_swa_lifecycle_trace_enabled() -> bool:
+    return env_flag(LAYER2_SWA_LIFECYCLE_TRACE_ENV)
 
 
 def row0_layer_parity_atol() -> float:
@@ -118,13 +128,14 @@ def wo_b_projection_oracle_enabled(layer_id: int | None = None) -> bool:
 
 
 def reset_row0_layer_trace(batch: Any, *, mode: str) -> None:
-    if not row0_layer_parity_enabled():
+    if not row_tensor_trace_enabled():
         return
     setattr(batch, "_dsv4_mtp_row0_layer_trace", [])
     setattr(batch, "_dsv4_mtp_attention_backend_trace", [])
     setattr(batch, "_dsv4_mtp_operator_trace", [])
     setattr(batch, "_dsv4_mtp_wo_a_projection_oracle_trace", [])
     setattr(batch, "_dsv4_mtp_wo_b_projection_oracle_trace", [])
+    setattr(batch, "_dsv4_layer2_swa_store_trace", [])
     setattr(batch, "_dsv4_mtp_row0_layer_trace_mode", mode)
 
 
@@ -136,7 +147,7 @@ def record_row0_tensor(
     layer_id: int | None = None,
     boundary: str | None = None,
 ) -> None:
-    if not row0_layer_parity_enabled():
+    if not row_tensor_trace_enabled():
         return
     if batch is None:
         return
@@ -306,8 +317,16 @@ def record_attention_backend(
     rows: int,
     metadata: Any,
     compress_ratio: int,
+    query: torch.Tensor | None = None,
+    merged_output: torch.Tensor | None = None,
+    swa_indices: torch.Tensor | None = None,
+    swa_lengths: torch.Tensor | None = None,
+    swa_cache: torch.Tensor | None = None,
+    compressed_indices: torch.Tensor | None = None,
+    compressed_lengths: torch.Tensor | None = None,
+    compressed_cache: torch.Tensor | None = None,
 ) -> None:
-    if not row0_layer_parity_enabled():
+    if not row_tensor_trace_enabled():
         return
     if batch is None:
         return
@@ -315,23 +334,223 @@ def record_attention_backend(
     if trace is None:
         trace = []
         setattr(batch, "_dsv4_mtp_attention_backend_trace", trace)
-    trace.append(
-        {
-            "layer_id": int(layer_id),
-            "backend": str(backend),
-            "rows": int(rows),
-            "compress_ratio": int(compress_ratio),
-            "target_verify_decode_rows": bool(
-                getattr(metadata, "target_verify_decode_rows", False)
-            ),
-            "max_seqlen_q": int(getattr(metadata, "max_seqlen_q", -1)),
-            "max_seqlen_k": int(getattr(metadata, "max_seqlen_k", -1)),
-            "phase": str(getattr(batch, "phase", "")),
-            "is_target_verify": bool(
-                getattr(batch, "dsv4_target_verify_metadata", None) is not None
-            ),
-        }
+    entry = {
+        "layer_id": int(layer_id),
+        "backend": str(backend),
+        "rows": int(rows),
+        "compress_ratio": int(compress_ratio),
+        "target_verify_decode_rows": bool(
+            getattr(metadata, "target_verify_decode_rows", False)
+        ),
+        "max_seqlen_q": int(getattr(metadata, "max_seqlen_q", -1)),
+        "max_seqlen_k": int(getattr(metadata, "max_seqlen_k", -1)),
+        "phase": str(getattr(batch, "phase", "")),
+        "is_target_verify": bool(
+            getattr(batch, "dsv4_target_verify_metadata", None) is not None
+        ),
+    }
+    detail_enabled = (
+        int(layer_id) == 2
+        and env_flag("MINISGL_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT")
     )
+    if detail_enabled:
+        try:
+            entry["tensor_metadata"] = _attention_backend_tensor_metadata(
+                query=query,
+                merged_output=merged_output,
+                swa_indices=swa_indices,
+                swa_lengths=swa_lengths,
+                swa_cache=swa_cache,
+                compressed_indices=compressed_indices,
+                compressed_lengths=compressed_lengths,
+                compressed_cache=compressed_cache,
+            )
+            entry["row_records"] = _attention_backend_row_records(
+                metadata,
+                int(rows),
+                query=query,
+                merged_output=merged_output,
+                swa_indices=swa_indices,
+                swa_lengths=swa_lengths,
+                swa_cache=swa_cache,
+                compressed_indices=compressed_indices,
+                compressed_lengths=compressed_lengths,
+                compressed_cache=compressed_cache,
+            )
+        except Exception as exc:
+            entry["row_record_error_type"] = type(exc).__name__
+            entry["row_record_error"] = str(exc)
+    trace.append(entry)
+
+
+def _attention_backend_tensor_metadata(**tensors: torch.Tensor | None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for name, tensor in tensors.items():
+        if isinstance(tensor, torch.Tensor):
+            metadata[name] = _tensor_metadata(tensor)
+        else:
+            metadata[name] = {"available": False}
+    return metadata
+
+
+def _attention_backend_row_records(
+    metadata: Any,
+    rows: int,
+    *,
+    query: torch.Tensor | None,
+    merged_output: torch.Tensor | None,
+    swa_indices: torch.Tensor | None,
+    swa_lengths: torch.Tensor | None,
+    swa_cache: torch.Tensor | None,
+    compressed_indices: torch.Tensor | None,
+    compressed_lengths: torch.Tensor | None,
+    compressed_cache: torch.Tensor | None,
+) -> list[dict[str, Any]]:
+    selector = query
+    if not isinstance(selector, torch.Tensor):
+        selector = getattr(metadata, "positions", None)
+    selected_rows = _selected_trace_rows(selector) if isinstance(selector, torch.Tensor) else [0]
+    selected_rows = [idx for idx in selected_rows if 0 <= int(idx) < int(rows)]
+    records = []
+    for row_idx in selected_rows:
+        record: dict[str, Any] = {
+            "row": int(row_idx),
+            "metadata": _attention_metadata_row(metadata, int(row_idx)),
+        }
+        if isinstance(query, torch.Tensor) and int(row_idx) < int(query.shape[0]):
+            record["query"] = _row_record(query, int(row_idx))
+        if (
+            isinstance(merged_output, torch.Tensor)
+            and int(row_idx) < int(merged_output.shape[0])
+        ):
+            record["merged_output"] = _row_record(merged_output, int(row_idx))
+        record["swa"] = _attention_consumed_cache_record(
+            indices=swa_indices,
+            lengths=swa_lengths,
+            cache=swa_cache,
+            row=int(row_idx),
+        )
+        if isinstance(compressed_indices, torch.Tensor):
+            record["compressed"] = _attention_consumed_cache_record(
+                indices=compressed_indices,
+                lengths=compressed_lengths,
+                cache=compressed_cache,
+                row=int(row_idx),
+            )
+        records.append(record)
+    return records
+
+
+def _attention_metadata_row(metadata: Any, row: int) -> dict[str, Any]:
+    def scalar(name: str) -> int | None:
+        tensor = getattr(metadata, name, None)
+        if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+            return None
+        flat = tensor.detach().reshape(-1)
+        if row < 0 or row >= int(flat.numel()):
+            return None
+        try:
+            return int(flat[row].cpu().item())
+        except Exception:
+            return None
+
+    def vector(name: str, limit: int = 64) -> list[int]:
+        tensor = getattr(metadata, name, None)
+        if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+            return []
+        view = tensor.detach()
+        if view.ndim == 1:
+            if row >= int(view.numel()):
+                return []
+            view = view[row : row + 1]
+        elif row >= int(view.shape[0]):
+            return []
+        else:
+            view = view[row].reshape(-1)
+        try:
+            return [int(x) for x in view[:limit].cpu().tolist()]
+        except Exception:
+            return []
+
+    return {
+        "raw_out_loc": scalar("raw_out_loc"),
+        "position": scalar("positions"),
+        "seq_len": scalar("seq_lens"),
+        "req_seq_len": scalar("req_seq_lens"),
+        "req_table_index": scalar("req_table_indices"),
+        "c4_out_loc": scalar("c4_out_loc"),
+        "c128_out_loc": scalar("c128_out_loc"),
+        "c4_indexer_out_loc": scalar("c4_indexer_out_loc"),
+        "swa_topk_length": scalar("swa_topk_lengths"),
+        "c4_topk_length_raw": scalar("c4_topk_lengths_raw"),
+        "c4_sparse_topk_length": scalar("c4_sparse_topk_lengths"),
+        "c128_topk_length_clamp1": scalar("c128_topk_lengths_clamp1"),
+        "page_table_row": vector("page_table"),
+        "swa_indices_row": vector("swa_page_indices"),
+        "c4_sparse_full_indices_row": vector("c4_sparse_full_indices"),
+        "c4_sparse_page_indices_row": vector("c4_sparse_page_indices"),
+        "c128_full_indices_row": vector("c128_full_indices"),
+        "c128_page_indices_row": vector("c128_page_indices"),
+        "c4_page_table_row": vector("c4_page_table"),
+        "c4_indexer_page_table_row": vector("c4_indexer_page_table"),
+        "c128_page_table_row": vector("c128_page_table"),
+    }
+
+
+def _attention_consumed_cache_record(
+    *,
+    indices: torch.Tensor | None,
+    lengths: torch.Tensor | None,
+    cache: torch.Tensor | None,
+    row: int,
+) -> dict[str, Any]:
+    if not isinstance(indices, torch.Tensor) or indices.numel() == 0:
+        return {"available": False, "reason": "missing indices"}
+    if row < 0 or row >= int(indices.shape[0]):
+        return {"available": False, "reason": "row out of range"}
+    index_row = indices.detach()[row].reshape(-1).to(dtype=torch.long)
+    if isinstance(lengths, torch.Tensor) and lengths.numel() > row:
+        try:
+            active_len = int(lengths.detach().reshape(-1)[row].cpu().item())
+        except Exception:
+            active_len = int(index_row.numel())
+    else:
+        active_len = int((index_row >= 0).sum().cpu().item())
+    active_len = max(0, min(active_len, int(index_row.numel())))
+    active = index_row[:active_len]
+    active = active[active >= 0]
+    record: dict[str, Any] = {
+        "available": True,
+        "active_length": int(active_len),
+        "active_indices": [int(x) for x in active[:64].cpu().tolist()],
+        "active_index_count": int(active.numel()),
+        "indices_row": [int(x) for x in index_row[:64].cpu().tolist()],
+    }
+    if not isinstance(cache, torch.Tensor):
+        record["cache_available"] = False
+        return record
+    valid = active[(active >= 0) & (active < int(cache.shape[0]))]
+    record["valid_index_count"] = int(valid.numel())
+    if valid.numel() == 0:
+        record["cache_values"] = {"available": False, "reason": "no valid indices"}
+        return record
+    values = cache.index_select(0, valid.to(device=cache.device, dtype=torch.long))
+    values_cpu = values.detach().contiguous().cpu()
+    record["cache_values"] = {
+        "shape": [int(x) for x in values_cpu.shape],
+        "dtype": str(values_cpu.dtype),
+        "raw_sha256": _raw_checksum(values_cpu),
+        "summary": _tensor_summary(values_cpu.float()),
+        "row_checksums": [
+            {
+                "index": int(index),
+                "raw_sha256": _raw_checksum(values_cpu[offset]),
+                "summary": _tensor_summary(values_cpu[offset].float()),
+            }
+            for offset, index in enumerate(valid[:8].cpu().tolist())
+        ],
+    }
+    return record
 
 
 def get_row0_layer_trace(batch: Any) -> list[dict[str, Any]]:
@@ -355,6 +574,129 @@ def export_attention_backend_trace(batch: Any) -> list[dict[str, Any]]:
     if not isinstance(trace, list):
         return []
     return [dict(entry) for entry in trace]
+
+
+def capture_cache_rows(cache: torch.Tensor | None, locs: torch.Tensor | None) -> torch.Tensor | None:
+    if not isinstance(cache, torch.Tensor) or not isinstance(locs, torch.Tensor):
+        return None
+    if cache.numel() == 0 or locs.numel() == 0:
+        return None
+    if cache.is_cuda:
+        try:
+            if torch.cuda.is_current_stream_capturing():
+                return None
+        except Exception:
+            return None
+    try:
+        locs_long = locs.detach().reshape(-1).to(device=cache.device, dtype=torch.long)
+        if not bool(torch.all((locs_long >= 0) & (locs_long < int(cache.shape[0]))).item()):
+            return None
+        return cache.index_select(0, locs_long).detach().contiguous().cpu()
+    except Exception:
+        return None
+
+
+def record_layer2_swa_store(
+    batch: Any,
+    *,
+    layer_id: int,
+    path: str,
+    kv: torch.Tensor | None,
+    full_out_loc: torch.Tensor | None,
+    swa_out_loc: torch.Tensor | None,
+    positions: torch.Tensor | None,
+    cache_before: torch.Tensor | None,
+    cache_after: torch.Tensor | None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    if int(layer_id) != 2 or not layer2_swa_lifecycle_trace_enabled():
+        return
+    if batch is None or not isinstance(kv, torch.Tensor) or kv.numel() == 0:
+        return
+    if kv.is_cuda:
+        try:
+            if torch.cuda.is_current_stream_capturing():
+                return
+        except Exception:
+            return
+    trace = getattr(batch, "_dsv4_layer2_swa_store_trace", None)
+    if trace is None:
+        trace = []
+        setattr(batch, "_dsv4_layer2_swa_store_trace", trace)
+
+    def _scalar(tensor: torch.Tensor | None, row: int) -> int | None:
+        if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+            return None
+        flat = tensor.detach().reshape(-1)
+        if row < 0 or row >= int(flat.numel()):
+            return None
+        try:
+            return int(flat[row].cpu().item())
+        except Exception:
+            return None
+
+    try:
+        rows = _selected_trace_rows(kv)
+        row_records = []
+        for row in rows:
+            record: dict[str, Any] = {
+                "row": int(row),
+                "input_id": _scalar(getattr(batch, "input_ids", None), int(row)),
+                "position": _scalar(positions, int(row)),
+                "full_out_loc": _scalar(full_out_loc, int(row)),
+                "swa_out_loc": _scalar(swa_out_loc, int(row)),
+                "store_input": _row_record(kv, int(row)),
+            }
+            if isinstance(cache_before, torch.Tensor) and int(row) < int(cache_before.shape[0]):
+                record["cache_before"] = _row_record(cache_before, int(row))
+            else:
+                record["cache_before"] = {"available": False}
+            if isinstance(cache_after, torch.Tensor) and int(row) < int(cache_after.shape[0]):
+                record["cache_after"] = _row_record(cache_after, int(row))
+            else:
+                record["cache_after"] = {"available": False}
+            row_records.append(record)
+        trace.append(
+            {
+                "layer_id": int(layer_id),
+                "path": str(path),
+                "mode": str(getattr(batch, "_dsv4_mtp_row0_layer_trace_mode", "")),
+                "phase": str(getattr(batch, "phase", "")),
+                "is_target_verify": bool(
+                    getattr(batch, "dsv4_target_verify_metadata", None) is not None
+                ),
+                "kv_tensor_metadata": _tensor_metadata(kv),
+                "cache_before_metadata": (
+                    _tensor_metadata(cache_before)
+                    if isinstance(cache_before, torch.Tensor)
+                    else {"available": False}
+                ),
+                "cache_after_metadata": (
+                    _tensor_metadata(cache_after)
+                    if isinstance(cache_after, torch.Tensor)
+                    else {"available": False}
+                ),
+                "batch_context": _operator_batch_context(batch, positions),
+                "extra": _json_dict(extra or {}),
+                "rows": row_records,
+            }
+        )
+    except Exception as exc:
+        trace.append(
+            {
+                "layer_id": int(layer_id),
+                "path": str(path),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        )
+
+
+def export_layer2_swa_store_trace(batch: Any) -> list[dict[str, Any]]:
+    trace = getattr(batch, "_dsv4_layer2_swa_store_trace", None)
+    if not isinstance(trace, list):
+        return []
+    return [_strip_private(entry) for entry in trace]
 
 
 def get_wo_a_projection_oracle_trace(batch: Any) -> list[dict[str, Any]]:
@@ -1636,15 +1978,18 @@ __all__ = [
     "OPERATOR_PARITY_RTOL_ENV",
     "ROW0_LAYER_PARITY_ENV",
     "ROW0_LAYER_PARITY_ATOL_ENV",
+    "LAYER2_SWA_LIFECYCLE_TRACE_ENV",
     "WO_A_PROJECTION_ORACLE_ENV",
     "WO_A_PROJECTION_ORACLE_LAYERS_ENV",
     "WO_B_PROJECTION_ORACLE_ENV",
     "WO_B_PROJECTION_ORACLE_LAYERS_ENV",
+    "capture_cache_rows",
     "clone_operator_row0_input",
     "compare_operator_traces",
     "compare_row0_layer_traces",
     "env_flag",
     "export_attention_backend_trace",
+    "export_layer2_swa_store_trace",
     "export_operator_trace",
     "export_row0_layer_trace",
     "export_wo_a_projection_oracle_trace",
@@ -1657,6 +2002,7 @@ __all__ = [
     "operator_parity_enabled",
     "operator_parity_rtol",
     "record_attention_backend",
+    "record_layer2_swa_store",
     "record_operator_capture",
     "record_row0_tensor",
     "record_wo_a_projection_oracle",
@@ -1664,6 +2010,8 @@ __all__ = [
     "reset_row0_layer_trace",
     "row0_layer_parity_atol",
     "row0_layer_parity_enabled",
+    "row_tensor_trace_enabled",
+    "layer2_swa_lifecycle_trace_enabled",
     "tensor_compare_stats",
     "wo_a_projection_oracle_enabled",
     "wo_b_projection_oracle_enabled",

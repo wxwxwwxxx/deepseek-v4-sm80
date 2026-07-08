@@ -55,6 +55,9 @@ _DSV4_NORMAL_PRODUCER_TRACE_ENV = "MINISGL_DSV4_NORMAL_PRODUCER_TRACE"
 _DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS_ENV = (
     "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS"
 )
+_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT_ENV = (
+    "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT"
+)
 _DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV = (
     "MINISGL_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION"
 )
@@ -1123,11 +1126,14 @@ class Engine:
         self._mtp_row0_layer_parity_oracle = None
 
     def _normal_producer_trace_enabled(self) -> bool:
-        return _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_ENV) and dsv4_mtp_debug.row0_layer_parity_enabled()
+        return _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_ENV) and dsv4_mtp_debug.row_tensor_trace_enabled()
 
     def _normal_producer_trace_name_selected(self, name: str) -> bool:
         if name in {"embedding", "hidden_before_final_norm", "final_norm", "lm_head_logits"}:
             return True
+        if _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT_ENV):
+            if name.startswith("layer2."):
+                return True
         if _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS_ENV):
             coarse_boundaries = (
                 ".input",
@@ -1182,9 +1188,20 @@ class Engine:
                     out_loc.to(device=self.device, dtype=torch.long),
                     positions.to(device=self.device, dtype=torch.long),
                 )
+                snapshot_labels = ("swa.layer0", "swa.layer1")
+                if _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT_ENV):
+                    snapshot_labels = (
+                        "swa.layer2",
+                        "c4.layer2",
+                        "c4_indexer.layer2",
+                        "c4_attention_state.layer2",
+                        "c4_indexer_state.layer2",
+                        "c128.layer3",
+                        "c128_attention_state.layer3",
+                    )
                 snapshot_items = self._summarize_mtp_kv_snapshot_labels(
                     snapshot,
-                    labels=("swa.layer0", "swa.layer1"),
+                    labels=snapshot_labels,
                 )
         except Exception as exc:
             snapshot_items = [{"error_type": type(exc).__name__, "error": str(exc)}]
@@ -1221,6 +1238,12 @@ class Engine:
                 ),
                 "wo_b_projection_oracle": (
                     dsv4_mtp_debug.export_wo_b_projection_oracle_trace(batch)
+                ),
+                "attention_backend_trace": (
+                    dsv4_mtp_debug.export_attention_backend_trace(batch)
+                ),
+                "layer2_swa_store_trace": (
+                    dsv4_mtp_debug.export_layer2_swa_store_trace(batch)
                 ),
                 "stored_row_snapshot": snapshot_items,
                 "metadata": self._mtp_row0_metadata_debug(batch),
@@ -2552,6 +2575,62 @@ class Engine:
             if str(item.get("label", "")) in selected
         ]
 
+    def _layer2_swa_snapshot_summary(self, snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(snapshot, dict):
+            return []
+        return self._summarize_mtp_kv_snapshot_labels(
+            snapshot,
+            labels=("swa.layer2",),
+        )
+
+    def _tensor_int_list(self, tensor: torch.Tensor | None, limit: int = 64) -> list[int]:
+        if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+            return []
+        return [int(x) for x in tensor.detach().reshape(-1)[:limit].cpu().tolist()]
+
+    def _layer2_swa_lifecycle_row_categories(
+        self,
+        *,
+        padded_verify_len: int,
+        active_verify_len: int,
+        draft_count: int,
+        accepted_prefix: int,
+        mismatch_depth: int | None,
+        copy_rows: int,
+    ) -> list[dict[str, Any]]:
+        rows = []
+        bonus_depth = (
+            int(draft_count)
+            if mismatch_depth is None and int(active_verify_len) > int(draft_count)
+            else None
+        )
+        for depth in range(int(padded_verify_len)):
+            if depth >= int(active_verify_len):
+                category = "padded_inactive"
+            elif depth < int(accepted_prefix):
+                category = "accepted"
+            elif mismatch_depth is not None and depth == int(mismatch_depth):
+                category = "correction"
+            elif bonus_depth is not None and depth == int(bonus_depth):
+                category = "bonus"
+            else:
+                category = "rejected_tail"
+            rows.append(
+                {
+                    "depth": int(depth),
+                    "category": category,
+                    "committed_by_copy": bool(depth < int(copy_rows)),
+                }
+            )
+        return rows
+
+    def _append_layer2_swa_lifecycle_event(self, event: dict[str, Any]) -> None:
+        log = self.mtp_spec_stats.setdefault("layer2_swa_lifecycle_trace", [])
+        event["trace_index"] = int(len(log))
+        log.append(event)
+        if len(log) > 64:
+            del log[:-64]
+
     def _mtp_state_checksum(self, values: torch.Tensor) -> dict[str, Any]:
         def _sha256(values: torch.Tensor) -> str:
             try:
@@ -3237,6 +3316,15 @@ class Engine:
             logits,
             target_tokens,
         )
+        layer2_swa_lifecycle_trace_enabled = (
+            dsv4_mtp_debug.layer2_swa_lifecycle_trace_enabled()
+        )
+        post_verify_snapshot = (
+            self._snapshot_mtp_kv_rows(all_real_locs, all_positions)
+            if layer2_swa_lifecycle_trace_enabled
+            else None
+        )
+        lifecycle_entries: list[dict[str, Any]] = []
 
         commit_loc_chunks: list[torch.Tensor] = []
         commit_position_chunks: list[torch.Tensor] = []
@@ -3323,6 +3411,96 @@ class Engine:
                 commit_loc_chunks.append(entry["real_locs"][:copy_rows])
                 commit_position_chunks.append(entry["positions_tensor"][:copy_rows])
                 copy_rows_by_entry.append((req, copy_rows, int(entry["committed_seq_len"])))
+            if layer2_swa_lifecycle_trace_enabled:
+                real_locs_full = entry["real_locs"][:padded_verify_len].to(
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                try:
+                    swa_locs_full = self.kv_cache.translate_full_locs_to_swa_locs(
+                        real_locs_full
+                    )
+                except Exception:
+                    swa_locs_full = None
+                positions_full = entry["positions_tensor"][:padded_verify_len].to(
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                row_depth_records = self._layer2_swa_lifecycle_row_categories(
+                    padded_verify_len=padded_verify_len,
+                    active_verify_len=active_verify_len,
+                    draft_count=len(drafts),
+                    accepted_prefix=accepted_prefix,
+                    mismatch_depth=mismatch_depth,
+                    copy_rows=copy_rows,
+                )
+                for depth, row_record in enumerate(row_depth_records):
+                    flat_row = int(row_start + depth)
+                    row_record.update(
+                        {
+                            "flattened_row": flat_row,
+                            "input_token": (
+                                int(
+                                    entry.get("verify_inputs_padded", [])[depth]
+                                    .reshape(-1)[0]
+                                    .item()
+                                )
+                                if depth < len(entry.get("verify_inputs_padded", []))
+                                else None
+                            ),
+                            "target_token": (
+                                int(row_tokens_full[depth].item())
+                                if depth < int(row_tokens_full.numel())
+                                else None
+                            ),
+                            "draft_token": (
+                                int(drafts[depth].reshape(-1)[0].item())
+                                if depth < len(drafts)
+                                else None
+                            ),
+                            "position": (
+                                int(positions_full[depth].item())
+                                if depth < int(positions_full.numel())
+                                else None
+                            ),
+                            "full_loc": (
+                                int(real_locs_full[depth].item())
+                                if depth < int(real_locs_full.numel())
+                                else None
+                            ),
+                            "swa_loc": (
+                                int(swa_locs_full[depth].item())
+                                if isinstance(swa_locs_full, torch.Tensor)
+                                and depth < int(swa_locs_full.numel())
+                                else None
+                            ),
+                        }
+                    )
+                lifecycle_entries.append(
+                    {
+                        "uid": int(getattr(req, "uid", -1)),
+                        "batch_index": int(batch_index),
+                        "table_idx": int(getattr(req, "table_idx", -1)),
+                        "committed_seq_len": int(entry["committed_seq_len"]),
+                        "cached_len_before_commit": int(getattr(req, "cached_len", -1)),
+                        "device_len_before_commit": int(getattr(req, "device_len", -1)),
+                        "active_verify_len": int(active_verify_len),
+                        "padded_verify_len": int(padded_verify_len),
+                        "row_start": int(row_start),
+                        "accepted_prefix": int(accepted_prefix),
+                        "mismatch_depth": (
+                            None if mismatch_depth is None else int(mismatch_depth)
+                        ),
+                        "candidate_copy_rows": int(candidate_copy_rows),
+                        "copy_rows": int(copy_rows),
+                        "positions": self._tensor_int_list(positions_full),
+                        "full_locs": self._tensor_int_list(real_locs_full),
+                        "swa_locs": self._tensor_int_list(swa_locs_full)
+                        if isinstance(swa_locs_full, torch.Tensor)
+                        else [],
+                        "row_depths": row_depth_records,
+                    }
+                )
             if trace_enabled:
                 emitted_now = emitted_tokens[batch_index][emitted_before:]
                 trace_entries.append(
@@ -3422,7 +3600,17 @@ class Engine:
                 if len(commit_log) > 32:
                     del commit_log[:-32]
             self._restore_mtp_kv_snapshot(pre_verify_snapshot)
+            after_pre_restore_snapshot = (
+                self._snapshot_mtp_kv_rows(all_real_locs, all_positions)
+                if layer2_swa_lifecycle_trace_enabled
+                else None
+            )
             self._restore_mtp_kv_snapshot(committed_snapshot)
+            after_committed_restore_snapshot = (
+                self._snapshot_mtp_kv_rows(all_real_locs, all_positions)
+                if layer2_swa_lifecycle_trace_enabled
+                else None
+            )
             owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
             if owner is not None and callable(getattr(owner, "commit_pending", None)):
                 req_pool_indices = torch.tensor(
@@ -3462,8 +3650,102 @@ class Engine:
                         "committed_seq_len_before": int(_committed_seq_len),
                     },
                 )
+            if layer2_swa_lifecycle_trace_enabled:
+                after_req_update_snapshot = self._snapshot_mtp_kv_rows(
+                    all_real_locs,
+                    all_positions,
+                )
+                self._append_layer2_swa_lifecycle_event(
+                    {
+                        "event": "target_verify_commit_restore",
+                        "total_verify_tokens": int(total_verify_tokens),
+                        "copied_tokens": int(copied_tokens),
+                        "copied_bytes": int(copied_bytes),
+                        "commit_locs": self._tensor_int_list(commit_locs),
+                        "commit_swa_locs": self._tensor_int_list(
+                            self.kv_cache.translate_full_locs_to_swa_locs(commit_locs)
+                        ),
+                        "commit_positions": self._tensor_int_list(commit_positions),
+                        "all_real_locs": self._tensor_int_list(all_real_locs),
+                        "all_swa_locs": self._tensor_int_list(
+                            self.kv_cache.translate_full_locs_to_swa_locs(all_real_locs)
+                        ),
+                        "all_positions": self._tensor_int_list(all_positions),
+                        "entries": lifecycle_entries,
+                        "target_verify_producer_trace": (
+                            dsv4_mtp_debug.export_row0_layer_trace(verify_batch)
+                        ),
+                        "target_verify_attention_backend_trace": (
+                            dsv4_mtp_debug.export_attention_backend_trace(verify_batch)
+                        ),
+                        "store_trace": dsv4_mtp_debug.export_layer2_swa_store_trace(
+                            verify_batch
+                        ),
+                        "snapshots": {
+                            "pre_verify": self._layer2_swa_snapshot_summary(
+                                pre_verify_snapshot
+                            ),
+                            "post_verify_before_restore": self._layer2_swa_snapshot_summary(
+                                post_verify_snapshot
+                            ),
+                            "committed_rows_before_restore": self._layer2_swa_snapshot_summary(
+                                committed_snapshot
+                            ),
+                            "after_pre_restore": self._layer2_swa_snapshot_summary(
+                                after_pre_restore_snapshot
+                            ),
+                            "after_committed_restore": self._layer2_swa_snapshot_summary(
+                                after_committed_restore_snapshot
+                            ),
+                            "after_req_update": self._layer2_swa_snapshot_summary(
+                                after_req_update_snapshot
+                            ),
+                        },
+                        "accepted_commit_blocker": accepted_commit_blocker or "",
+                    }
+                )
         else:
             self._restore_mtp_kv_snapshot(pre_verify_snapshot)
+            if layer2_swa_lifecycle_trace_enabled:
+                after_pre_restore_snapshot = self._snapshot_mtp_kv_rows(
+                    all_real_locs,
+                    all_positions,
+                )
+                self._append_layer2_swa_lifecycle_event(
+                    {
+                        "event": "target_verify_restore_without_commit",
+                        "total_verify_tokens": int(total_verify_tokens),
+                        "copied_tokens": 0,
+                        "copied_bytes": 0,
+                        "all_real_locs": self._tensor_int_list(all_real_locs),
+                        "all_swa_locs": self._tensor_int_list(
+                            self.kv_cache.translate_full_locs_to_swa_locs(all_real_locs)
+                        ),
+                        "all_positions": self._tensor_int_list(all_positions),
+                        "entries": lifecycle_entries,
+                        "target_verify_producer_trace": (
+                            dsv4_mtp_debug.export_row0_layer_trace(verify_batch)
+                        ),
+                        "target_verify_attention_backend_trace": (
+                            dsv4_mtp_debug.export_attention_backend_trace(verify_batch)
+                        ),
+                        "store_trace": dsv4_mtp_debug.export_layer2_swa_store_trace(
+                            verify_batch
+                        ),
+                        "snapshots": {
+                            "pre_verify": self._layer2_swa_snapshot_summary(
+                                pre_verify_snapshot
+                            ),
+                            "post_verify_before_restore": self._layer2_swa_snapshot_summary(
+                                post_verify_snapshot
+                            ),
+                            "after_pre_restore": self._layer2_swa_snapshot_summary(
+                                after_pre_restore_snapshot
+                            ),
+                        },
+                        "accepted_commit_blocker": accepted_commit_blocker or "",
+                    }
+                )
             if allow_accepted_commit:
                 owner = getattr(getattr(self, "attn_backend", None), "online_c128_mtp", None)
                 if owner is not None and callable(getattr(owner, "clear", None)):

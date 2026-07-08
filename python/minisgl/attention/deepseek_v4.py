@@ -954,7 +954,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 include_integrity=True,
                 extra={"layer_id": int(layer_id), "backend": out.backend},
             )
-        if not _debug_activations_enabled():
+        layer2_split_trace = (
+            int(layer_id) == 2
+            and dsv4_mtp_debug.env_flag(
+                "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT"
+            )
+            and dsv4_mtp_debug.row_tensor_trace_enabled()
+        )
+        if not (_debug_activations_enabled() or layer2_split_trace):
             return
         prefix = f"layer{layer_id}.indexer_select"
         _capture_debug_activation(f"{prefix}.seq_lens", seq_lens)
@@ -3733,7 +3740,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
         attn_sink: torch.Tensor | None,
         merged_output: torch.Tensor,
     ) -> None:
-        if not _debug_activations_enabled():
+        layer2_split_trace = (
+            int(layer_id) == 2
+            and dsv4_mtp_debug.env_flag(
+                "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT"
+            )
+            and dsv4_mtp_debug.row_tensor_trace_enabled()
+        )
+        if not (_debug_activations_enabled() or layer2_split_trace):
             return
         row_indices = self._debug_attention_rows(metadata, rows, q.device)
         prefix = f"layer{layer_id}.attention_backend"
@@ -3977,6 +3991,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 rows=rows,
                 metadata=metadata,
                 compress_ratio=compress_ratio or 0,
+                query=q,
+                merged_output=out,
+                swa_indices=swa_indices,
+                swa_lengths=swa_lengths,
+                swa_cache=torch_swa_cache,
+                compressed_indices=compressed_indices,
+                compressed_lengths=compressed_lengths,
+                compressed_cache=compressed_cache,
             )
             return out
 
@@ -4042,6 +4064,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     rows=rows,
                     metadata=metadata,
                     compress_ratio=compress_ratio or 0,
+                    query=q,
+                    merged_output=fast,
+                    swa_indices=swa_indices,
+                    swa_lengths=swa_lengths,
+                    swa_cache=splitk_swa_cache,
+                    compressed_indices=compressed_indices,
+                    compressed_lengths=compressed_lengths,
+                    compressed_cache=compressed_cache,
                 )
                 return fast
 
@@ -4095,6 +4125,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 rows=rows,
                 metadata=metadata,
                 compress_ratio=compress_ratio or 0,
+                query=q,
+                merged_output=fast,
+                swa_indices=swa_indices,
+                swa_lengths=swa_lengths,
+                swa_cache=base_swa_cache,
+                compressed_indices=compressed_indices,
+                compressed_lengths=compressed_lengths,
+                compressed_cache=compressed_cache,
             )
             return fast
         if compressed_cache is None:
@@ -4105,6 +4143,12 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 rows=rows,
                 metadata=metadata,
                 compress_ratio=compress_ratio or 0,
+                query=q,
+                swa_indices=swa_indices,
+                swa_lengths=swa_lengths,
+                compressed_indices=compressed_indices,
+                compressed_lengths=compressed_lengths,
+                compressed_cache=compressed_cache,
             )
             return None
         with dsv4_direct_copy_nvtx(
@@ -4144,6 +4188,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
             rows=rows,
             metadata=metadata,
             compress_ratio=compress_ratio or 0,
+            query=q,
+            merged_output=out,
+            swa_indices=swa_indices,
+            swa_lengths=swa_lengths,
+            swa_cache=fallback_swa_cache,
+            compressed_indices=compressed_indices,
+            compressed_lengths=compressed_lengths,
+            compressed_cache=compressed_cache,
         )
         return out
 
