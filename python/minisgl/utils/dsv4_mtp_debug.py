@@ -12,6 +12,7 @@ OPERATOR_PARITY_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY"
 OPERATOR_PARITY_OPERATORS_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_OPERATORS"
 OPERATOR_PARITY_ATOL_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_ATOL"
 OPERATOR_PARITY_RTOL_ENV = "MINISGL_DSV4_MTP_OPERATOR_PARITY_RTOL"
+ROW_TRACE_ROWS_ENV = "MINISGL_DSV4_MTP_ROW_TRACE_ROWS"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
@@ -100,7 +101,23 @@ def record_row0_tensor(
     try:
         if layer_id is None:
             layer_id = _infer_layer_id(name)
-        row0 = tensor.detach()[0].float().contiguous().cpu()
+        selected_rows = _selected_trace_rows(tensor)
+        row_tensors: dict[int, torch.Tensor] = {}
+        row_summaries = []
+        for row_idx in selected_rows:
+            row = tensor.detach()[int(row_idx)].contiguous().cpu()
+            row_tensors[int(row_idx)] = row
+            row_summaries.append(
+                {
+                    "row": int(row_idx),
+                    "summary": _tensor_summary(row),
+                    "raw_sha256": _raw_checksum(row),
+                }
+            )
+        row0_raw = row_tensors.get(0)
+        if row0_raw is None:
+            row0_raw = tensor.detach()[0].contiguous().cpu()
+        row0 = row0_raw.float()
         trace = getattr(batch, "_dsv4_mtp_row0_layer_trace", None)
         if trace is None:
             trace = []
@@ -114,7 +131,9 @@ def record_row0_tensor(
                 "row0_shape": [int(x) for x in row0.shape],
                 "dtype": str(tensor.dtype),
                 "summary": _tensor_summary(row0),
+                "row_summaries": row_summaries,
                 "_row0_tensor": row0,
+                "_row_tensors": row_tensors,
             }
         )
     except Exception as exc:
@@ -345,6 +364,73 @@ def compare_row0_layer_traces(
     }
 
 
+def compare_layer_trace_rows(
+    lhs: list[dict[str, Any]],
+    rhs: list[dict[str, Any]],
+    *,
+    lhs_label: str,
+    rhs_label: str,
+    lhs_row: int = 0,
+    rhs_row: int = 0,
+    exact: bool = True,
+    max_records: int | None = None,
+) -> dict[str, Any]:
+    rhs_by_name: dict[str, dict[str, Any]] = {}
+    for entry in rhs:
+        name = entry.get("name")
+        if isinstance(name, str) and name not in rhs_by_name:
+            rhs_by_name[name] = entry
+
+    comparisons: list[dict[str, Any]] = []
+    first_mismatch: dict[str, Any] | None = None
+    missing_from_rhs: list[str] = []
+    for lhs_entry in lhs:
+        name = lhs_entry.get("name")
+        if not isinstance(name, str):
+            continue
+        rhs_entry = rhs_by_name.get(name)
+        if rhs_entry is None:
+            missing_from_rhs.append(name)
+            continue
+        comparison = _compare_trace_entry_rows(
+            lhs_entry,
+            rhs_entry,
+            lhs_label=lhs_label,
+            rhs_label=rhs_label,
+            lhs_row=int(lhs_row),
+            rhs_row=int(rhs_row),
+            exact=bool(exact),
+        )
+        comparisons.append(comparison)
+        if first_mismatch is None and bool(comparison.get("is_mismatch", False)):
+            first_mismatch = comparison
+        if max_records is not None and len(comparisons) >= int(max_records):
+            break
+
+    lhs_names = {
+        entry.get("name") for entry in lhs if isinstance(entry.get("name"), str)
+    }
+    missing_from_lhs = [
+        str(entry.get("name"))
+        for entry in rhs
+        if isinstance(entry.get("name"), str) and entry.get("name") not in lhs_names
+    ]
+    return {
+        "lhs_label": lhs_label,
+        "rhs_label": rhs_label,
+        "lhs_row": int(lhs_row),
+        "rhs_row": int(rhs_row),
+        "exact": bool(exact),
+        "num_lhs_entries": int(len(lhs)),
+        "num_rhs_entries": int(len(rhs)),
+        "num_compared": int(len(comparisons)),
+        "missing_from_rhs": missing_from_rhs[:32],
+        "missing_from_lhs": missing_from_lhs[:32],
+        "first_mismatch": first_mismatch,
+        "comparisons": comparisons,
+    }
+
+
 def compare_operator_traces(
     normal_trace: list[dict[str, Any]],
     target_trace: list[dict[str, Any]],
@@ -475,6 +561,62 @@ def _compare_trace_entry(
             "top_diffs": top_diffs,
             "lhs_checksum": lhs.get("summary", {}).get("checksum"),
             "rhs_checksum": rhs.get("summary", {}).get("checksum"),
+        }
+    )
+    return base
+
+
+def _compare_trace_entry_rows(
+    lhs: dict[str, Any],
+    rhs: dict[str, Any],
+    *,
+    lhs_label: str,
+    rhs_label: str,
+    lhs_row: int,
+    rhs_row: int,
+    exact: bool,
+) -> dict[str, Any]:
+    lhs_tensor = _trace_row_tensor(lhs, lhs_row)
+    rhs_tensor = _trace_row_tensor(rhs, rhs_row)
+    base: dict[str, Any] = {
+        "name": lhs.get("name"),
+        "layer_id": lhs.get("layer_id"),
+        "boundary": lhs.get("boundary"),
+        "lhs_row": int(lhs_row),
+        "rhs_row": int(rhs_row),
+        "lhs_dtype": str(lhs_tensor.dtype) if isinstance(lhs_tensor, torch.Tensor) else None,
+        "rhs_dtype": str(rhs_tensor.dtype) if isinstance(rhs_tensor, torch.Tensor) else None,
+        "lhs_shape": [int(x) for x in lhs_tensor.shape]
+        if isinstance(lhs_tensor, torch.Tensor)
+        else None,
+        "rhs_shape": [int(x) for x in rhs_tensor.shape]
+        if isinstance(rhs_tensor, torch.Tensor)
+        else None,
+    }
+    if not isinstance(lhs_tensor, torch.Tensor) or not isinstance(rhs_tensor, torch.Tensor):
+        base.update(
+            {
+                "is_mismatch": True,
+                "error": "missing selected row tensor for comparison",
+            }
+        )
+        return base
+    stats = _tensor_allclose_stats(lhs_tensor, rhs_tensor, atol=0.0, rtol=0.0)
+    bit_exact = bool(stats.get("bit_exact", False))
+    allclose_exact = bool(stats.get("allclose", False))
+    base.update(
+        {
+            "is_mismatch": (not bit_exact) if exact else (not allclose_exact),
+            "bit_exact_result": bit_exact,
+            "allclose_result": allclose_exact,
+            "max_delta": stats.get("max_delta"),
+            "mean_delta": stats.get("mean_delta"),
+            "first_differing_index": stats.get("first_differing_index"),
+            "max_delta_index": stats.get("max_delta_index"),
+            f"{lhs_label}_raw_sha256": _raw_checksum(lhs_tensor),
+            f"{rhs_label}_raw_sha256": _raw_checksum(rhs_tensor),
+            f"{lhs_label}_sample": stats.get("lhs_sample"),
+            f"{rhs_label}_sample": stats.get("rhs_sample"),
         }
     )
     return base
@@ -1092,6 +1234,49 @@ def _infer_layer_id(name: str) -> int | None:
         return None
 
 
+def _selected_trace_rows(tensor: torch.Tensor) -> list[int]:
+    if tensor.ndim == 0 or tensor.shape[0] <= 0:
+        return []
+    row_count = int(tensor.shape[0])
+    raw = os.environ.get(ROW_TRACE_ROWS_ENV, "").strip()
+    if not raw:
+        return [0]
+    selected: set[int] = set()
+    if raw.lower() in {"all", "*"}:
+        selected.update(range(min(row_count, 16)))
+    else:
+        for part in raw.split(","):
+            token = part.strip()
+            if not token:
+                continue
+            try:
+                if "-" in token:
+                    start_s, end_s = token.split("-", 1)
+                    start, end = int(start_s), int(end_s)
+                    if end < start:
+                        start, end = end, start
+                    selected.update(range(start, end + 1))
+                else:
+                    selected.add(int(token))
+            except ValueError:
+                continue
+    selected.add(0)
+    return [idx for idx in sorted(selected) if 0 <= idx < row_count]
+
+
+def _trace_row_tensor(entry: dict[str, Any], row: int) -> torch.Tensor | None:
+    row_tensors = entry.get("_row_tensors")
+    if isinstance(row_tensors, dict):
+        tensor = row_tensors.get(int(row))
+        if isinstance(tensor, torch.Tensor):
+            return tensor
+    if int(row) == 0:
+        tensor = entry.get("_row0_tensor")
+        if isinstance(tensor, torch.Tensor):
+            return tensor
+    return None
+
+
 def _tensor_summary(row0: torch.Tensor) -> dict[str, Any]:
     flat = row0.reshape(-1)
     summary: dict[str, Any] = {
@@ -1119,6 +1304,7 @@ def _tensor_summary(row0: torch.Tensor) -> dict[str, Any]:
     summary["head"] = _jsonable(head)
     summary["tail"] = _jsonable(tail)
     summary["checksum"] = _checksum(flat)
+    summary["raw_sha256"] = _raw_checksum(row0)
     return summary
 
 
@@ -1126,6 +1312,15 @@ def _checksum(flat: torch.Tensor) -> str:
     contiguous = flat.float().contiguous()
     try:
         payload = contiguous.numpy().tobytes()
+    except Exception:
+        payload = bytes(str(contiguous.tolist()), encoding="utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _raw_checksum(tensor: torch.Tensor) -> str:
+    contiguous = tensor.detach().contiguous().cpu()
+    try:
+        payload = contiguous.view(torch.uint8).numpy().tobytes()
     except Exception:
         payload = bytes(str(contiguous.tolist()), encoding="utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]

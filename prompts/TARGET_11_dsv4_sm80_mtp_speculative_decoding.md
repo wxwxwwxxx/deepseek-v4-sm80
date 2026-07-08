@@ -113,6 +113,9 @@ Run these in order.
 | TARGET 11.16 | `prompts/TARGET_11.16_dsv4_sm80_mtp_moe_post_reduce_parity.md` | After 11.15 proves router/topk, routed expert, shared expert, and pre-reduce aggregation are exact, fix or precisely no-go the MoE post-experts reduce/all-reduce boundary. |
 | TARGET 11.17 | `prompts/TARGET_11.17_dsv4_sm80_mtp_moe_pre_reduce_drifting_rank_parity.md` | After 11.16 proves post-reduce drift is propagated from rank0/rank7 local pre-reduce aggregate drift, find and fix/no-go the drifting-rank MoE sub-boundary. |
 | TARGET 11.18 | `prompts/TARGET_11.18_dsv4_sm80_mtp_post_moe_downstream_owner_census.md` | After 11.17 fixes MoE pre-reduce but the matrix still fails, rank downstream owners such as layer21 `attention_wo_b` and layer32 `indexer_query_fp8_values` before choosing the next fix. |
+| TARGET 11.19 | `prompts/TARGET_11.19_dsv4_sm80_mtp_accepted_commit_lifecycle_state_parity.md` | After 11.18 ranks accepted-commit lifecycle/post-commit state above local operator fixes, find the first event/state component that makes Mini self-consistent but baseline-divergent. |
+| TARGET 11.20 | `prompts/TARGET_11.20_dsv4_sm80_mtp_row_depth_committed_state_baseline_parity.md` | After 11.19 narrows the owner to bs4 uid0 event4 depth1 committed correction-row state, compare MTP committed rows against baseline greedy state hashes. |
+| TARGET 11.21 | `prompts/TARGET_11.21_dsv4_sm80_mtp_target_verify_row_depth_producer_parity.md` | After 11.20 proves logical ownership is correct but `swa.layer1` row values differ, find the layer0-to-layer1 producer boundary that first diverges. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -265,6 +268,18 @@ Do not promote MTP by default unless all of these are true:
   fails with post-MoE downstream owners such as layer21 `attention_wo_b` and
   layer32 `indexer_query_fp8_values`, stop at TARGET 11.18 and build an
   event/layer/rank owner census before choosing the next local fix.
+- If TARGET 11.18 shows that direct `attention_wo_b` and indexer FP8 fixes are
+  lower priority than accepted-commit lifecycle/post-commit state divergence,
+  stop at TARGET 11.19 and find the first event/state component that diverges
+  from baseline greedy before applying more local operator fixes.
+- If TARGET 11.19 narrows the first concrete unclosed owner to bs4 uid0 event4
+  committed depth1 correction-row state but lacks baseline-side state hashes,
+  stop at TARGET 11.20 and compare row-depth committed state against baseline
+  greedy before applying a runtime patch.
+- If TARGET 11.20 proves row-depth ownership is equivalent but committed
+  `swa.layer1` values differ between baseline greedy and MTP target verify,
+  stop at TARGET 11.21 and trace the producer-side layer0-to-layer1 boundary
+  before patching attention, indexer, C128, or graph/perf.
 
 ## Deliverables
 

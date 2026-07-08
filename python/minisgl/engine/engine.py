@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ _DSV4_MTP_SPECULATIVE_ENV = "MINISGL_DSV4_MTP_SPECULATIVE"
 _DSV4_MTP_SPEC_DRAFT_LEN_ENV = "MINISGL_DSV4_MTP_SPEC_DRAFT_LEN"
 _DSV4_MTP_ROW0_DEBUG_ENV = "MINISGL_DSV4_MTP_ROW0_DEBUG"
 _DSV4_MTP_ROW_DEPTH_ORACLE_ENV = "MINISGL_DSV4_MTP_ROW_DEPTH_ORACLE"
+_DSV4_NORMAL_PRODUCER_TRACE_ENV = "MINISGL_DSV4_NORMAL_PRODUCER_TRACE"
 _DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION_ENV = (
     "MINISGL_DSV4_MTP_VERIFY_FORCE_TORCH_ATTENTION"
 )
@@ -1103,6 +1105,100 @@ class Engine:
                 del operator_log[:-16]
         self._mtp_row0_layer_parity_oracle = None
 
+    def _normal_producer_trace_enabled(self) -> bool:
+        return _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_ENV) and dsv4_mtp_debug.row0_layer_parity_enabled()
+
+    def _normal_producer_trace_name_selected(self, name: str) -> bool:
+        if name in {"embedding", "hidden_before_final_norm", "final_norm", "lm_head_logits"}:
+            return True
+        return name.startswith("layer0.") or name.startswith("layer1.")
+
+    def _record_normal_producer_trace_debug(
+        self,
+        mode: str,
+        batch: Batch,
+        logits: torch.Tensor | None,
+        next_tokens: torch.Tensor | None,
+        *,
+        forward_source: str,
+    ) -> None:
+        if not self._normal_producer_trace_enabled():
+            return
+        trace = dsv4_mtp_debug.get_row0_layer_trace(batch)
+        if not trace:
+            return
+
+        def _tolist(tensor: torch.Tensor | None, limit: int = 16) -> list[int]:
+            if tensor is None or not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+                return []
+            return [int(x) for x in tensor.detach().reshape(-1)[:limit].cpu().tolist()]
+
+        records = []
+        for entry in trace:
+            name = str(entry.get("name", ""))
+            if not self._normal_producer_trace_name_selected(name):
+                continue
+            records.append(
+                {
+                    "name": name,
+                    "layer_id": entry.get("layer_id"),
+                    "boundary": entry.get("boundary"),
+                    "shape": entry.get("shape"),
+                    "dtype": entry.get("dtype"),
+                    "row_summaries": entry.get("row_summaries", []),
+                }
+            )
+
+        snapshot_items: list[dict[str, Any]] = []
+        try:
+            out_loc = getattr(batch, "out_loc", None)
+            positions = getattr(batch, "positions", None)
+            if isinstance(out_loc, torch.Tensor) and isinstance(positions, torch.Tensor):
+                snapshot = self._snapshot_mtp_kv_rows(
+                    out_loc.to(device=self.device, dtype=torch.long),
+                    positions.to(device=self.device, dtype=torch.long),
+                )
+                snapshot_items = self._summarize_mtp_kv_snapshot_labels(
+                    snapshot,
+                    labels=("swa.layer0", "swa.layer1"),
+                )
+        except Exception as exc:
+            snapshot_items = [{"error_type": type(exc).__name__, "error": str(exc)}]
+
+        log = self.mtp_spec_stats.setdefault("normal_producer_trace_debug", [])
+        log.append(
+            {
+                "trace_index": int(len(log)),
+                "mode": str(mode),
+                "phase": str(getattr(batch, "phase", "")),
+                "forward_source": str(forward_source),
+                "batch_size": int(getattr(batch, "size", -1)),
+                "input_ids": _tolist(getattr(batch, "input_ids", None), 32),
+                "positions": _tolist(getattr(batch, "positions", None), 32),
+                "out_cache_loc": _tolist(getattr(batch, "out_loc", None), 32),
+                "next_tokens": _tolist(next_tokens, 32),
+                "logits_top1": (
+                    _tolist(torch.argmax(logits, dim=-1).to(torch.int32), 32)
+                    if isinstance(logits, torch.Tensor) and logits.ndim >= 2
+                    else []
+                ),
+                "reqs": [
+                    {
+                        "uid": int(getattr(req, "uid", -1)),
+                        "table_idx": int(getattr(req, "table_idx", -1)),
+                        "cached_len": int(getattr(req, "cached_len", -1)),
+                        "device_len": int(getattr(req, "device_len", -1)),
+                    }
+                    for req in list(getattr(batch, "reqs", []))[:16]
+                ],
+                "producer_trace": records,
+                "stored_row_snapshot": snapshot_items,
+                "metadata": self._mtp_row0_metadata_debug(batch),
+            }
+        )
+        if len(log) > 64:
+            del log[:-64]
+
     def _mtp_row_topk_debug(self, row_logits: torch.Tensor, *, k: int = 5) -> dict[str, Any]:
         if row_logits.numel() == 0:
             return {"token_ids": [], "logits": [], "top1_top2_margin": None}
@@ -1196,6 +1292,7 @@ class Engine:
         saved_verify_ctx = getattr(owner, "_verify_ctx", None) if owner is not None else None
         target_hidden = getattr(target_output, "hidden_states", None)
         target_hidden_before_norm = getattr(target_output, "hidden_states_before_norm", None)
+        target_trace = dsv4_mtp_debug.get_row0_layer_trace(verify_batch)
         try:
             for entry in entries[:8]:
                 req = entry["req"]
@@ -1235,6 +1332,10 @@ class Engine:
                             device=self.device,
                             dtype=torch.int32,
                         )
+                        target_row_snapshot = self._snapshot_mtp_kv_rows(
+                            real_locs[depth : depth + 1],
+                            positions[depth : depth + 1],
+                        )
                         req.cached_len = position
                         req.device_len = position + 1
                         oracle_batch = self._make_mtp_frozen_batch(
@@ -1242,6 +1343,10 @@ class Engine:
                             input_token,
                             [position],
                             read_only=False,
+                        )
+                        dsv4_mtp_debug.reset_row0_layer_trace(
+                            oracle_batch,
+                            mode="mtp_row_depth_normal_oracle",
                         )
                         self._sync_device_for_mtp_spec()
                         with self.ctx.forward_batch(oracle_batch):
@@ -1252,6 +1357,11 @@ class Engine:
                                 "mtp_row_depth_oracle",
                             )
                         self._sync_device_for_mtp_spec()
+                        oracle_trace = dsv4_mtp_debug.get_row0_layer_trace(oracle_batch)
+                        oracle_row_snapshot = self._snapshot_mtp_kv_rows(
+                            real_locs[depth : depth + 1],
+                            positions[depth : depth + 1],
+                        )
 
                         oracle_logits = oracle_output.logits[:1]
                         oracle_token = int(
@@ -1316,6 +1426,31 @@ class Engine:
                                 "hidden_before_norm_delta": self._mtp_tensor_delta_debug(
                                     target_hidden_before_row,
                                     oracle_output.hidden_states_before_norm[:1],
+                                ),
+                                "producer_trace_parity": (
+                                    dsv4_mtp_debug.compare_layer_trace_rows(
+                                        oracle_trace,
+                                        target_trace,
+                                        lhs_label="normal",
+                                        rhs_label="target_verify",
+                                        lhs_row=0,
+                                        rhs_row=flat_row,
+                                        exact=True,
+                                    )
+                                    if dsv4_mtp_debug.row0_layer_parity_enabled()
+                                    else {"enabled": False}
+                                ),
+                                "target_stored_row_snapshot": (
+                                    self._summarize_mtp_kv_snapshot_labels(
+                                        target_row_snapshot,
+                                        labels=("swa.layer0", "swa.layer1"),
+                                    )
+                                ),
+                                "oracle_stored_row_snapshot": (
+                                    self._summarize_mtp_kv_snapshot_labels(
+                                        oracle_row_snapshot,
+                                        labels=("swa.layer0", "swa.layer1"),
+                                    )
                                 ),
                                 "target_metadata": self._mtp_target_row_metadata_debug(
                                     verify_batch,
@@ -2225,17 +2360,42 @@ class Engine:
         *,
         limit: int = 24,
     ) -> dict[str, Any]:
+        def _sha256(values: torch.Tensor) -> str:
+            try:
+                raw = values.detach().contiguous()
+                if raw.numel() == 0:
+                    return ""
+                raw_bytes = raw.view(torch.uint8).cpu().numpy().tobytes()
+                return hashlib.sha256(raw_bytes).hexdigest()[:16]
+            except Exception as exc:
+                return f"error:{type(exc).__name__}"
+
         def _checksum(values: torch.Tensor) -> dict[str, Any]:
             flat = values.detach().float().reshape(-1)
             if flat.numel() == 0:
-                return {"numel": 0, "sum": 0.0, "abs_sum": 0.0, "max_abs": 0.0}
+                return {
+                    "numel": 0,
+                    "sum": 0.0,
+                    "abs_sum": 0.0,
+                    "max_abs": 0.0,
+                    "sha256": _sha256(values),
+                }
             return {
                 "numel": int(flat.numel()),
                 "sum": float(flat.sum(dtype=torch.float64).item()),
                 "abs_sum": float(flat.abs().sum(dtype=torch.float64).item()),
                 "max_abs": float(flat.abs().max().item()),
                 "sample": [float(x) for x in flat[:4].cpu().tolist()],
+                "sha256": _sha256(values),
             }
+
+        def _row_checksums(values: torch.Tensor, limit_rows: int = 8) -> list[dict[str, Any]]:
+            if values.ndim == 0 or values.shape[0] <= 1:
+                return []
+            rows = []
+            for row_idx in range(min(int(values.shape[0]), int(limit_rows))):
+                rows.append({"row": int(row_idx), "checksum": _checksum(values[row_idx])})
+            return rows
 
         items = []
         for item in snapshot.get("items", [])[:limit]:
@@ -2253,6 +2413,7 @@ class Engine:
                         "locs": [int(x) for x in locs.detach().cpu().tolist()[:8]],
                         "shape": list(values.shape),
                         "checksum": _checksum(values),
+                        "row_checksums": _row_checksums(values),
                     }
                 )
             elif kind == "indexer_fp8_paged":
@@ -2288,6 +2449,8 @@ class Engine:
                         "offsets": [int(x) for x in offsets.detach().cpu().tolist()[:8]],
                         "data_checksum": _checksum(data_values),
                         "scale_checksum": _checksum(scale_values),
+                        "data_row_checksums": _row_checksums(data_values),
+                        "scale_row_checksums": _row_checksums(scale_values),
                     }
                 )
             elif kind == "indexer_fp8":
@@ -2303,6 +2466,8 @@ class Engine:
                         "locs": [int(x) for x in locs.detach().cpu().tolist()[:8]],
                         "data_checksum": _checksum(values_snapshot),
                         "scale_checksum": _checksum(scales_snapshot),
+                        "data_row_checksums": _row_checksums(values_snapshot),
+                        "scale_row_checksums": _row_checksums(scales_snapshot),
                     }
                 )
         return {
@@ -2311,16 +2476,47 @@ class Engine:
             "items": items,
         }
 
+    def _summarize_mtp_kv_snapshot_labels(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        labels: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        selected = set(labels)
+        summary = self._summarize_mtp_kv_snapshot(snapshot, limit=512)
+        return [
+            item
+            for item in summary.get("items", [])
+            if str(item.get("label", "")) in selected
+        ]
+
     def _mtp_state_checksum(self, values: torch.Tensor) -> dict[str, Any]:
+        def _sha256(values: torch.Tensor) -> str:
+            try:
+                raw = values.detach().contiguous()
+                if raw.numel() == 0:
+                    return ""
+                raw_bytes = raw.view(torch.uint8).cpu().numpy().tobytes()
+                return hashlib.sha256(raw_bytes).hexdigest()[:16]
+            except Exception as exc:
+                return f"error:{type(exc).__name__}"
+
         flat = values.detach().float().reshape(-1)
         if flat.numel() == 0:
-            return {"numel": 0, "sum": 0.0, "abs_sum": 0.0, "max_abs": 0.0}
+            return {
+                "numel": 0,
+                "sum": 0.0,
+                "abs_sum": 0.0,
+                "max_abs": 0.0,
+                "sha256": _sha256(values),
+            }
         return {
             "numel": int(flat.numel()),
             "sum": float(flat.sum(dtype=torch.float64).item()),
             "abs_sum": float(flat.abs().sum(dtype=torch.float64).item()),
             "max_abs": float(flat.abs().max().item()),
             "sample": [float(x) for x in flat[:4].cpu().tolist()],
+            "sha256": _sha256(values),
         }
 
     def _mtp_component_mapping_summary(
@@ -3517,6 +3713,11 @@ class Engine:
         mtp_positions = [int(req.device_len) - 1 for req in batch.reqs]
         self._sync_device_for_mtp_spec()
         start_s = time.perf_counter()
+        if self._normal_producer_trace_enabled():
+            dsv4_mtp_debug.reset_row0_layer_trace(
+                batch,
+                mode="mtp_normal_target_decode",
+            )
         with self.ctx.forward_batch(batch):
             self.graph_runner.record_eager_decode(batch)
             target_output = self.model.forward_with_hidden()
@@ -3574,6 +3775,26 @@ class Engine:
         ):
             next_tokens_gpu = self.sampler.sample(logits, args).to(torch.int32)
         self._debug_sync_forward("after_sampler", batch, forward_source)
+        self._record_normal_producer_trace_debug(
+            "mtp_normal_target_decode",
+            batch,
+            logits,
+            next_tokens_gpu,
+            forward_source=forward_source,
+        )
+
+        for i, req in enumerate(batch.reqs):
+            self._record_mtp_state_parity_snapshot(
+                "mtp_after_normal_before_verify",
+                req,
+                tail_len=2,
+                extra={
+                    "next_token": int(next_tokens_gpu[i].item())
+                    if i < int(next_tokens_gpu.numel())
+                    else None,
+                    "forward_source": forward_source,
+                },
+            )
 
         emitted_tokens: list[list[torch.Tensor]] = [
             [next_tokens_gpu[i : i + 1].contiguous()] for i in range(batch.size)
@@ -3673,6 +3894,11 @@ class Engine:
         next_tokens_gpu: torch.Tensor | None = None
         logits: torch.Tensor | None = None
         forward_source = "unknown"
+        if self._normal_producer_trace_enabled():
+            dsv4_mtp_debug.reset_row0_layer_trace(
+                batch,
+                mode="baseline_normal_decode",
+            )
         with self.ctx.forward_batch(batch):
             if batch.is_decode:
                 self._marlin_wna16_decode_guard_checks += 1
@@ -3741,6 +3967,13 @@ class Engine:
                 assert logits is not None
                 next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
             self._debug_sync_forward("after_sampler", batch, forward_source)
+        self._record_normal_producer_trace_debug(
+            "baseline_normal_decode",
+            batch,
+            logits[: batch.size] if logits is not None else None,
+            next_tokens_gpu,
+            forward_source=forward_source,
+        )
         dsv4_memory_debug.record_owner_tensor(
             owner_label="engine.sampler.next_tokens_gpu",
             stage=forward_stage,
