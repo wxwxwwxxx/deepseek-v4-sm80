@@ -2235,15 +2235,22 @@ def _operator_batch_context(batch: Any, positions: torch.Tensor | None) -> dict[
     if isinstance(metadata, dict):
         row_depths = metadata.get("row_depths")
         row_to_batch_index = metadata.get("row_to_batch_index")
+        row_to_parent_batch_index = metadata.get("row_to_parent_batch_index")
         for key, value in (
             ("row_depth", row_depths),
             ("row_to_batch_index", row_to_batch_index),
+            ("row_to_parent_batch_index", row_to_parent_batch_index),
         ):
             try:
                 if isinstance(value, torch.Tensor) and value.numel() > 0:
                     ctx[key] = int(value.reshape(-1)[0].detach().cpu().item())
                 elif isinstance(value, (list, tuple)) and value:
                     ctx[key] = int(value[0])
+            except Exception:
+                pass
+        if "parent_batch_size" in metadata:
+            try:
+                ctx["parent_batch_size"] = int(metadata["parent_batch_size"])
             except Exception:
                 pass
         for src, dst in (
@@ -2288,6 +2295,7 @@ def _operator_row_context(
         for src, dst in (
             ("row_depths", "row_depth"),
             ("row_to_batch_index", "row_to_batch_index"),
+            ("row_to_parent_batch_index", "row_to_parent_batch_index"),
         ):
             value = metadata.get(src)
             try:
@@ -2295,6 +2303,11 @@ def _operator_row_context(
                     ctx[dst] = int(value.detach().reshape(-1)[int(row)].cpu().item())
                 elif isinstance(value, (list, tuple)) and 0 <= int(row) < len(value):
                     ctx[dst] = int(value[int(row)])
+            except Exception:
+                pass
+        if "parent_batch_size" in metadata:
+            try:
+                ctx["parent_batch_size"] = int(metadata["parent_batch_size"])
             except Exception:
                 pass
     return _json_dict(ctx)
@@ -2344,12 +2357,21 @@ def _json_dict(values: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(value, dict):
             out[str(key)] = _json_dict(value)
         elif isinstance(value, (list, tuple)):
-            out[str(key)] = [
-                _json_dict(item) if isinstance(item, dict) else _json_scalar(item)
-                for item in value
-            ]
+            out[str(key)] = _json_list(value)
         else:
             out[str(key)] = _json_scalar(value)
+    return out
+
+
+def _json_list(values: list[Any] | tuple[Any, ...]) -> list[Any]:
+    out: list[Any] = []
+    for value in values:
+        if isinstance(value, dict):
+            out.append(_json_dict(value))
+        elif isinstance(value, (list, tuple)):
+            out.append(_json_list(value))
+        else:
+            out.append(_json_scalar(value))
     return out
 
 

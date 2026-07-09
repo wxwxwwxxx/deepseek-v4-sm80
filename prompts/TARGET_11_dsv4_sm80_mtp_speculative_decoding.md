@@ -136,6 +136,10 @@ Run these in order.
 | TARGET 11.255 | `prompts/TARGET_11.255_dsv4_sm80_mtp_layer0_output_subboundary_parity.md` | After 11.254 localizes the producer mismatch to layer0 output, split layer0 attention, MoE, reduce, and residual sub-boundaries for the same correction row. |
 | TARGET 11.256 | `prompts/TARGET_11.256_dsv4_sm80_mtp_rank6_layer0_q_wqb_projection_parity.md` | After 11.255 proves the first rank-local mismatch is rank6 layer0 `q_wqb_output`, compare q_wqb input, weight/cache, dispatch, row-shape, and precision/backend behavior. |
 | TARGET 11.257 | `prompts/TARGET_11.257_dsv4_sm80_mtp_q_wqb_cached_bf16_row_shape_contract.md` | After 11.256 proves cached-BF16 q_wqb is row-shape sensitive, choose and test a target-verify q_wqb row-shape contract or correctness gate. |
+| TARGET 11.258 | `prompts/TARGET_11.258_dsv4_sm80_mtp_accepted_commit_swa_contract_after_q_wqb_oracle.md` | After 11.257 proves q_wqb-only contracts do not close exactness and expose `swa.layer10` after accepted commit, define the accepted-commit SWA contract and split producer/source/copy/destination/restore. |
+| TARGET 11.259 | `prompts/TARGET_11.259_dsv4_sm80_mtp_layer10_input_upstream_parity_after_q_wqb_oracle.md` | After 11.258 proves SWA commit faithfully preserves an already-wrong `layer10.input`, trace upstream layer inputs and hidden publication under the q_wqb oracle while keeping the default path as control. |
+| TARGET 11.260 | `prompts/TARGET_11.260_dsv4_sm80_mtp_layer1_moe_aggregate_before_reduce_parity.md` | After 11.259 narrows the q_wqb-oracle producer drift to layer1 MoE aggregation, classify whether `expert_aggregate_before_reduce` differs due to instrumentation, row indexing, dtype/order, publication, or microbatch contract. |
+| TARGET 11.261 | `prompts/TARGET_11.261_dsv4_sm80_mtp_rank2_layer1_shared_expert_parity_after_q_wqb_oracle.md` | After 11.260 proves the aggregate owner was instrumentation and the next true owner is rank2 `layer1.shared_expert_output`, split shared expert input, row mapping, gate_up, activation, down_proj, finalize, weight/cache, backend row-shape, and SGLang contract. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -393,6 +397,28 @@ Do not promote MTP by default unless all of these are true:
   q_wqb row-shape contract or correctness gate before changing q_norm_rope,
   attention backend, wo_a/wo_b, MoE, layer1, logits, sampler, graph/perf, or
   unrelated state.
+- If TARGET 11.257 proves q_wqb-only contracts can fix the carried q_wqb anchor
+  but not the full exactness matrix, and the q_wqb oracle exposes an
+  accepted-commit `swa.layer10` row-value owner, stop at TARGET 11.258 and
+  define the accepted-commit SWA lifecycle contract before patching local SWA
+  rows, q_wqb gates, logits, sampler, graph/perf, or unrelated state.
+- If TARGET 11.258 proves accepted-commit SWA lifecycle preserves the value it
+  is given and `layer10.input` is already non-equivalent under the q_wqb oracle,
+  stop at TARGET 11.259 and trace upstream layer inputs, row identity, and
+  hidden publication before patching SWA copy/restore, q_wqb gates, logits,
+  sampler, graph/perf, or unrelated state.
+- If TARGET 11.259 proves the q_wqb-oracle producer drift is exact through
+  layer1 MoE input and individual routed/shared expert outputs, but first
+  differs at `layer1.expert_aggregate_before_reduce`, stop at TARGET 11.260 and
+  classify aggregate inputs, row/chunk indexing, dtype/order, publication, and
+  reduce-input contract before patching MoE broadly, SWA, q_wqb gates, logits,
+  sampler, graph/perf, or unrelated state.
+- If TARGET 11.260 proves the aggregate owner was instrumentation and the first
+  true pre-reduce contribution mismatch is rank2 `layer1.shared_expert_output`,
+  stop at TARGET 11.261 and split shared expert input, row mapping, gate_up,
+  activation, down projection, finalize, weight/cache, backend row-shape, and
+  SGLang target-verify contract before patching aggregate, all-reduce, SWA,
+  q_wqb gates, logits, sampler, graph/perf, or unrelated state.
 
 ## Deliverables
 

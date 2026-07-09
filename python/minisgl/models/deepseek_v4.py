@@ -66,6 +66,30 @@ DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_ENV = (
 DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_TIMING_ENV = (
     "MINISGL_DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_TIMING"
 )
+DSV4_MTP_Q_WQB_CONTRACT_ORACLE_ENV = "MINISGL_DSV4_MTP_Q_WQB_CONTRACT_ORACLE"
+DSV4_MTP_Q_WQB_TARGET_NORMAL_SHAPE_ENV = (
+    "MINISGL_DSV4_MTP_Q_WQB_TARGET_NORMAL_SHAPE"
+)
+DSV4_MTP_Q_WQB_TARGET_FULL_ROWS_ENV = "MINISGL_DSV4_MTP_Q_WQB_TARGET_FULL_ROWS"
+DSV4_MTP_Q_WQB_GLOBAL_ROW_INVARIANT_ENV = (
+    "MINISGL_DSV4_MTP_Q_WQB_GLOBAL_ROW_INVARIANT"
+)
+DSV4_MTP_Q_WQB_REFERENCE_GATE_ENV = "MINISGL_DSV4_MTP_Q_WQB_REFERENCE_GATE"
+DSV4_MTP_SHARED_EXPERT_MICROBENCH_ENV = (
+    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH"
+)
+DSV4_MTP_SHARED_EXPERT_MICROBENCH_RANKS_ENV = (
+    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH_RANKS"
+)
+DSV4_MTP_SHARED_EXPERT_MICROBENCH_POSITION_ENV = (
+    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH_POSITION"
+)
+DSV4_MTP_SHARED_EXPERT_MICROBENCH_TOKEN_ENV = (
+    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH_TOKEN"
+)
+DSV4_MTP_SHARED_EXPERT_MICROBENCH_MAX_RECORDS_ENV = (
+    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH_MAX_RECORDS"
+)
 
 
 def dsv4_experimental_mtp_enabled() -> bool:
@@ -264,6 +288,79 @@ def _dsv4_target_verify_moe_microbatch_timing_enabled() -> bool:
     return dsv4_kernel.dsv4_env_flag(DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_TIMING_ENV)
 
 
+def _dsv4_mtp_q_wqb_contract_oracle_enabled() -> bool:
+    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_CONTRACT_ORACLE_ENV)
+
+
+def _dsv4_mtp_q_wqb_target_normal_shape_enabled() -> bool:
+    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_TARGET_NORMAL_SHAPE_ENV)
+
+
+def _dsv4_mtp_q_wqb_target_full_rows_enabled() -> bool:
+    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_TARGET_FULL_ROWS_ENV)
+
+
+def _dsv4_mtp_q_wqb_global_row_invariant_enabled() -> bool:
+    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_GLOBAL_ROW_INVARIANT_ENV)
+
+
+def _dsv4_mtp_q_wqb_reference_gate_enabled() -> bool:
+    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_REFERENCE_GATE_ENV)
+
+
+def _dsv4_mtp_shared_expert_microbench_enabled(layer_id: int | None = None) -> bool:
+    if not dsv4_kernel.dsv4_env_flag(DSV4_MTP_SHARED_EXPERT_MICROBENCH_ENV):
+        return False
+    if layer_id is not None and not dsv4_mtp_debug.operator_parity_layer_enabled(layer_id):
+        return False
+    raw = os.environ.get(DSV4_MTP_SHARED_EXPERT_MICROBENCH_RANKS_ENV, "").strip()
+    if not raw:
+        return True
+    try:
+        rank = int(get_tp_info().rank)
+        selected: set[int] | None = set()
+        if raw.lower() in {"all", "*"}:
+            selected = None
+        else:
+            for part in raw.split(","):
+                token = part.strip()
+                if not token:
+                    continue
+                if "-" in token:
+                    start_s, end_s = token.split("-", 1)
+                    start, end = int(start_s), int(end_s)
+                    if end < start:
+                        start, end = end, start
+                    selected.update(range(start, end + 1))
+                else:
+                    selected.add(int(token))
+    except Exception:
+        return True
+    return selected is None or rank in selected
+
+
+def _dsv4_mtp_shared_expert_microbench_max_records() -> int:
+    raw = os.environ.get(DSV4_MTP_SHARED_EXPERT_MICROBENCH_MAX_RECORDS_ENV, "").strip()
+    if not raw:
+        return 1
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+def _dsv4_mtp_shared_expert_microbench_scalar_filter(
+    env_name: str,
+) -> int | None:
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class _DSV4TargetVerifyMoEMicrobatchContract:
     batch_size: int
@@ -274,6 +371,12 @@ class _DSV4TargetVerifyMoEMicrobatchContract:
     chunk_count: int
     active_rows: int
     padded_rows: int
+    row_depths: tuple[int, ...]
+    row_to_batch_index: tuple[int, ...]
+    row_to_parent_batch_index: tuple[int, ...]
+    active_row_mask: tuple[bool, ...]
+    padded_row_mask: tuple[bool, ...]
+    source_rows_per_chunk: tuple[tuple[int, ...], ...]
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -286,7 +389,121 @@ class _DSV4TargetVerifyMoEMicrobatchContract:
             "active_rows": int(self.active_rows),
             "padded_rows": int(self.padded_rows),
             "chunking": "contiguous_flattened_chunks",
+            "row_depths": [int(x) for x in self.row_depths],
+            "row_to_batch_index": [int(x) for x in self.row_to_batch_index],
+            "row_to_parent_batch_index": [
+                int(x) for x in self.row_to_parent_batch_index
+            ],
+            "active_row_mask": [bool(x) for x in self.active_row_mask],
+            "padded_row_mask": [bool(x) for x in self.padded_row_mask],
+            "source_rows_per_chunk": [
+                [int(row) for row in rows] for rows in self.source_rows_per_chunk
+            ],
         }
+
+
+@dataclass(frozen=True)
+class _DSV4TargetVerifyQWQBNormalShapeContract:
+    parent_batch_size: int
+    rows: int
+    row_to_parent_batch_index: tuple[int, ...]
+    row_depths: tuple[int, ...]
+    active_rows: int
+    padded_rows: int
+
+    @property
+    def depth_count(self) -> int:
+        if not self.row_depths:
+            return 0
+        return max(self.row_depths) + 1
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "parent_batch_size": int(self.parent_batch_size),
+            "rows": int(self.rows),
+            "row_to_parent_batch_index": [int(x) for x in self.row_to_parent_batch_index],
+            "row_depths": [int(x) for x in self.row_depths],
+            "active_rows": int(self.active_rows),
+            "padded_rows": int(self.padded_rows),
+            "depth_count": int(self.depth_count),
+            "chunking": "row_depth_parent_batch_slots",
+        }
+
+
+def _dsv4_target_verify_q_wqb_normal_shape_contract(
+    batch: Batch | None,
+    rows: int,
+    *,
+    require_enabled: bool,
+) -> _DSV4TargetVerifyQWQBNormalShapeContract | None:
+    if require_enabled and not _dsv4_mtp_q_wqb_target_normal_shape_enabled():
+        return None
+    if not _dsv4_is_target_verify_batch(batch):
+        return None
+    metadata = getattr(batch, "dsv4_target_verify_metadata", None)
+    if not isinstance(metadata, dict):
+        raise RuntimeError(
+            "DeepSeek V4 target-verify q_wqb normal-shape contract requires "
+            "dsv4_target_verify_metadata."
+        )
+    rows = int(rows)
+    if rows <= 0:
+        raise RuntimeError("DeepSeek V4 target-verify q_wqb contract got no rows.")
+
+    def _int_list(name: str) -> list[int]:
+        value = metadata.get(name)
+        if isinstance(value, torch.Tensor):
+            return [int(x) for x in value.detach().reshape(-1).cpu().tolist()]
+        if isinstance(value, (list, tuple)):
+            return [int(x) for x in value]
+        return []
+
+    row_to_parent = _int_list("row_to_parent_batch_index")
+    if len(row_to_parent) != rows:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify q_wqb normal-shape contract cannot derive "
+            "normal row slots: metadata.row_to_parent_batch_index is missing or "
+            f"has length {len(row_to_parent)} for rows={rows}."
+        )
+    try:
+        parent_batch_size = int(metadata.get("parent_batch_size", 0))
+    except (TypeError, ValueError):
+        parent_batch_size = 0
+    if parent_batch_size <= 0:
+        raise RuntimeError(
+            "DeepSeek V4 target-verify q_wqb normal-shape contract cannot derive "
+            "normal row count: metadata.parent_batch_size is missing."
+        )
+    if any(slot < 0 or slot >= parent_batch_size for slot in row_to_parent):
+        raise RuntimeError(
+            "DeepSeek V4 target-verify q_wqb normal-shape contract got an invalid "
+            f"parent row slot: slots={row_to_parent[:16]}, "
+            f"parent_batch_size={parent_batch_size}."
+        )
+
+    row_depths = _int_list("row_depths")
+    if len(row_depths) != rows:
+        row_depths = list(range(rows))
+    active_mask = metadata.get("active_row_mask")
+    padded_mask = metadata.get("padded_row_mask")
+    active_rows = (
+        sum(1 for value in active_mask if bool(value))
+        if isinstance(active_mask, (list, tuple))
+        else rows
+    )
+    padded_rows = (
+        sum(1 for value in padded_mask if bool(value))
+        if isinstance(padded_mask, (list, tuple))
+        else 0
+    )
+    return _DSV4TargetVerifyQWQBNormalShapeContract(
+        parent_batch_size=parent_batch_size,
+        rows=rows,
+        row_to_parent_batch_index=tuple(row_to_parent),
+        row_depths=tuple(int(x) for x in row_depths),
+        active_rows=int(active_rows),
+        padded_rows=int(padded_rows),
+    )
 
 
 def _dsv4_target_verify_moe_microbatch_contract(
@@ -384,16 +601,37 @@ def _dsv4_target_verify_moe_microbatch_contract(
         )
     active_rows = sum(1 for value in active_mask if bool(value))
     padded_rows = sum(1 for value in padded_mask if bool(value))
+    row_to_batch = metadata.get("row_to_batch_index")
+    if isinstance(row_to_batch, (list, tuple)) and len(row_to_batch) == rows:
+        row_to_batch_values = tuple(int(value) for value in row_to_batch)
+    else:
+        row_to_batch_values = tuple()
+    row_to_parent = metadata.get("row_to_parent_batch_index")
+    if isinstance(row_to_parent, (list, tuple)) and len(row_to_parent) == rows:
+        row_to_parent_values = tuple(int(value) for value in row_to_parent)
+    else:
+        row_to_parent_values = tuple()
+    chunk_rows = batch_size
+    source_rows_per_chunk = tuple(
+        tuple(range(start, min(start + chunk_rows, rows)))
+        for start in range(0, rows, chunk_rows)
+    )
 
     return _DSV4TargetVerifyMoEMicrobatchContract(
         batch_size=batch_size,
         verify_width=verify_width,
         rows=rows,
         row_order=row_order,
-        chunk_rows=batch_size,
+        chunk_rows=chunk_rows,
         chunk_count=verify_width,
         active_rows=active_rows,
         padded_rows=padded_rows,
+        row_depths=tuple(depth_values),
+        row_to_batch_index=row_to_batch_values,
+        row_to_parent_batch_index=row_to_parent_values,
+        active_row_mask=tuple(bool(value) for value in active_mask),
+        padded_row_mask=tuple(bool(value) for value in padded_mask),
+        source_rows_per_chunk=source_rows_per_chunk,
     )
 
 
@@ -437,6 +675,7 @@ def _dsv4_moe_tensor_brief(tensor: torch.Tensor | None) -> dict[str, object]:
         "device": str(tensor.device),
         "stride": [int(x) for x in tensor.stride()],
         "storage_offset": int(tensor.storage_offset()),
+        "data_ptr": int(tensor.data_ptr()),
         "is_contiguous": bool(tensor.is_contiguous()),
         "head": _dsv4_moe_tensor_head(tensor, limit=16),
     }
@@ -475,6 +714,18 @@ def _dsv4_moe_reduce_tensor_census_if_enabled(
     if not _dsv4_moe_reduce_census_enabled():
         return {"available": False, "disabled": True}
     return _dsv4_moe_reduce_tensor_census(tensor)
+
+
+def _dsv4_moe_preserve_pre_reduce_tensor_enabled(layer_id: int) -> bool:
+    operator_trace = dsv4_mtp_debug.operator_parity_layer_enabled(layer_id) and any(
+        dsv4_mtp_debug.operator_parity_enabled(name)
+        for name in (
+            "expert_aggregate_before_reduce",
+            "expert_reduce_output",
+            "moe_output",
+        )
+    )
+    return operator_trace or dsv4_mtp_debug.moe_contract_oracle_enabled(layer_id)
 
 
 def _dsv4_moe_comm_backend_name(comm: DistributedCommunicator) -> str:
@@ -1171,6 +1422,72 @@ def _fp8_cached_bf16_weight_local_projection_row_invariant(
     ]
     y = torch.cat(chunks, dim=0)
     return y.reshape(*x.shape[:-1], y.shape[-1])
+
+
+def _fp8_cached_bf16_weight_local_projection_target_normal_shape(
+    x: torch.Tensor,
+    cached_weight: torch.Tensor,
+    *,
+    owner: object,
+    cache_name: str,
+    owner_label: str,
+    contract: _DSV4TargetVerifyQWQBNormalShapeContract,
+    dummy_fill: str = "zero",
+) -> torch.Tensor:
+    rows = x.numel() // x.shape[-1]
+    if rows != int(contract.rows):
+        raise RuntimeError(
+            "DeepSeek V4 q_wqb normal-shape contract row mismatch: "
+            f"x rows={rows}, contract rows={contract.rows}."
+        )
+    if rows <= 0:
+        return _fp8_cached_bf16_weight_local_projection(
+            x,
+            cached_weight,
+            owner=owner,
+            cache_name=cache_name,
+            owner_label=owner_label,
+        )
+    x_2d = x.reshape(rows, x.shape[-1])
+    parent_rows = int(contract.parent_batch_size)
+    row_depths = list(contract.row_depths)
+    row_slots = list(contract.row_to_parent_batch_index)
+    output_2d: torch.Tensor | None = None
+    for depth in sorted(set(row_depths)):
+        source_rows = [idx for idx, value in enumerate(row_depths) if int(value) == int(depth)]
+        if not source_rows:
+            continue
+        if dummy_fill == "repeat_first":
+            padded = x_2d[source_rows[0] : source_rows[0] + 1].expand(
+                parent_rows,
+                -1,
+            ).contiguous()
+        else:
+            padded = x_2d.new_zeros((parent_rows, x_2d.shape[-1]))
+        used_slots: set[int] = set()
+        for source_row in source_rows:
+            slot = int(row_slots[source_row])
+            if slot in used_slots:
+                raise RuntimeError(
+                    "DeepSeek V4 q_wqb normal-shape contract got duplicate rows "
+                    f"for depth={depth}, parent slot={slot}."
+                )
+            used_slots.add(slot)
+            padded[slot].copy_(x_2d[source_row])
+        projected = _fp8_cached_bf16_weight_local_projection(
+            padded,
+            cached_weight,
+            owner=owner,
+            cache_name=cache_name,
+            owner_label=owner_label,
+        ).reshape(parent_rows, -1)
+        if output_2d is None:
+            output_2d = x_2d.new_empty((rows, projected.shape[-1]))
+        for source_row in source_rows:
+            output_2d[source_row].copy_(projected[int(row_slots[source_row])])
+    if output_2d is None:
+        raise RuntimeError("DeepSeek V4 q_wqb normal-shape contract produced no rows.")
+    return output_2d.reshape(*x.shape[:-1], output_2d.shape[-1])
 
 
 def _row_invariant_all_reduce(
@@ -2322,6 +2639,138 @@ class DSV4Attention(BaseOP):
         probe["cache"] = {"available": False, "reason": "no prepared q_wqb cache path"}
         return probe
 
+    def _q_wqb_contract_oracle_probe(
+        self,
+        q_lora: torch.Tensor,
+        selected_output: torch.Tensor,
+        *,
+        batch: Batch | None,
+        selected_path: str,
+    ) -> dict[str, object] | None:
+        if not _dsv4_mtp_q_wqb_contract_oracle_enabled():
+            return None
+        if not dsv4_mtp_debug.operator_parity_enabled("wq_b"):
+            return None
+        if not dsv4_mtp_debug.operator_parity_layer_enabled(int(self.layer_id)):
+            return None
+        if not _dsv4_is_target_verify_batch(batch):
+            return None
+        rows = q_lora.numel() // q_lora.shape[-1]
+        try:
+            contract = _dsv4_target_verify_q_wqb_normal_shape_contract(
+                batch,
+                rows,
+                require_enabled=False,
+            )
+        except Exception as exc:
+            return {
+                "available": False,
+                "selected_path": str(selected_path),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        if contract is None:
+            return {"available": False, "reason": "not a target-verify batch"}
+        try:
+            cached_weight = _cached_fp8_bf16_weight(
+                self.wq_b,
+                self._q_wqb_bf16_weight_cache_name,
+                self.wq_b.weight,
+                getattr(self.wq_b, "weight_scale_inv", None),
+                out_dtype=q_lora.dtype,
+                allow_build=False,
+                owner_label=self._q_wqb_owner_label,
+            )
+            outputs: dict[str, torch.Tensor] = {
+                "selected": selected_output.reshape(rows, -1),
+                "target_row_invariant": _fp8_cached_bf16_weight_local_projection_row_invariant(
+                    q_lora,
+                    cached_weight,
+                    owner=self.wq_b,
+                    cache_name=self._q_wqb_bf16_weight_cache_name,
+                    owner_label=self._q_wqb_owner_label,
+                ).reshape(rows, -1),
+                "target_normal_shape_zero": _fp8_cached_bf16_weight_local_projection_target_normal_shape(
+                    q_lora,
+                    cached_weight,
+                    owner=self.wq_b,
+                    cache_name=self._q_wqb_bf16_weight_cache_name,
+                    owner_label=self._q_wqb_owner_label,
+                    contract=contract,
+                    dummy_fill="zero",
+                ).reshape(rows, -1),
+                "target_normal_shape_repeat": _fp8_cached_bf16_weight_local_projection_target_normal_shape(
+                    q_lora,
+                    cached_weight,
+                    owner=self.wq_b,
+                    cache_name=self._q_wqb_bf16_weight_cache_name,
+                    owner_label=self._q_wqb_owner_label,
+                    contract=contract,
+                    dummy_fill="repeat_first",
+                ).reshape(rows, -1),
+                "target_full_rows": _fp8_cached_bf16_weight_local_projection(
+                    q_lora,
+                    cached_weight,
+                    owner=self.wq_b,
+                    cache_name=self._q_wqb_bf16_weight_cache_name,
+                    owner_label=self._q_wqb_owner_label,
+                ).reshape(rows, -1),
+            }
+            q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+                "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
+            )
+            outputs["target_reference_gate"] = self.wq_b.forward(
+                q_lora,
+                fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
+            ).reshape(rows, -1)
+            row_records: list[dict[str, object]] = []
+            max_rows = min(rows, 8)
+            for row in range(max_rows):
+                row_outputs = {
+                    name: dsv4_mtp_debug.tensor_probe_record(tensor[row])
+                    for name, tensor in outputs.items()
+                }
+                row_pairwise: dict[str, object] = {}
+                names = list(outputs)
+                for i, lhs_name in enumerate(names):
+                    for rhs_name in names[i + 1 :]:
+                        row_pairwise[f"{lhs_name}_vs_{rhs_name}"] = (
+                            dsv4_mtp_debug.tensor_compare_stats(
+                                outputs[lhs_name][row],
+                                outputs[rhs_name][row],
+                                atol=0.0,
+                                rtol=0.0,
+                            )
+                        )
+                row_records.append(
+                    {
+                        "row": int(row),
+                        "row_depth": int(contract.row_depths[row]),
+                        "parent_batch_index": int(contract.row_to_parent_batch_index[row]),
+                        "outputs": row_outputs,
+                        "pairwise": row_pairwise,
+                    }
+                )
+            return {
+                "available": True,
+                "selected_path": str(selected_path),
+                "contract": contract.as_record(),
+                "cached_weight": dsv4_mtp_debug.tensor_probe_record(cached_weight),
+                "output_tensor_metadata": {
+                    name: dsv4_mtp_debug.tensor_probe_record(tensor, max_sample_elements=64)
+                    for name, tensor in outputs.items()
+                },
+                "row_records": row_records,
+            }
+        except Exception as exc:
+            return {
+                "available": False,
+                "selected_path": str(selected_path),
+                "contract": contract.as_record(),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
         with dsv4_direct_copy_nvtx(
@@ -2506,33 +2955,95 @@ class DSV4Attention(BaseOP):
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_wqb"):
             wq_b_debug_input = dsv4_mtp_debug.clone_operator_row0_input("wq_b", q_lora)
             q_wqb_path = "mini.wq_b.quantized_linear_ref"
+            q_wqb_contract: _DSV4TargetVerifyQWQBNormalShapeContract | None = None
+            q_wqb_row_invariant_local = False
+            q_wqb_target_full_rows_contract = False
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
                 q_wqb_path = "mini.wq_b.forward_fp8_marlin_weight"
-                q = self.wq_b.forward_fp8_marlin_weight(
+                q_flat = self.wq_b.forward_fp8_marlin_weight(
                     q_lora,
                     cache_name=self._q_wqb_marlin_weight_cache_name,
                     owner_label=self._q_wqb_owner_label,
-                ).view(-1, self.num_local_heads, self.head_dim)
+                )
             elif dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
-                q_wqb_path = "mini.wq_b.forward_fp8_cached_bf16_weight"
-                if is_target_verify:
-                    q_wqb_path = "mini.wq_b.forward_fp8_cached_bf16_weight.row_invariant_local"
-                q = self.wq_b.forward_fp8_cached_bf16_weight(
-                    q_lora,
-                    cache_name=self._q_wqb_bf16_weight_cache_name,
-                    owner_label=self._q_wqb_owner_label,
-                    row_invariant_local=is_target_verify,
-                ).view(-1, self.num_local_heads, self.head_dim)
+                if is_target_verify and _dsv4_mtp_q_wqb_reference_gate_enabled():
+                    q_wqb_path = "mini.wq_b.quantized_linear_ref.target_reference_gate"
+                    q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
+                        "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
+                    )
+                    q_flat = self.wq_b.forward(
+                        q_lora,
+                        fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
+                    )
+                else:
+                    q_wqb_path = "mini.wq_b.forward_fp8_cached_bf16_weight"
+                    q_wqb_contract = _dsv4_target_verify_q_wqb_normal_shape_contract(
+                        batch,
+                        q_lora.numel() // q_lora.shape[-1],
+                        require_enabled=True,
+                    )
+                    if q_wqb_contract is not None:
+                        q_wqb_path = (
+                            "mini.wq_b.forward_fp8_cached_bf16_weight."
+                            "target_normal_shape"
+                        )
+                        cached_weight = _cached_fp8_bf16_weight(
+                            self.wq_b,
+                            self._q_wqb_bf16_weight_cache_name,
+                            self.wq_b.weight,
+                            getattr(self.wq_b, "weight_scale_inv", None),
+                            out_dtype=q_lora.dtype,
+                            allow_build=False,
+                            owner_label=self._q_wqb_owner_label,
+                        )
+                        q_flat = _fp8_cached_bf16_weight_local_projection_target_normal_shape(
+                            q_lora,
+                            cached_weight,
+                            owner=self.wq_b,
+                            cache_name=self._q_wqb_bf16_weight_cache_name,
+                            owner_label=self._q_wqb_owner_label,
+                            contract=q_wqb_contract,
+                            dummy_fill="zero",
+                        )
+                    else:
+                        q_wqb_target_full_rows_contract = bool(
+                            is_target_verify
+                            and _dsv4_mtp_q_wqb_target_full_rows_enabled()
+                        )
+                        q_wqb_row_invariant_local = bool(
+                            (
+                                is_target_verify
+                                and not q_wqb_target_full_rows_contract
+                            )
+                            or _dsv4_mtp_q_wqb_global_row_invariant_enabled()
+                        )
+                        if q_wqb_target_full_rows_contract:
+                            q_wqb_path = (
+                                "mini.wq_b.forward_fp8_cached_bf16_weight."
+                                "target_full_rows"
+                            )
+                        elif q_wqb_row_invariant_local:
+                            q_wqb_path = (
+                                "mini.wq_b.forward_fp8_cached_bf16_weight."
+                                "row_invariant_local"
+                            )
+                        q_flat = self.wq_b.forward_fp8_cached_bf16_weight(
+                            q_lora,
+                            cache_name=self._q_wqb_bf16_weight_cache_name,
+                            owner_label=self._q_wqb_owner_label,
+                            row_invariant_local=q_wqb_row_invariant_local,
+                        )
             else:
                 q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
                     "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
                 )
                 if q_wqb_fp8_gemm:
                     q_wqb_path = "mini.wq_b.quantized_linear_ref.fp8_gemm"
-                q = self.wq_b.forward(
+                q_flat = self.wq_b.forward(
                     q_lora,
                     fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
-                ).view(-1, self.num_local_heads, self.head_dim)
+                )
+            q = q_flat.view(-1, self.num_local_heads, self.head_dim)
             _capture_debug_activation(f"layer{self.layer_id}.q_wqb_output", q)
             q_wqb_per_row_probe = self._q_wqb_per_row_probe(
                 q_lora,
@@ -2546,6 +3057,12 @@ class DSV4Attention(BaseOP):
                 q_wqb_weight_cache_probe = self._q_wqb_weight_cache_probe(
                     path=q_wqb_path
                 )
+            q_wqb_contract_oracle = self._q_wqb_contract_oracle_probe(
+                q_lora,
+                q_flat,
+                batch=batch,
+                selected_path=q_wqb_path,
+            )
             dsv4_mtp_debug.record_operator_capture(
                 batch,
                 operator_name="wq_b",
@@ -2568,17 +3085,25 @@ class DSV4Attention(BaseOP):
                         dsv4_kernel.dense_fp8_marlin_projection_enabled()
                     ),
                     "row_invariant_local": bool(
-                        is_target_verify
-                        and dsv4_kernel.dsv4_env_flag(
-                            dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
-                        )
-                        and not dsv4_kernel.dense_fp8_marlin_projection_enabled()
+                        q_wqb_row_invariant_local
+                    ),
+                    "target_normal_shape_contract": bool(q_wqb_contract is not None),
+                    "target_full_rows_contract": bool(q_wqb_target_full_rows_contract),
+                    "global_row_invariant_contract": bool(
+                        _dsv4_mtp_q_wqb_global_row_invariant_enabled()
+                    ),
+                    "reference_gate_contract": bool(
+                        is_target_verify and _dsv4_mtp_q_wqb_reference_gate_enabled()
                     ),
                 },
                 extra={
                     "output_boundary": "wq_b_local_output_q_wqb_output",
                     "per_row_probe": q_wqb_per_row_probe,
                     "weight_cache_probe": q_wqb_weight_cache_probe,
+                    "q_wqb_contract": (
+                        q_wqb_contract.as_record() if q_wqb_contract is not None else None
+                    ),
+                    "q_wqb_contract_oracle": q_wqb_contract_oracle,
                 },
             )
             q_wqb_output_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
@@ -3997,6 +4522,230 @@ class DSV4SharedExperts(BaseOP):
             owner_label=self._down_owner_label,
         )
 
+    @staticmethod
+    def _debug_tensor_meta(tensor: torch.Tensor | None) -> dict[str, object]:
+        if not isinstance(tensor, torch.Tensor):
+            return {"available": False}
+        return _dsv4_moe_reduce_tensor_census(tensor)
+
+    def _debug_weight_cache_probe(self) -> dict[str, object]:
+        gate_up_cache = getattr(
+            self.gate_up_proj,
+            self._gate_up_bf16_weight_cache_name,
+            None,
+        )
+        down_bf16_cache = getattr(
+            self.down_proj,
+            self._down_bf16_weight_cache_name,
+            None,
+        )
+        down_marlin_cache = getattr(
+            self.down_proj,
+            self._down_marlin_weight_cache_name,
+            None,
+        )
+        return {
+            "layer_id": None if self.layer_id is None else int(self.layer_id),
+            "use_bf16_weight_cache": bool(
+                dsv4_kernel.dsv4_env_flag(
+                    dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+                )
+            ),
+            "dense_fp8_marlin_projection": bool(
+                dsv4_kernel.dense_fp8_marlin_projection_enabled()
+            ),
+            "shared_fp8_gemm": bool(
+                dsv4_kernel.dsv4_sm80_triton_enabled(
+                    "MINISGL_DSV4_SM80_SHARED_FP8_GEMM"
+                )
+            ),
+            "bf16_small_gemm_pretranspose": bool(
+                dsv4_kernel.dsv4_env_flag(
+                    dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
+                )
+            ),
+            "gate_up_owner": self._gate_up_owner_label,
+            "down_owner": self._down_owner_label,
+            "gate_up_cache_name": self._gate_up_bf16_weight_cache_name,
+            "down_bf16_cache_name": self._down_bf16_weight_cache_name,
+            "down_marlin_cache_name": self._down_marlin_weight_cache_name,
+            "gate_up_weight_present": hasattr(self.gate_up_proj, "weight"),
+            "gate_up_scale_present": hasattr(self.gate_up_proj, "weight_scale_inv"),
+            "down_weight_present": hasattr(self.down_proj, "weight"),
+            "down_scale_present": hasattr(self.down_proj, "weight_scale_inv"),
+            "gate_up_weight": self._debug_tensor_meta(
+                getattr(self.gate_up_proj, "weight", None)
+            ),
+            "gate_up_scale": self._debug_tensor_meta(
+                getattr(self.gate_up_proj, "weight_scale_inv", None)
+            ),
+            "down_weight": self._debug_tensor_meta(
+                getattr(self.down_proj, "weight", None)
+            ),
+            "down_scale": self._debug_tensor_meta(
+                getattr(self.down_proj, "weight_scale_inv", None)
+            ),
+            "gate_up_bf16_cache": self._debug_tensor_meta(gate_up_cache),
+            "down_bf16_cache": self._debug_tensor_meta(down_bf16_cache),
+            "down_marlin_cache": self._debug_tensor_meta(down_marlin_cache),
+        }
+
+    @staticmethod
+    def _debug_metadata_value(metadata: dict[str, object], name: str, row: int) -> object:
+        values = metadata.get(name)
+        try:
+            if isinstance(values, torch.Tensor) and 0 <= int(row) < int(values.numel()):
+                value = values.detach().reshape(-1)[int(row)].cpu().item()
+                return bool(value) if isinstance(value, bool) else int(value)
+            if isinstance(values, (list, tuple)) and 0 <= int(row) < len(values):
+                value = values[int(row)]
+                if isinstance(value, bool):
+                    return bool(value)
+                return int(value)
+        except Exception:
+            return None
+        return None
+
+    def _debug_source_row_records(
+        self,
+        batch: Batch | None,
+        positions: torch.Tensor | None,
+        *,
+        rows: int,
+        context: dict[str, object],
+    ) -> list[dict[str, object]]:
+        source_rows = context.get("source_rows")
+        if not isinstance(source_rows, (list, tuple)):
+            source_rows = list(range(int(rows)))
+        metadata = getattr(batch, "dsv4_target_verify_metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        def _tensor_scalar(tensor: torch.Tensor | None, row: int) -> int | None:
+            if not isinstance(tensor, torch.Tensor):
+                return None
+            try:
+                if 0 <= int(row) < int(tensor.numel()):
+                    return int(tensor.detach().reshape(-1)[int(row)].cpu().item())
+            except Exception:
+                return None
+            return None
+
+        input_ids = getattr(batch, "input_ids", None)
+        out_loc = getattr(batch, "out_loc", None)
+        records: list[dict[str, object]] = []
+        for chunk_row in range(min(int(rows), len(source_rows))):
+            source_row = int(source_rows[chunk_row])
+            record = {
+                "chunk_row": int(chunk_row),
+                "source_row": source_row,
+                "input_token": _tensor_scalar(input_ids, source_row),
+                "position": _tensor_scalar(positions, source_row),
+                "out_cache_loc": _tensor_scalar(out_loc, source_row),
+                "row_depth": self._debug_metadata_value(
+                    metadata, "row_depths", source_row
+                ),
+                "row_to_batch_index": self._debug_metadata_value(
+                    metadata, "row_to_batch_index", source_row
+                ),
+                "row_to_parent_batch_index": self._debug_metadata_value(
+                    metadata, "row_to_parent_batch_index", source_row
+                ),
+                "active_row": self._debug_metadata_value(
+                    metadata, "active_row_mask", source_row
+                ),
+                "padded_row": self._debug_metadata_value(
+                    metadata, "padded_row_mask", source_row
+                ),
+            }
+            records.append(record)
+        return records
+
+    def _debug_positions_for_forward(
+        self,
+        batch: Batch | None,
+        hidden_states: torch.Tensor,
+        *,
+        context: dict[str, object],
+    ) -> torch.Tensor | None:
+        positions = _dsv4_debug_positions(batch, device=hidden_states.device)
+        source_rows = context.get("source_rows")
+        rows = hidden_states.numel() // hidden_states.shape[-1]
+        if (
+            isinstance(positions, torch.Tensor)
+            and isinstance(source_rows, (list, tuple))
+            and len(source_rows) >= int(rows)
+        ):
+            try:
+                index = torch.tensor(
+                    [int(row) for row in source_rows[: int(rows)]],
+                    device=positions.device,
+                    dtype=torch.long,
+                )
+                if index.numel() > 0 and int(index.max().item()) < int(positions.numel()):
+                    return positions.reshape(-1).index_select(0, index)
+            except Exception:
+                return positions
+        return positions
+
+    def _record_shared_boundary(
+        self,
+        *,
+        operator_name: str,
+        input_tensor: torch.Tensor | None,
+        output_tensor: torch.Tensor | None,
+        path: str,
+        stage: str,
+        params: dict[str, object],
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        batch = _dsv4_debug_batch()
+        if bool(getattr(batch, "_dsv4_shared_expert_suppress_operator_trace", False)):
+            return
+        if not dsv4_mtp_debug.operator_parity_enabled(operator_name):
+            return
+        source_tensor = output_tensor if isinstance(output_tensor, torch.Tensor) else input_tensor
+        if not isinstance(source_tensor, torch.Tensor):
+            return
+        context = getattr(batch, "_dsv4_shared_expert_forward_context", None)
+        if not isinstance(context, dict):
+            context = {}
+        positions = self._debug_positions_for_forward(
+            batch,
+            source_tensor,
+            context=context,
+        )
+        rows = source_tensor.numel() // source_tensor.shape[-1]
+        record_extra: dict[str, object] = {
+            "stage": stage,
+            "input_census": _dsv4_moe_reduce_tensor_census(input_tensor),
+            "output_census": _dsv4_moe_reduce_tensor_census(output_tensor),
+            "shared_forward_context": {
+                key: value
+                for key, value in context.items()
+                if not str(key).startswith("_")
+            },
+            "source_row_records": self._debug_source_row_records(
+                batch,
+                _dsv4_debug_positions(batch, device=source_tensor.device),
+                rows=int(rows),
+                context=context,
+            ),
+        }
+        if extra:
+            record_extra.update(extra)
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name=operator_name,
+            layer_id=-1 if self.layer_id is None else int(self.layer_id),
+            input_tensor=input_tensor,
+            output_tensor=output_tensor,
+            positions=positions,
+            path=path,
+            params=params,
+            extra=record_extra,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -4005,20 +4754,79 @@ class DSV4SharedExperts(BaseOP):
         row_invariant_local: bool = False,
     ) -> torch.Tensor:
         rows = hidden_states.numel() // hidden_states.shape[-1]
+        shared_params = {
+            "shared_experts_forward": True,
+            "reduce": bool(reduce),
+            "row_invariant_local": bool(row_invariant_local),
+            "rows": int(rows),
+            "swiglu_limit": float(self.swiglu_limit),
+        }
+        self._record_shared_boundary(
+            operator_name="shared_expert_forward_input",
+            input_tensor=hidden_states,
+            output_tensor=hidden_states,
+            path="mini.shared_experts.forward.input",
+            stage="shared_experts.forward.input",
+            params=shared_params,
+            extra={
+                "backend": self._debug_weight_cache_probe(),
+            },
+        )
         if row_invariant_local and rows > 1:
             hidden_2d = hidden_states.reshape(rows, hidden_states.shape[-1])
-            chunks = [
-                self.forward(
-                    hidden_2d[row : row + 1],
-                    reduce=reduce,
-                    row_invariant_local=False,
+            batch = _dsv4_debug_batch()
+            base_context = getattr(batch, "_dsv4_shared_expert_forward_context", None)
+            if not isinstance(base_context, dict):
+                base_context = {}
+            base_source_rows = base_context.get("source_rows")
+            chunks: list[torch.Tensor] = []
+            for row in range(rows):
+                row_context = dict(base_context)
+                if isinstance(base_source_rows, (list, tuple)) and row < len(base_source_rows):
+                    row_context["source_rows"] = [int(base_source_rows[row])]
+                else:
+                    row_context["source_rows"] = [int(row)]
+                row_context["row_invariant_local_parent_rows"] = int(rows)
+                row_context["row_invariant_local_chunk_row"] = int(row)
+                previous_context = getattr(
+                    batch, "_dsv4_shared_expert_forward_context", None
                 )
-                for row in range(rows)
-            ]
+                if batch is not None:
+                    setattr(batch, "_dsv4_shared_expert_forward_context", row_context)
+                try:
+                    chunks.append(
+                        self.forward(
+                            hidden_2d[row : row + 1],
+                            reduce=reduce,
+                            row_invariant_local=False,
+                        )
+                    )
+                finally:
+                    if batch is not None:
+                        if previous_context is None:
+                            try:
+                                delattr(batch, "_dsv4_shared_expert_forward_context")
+                            except AttributeError:
+                                pass
+                        else:
+                            setattr(
+                                batch,
+                                "_dsv4_shared_expert_forward_context",
+                                previous_context,
+                            )
             return torch.cat(chunks, dim=0).reshape(*hidden_states.shape[:-1], -1)
         fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_SHARED_FP8_GEMM")
         use_bf16_weight_cache = dsv4_kernel.dsv4_env_flag(
             dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+        )
+        shared_params.update(
+            {
+                "use_bf16_weight_cache": bool(use_bf16_weight_cache),
+                "dense_fp8_marlin_projection": bool(
+                    dsv4_kernel.dense_fp8_marlin_projection_enabled()
+                ),
+                "shared_fp8_gemm": bool(fp8_gemm),
+            }
         )
         with _dsv4_capture_nvtx("shared_experts.gate_up_proj"):
             if use_bf16_weight_cache:
@@ -4032,11 +4840,48 @@ class DSV4SharedExperts(BaseOP):
                     hidden_states,
                     fp8_gemm=fp8_gemm if fp8_gemm else None,
                 )
+        self._record_shared_boundary(
+            operator_name="shared_expert_gate_up",
+            input_tensor=hidden_states,
+            output_tensor=gate_up,
+            path="mini.shared_experts.gate_up_proj",
+            stage="shared_experts.gate_up_proj",
+            params=shared_params,
+            extra={"backend": self._debug_weight_cache_probe()},
+        )
         gate, up = gate_up.chunk(2, dim=-1)
+        self._record_shared_boundary(
+            operator_name="shared_expert_gate_chunk",
+            input_tensor=gate_up,
+            output_tensor=gate,
+            path="mini.shared_experts.gate_up_proj.chunk.gate",
+            stage="shared_experts.gate_chunk",
+            params=shared_params,
+        )
+        self._record_shared_boundary(
+            operator_name="shared_expert_up_chunk",
+            input_tensor=gate_up,
+            output_tensor=up,
+            path="mini.shared_experts.gate_up_proj.chunk.up",
+            stage="shared_experts.up_chunk",
+            params=shared_params,
+        )
         hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
             gate,
             up,
             swiglu_limit=self.swiglu_limit,
+        )
+        self._record_shared_boundary(
+            operator_name="shared_expert_silu_and_mul_clamp",
+            input_tensor=gate_up,
+            output_tensor=hidden,
+            path="mini.shared_experts.silu_and_mul_clamp_fallback",
+            stage="shared_experts.silu_and_mul_clamp",
+            params=shared_params,
+            extra={
+                "gate": _dsv4_moe_reduce_tensor_census(gate),
+                "up": _dsv4_moe_reduce_tensor_census(up),
+            },
         )
         with _dsv4_capture_nvtx("shared_experts.down_proj"):
             with dsv4_direct_copy_nvtx(
@@ -4044,28 +4889,51 @@ class DSV4SharedExperts(BaseOP):
                 hidden=hidden,
             ):
                 hidden_for_down = hidden.to(up.dtype)
+            self._record_shared_boundary(
+                operator_name="shared_expert_hidden_for_down",
+                input_tensor=hidden,
+                output_tensor=hidden_for_down,
+                path="mini.shared_experts.hidden_for_down",
+                stage="shared_experts.hidden_for_down",
+                params=shared_params,
+                extra={
+                    "hidden_dtype_before_cast": str(hidden.dtype),
+                    "hidden_dtype_after_cast": str(hidden_for_down.dtype),
+                },
+            )
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
-                return self.down_proj.forward_fp8_marlin_weight(
+                down = self.down_proj.forward_fp8_marlin_weight(
                     hidden_for_down,
                     cache_name=self._down_marlin_weight_cache_name,
                     owner_label=self._down_owner_label,
                     reduce=reduce,
                     reduce_label="dsv4.shared_expert_all_reduce",
                 )
-            if use_bf16_weight_cache:
-                return self.down_proj.forward_fp8_cached_bf16_weight(
+            elif use_bf16_weight_cache:
+                down = self.down_proj.forward_fp8_cached_bf16_weight(
                     hidden_for_down,
                     cache_name=self._down_bf16_weight_cache_name,
                     owner_label=self._down_owner_label,
                     reduce=reduce,
                     reduce_label="dsv4.shared_expert_all_reduce",
                 )
-            return self.down_proj.forward(
-                hidden_for_down,
-                reduce=reduce,
-                reduce_label="dsv4.shared_expert_all_reduce",
-                fp8_gemm=fp8_gemm if fp8_gemm else None,
+            else:
+                down = self.down_proj.forward(
+                    hidden_for_down,
+                    reduce=reduce,
+                    reduce_label="dsv4.shared_expert_all_reduce",
+                    fp8_gemm=fp8_gemm if fp8_gemm else None,
+                )
+            self._record_shared_boundary(
+                operator_name="shared_expert_down_proj",
+                input_tensor=hidden_for_down,
+                output_tensor=down,
+                path="mini.shared_experts.down_proj",
+                stage="shared_experts.down_proj",
+                params=shared_params,
+                extra={"backend": self._debug_weight_cache_probe()},
             )
+            return down
 
 
 def _dsv4_moe_reduce_once_input(
@@ -4224,6 +5092,53 @@ class DSV4FusedMoERunner:
             row_invariant_local=row_invariant_local,
         )
 
+    def _apply_shared_raw_with_debug_context(
+        self,
+        flat: torch.Tensor,
+        *,
+        row_invariant_local: bool,
+        batch: Batch | None,
+        stage: str,
+        source_rows: list[int] | tuple[int, ...] | None = None,
+        chunk_start: int | None = None,
+        chunk_end: int | None = None,
+        variant: str | None = None,
+        contract: dict[str, object] | None = None,
+    ) -> torch.Tensor | None:
+        if batch is None:
+            return self.apply_shared_raw(
+                flat,
+                row_invariant_local=row_invariant_local,
+            )
+        rows = int(flat.shape[0]) if flat.ndim > 0 else 0
+        if source_rows is None:
+            source_rows = list(range(rows))
+        context: dict[str, object] = {
+            "stage": str(stage),
+            "source_rows": [int(row) for row in list(source_rows)[:rows]],
+            "chunk_start": None if chunk_start is None else int(chunk_start),
+            "chunk_end": None if chunk_end is None else int(chunk_end),
+            "variant": variant,
+            "row_invariant_local": bool(row_invariant_local),
+        }
+        if contract is not None:
+            context["microbatch_contract"] = contract
+        previous_context = getattr(batch, "_dsv4_shared_expert_forward_context", None)
+        setattr(batch, "_dsv4_shared_expert_forward_context", context)
+        try:
+            return self.apply_shared_raw(
+                flat,
+                row_invariant_local=row_invariant_local,
+            )
+        finally:
+            if previous_context is None:
+                try:
+                    delattr(batch, "_dsv4_shared_expert_forward_context")
+                except AttributeError:
+                    pass
+            else:
+                setattr(batch, "_dsv4_shared_expert_forward_context", previous_context)
+
     def finalize_shared(self, shared_output: torch.Tensor) -> torch.Tensor:
         with dsv4_direct_copy_nvtx(
             f"moe_shared_expert_staging.runner_shared_to_fp32.layer{self.layer_id}",
@@ -4317,6 +5232,12 @@ class DSV4FusedMoERunner:
         comm: DistributedCommunicator,
         hash_topk: DSV4TopK | None,
         row_invariant_local: bool,
+        batch: Batch | None = None,
+        source_rows: list[int] | tuple[int, ...] | None = None,
+        chunk_start: int | None = None,
+        chunk_end: int | None = None,
+        variant: str | None = None,
+        contract: dict[str, object] | None = None,
     ) -> dict[str, torch.Tensor | None]:
         weights, indices = self.route(
             flat,
@@ -4330,12 +5251,22 @@ class DSV4FusedMoERunner:
         else:
             routed_raw = self.apply_experts(flat, prepared)
         routed = self.finalize_routed(routed_raw)
-        shared_raw = self.apply_shared_raw(
+        shared_raw = self._apply_shared_raw_with_debug_context(
             flat,
+            batch=batch,
+            stage="runner.contract_run_once.shared",
+            source_rows=source_rows,
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
+            variant=variant,
+            contract=contract,
             row_invariant_local=row_invariant_local,
         )
         shared = self.finalize_shared(shared_raw) if shared_raw is not None else None
         aggregate = routed + shared if shared is not None else routed
+        aggregate_before_reduce = aggregate
+        if _dsv4_moe_preserve_pre_reduce_tensor_enabled(self.layer_id):
+            aggregate_before_reduce = aggregate.detach().clone()
         reduced, _reduce_extra = self.maybe_reduce_final(
             aggregate,
             comm=comm,
@@ -4350,7 +5281,7 @@ class DSV4FusedMoERunner:
             "routed_expert_output": routed,
             "shared_expert_output_raw": shared_raw,
             "shared_expert_output": shared,
-            "expert_aggregate_before_reduce": aggregate,
+            "expert_aggregate_before_reduce": aggregate_before_reduce,
             "expert_reduce_output": reduced,
             "moe_output": output,
         }
@@ -4365,6 +5296,9 @@ class DSV4FusedMoERunner:
         source_rows: list[int],
         row_invariant_local: bool,
         chunk_size: int | None = None,
+        batch: Batch | None = None,
+        variant: str | None = None,
+        contract: dict[str, object] | None = None,
     ) -> dict[str, torch.Tensor | None]:
         rows = int(flat.shape[0])
         if chunk_size is None or int(chunk_size) <= 0 or int(chunk_size) >= rows:
@@ -4374,16 +5308,29 @@ class DSV4FusedMoERunner:
                 comm=comm,
                 hash_topk=hash_topk,
                 row_invariant_local=row_invariant_local,
+                batch=batch,
+                source_rows=source_rows,
+                chunk_start=0,
+                chunk_end=rows,
+                variant=variant,
+                contract=contract,
             )
         by_name: dict[str, list[torch.Tensor | None]] = {}
         for start in range(0, rows, int(chunk_size)):
             end = min(start + int(chunk_size), rows)
+            chunk_source_rows = list(source_rows[start:end])
             chunk = self._contract_run_once(
                 flat[start:end].contiguous(),
                 flat_input_ids[start:end].contiguous(),
                 comm=comm,
                 hash_topk=hash_topk,
                 row_invariant_local=row_invariant_local,
+                batch=batch,
+                source_rows=chunk_source_rows,
+                chunk_start=start,
+                chunk_end=end,
+                variant=variant,
+                contract=contract,
             )
             for name, tensor in chunk.items():
                 by_name.setdefault(name, []).append(tensor)
@@ -4414,6 +5361,435 @@ class DSV4FusedMoERunner:
             params=params,
             extra=extra,
             reference_tensor=reference_tensor,
+        )
+
+    @staticmethod
+    def _microbench_compare(
+        lhs: torch.Tensor | None,
+        rhs: torch.Tensor | None,
+    ) -> dict[str, object]:
+        if not isinstance(lhs, torch.Tensor) or not isinstance(rhs, torch.Tensor):
+            return {"available": False}
+        if tuple(lhs.shape) != tuple(rhs.shape):
+            return {
+                "available": False,
+                "reason": "shape mismatch",
+                "lhs_shape": [int(x) for x in lhs.shape],
+                "rhs_shape": [int(x) for x in rhs.shape],
+            }
+        try:
+            lhs_cpu = lhs.detach().float().contiguous().cpu()
+            rhs_cpu = rhs.detach().float().contiguous().cpu()
+            delta = lhs_cpu - rhs_cpu
+            abs_delta = delta.abs()
+            max_abs = float(abs_delta.max().item()) if abs_delta.numel() else 0.0
+            denom = rhs_cpu.abs().clamp_min(1.0e-12)
+            max_rel = (
+                float((abs_delta / denom).max().item()) if abs_delta.numel() else 0.0
+            )
+            return {
+                "available": True,
+                "bit_exact": bool(torch.equal(lhs_cpu, rhs_cpu)),
+                "max_abs": max_abs,
+                "max_rel": max_rel,
+                "lhs_checksum": _dsv4_moe_row0_checksum(lhs),
+                "rhs_checksum": _dsv4_moe_row0_checksum(rhs),
+            }
+        except Exception as exc:
+            return {
+                "available": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+
+    @staticmethod
+    def _shared_microbench_tensor_scalar(
+        tensor: torch.Tensor | None,
+        row: int,
+    ) -> int | None:
+        if not isinstance(tensor, torch.Tensor):
+            return None
+        try:
+            flat = tensor.detach().reshape(-1)
+            if 0 <= int(row) < int(flat.numel()):
+                return int(flat[int(row)].cpu().item())
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _shared_microbench_contract_value(
+        values: list[object] | tuple[object, ...] | torch.Tensor | None,
+        row: int,
+    ) -> object | None:
+        try:
+            if isinstance(values, torch.Tensor) and 0 <= int(row) < int(values.numel()):
+                value = values.detach().reshape(-1)[int(row)].cpu().item()
+                if isinstance(value, bool):
+                    return bool(value)
+                return int(value)
+            if isinstance(values, (list, tuple)) and 0 <= int(row) < len(values):
+                value = values[int(row)]
+                if isinstance(value, bool):
+                    return bool(value)
+                return int(value)
+        except Exception:
+            return None
+        return None
+
+    def _shared_microbench_select_row(
+        self,
+        batch: Batch | None,
+        flat_input_ids: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> int | None:
+        if batch is None:
+            return None
+        if not dsv4_mtp_debug.operator_parity_enabled("shared_expert_microbench"):
+            return None
+        if not _dsv4_mtp_shared_expert_microbench_enabled(self.layer_id):
+            return None
+        count = int(getattr(self, "_shared_expert_microbench_records", 0))
+        if count >= _dsv4_mtp_shared_expert_microbench_max_records():
+            return None
+        token_filter = _dsv4_mtp_shared_expert_microbench_scalar_filter(
+            DSV4_MTP_SHARED_EXPERT_MICROBENCH_TOKEN_ENV
+        )
+        position_filter = _dsv4_mtp_shared_expert_microbench_scalar_filter(
+            DSV4_MTP_SHARED_EXPERT_MICROBENCH_POSITION_ENV
+        )
+        try:
+            rows = int(flat_input_ids.detach().reshape(-1).numel())
+        except Exception:
+            return None
+        if rows <= 0:
+            return None
+        for row in range(rows):
+            token = self._shared_microbench_tensor_scalar(flat_input_ids, row)
+            if token_filter is not None and token != token_filter:
+                continue
+            position = self._shared_microbench_tensor_scalar(positions, row)
+            if position_filter is not None and position != position_filter:
+                continue
+            return int(row)
+        return None
+
+    def _shared_microbench_run_current(
+        self,
+        batch: Batch | None,
+        x: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.shared_experts is None:
+            return None
+        previous_suppress = bool(
+            getattr(batch, "_dsv4_shared_expert_suppress_operator_trace", False)
+        )
+        if batch is not None:
+            setattr(batch, "_dsv4_shared_expert_suppress_operator_trace", True)
+        try:
+            return self.apply_shared_raw(x.contiguous(), row_invariant_local=False)
+        finally:
+            if batch is not None:
+                if previous_suppress:
+                    setattr(batch, "_dsv4_shared_expert_suppress_operator_trace", True)
+                else:
+                    try:
+                        delattr(batch, "_dsv4_shared_expert_suppress_operator_trace")
+                    except AttributeError:
+                        pass
+
+    def _shared_microbench_run_reference(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, dict[str, object]]:
+        if self.shared_experts is None:
+            return None, {"available": False, "reason": "no shared experts"}
+        shared = self.shared_experts
+        if not hasattr(shared.gate_up_proj, "weight"):
+            return None, {
+                "available": False,
+                "reason": "gate_up original weight unavailable",
+            }
+        if not hasattr(shared.down_proj, "weight"):
+            return None, {
+                "available": False,
+                "reason": "down original weight unavailable",
+            }
+        try:
+            gate_up = shared.gate_up_proj.forward(
+                x.contiguous(),
+                fp8_gemm=False,
+            )
+            gate, up = gate_up.chunk(2, dim=-1)
+            hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
+                gate,
+                up,
+                swiglu_limit=shared.swiglu_limit,
+            )
+            hidden_for_down = hidden.to(up.dtype)
+            out = shared.down_proj.forward(
+                hidden_for_down,
+                reduce=False,
+                fp8_gemm=False,
+            )
+            return out, {"available": True, "path": "torch_quantized_linear_ref"}
+        except Exception as exc:
+            return None, {
+                "available": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+
+    def _maybe_record_shared_expert_microbench(
+        self,
+        batch: Batch | None,
+        *,
+        flat: torch.Tensor,
+        flat_input_ids: torch.Tensor,
+        positions: torch.Tensor | None,
+        runtime_shared_raw: torch.Tensor | None,
+        contract: _DSV4TargetVerifyMoEMicrobatchContract,
+    ) -> None:
+        selected_row = self._shared_microbench_select_row(
+            batch,
+            flat_input_ids,
+            positions,
+        )
+        if selected_row is None:
+            return
+        setattr(
+            self,
+            "_shared_expert_microbench_records",
+            int(getattr(self, "_shared_expert_microbench_records", 0)) + 1,
+        )
+        if flat.ndim != 2 or flat.shape[0] <= 0:
+            return
+        selected_row = max(0, min(int(selected_row), int(flat.shape[0]) - 1))
+        row = flat[selected_row : selected_row + 1].contiguous()
+        target_metadata = getattr(batch, "dsv4_target_verify_metadata", None)
+        parent_rows_value = int(contract.batch_size)
+        if isinstance(target_metadata, dict):
+            try:
+                parent_rows_value = int(
+                    target_metadata.get("parent_batch_size", parent_rows_value)
+                )
+            except Exception:
+                parent_rows_value = int(contract.batch_size)
+        parent_rows = max(1, parent_rows_value)
+        parent_slot = 0
+        if 0 <= selected_row < len(contract.row_to_parent_batch_index):
+            parent_slot = int(contract.row_to_parent_batch_index[selected_row])
+        parent_slot = max(0, min(parent_slot, parent_rows - 1))
+        selected_position = None
+        if isinstance(positions, torch.Tensor) and positions.numel() > selected_row:
+            try:
+                selected_position = positions.reshape(-1)[
+                    selected_row : selected_row + 1
+                ].contiguous()
+            except Exception:
+                selected_position = None
+        selected_runtime_shared_raw = None
+        if (
+            isinstance(runtime_shared_raw, torch.Tensor)
+            and runtime_shared_raw.ndim > 0
+            and selected_row < int(runtime_shared_raw.shape[0])
+        ):
+            selected_runtime_shared_raw = runtime_shared_raw[
+                selected_row : selected_row + 1
+            ].contiguous()
+
+        def _parent_tensor(fill: str, source: torch.Tensor) -> torch.Tensor:
+            if fill == "repeat":
+                parent = source.repeat(parent_rows, 1)
+            else:
+                parent = torch.zeros(
+                    (parent_rows, source.shape[-1]),
+                    device=source.device,
+                    dtype=source.dtype,
+                )
+            parent[parent_slot : parent_slot + 1].copy_(source)
+            return parent.contiguous()
+
+        def _padded_neighbors(source: torch.Tensor) -> torch.Tensor:
+            rows = max(3, int(flat.shape[0]))
+            padded = torch.zeros(
+                (rows, source.shape[-1]),
+                device=source.device,
+                dtype=source.dtype,
+            )
+            padded[0:1].copy_(source)
+            return padded.contiguous()
+
+        def _select_row(tensor: torch.Tensor | None, index: int = 0) -> torch.Tensor | None:
+            if not isinstance(tensor, torch.Tensor) or tensor.ndim == 0:
+                return None
+            if int(index) < 0 or int(index) >= int(tensor.shape[0]):
+                return None
+            return tensor[int(index) : int(index) + 1].contiguous()
+
+        variants: dict[str, torch.Tensor | None] = {}
+        with torch.no_grad():
+            repeated = [
+                self._shared_microbench_run_current(batch, row)
+                for _ in range(3)
+            ]
+            variants["one_row"] = repeated[0]
+            variants["target_full_rows_3"] = _select_row(
+                self._shared_microbench_run_current(batch, flat.contiguous()),
+                selected_row,
+            )
+            parent_zero = _parent_tensor("zero", row)
+            variants["parent_like_4_zero_fill"] = _select_row(
+                self._shared_microbench_run_current(batch, parent_zero),
+                parent_slot,
+            )
+            parent_repeat = _parent_tensor("repeat", row)
+            variants["parent_like_4_repeat_fill"] = _select_row(
+                self._shared_microbench_run_current(batch, parent_repeat),
+                parent_slot,
+            )
+            variants["padded_neighbor_rows_zero"] = _select_row(
+                self._shared_microbench_run_current(batch, _padded_neighbors(row)),
+                0,
+            )
+            ref, ref_meta = self._shared_microbench_run_reference(row)
+            variants["reference_torch_one_row"] = ref
+
+            value_sweeps: list[dict[str, object]] = []
+            sweep_inputs = [
+                ("zeros", torch.zeros_like(row)),
+                ("small_scale_0.125x", row * 0.125),
+                ("original", row),
+                ("scale_2x", row * 2.0),
+                ("scale_4x", row * 4.0),
+                ("sign_flipped", -row),
+            ]
+            for label, sweep_row in sweep_inputs:
+                one = self._shared_microbench_run_current(batch, sweep_row)
+                parent = _parent_tensor("zero", sweep_row)
+                parent_out = _select_row(
+                    self._shared_microbench_run_current(batch, parent),
+                    parent_slot,
+                )
+                value_sweeps.append(
+                    {
+                        "variant": label,
+                        "one_row": _dsv4_moe_reduce_tensor_census(one),
+                        "parent_like_4_zero_fill": _dsv4_moe_reduce_tensor_census(
+                            parent_out
+                        ),
+                        "one_vs_parent_like_4": self._microbench_compare(one, parent_out),
+                    }
+                )
+
+        repeat_comparisons = [
+            self._microbench_compare(repeated[0], item)
+            for item in repeated[1:]
+            if isinstance(repeated[0], torch.Tensor)
+        ]
+        base = variants.get("one_row")
+        row_shape_rows = []
+        for name, tensor in variants.items():
+            row_shape_rows.append(
+                {
+                    "variant": name,
+                    "output": _dsv4_moe_reduce_tensor_census(tensor),
+                    "vs_one_row": (
+                        {"available": True, "bit_exact": True, "max_abs": 0.0, "max_rel": 0.0}
+                        if name == "one_row"
+                        else self._microbench_compare(base, tensor)
+                    ),
+                }
+            )
+
+        source_record = {
+            "source_row": int(selected_row),
+            "chunk_row": int(selected_row),
+            "parent_row": int(parent_slot),
+            "input_token": self._shared_microbench_tensor_scalar(
+                flat_input_ids,
+                selected_row,
+            ),
+            "position": self._shared_microbench_tensor_scalar(
+                positions,
+                selected_row,
+            ),
+            "out_cache_loc": self._shared_microbench_tensor_scalar(
+                getattr(batch, "out_loc", None),
+                selected_row,
+            ),
+            "row_depth": self._shared_microbench_contract_value(
+                contract.row_depths,
+                selected_row,
+            ),
+            "row_to_batch_index": self._shared_microbench_contract_value(
+                contract.row_to_batch_index,
+                selected_row,
+            ),
+            "row_to_parent_batch_index": self._shared_microbench_contract_value(
+                contract.row_to_parent_batch_index,
+                selected_row,
+            ),
+            "active_row": self._shared_microbench_contract_value(
+                contract.active_row_mask,
+                selected_row,
+            ),
+            "padded_row": self._shared_microbench_contract_value(
+                contract.padded_row_mask,
+                selected_row,
+            ),
+        }
+        extra = {
+            "stage": "runner.target_verify_microbatch.shared_expert_microbench",
+            "selected_source_row": int(selected_row),
+            "source_row_records": [source_record],
+            "microbench": {
+                "real_row_source": f"rank-local target verify flat row {selected_row}",
+                "parent_rows": int(parent_rows),
+                "parent_slot": int(parent_slot),
+                "contract": contract.as_record(),
+                "repeated_same_input_same_shape": {
+                    "runs": [
+                        _dsv4_moe_reduce_tensor_census(item) for item in repeated
+                    ],
+                    "comparisons_to_first": repeat_comparisons,
+                },
+                "row_shape_oracles": row_shape_rows,
+                "reference_torch": ref_meta,
+                "value_sweep": value_sweeps,
+            },
+        }
+        _dsv4_moe_record_operator(
+            batch,
+            operator_name="shared_expert_microbench",
+            layer_id=self.layer_id,
+            input_tensor=row,
+            output_tensor=selected_runtime_shared_raw,
+            positions=selected_position,
+            path="mini.moe.runner.target_verify_microbatch.shared_expert_microbench",
+            params={
+                "runner": True,
+                "target_verify_moe_microbatch_runtime": True,
+                "microbench": True,
+            },
+            extra=extra,
+        )
+        dsv4_mtp_debug.record_moe_microbatch_runtime(
+            batch,
+            {
+                "layer_id": int(self.layer_id),
+                "record_type": "shared_expert_microbench",
+                "enabled": True,
+                "input_tensor_metadata": DSV4SharedExperts._debug_tensor_meta(row),
+                "output_tensor_metadata": DSV4SharedExperts._debug_tensor_meta(
+                    selected_runtime_shared_raw
+                ),
+                "input_census": _dsv4_moe_reduce_tensor_census(row),
+                "output_census": _dsv4_moe_reduce_tensor_census(
+                    selected_runtime_shared_raw
+                ),
+                **extra,
+            },
         )
 
     def _maybe_record_contract_oracle(
@@ -4527,6 +5903,8 @@ class DSV4FusedMoERunner:
                     source_rows=variant_source_rows,
                     row_invariant_local=row_invariant_local,
                     chunk_size=chunk_size,
+                    batch=batch,
+                    variant=variant,
                 )
                 self._record_contract_variant(
                     batch,
@@ -4587,6 +5965,9 @@ class DSV4FusedMoERunner:
                 source_rows=list(range(int(flat.shape[0]))),
                 row_invariant_local=False,
                 chunk_size=contract.chunk_rows,
+                batch=batch,
+                variant="target_verify_microbatch_runtime",
+                contract=contract.as_record(),
             )
 
         if timing_enabled and start_event is not None and end_event is not None:
@@ -4610,6 +5991,19 @@ class DSV4FusedMoERunner:
         shared = tensors.get("shared_expert_output")
         aggregate = tensors.get("expert_aggregate_before_reduce")
         reduced = tensors.get("expert_reduce_output")
+        self._maybe_record_shared_expert_microbench(
+            batch,
+            flat=flat,
+            flat_input_ids=flat_input_ids,
+            positions=positions,
+            runtime_shared_raw=shared_raw if isinstance(shared_raw, torch.Tensor) else None,
+            contract=contract,
+        )
+        pre_reduce_snapshot_preserved = (
+            isinstance(aggregate, torch.Tensor)
+            and isinstance(reduced, torch.Tensor)
+            and int(aggregate.data_ptr()) != int(reduced.data_ptr())
+        )
 
         route_extra = {
             "stage": "runner.target_verify_moe_microbatch",
@@ -4761,6 +6155,7 @@ class DSV4FusedMoERunner:
                 "shared_input": _dsv4_moe_reduce_tensor_census(shared),
                 "aggregate_output": _dsv4_moe_reduce_tensor_census(aggregate),
                 "aggregate_order": "routed_fp32_plus_shared_fp32",
+                "pre_reduce_snapshot_preserved": bool(pre_reduce_snapshot_preserved),
                 "microbatch_contract": contract.as_record(),
             },
         )
@@ -4778,6 +6173,7 @@ class DSV4FusedMoERunner:
                 "communication_input_dtype": str(getattr(aggregate, "dtype", "")),
                 "post_reduce": _dsv4_moe_reduce_tensor_census_if_enabled(reduced),
                 "communication_output_dtype": str(getattr(reduced, "dtype", "")),
+                "pre_reduce_snapshot_preserved": bool(pre_reduce_snapshot_preserved),
                 "microbatch_contract": contract.as_record(),
             }
         )
@@ -5010,8 +6406,14 @@ class DSV4FusedMoERunner:
         shared = None
         shared_raw = None
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.shared"):
-            shared_raw = self.apply_shared_raw(
+            shared_raw = self._apply_shared_raw_with_debug_context(
                 flat,
+                batch=batch,
+                stage="runner.forward.shared",
+                source_rows=list(range(int(flat.shape[0]))),
+                chunk_start=0,
+                chunk_end=int(flat.shape[0]),
+                variant="runner_forward",
                 row_invariant_local=is_target_verify,
             )
             if shared_raw is not None:
@@ -5407,11 +6809,41 @@ class DSV4MoE(BaseOP):
                 extra={"stage": "non_runner.shared_input", "shared_experts_present": True},
             )
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.shared"):
-                shared_raw = self.shared_experts.forward(
-                    flat,
-                    reduce=not reduce_once,
-                    row_invariant_local=is_target_verify,
+                previous_context = getattr(
+                    batch, "_dsv4_shared_expert_forward_context", None
                 )
+                if batch is not None:
+                    setattr(
+                        batch,
+                        "_dsv4_shared_expert_forward_context",
+                        {
+                            "stage": "non_runner.forward.shared",
+                            "source_rows": list(range(int(flat.shape[0]))),
+                            "chunk_start": 0,
+                            "chunk_end": int(flat.shape[0]),
+                            "variant": "non_runner_forward",
+                            "row_invariant_local": bool(is_target_verify),
+                        },
+                    )
+                try:
+                    shared_raw = self.shared_experts.forward(
+                        flat,
+                        reduce=not reduce_once,
+                        row_invariant_local=is_target_verify,
+                    )
+                finally:
+                    if batch is not None:
+                        if previous_context is None:
+                            try:
+                                delattr(batch, "_dsv4_shared_expert_forward_context")
+                            except AttributeError:
+                                pass
+                        else:
+                            setattr(
+                                batch,
+                                "_dsv4_shared_expert_forward_context",
+                                previous_context,
+                            )
                 _dsv4_moe_record_operator(
                     batch,
                     operator_name="shared_expert_output_raw",

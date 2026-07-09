@@ -58,6 +58,10 @@ _DSV4_NORMAL_PRODUCER_TRACE_ENV = "MINISGL_DSV4_NORMAL_PRODUCER_TRACE"
 _DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS_ENV = (
     "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_ALL_LAYERS"
 )
+_DSV4_NORMAL_PRODUCER_TRACE_LAYERS_ENV = "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_LAYERS"
+_DSV4_NORMAL_PRODUCER_TRACE_ALL_BOUNDARIES_ENV = (
+    "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_ALL_BOUNDARIES"
+)
 _DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT_ENV = (
     "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT"
 )
@@ -953,6 +957,7 @@ class Engine:
                     metadata.get("speculative_num_draft_tokens", 0)
                 ),
                 "batch_size": int(len(entries)),
+                "parent_batch_size": int(metadata.get("parent_batch_size", len(entries))),
                 "num_tokens": int(getattr(verify_batch, "input_ids").numel()),
                 "verify_lens": [int(entry["verify_len"]) for entry in entries],
                 "active_verify_lens": [
@@ -977,6 +982,17 @@ class Engine:
                 ],
                 "row_depths": [
                     int(x) for x in list(metadata.get("row_depths", []))[:32]
+                ],
+                "row_to_batch_index": [
+                    int(x)
+                    for x in list(metadata.get("row_to_batch_index", []))[:32]
+                ],
+                "row_to_parent_batch_index": [
+                    int(x)
+                    for x in list(metadata.get("row_to_parent_batch_index", []))[:32]
+                ],
+                "parent_batch_indices": [
+                    int(x) for x in list(metadata.get("parent_batch_indices", []))[:32]
                 ],
                 "force_torch_attention": bool(
                     getattr(verify_batch, "dsv4_force_torch_attention", False)
@@ -1186,9 +1202,50 @@ class Engine:
     def _normal_producer_trace_enabled(self) -> bool:
         return _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_ENV) and dsv4_mtp_debug.row_tensor_trace_enabled()
 
+    def _normal_producer_trace_selected_layers(self) -> set[int] | None:
+        raw = os.environ.get(_DSV4_NORMAL_PRODUCER_TRACE_LAYERS_ENV, "").strip()
+        if not raw or raw.lower() in {"all", "*"}:
+            return None
+        selected: set[int] = set()
+        try:
+            for part in raw.split(","):
+                token = part.strip()
+                if not token:
+                    continue
+                if "-" in token:
+                    start_s, end_s = token.split("-", 1)
+                    start, end = int(start_s), int(end_s)
+                    if end < start:
+                        start, end = end, start
+                    selected.update(range(start, end + 1))
+                else:
+                    selected.add(int(token))
+        except ValueError:
+            return None
+        return selected
+
+    def _normal_producer_trace_layer_selected(self, name: str) -> bool:
+        if not name.startswith("layer"):
+            return False
+        digits = []
+        for char in name[len("layer") :]:
+            if not char.isdigit():
+                break
+            digits.append(char)
+        if not digits:
+            return False
+        try:
+            layer_id = int("".join(digits))
+        except ValueError:
+            return False
+        selected = self._normal_producer_trace_selected_layers()
+        return selected is None or int(layer_id) in selected
+
     def _normal_producer_trace_name_selected(self, name: str) -> bool:
         if name in {"embedding", "hidden_before_final_norm", "final_norm", "lm_head_logits"}:
             return True
+        if _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_ALL_BOUNDARIES_ENV):
+            return self._normal_producer_trace_layer_selected(name)
         if _env_flag(_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT_ENV):
             if name.startswith("layer2."):
                 return True
@@ -1367,11 +1424,35 @@ class Engine:
 
     def _mtp_target_row_metadata_debug(self, batch: Batch, row: int) -> dict[str, Any]:
         core = getattr(getattr(batch, "attn_metadata", None), "core_metadata", None)
+        target_metadata = getattr(batch, "dsv4_target_verify_metadata", None)
 
         def _scalar(tensor: torch.Tensor | None) -> int | None:
             if tensor is None or int(row) < 0 or int(row) >= int(tensor.numel()):
                 return None
             return int(tensor.detach().reshape(-1)[int(row)].item())
+
+        def _metadata_scalar(name: str) -> int | None:
+            if not isinstance(target_metadata, dict):
+                return None
+            values = target_metadata.get(name)
+            try:
+                if isinstance(values, torch.Tensor):
+                    if int(row) < 0 or int(row) >= int(values.numel()):
+                        return None
+                    return int(values.detach().reshape(-1)[int(row)].item())
+                if isinstance(values, (list, tuple)):
+                    if int(row) < 0 or int(row) >= len(values):
+                        return None
+                    return int(values[int(row)])
+            except Exception:
+                return None
+            return None
+
+        def _metadata_bool(name: str) -> bool | None:
+            value = _metadata_scalar(name)
+            if value is None:
+                return None
+            return bool(value)
 
         metadata = {
             "input_id": _scalar(getattr(batch, "input_ids", None)),
@@ -1388,6 +1469,24 @@ class Engine:
                     "target_verify_decode_rows": bool(
                         getattr(core, "target_verify_decode_rows", False)
                     ),
+                }
+            )
+        if isinstance(target_metadata, dict):
+            metadata.update(
+                {
+                    "row_depth": _metadata_scalar("row_depths"),
+                    "row_to_batch_index": _metadata_scalar("row_to_batch_index"),
+                    "row_to_parent_batch_index": _metadata_scalar(
+                        "row_to_parent_batch_index"
+                    ),
+                    "parent_batch_size": int(
+                        target_metadata.get("parent_batch_size", -1)
+                    ),
+                    "active_row": _metadata_bool("active_row_mask"),
+                    "padded_row": _metadata_bool("padded_row_mask"),
+                    "runtime": str(target_metadata.get("runtime", "")),
+                    "attention_mode": str(target_metadata.get("attention_mode", "")),
+                    "kv_store_mode": str(target_metadata.get("kv_store_mode", "")),
                 }
             )
         return metadata
@@ -1967,11 +2066,28 @@ class Engine:
         row_depths: list[int] = []
         row_to_table_idx: list[int] = []
         row_to_batch_index: list[int] = []
+        row_to_parent_batch_index: list[int] = []
+        parent_batch_size = max(
+            int(entry.get("parent_batch_size", len(entries))) for entry in entries
+        )
+        if parent_batch_size <= 0:
+            raise RuntimeError(
+                "DeepSeek V4 MTP flattened verify requires a positive parent batch size."
+            )
         cursor = 0
         try:
             for entry in entries:
                 req = entry["req"]
                 active_verify_len = int(entry["verify_len"])
+                parent_batch_index = int(
+                    entry.get("parent_batch_index", entry.get("batch_index", -1))
+                )
+                if parent_batch_index < 0 or parent_batch_index >= parent_batch_size:
+                    raise RuntimeError(
+                        "DeepSeek V4 MTP flattened verify parent row slot is invalid: "
+                        f"parent_batch_index={parent_batch_index}, "
+                        f"parent_batch_size={parent_batch_size}."
+                    )
                 if active_verify_len <= 0 or active_verify_len > speculative_num_draft_tokens:
                     raise RuntimeError(
                         "DeepSeek V4 MTP flattened verify active length is invalid: "
@@ -2007,6 +2123,8 @@ class Engine:
                 entry["committed_seq_len"] = base_pos
                 entry["active_verify_len"] = active_verify_len
                 entry["padded_verify_len"] = speculative_num_draft_tokens
+                entry["parent_batch_size"] = int(parent_batch_size)
+                entry["parent_batch_index"] = int(parent_batch_index)
                 entry["positions_tensor"] = positions.to(dtype=torch.int32)
                 entry["temp_locs"] = real_locs.to(dtype=torch.int32)
                 entry["real_locs"] = real_locs.to(dtype=torch.int32)
@@ -2036,6 +2154,9 @@ class Engine:
                 row_to_batch_index.extend(
                     [int(entry.get("batch_index", -1))] * speculative_num_draft_tokens
                 )
+                row_to_parent_batch_index.extend(
+                    [int(parent_batch_index)] * speculative_num_draft_tokens
+                )
                 cursor += speculative_num_draft_tokens
 
             verify_batch = Batch(
@@ -2064,6 +2185,10 @@ class Engine:
                 "speculative_num_draft_tokens": speculative_num_draft_tokens,
                 "extend_lens": verify_lens,
                 "active_verify_lens": active_verify_lens,
+                "parent_batch_size": int(parent_batch_size),
+                "parent_batch_indices": [
+                    int(entry.get("parent_batch_index", -1)) for entry in entries
+                ],
                 "committed_seq_lens": [
                     int(entry["committed_seq_len"]) for entry in entries
                 ],
@@ -2072,6 +2197,7 @@ class Engine:
                 "row_depths": row_depths,
                 "row_to_table_idx": row_to_table_idx,
                 "row_to_batch_index": row_to_batch_index,
+                "row_to_parent_batch_index": row_to_parent_batch_index,
                 "num_tokens": int(total_verify_tokens),
             }
             self.dsv4_target_verify_runtime.apply_to_batch(
@@ -2704,6 +2830,44 @@ class Engine:
             labels=labels,
         )
 
+    def _swa_lifecycle_target_producer_trace(self, batch: Batch) -> list[dict[str, Any]]:
+        trace = dsv4_mtp_debug.export_row0_layer_trace(batch)
+        if not trace:
+            return []
+        selected_layers = dsv4_mtp_debug.swa_lifecycle_trace_layers()
+        if not selected_layers:
+            return trace
+        out: list[dict[str, Any]] = []
+        for entry in trace:
+            layer_id = entry.get("layer_id")
+            if layer_id is None:
+                continue
+            try:
+                if int(layer_id) in selected_layers:
+                    out.append(entry)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _swa_lifecycle_attention_backend_trace(self, batch: Batch) -> list[dict[str, Any]]:
+        trace = dsv4_mtp_debug.export_attention_backend_trace(batch)
+        if not trace:
+            return []
+        selected_layers = dsv4_mtp_debug.swa_lifecycle_trace_layers()
+        if not selected_layers:
+            return trace
+        out: list[dict[str, Any]] = []
+        for entry in trace:
+            layer_id = entry.get("layer_id")
+            if layer_id is None:
+                continue
+            try:
+                if int(layer_id) in selected_layers:
+                    out.append(entry)
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def _tensor_int_list(self, tensor: torch.Tensor | None, limit: int = 64) -> list[int]:
         if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
             return []
@@ -3246,6 +3410,9 @@ class Engine:
                     frozen_kv_read_only=batch.frozen_kv_read_only,
                 )
                 sub_batch.dsv4_parent_batch_size = int(len(batch.reqs))
+                sub_batch.dsv4_parent_batch_start = int(
+                    getattr(batch, "dsv4_parent_batch_start", 0)
+                ) + int(start)
                 sub_first_tokens = first_tokens_gpu[start:end].contiguous()
                 sub_drafts = {
                     int(index - start): drafts
@@ -3277,6 +3444,7 @@ class Engine:
         entries: list[dict[str, Any]] = []
         page_boundary_stops = 0
         accepted_prefix_lens = [0] * len(batch.reqs)
+        parent_batch_start = int(getattr(batch, "dsv4_parent_batch_start", 0))
         for i, req in enumerate(batch.reqs):
             drafts = draft_tokens_by_index.get(i, [])
             if not (drafts and req.can_decode):
@@ -3304,6 +3472,7 @@ class Engine:
             entries.append(
                 {
                     "batch_index": i,
+                    "parent_batch_index": parent_batch_start + int(i),
                     "req": req,
                     "drafts": drafts[:draft_count],
                     "parent_batch_size": int(
@@ -3847,10 +4016,10 @@ class Engine:
                         "all_positions": self._tensor_int_list(all_positions),
                         "entries": lifecycle_entries,
                         "target_verify_producer_trace": (
-                            dsv4_mtp_debug.export_row0_layer_trace(verify_batch)
+                            self._swa_lifecycle_target_producer_trace(verify_batch)
                         ),
                         "target_verify_attention_backend_trace": (
-                            dsv4_mtp_debug.export_attention_backend_trace(verify_batch)
+                            self._swa_lifecycle_attention_backend_trace(verify_batch)
                         ),
                         "store_trace": dsv4_mtp_debug.export_layer2_swa_store_trace(
                             verify_batch
@@ -3898,10 +4067,10 @@ class Engine:
                         "all_positions": self._tensor_int_list(all_positions),
                         "entries": lifecycle_entries,
                         "target_verify_producer_trace": (
-                            dsv4_mtp_debug.export_row0_layer_trace(verify_batch)
+                            self._swa_lifecycle_target_producer_trace(verify_batch)
                         ),
                         "target_verify_attention_backend_trace": (
-                            dsv4_mtp_debug.export_attention_backend_trace(verify_batch)
+                            self._swa_lifecycle_attention_backend_trace(verify_batch)
                         ),
                         "store_trace": dsv4_mtp_debug.export_layer2_swa_store_trace(
                             verify_batch
