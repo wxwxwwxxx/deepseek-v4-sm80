@@ -133,6 +133,7 @@ Run these in order.
 | TARGET 11.252 | `prompts/TARGET_11.252_dsv4_sm80_mtp_c4_indexer_state_validity_consume.md` | After 11.251 identifies C4 indexer state as the next analyzer-visible owner but likely uninitialized, instrument validity/write/consume before runtime patching. |
 | TARGET 11.253 | `prompts/TARGET_11.253_dsv4_sm80_mtp_swa_layer1_commit_row_value_parity.md` | After 11.252 skips uninitialized C4 indexer state, classify the first valid SWA layer1 accepted-commit row value owner into producer, copy, or restore/cleanup. |
 | TARGET 11.254 | `prompts/TARGET_11.254_dsv4_sm80_mtp_layer1_swa_producer_boundary_parity.md` | After 11.253 proves accepted commit only preserves an already-wrong SWA row, bisect target-verify producer parity from layer0 through layer1 SWA store input. |
+| TARGET 11.255 | `prompts/TARGET_11.255_dsv4_sm80_mtp_layer0_output_subboundary_parity.md` | After 11.254 localizes the producer mismatch to layer0 output, split layer0 attention, MoE, reduce, and residual sub-boundaries for the same correction row. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -376,6 +377,10 @@ Do not promote MTP by default unless all of these are true:
   layer1 store input, stop at TARGET 11.254 and bisect the target-verify
   producer boundary from layer0 output through layer1 SWA store input before
   changing accepted commit, logits, sampler, graph/perf, or unrelated state.
+- If TARGET 11.254 proves metadata, embedding, and layer0 input are exact but
+  `layer0.post_moe_residual` is the first mismatch, stop at TARGET 11.255 and
+  split layer0 into attention, MoE, reduce, and residual sub-boundaries before
+  changing layer1, SWA commit, logits, sampler, graph/perf, or unrelated state.
 
 ## Deliverables
 
