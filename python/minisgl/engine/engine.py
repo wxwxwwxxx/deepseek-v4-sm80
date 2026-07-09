@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -72,6 +73,11 @@ _DSV4_MTP_VERIFY_SPLITK_ATTENTION_ENV = "MINISGL_DSV4_MTP_VERIFY_SPLITK_ATTENTIO
 _DSV4_MTP_VERIFY_GROUP_SIZE_ENV = "MINISGL_DSV4_MTP_VERIFY_GROUP_SIZE"
 _DSV4_MTP_STATE_PARITY_TRACE_ENV = "MINISGL_DSV4_MTP_STATE_PARITY_TRACE"
 _DSV4_MTP_STATE_PARITY_TRACE_LIMIT_ENV = "MINISGL_DSV4_MTP_STATE_PARITY_TRACE_LIMIT"
+_DSV4_MTP_TEACHER_FORCED_BASELINE_ENV = "MINISGL_DSV4_MTP_TEACHER_FORCED_BASELINE"
+_DSV4_MTP_TEACHER_FORCED_VERIFY_ONLY_ENV = (
+    "MINISGL_DSV4_MTP_TEACHER_FORCED_VERIFY_ONLY"
+)
+_DSV4_MTP_CANONICAL_REPLAY_COMMIT_ENV = "MINISGL_DSV4_MTP_CANONICAL_REPLAY_COMMIT"
 _DSV4_TARGET_VERIFY_RUNTIME_ENV = "MINISGL_DSV4_TARGET_VERIFY_RUNTIME"
 _DSV4_TARGET_VERIFY_RUNTIME_LEGACY = "legacy_target11_6"
 _DSV4_TARGET_VERIFY_RUNTIME_SGLANG_PREFILL_EXTEND = "sglang_prefill_extend"
@@ -209,6 +215,7 @@ class Engine:
             getattr(config, "dsv4_mtp_spec_draft_len", 1) or 1
         )
         self._mtp_pending_draft_tokens: dict[int, int] = {}
+        self._mtp_teacher_forced_baseline = self._load_mtp_teacher_forced_baseline()
         acceptance_histogram = {
             str(i): 0 for i in range(max(int(self.dsv4_mtp_spec_draft_len), 1) + 1)
         }
@@ -268,6 +275,19 @@ class Engine:
             "operator_parity_debug": [],
             "row_depth_oracle_debug": [],
             "accepted_commit_row_hashes": [],
+            "teacher_forced_baseline_path": os.environ.get(
+                _DSV4_MTP_TEACHER_FORCED_BASELINE_ENV, ""
+            ),
+            "teacher_forced_enabled": bool(self._mtp_teacher_forced_baseline),
+            "teacher_forced_verify_only": _env_flag(
+                _DSV4_MTP_TEACHER_FORCED_VERIFY_ONLY_ENV
+            ),
+            "teacher_forced_trace": [],
+            "canonical_replay_commit_enabled": _env_flag(
+                _DSV4_MTP_CANONICAL_REPLAY_COMMIT_ENV
+            ),
+            "canonical_replay_commit_rows": 0,
+            "canonical_replay_commit_debug": [],
             "last_batch": {},
         }
         self._mtp_row0_layer_parity_oracle: dict[str, Any] | None = None
@@ -793,6 +813,150 @@ class Engine:
     def _sync_device_for_mtp_spec(self) -> None:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
+
+    def _load_mtp_teacher_forced_baseline(self) -> dict[tuple[int, int], list[int]]:
+        path = os.environ.get(_DSV4_MTP_TEACHER_FORCED_BASELINE_ENV, "").strip()
+        if not path:
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to load DeepSeek V4 MTP teacher-forced baseline "
+                f"artifact from {path!r}."
+            ) from exc
+        tokens_by_req: dict[tuple[int, int], list[int]] = {}
+        for run in payload.get("runs", []):
+            try:
+                batch_size = int(run.get("batch_size", -1))
+            except Exception:
+                continue
+            for uid, token_ids in enumerate(run.get("token_ids", [])):
+                if not isinstance(token_ids, list):
+                    continue
+                tokens_by_req[(batch_size, int(uid))] = [
+                    int(token) for token in token_ids
+                ]
+        if not tokens_by_req:
+            raise RuntimeError(
+                "DeepSeek V4 MTP teacher-forced baseline artifact has no "
+                f"runs/token_ids entries: {path!r}."
+            )
+        return tokens_by_req
+
+    def _mtp_teacher_forced_generated_prefix_len(
+        self,
+        req: Req,
+        baseline_tokens: list[int],
+    ) -> int:
+        input_ids = getattr(req, "input_ids", None)
+        if not isinstance(input_ids, torch.Tensor) or input_ids.numel() == 0:
+            return 0
+        host_ids = [int(x) for x in input_ids.detach().cpu().tolist()]
+        limit = min(len(host_ids), len(baseline_tokens))
+        for count in range(limit, 0, -1):
+            if host_ids[-count:] == baseline_tokens[:count]:
+                return int(count)
+        return 0
+
+    def _teacher_forced_mtp_spec_drafts(
+        self,
+        batch: Batch,
+        next_tokens_gpu: torch.Tensor,
+    ) -> dict[str, Any] | None:
+        if not self._mtp_teacher_forced_baseline:
+            return None
+        draft_len = int(self.dsv4_mtp_spec_draft_len)
+        parent_batch_size = int(
+            getattr(batch, "dsv4_parent_batch_size", int(batch.size))
+        )
+        draft_tokens_by_index: dict[int, list[torch.Tensor]] = {}
+        trace: list[dict[str, Any]] = []
+        proposed = 0
+        for batch_index, req in enumerate(batch.reqs):
+            baseline_tokens = self._mtp_teacher_forced_baseline.get(
+                (parent_batch_size, int(getattr(req, "uid", batch_index)))
+            )
+            if baseline_tokens is None:
+                baseline_tokens = self._mtp_teacher_forced_baseline.get(
+                    (parent_batch_size, int(batch_index))
+                )
+            if not baseline_tokens:
+                trace.append(
+                    {
+                        "uid": int(getattr(req, "uid", -1)),
+                        "batch_index": int(batch_index),
+                        "parent_batch_size": int(parent_batch_size),
+                        "status": "missing_baseline_tokens",
+                    }
+                )
+                continue
+
+            generated_prefix = self._mtp_teacher_forced_generated_prefix_len(
+                req, baseline_tokens
+            )
+            expected_current = (
+                int(baseline_tokens[generated_prefix])
+                if generated_prefix < len(baseline_tokens)
+                else None
+            )
+            current_token = (
+                int(next_tokens_gpu[batch_index].item())
+                if batch_index < int(next_tokens_gpu.numel())
+                else None
+            )
+            start = generated_prefix + 1
+            max_steps = min(
+                draft_len,
+                max(0, len(baseline_tokens) - start),
+                max(int(req.remain_len), 0),
+            )
+            forced_tokens = baseline_tokens[start : start + max_steps]
+            if forced_tokens:
+                draft_tokens_by_index[int(batch_index)] = [
+                    torch.tensor([token], dtype=torch.int32, device=self.device)
+                    for token in forced_tokens
+                ]
+                proposed += len(forced_tokens)
+            trace.append(
+                {
+                    "uid": int(getattr(req, "uid", -1)),
+                    "batch_index": int(batch_index),
+                    "parent_batch_size": int(parent_batch_size),
+                    "generated_prefix_len": int(generated_prefix),
+                    "current_target_token": current_token,
+                    "expected_current_baseline_token": expected_current,
+                    "current_matches_baseline": bool(
+                        expected_current is not None
+                        and current_token is not None
+                        and int(current_token) == int(expected_current)
+                    ),
+                    "forced_draft_tokens": [int(x) for x in forced_tokens],
+                    "status": "ok" if forced_tokens else "no_future_tokens",
+                }
+            )
+        log = self.mtp_spec_stats.setdefault("teacher_forced_trace", [])
+        log.append(
+            {
+                "trace_index": int(len(log)),
+                "batch_size": int(batch.size),
+                "parent_batch_size": int(parent_batch_size),
+                "draft_len": int(draft_len),
+                "verify_only": _env_flag(_DSV4_MTP_TEACHER_FORCED_VERIFY_ONLY_ENV),
+                "entries": trace,
+            }
+        )
+        if len(log) > 64:
+            del log[:-64]
+        self.mtp_spec_stats["draft_tokens_proposed"] = int(
+            self.mtp_spec_stats["draft_tokens_proposed"]
+        ) + int(proposed)
+        return {
+            "proposed": proposed,
+            "finite": True,
+            "draft_tokens_by_index": draft_tokens_by_index,
+        }
 
     def _can_run_mtp_spec_greedy(self, batch: Batch, args: BatchSamplingArgs) -> bool:
         if not self.enable_dsv4_mtp_speculative:
@@ -3134,6 +3298,99 @@ class Engine:
         has_fp8 = getattr(kv_cache, "has_indexer_fp8_cache", None)
         return bool(callable(has_fp8) and has_fp8())
 
+    def _canonical_replay_mtp_commit_rows(
+        self,
+        replay_entries: list[tuple[dict[str, Any], int]],
+    ) -> list[dict[str, Any]]:
+        replay_debug: list[dict[str, Any]] = []
+        saved_req_state = {
+            id(entry["req"]): (
+                entry["req"],
+                int(getattr(entry["req"], "cached_len", -1)),
+                int(getattr(entry["req"], "device_len", -1)),
+            )
+            for entry, _copy_rows in replay_entries
+        }
+        try:
+            for entry, copy_rows in replay_entries:
+                req = entry["req"]
+                committed_seq_len = int(entry["committed_seq_len"])
+                inputs = list(entry.get("verify_inputs_padded", entry.get("verify_inputs", [])))
+                positions = entry["positions_tensor"].to(device=self.device, dtype=torch.long)
+                real_locs = entry["real_locs"].to(device=self.device, dtype=torch.long)
+                for depth in range(int(copy_rows)):
+                    if depth >= len(inputs):
+                        raise RuntimeError(
+                            "DeepSeek V4 MTP canonical replay commit missing "
+                            f"input for depth={depth}, copy_rows={copy_rows}."
+                        )
+                    position = int(positions[depth].item())
+                    token = inputs[depth].to(device=self.device, dtype=torch.int32)
+                    req.cached_len = int(committed_seq_len + depth)
+                    req.device_len = int(committed_seq_len + depth + 1)
+                    replay_batch = self._make_mtp_frozen_batch(
+                        [req],
+                        token.contiguous(),
+                        [position],
+                        read_only=False,
+                    )
+                    dsv4_mtp_debug.reset_row0_layer_trace(
+                        replay_batch,
+                        mode="mtp_canonical_replay_commit",
+                    )
+                    self._sync_device_for_mtp_spec()
+                    start_s = time.perf_counter()
+                    with self.ctx.forward_batch(replay_batch):
+                        self.graph_runner.record_eager_decode(replay_batch)
+                        output = self.model.forward_with_hidden()
+                        self._debug_sync_forward(
+                            "after_mtp_canonical_replay_commit",
+                            replay_batch,
+                            "mtp_canonical_replay_commit",
+                        )
+                    self._sync_device_for_mtp_spec()
+                    logits = output.logits[:1]
+                    replay_debug.append(
+                        {
+                            "uid": int(getattr(req, "uid", -1)),
+                            "table_idx": int(getattr(req, "table_idx", -1)),
+                            "depth": int(depth),
+                            "input_token": int(token.reshape(-1)[0].item()),
+                            "position": int(position),
+                            "full_loc": int(real_locs[depth].item()),
+                            "committed_seq_len_before": int(committed_seq_len),
+                            "elapsed_s": float(time.perf_counter() - start_s),
+                            "top1_token": (
+                                int(torch.argmax(logits[0], dim=-1).item())
+                                if logits.numel() > 0
+                                else None
+                            ),
+                            "producer_trace": dsv4_mtp_debug.export_row0_layer_trace(
+                                replay_batch
+                            ),
+                            "attention_backend_trace": (
+                                dsv4_mtp_debug.export_attention_backend_trace(
+                                    replay_batch
+                                )
+                            ),
+                            "metadata": self._mtp_row0_metadata_debug(replay_batch),
+                        }
+                    )
+        finally:
+            for req, cached_len, device_len in saved_req_state.values():
+                req.cached_len = int(cached_len)
+                req.device_len = int(device_len)
+        log = self.mtp_spec_stats.setdefault("canonical_replay_commit_debug", [])
+        log.append(
+            {
+                "trace_index": int(len(log)),
+                "rows": replay_debug,
+            }
+        )
+        if len(log) > 32:
+            del log[:-32]
+        return replay_debug
+
     def _copy_mtp_temp_kv_to_committed(
         self,
         temp_locs: torch.Tensor,
@@ -3672,13 +3929,22 @@ class Engine:
         commit_loc_chunks: list[torch.Tensor] = []
         commit_position_chunks: list[torch.Tensor] = []
         copy_rows_by_entry: list[tuple[Req, int, int]] = []
+        canonical_replay_entries: list[tuple[dict[str, Any], int]] = []
         bonus_tokens = 0
         accepted_candidates = 0
         correction_token_candidates = 0
         bonus_token_candidates = 0
         blocked_commit_rows = 0
         accepted_commit_blocker = self._mtp_accepted_commit_blocker()
-        allow_accepted_commit = accepted_commit_blocker is None
+        teacher_forced_verify_only = _env_flag(_DSV4_MTP_TEACHER_FORCED_VERIFY_ONLY_ENV)
+        allow_accepted_commit = (
+            accepted_commit_blocker is None and not teacher_forced_verify_only
+        )
+        accepted_commit_status = (
+            accepted_commit_blocker
+            if accepted_commit_blocker is not None
+            else ("teacher_forced_verify_only" if teacher_forced_verify_only else "")
+        )
         if accepted_commit_blocker is not None:
             self.mtp_spec_stats["accepted_kv_commit_fail_closed"] = True
             self.mtp_spec_stats["accepted_kv_commit_blocker"] = accepted_commit_blocker
@@ -3754,6 +4020,7 @@ class Engine:
                 commit_loc_chunks.append(entry["real_locs"][:copy_rows])
                 commit_position_chunks.append(entry["positions_tensor"][:copy_rows])
                 copy_rows_by_entry.append((req, copy_rows, int(entry["committed_seq_len"])))
+                canonical_replay_entries.append((entry, int(copy_rows)))
             if layer2_swa_lifecycle_trace_enabled:
                 real_locs_full = entry["real_locs"][:padded_verify_len].to(
                     device=self.device,
@@ -3892,7 +4159,7 @@ class Engine:
                         "mismatch_depth": (
                             None if mismatch_depth is None else int(mismatch_depth)
                         ),
-                        "accepted_commit_blocker": accepted_commit_blocker or "",
+                        "accepted_commit_blocker": accepted_commit_status,
                         "candidate_copy_rows": int(candidate_copy_rows),
                         "copy_rows": int(copy_rows),
                         "emitted_tail": [
@@ -3905,6 +4172,10 @@ class Engine:
         copied_bytes = 0
         copied_tokens = 0
         rollback_start_s = time.perf_counter()
+        canonical_replay_commit = _env_flag(_DSV4_MTP_CANONICAL_REPLAY_COMMIT_ENV)
+        commit_source = (
+            "canonical_normal_replay" if canonical_replay_commit else "target_verify_snapshot"
+        )
         if commit_loc_chunks:
             commit_locs = torch.cat(commit_loc_chunks, dim=0).to(
                 device=self.device,
@@ -3915,13 +4186,18 @@ class Engine:
                 dtype=torch.long,
             )
             copied_tokens = int(commit_locs.numel())
-            committed_snapshot = self._snapshot_mtp_kv_rows(commit_locs, commit_positions)
+            committed_snapshot = (
+                {}
+                if canonical_replay_commit
+                else self._snapshot_mtp_kv_rows(commit_locs, commit_positions)
+            )
             copied_bytes = int(committed_snapshot.get("bytes", 0))
             if _env_flag(_DSV4_MTP_ROW0_DEBUG_ENV):
                 commit_log = self.mtp_spec_stats.setdefault("accepted_commit_row_hashes", [])
                 commit_log.append(
                     {
                         "trace_index": int(len(commit_log)),
+                        "commit_source": commit_source,
                         "commit_locs": [
                             int(x) for x in commit_locs.detach().cpu().tolist()[:16]
                         ],
@@ -3943,12 +4219,23 @@ class Engine:
                 if len(commit_log) > 32:
                     del commit_log[:-32]
             self._restore_mtp_kv_snapshot(pre_verify_snapshot)
+            canonical_replay_debug: list[dict[str, Any]] = []
             after_pre_restore_snapshot = (
                 self._snapshot_mtp_kv_rows(all_real_locs, all_positions)
                 if layer2_swa_lifecycle_trace_enabled
                 else None
             )
-            self._restore_mtp_kv_snapshot(committed_snapshot)
+            if canonical_replay_commit:
+                canonical_replay_debug = self._canonical_replay_mtp_commit_rows(
+                    canonical_replay_entries
+                )
+                committed_snapshot = self._snapshot_mtp_kv_rows(
+                    commit_locs,
+                    commit_positions,
+                )
+                copied_bytes = int(committed_snapshot.get("bytes", 0))
+            else:
+                self._restore_mtp_kv_snapshot(committed_snapshot)
             after_committed_restore_snapshot = (
                 self._snapshot_mtp_kv_rows(all_real_locs, all_positions)
                 if layer2_swa_lifecycle_trace_enabled
@@ -4001,9 +4288,11 @@ class Engine:
                 self._append_layer2_swa_lifecycle_event(
                     {
                         "event": "target_verify_commit_restore",
+                        "commit_source": commit_source,
                         "total_verify_tokens": int(total_verify_tokens),
                         "copied_tokens": int(copied_tokens),
                         "copied_bytes": int(copied_bytes),
+                        "canonical_replay_debug": canonical_replay_debug,
                         "commit_locs": self._tensor_int_list(commit_locs),
                         "commit_swa_locs": self._tensor_int_list(
                             self.kv_cache.translate_full_locs_to_swa_locs(commit_locs)
@@ -4044,7 +4333,7 @@ class Engine:
                                 after_req_update_snapshot
                             ),
                         },
-                        "accepted_commit_blocker": accepted_commit_blocker or "",
+                        "accepted_commit_blocker": accepted_commit_status,
                     }
                 )
         else:
@@ -4086,7 +4375,7 @@ class Engine:
                                 after_pre_restore_snapshot
                             ),
                         },
-                        "accepted_commit_blocker": accepted_commit_blocker or "",
+                        "accepted_commit_blocker": accepted_commit_status,
                     }
                 )
             if allow_accepted_commit:
@@ -4111,6 +4400,10 @@ class Engine:
         self.mtp_spec_stats["accepted_kv_copied_tokens"] = int(
             self.mtp_spec_stats["accepted_kv_copied_tokens"]
         ) + int(copied_tokens)
+        if canonical_replay_commit:
+            self.mtp_spec_stats["canonical_replay_commit_rows"] = int(
+                self.mtp_spec_stats.get("canonical_replay_commit_rows", 0)
+            ) + int(copied_tokens)
         self.mtp_spec_stats["accepted_kv_commit_blocked_rows"] = int(
             self.mtp_spec_stats["accepted_kv_commit_blocked_rows"]
         ) + int(blocked_commit_rows)
@@ -4486,12 +4779,14 @@ class Engine:
         emitted_tokens: list[list[torch.Tensor]] = [
             [next_tokens_gpu[i : i + 1].contiguous()] for i in range(batch.size)
         ]
-        draft = self._propose_mtp_spec_drafts(
-            batch,
-            next_tokens_gpu,
-            target_output.hidden_states_before_norm[: batch.size],
-            mtp_positions,
-        )
+        draft = self._teacher_forced_mtp_spec_drafts(batch, next_tokens_gpu)
+        if draft is None:
+            draft = self._propose_mtp_spec_drafts(
+                batch,
+                next_tokens_gpu,
+                target_output.hidden_states_before_norm[: batch.size],
+                mtp_positions,
+            )
         verification = self._verify_mtp_spec_drafts(
             batch,
             next_tokens_gpu,

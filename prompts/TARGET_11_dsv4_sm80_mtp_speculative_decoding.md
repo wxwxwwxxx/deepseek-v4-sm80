@@ -140,6 +140,7 @@ Run these in order.
 | TARGET 11.259 | `prompts/TARGET_11.259_dsv4_sm80_mtp_layer10_input_upstream_parity_after_q_wqb_oracle.md` | After 11.258 proves SWA commit faithfully preserves an already-wrong `layer10.input`, trace upstream layer inputs and hidden publication under the q_wqb oracle while keeping the default path as control. |
 | TARGET 11.260 | `prompts/TARGET_11.260_dsv4_sm80_mtp_layer1_moe_aggregate_before_reduce_parity.md` | After 11.259 narrows the q_wqb-oracle producer drift to layer1 MoE aggregation, classify whether `expert_aggregate_before_reduce` differs due to instrumentation, row indexing, dtype/order, publication, or microbatch contract. |
 | TARGET 11.261 | `prompts/TARGET_11.261_dsv4_sm80_mtp_rank2_layer1_shared_expert_parity_after_q_wqb_oracle.md` | After 11.260 proves the aggregate owner was instrumentation and the next true owner is rank2 `layer1.shared_expert_output`, split shared expert input, row mapping, gate_up, activation, down_proj, finalize, weight/cache, backend row-shape, and SGLang contract. |
+| TARGET 11.262 | `prompts/TARGET_11.262_dsv4_sm80_mtp_target_verify_pivot_feasibility.md` | After 11.261 shows local row-shape oracles can fix an anchor but regress the full matrix, run teacher-forced verify replay, canonical replay commit, and semantic transcript/shape-signature checks to decide whether to pause MTP or continue with a bounded contract port. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -419,6 +420,12 @@ Do not promote MTP by default unless all of these are true:
   activation, down projection, finalize, weight/cache, backend row-shape, and
   SGLang target-verify contract before patching aggregate, all-reduce, SWA,
   q_wqb gates, logits, sampler, graph/perf, or unrelated state.
+- If TARGET 11.261 proves local row-shape/full-shape oracles can fix the
+  rank2/layer1 shared-expert anchor but regress the full exactness matrix, stop
+  at TARGET 11.262 and run contract-level pivot experiments: teacher-forced
+  target-verify replay, canonical replay commit, semantic transcript, and
+  shape-signature dashboard.  Do not continue local operator-owner repairs
+  unless 11.262 names a bounded contract port.
 
 ## Deliverables
 
