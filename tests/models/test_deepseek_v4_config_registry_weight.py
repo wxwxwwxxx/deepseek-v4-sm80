@@ -12,12 +12,8 @@ import minisgl.distributed.info as dist_info
 from minisgl.distributed import set_tp_info
 from minisgl.models import create_model
 from minisgl.models.config import ModelConfig
-from minisgl.models.deepseek_v4 import DSV4_EXPERIMENTAL_MTP_ENV, DeepseekV4ForCausalLM
-from minisgl.models.weight import (
-    _remap_deepseek_v4_mtp_weight_name,
-    _remap_deepseek_v4_weight_name,
-    _shard_deepseek_v4_tensor,
-)
+from minisgl.models.deepseek_v4 import DeepseekV4ForCausalLM
+from minisgl.models.weight import _remap_deepseek_v4_weight_name, _shard_deepseek_v4_tensor
 from minisgl.utils import cached_load_hf_config, torch_dtype
 
 MODEL_DIR = Path("/models/DeepSeek-V4-Flash")
@@ -69,7 +65,6 @@ def test_deepseek_v4_config_parse_from_local_json():
     assert cfg.hc_mult == 4
     assert cfg.hc_sinkhorn_iters == 20
     assert cfg.hc_eps == pytest.approx(1e-6)
-    assert cfg.num_nextn_predict_layers == 1
 
 
 def test_cached_load_hf_config_falls_back_for_deepseek_v4():
@@ -105,13 +100,9 @@ def test_deepseek_v4_registry_builds_model_skeleton_on_meta():
     assert state["model.layers.0.self_attn.wo_b.weight"].shape == torch.Size([4096, 8192])
 
     assert state["model.layers.2.self_attn.compressor.ape"].shape == torch.Size([4, 1024])
-    assert state["model.layers.2.self_attn.compressor.wkv_gate.weight"].shape == torch.Size(
-        [2048, 4096]
-    )
+    assert state["model.layers.2.self_attn.compressor.wkv_gate.weight"].shape == torch.Size([2048, 4096])
     assert state["model.layers.2.self_attn.indexer.wq_b.weight"].shape == torch.Size([8192, 1024])
-    assert state["model.layers.2.self_attn.indexer.weights_proj.weight"].shape == torch.Size(
-        [64, 4096]
-    )
+    assert state["model.layers.2.self_attn.indexer.weights_proj.weight"].shape == torch.Size([64, 4096])
     assert state["model.layers.2.self_attn.indexer.compressor.ape"].shape == torch.Size([4, 256])
     assert state["model.layers.3.self_attn.compressor.ape"].shape == torch.Size([128, 512])
 
@@ -121,45 +112,11 @@ def test_deepseek_v4_registry_builds_model_skeleton_on_meta():
     assert "model.layers.3.mlp.topk.tid2eid" not in state
     assert state["model.layers.0.mlp.experts.w13_weight"].shape == torch.Size([256, 2, 2048, 2048])
     assert state["model.layers.0.mlp.experts.w13_weight"].dtype is torch.int8
-    assert state["model.layers.0.mlp.experts.w13_weight_scale_inv"].shape == torch.Size(
-        [256, 2, 2048, 128]
-    )
+    assert state["model.layers.0.mlp.experts.w13_weight_scale_inv"].shape == torch.Size([256, 2, 2048, 128])
     assert state["model.layers.0.mlp.experts.w2_weight"].shape == torch.Size([256, 4096, 1024])
-    assert state["model.layers.0.mlp.experts.w2_weight_scale_inv"].shape == torch.Size(
-        [256, 4096, 64]
-    )
-    assert state["model.layers.0.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size(
-        [4096, 4096]
-    )
-    assert state["model.layers.0.mlp.shared_experts.down_proj.weight"].shape == torch.Size(
-        [4096, 2048]
-    )
-
-
-def test_deepseek_v4_mtp_optin_builds_nextn_skeleton_on_meta(monkeypatch):
-    monkeypatch.setenv(DSV4_EXPERIMENTAL_MTP_ENV, "1")
-    set_tp_info(0, 1)
-    cfg = ModelConfig.from_hf(_local_hf_config())
-
-    with torch.device("meta"), torch_dtype(torch.bfloat16):
-        state = create_model(cfg).state_dict()
-
-    assert state["mtp.enorm.weight"].shape == torch.Size([4096])
-    assert state["mtp.hnorm.weight"].shape == torch.Size([4096])
-    assert state["mtp.e_proj.weight"].shape == torch.Size([4096, 4096])
-    assert state["mtp.e_proj.weight"].dtype is torch.float8_e4m3fn
-    assert state["mtp.e_proj.weight_scale_inv"].shape == torch.Size([32, 32])
-    assert state["mtp.h_proj.weight"].shape == torch.Size([4096, 4096])
-    assert state["mtp.decoder.self_attn.wq_b.weight"].shape == torch.Size([32768, 1024])
-    assert state["mtp.decoder.self_attn.attn_sink"].shape == torch.Size([64])
-    assert state["mtp.decoder.mlp.gate.e_score_correction_bias"].shape == torch.Size([256])
-    assert "mtp.decoder.mlp.topk.tid2eid" not in state
-    assert state["mtp.decoder.mlp.experts.w13_weight"].shape == torch.Size([256, 2, 2048, 2048])
-    assert state["mtp.decoder.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size(
-        [4096, 4096]
-    )
-    assert state["mtp.hc_head_fn"].shape == torch.Size([4, 16384])
-    assert state["mtp.shared_head.norm.weight"].shape == torch.Size([4096])
+    assert state["model.layers.0.mlp.experts.w2_weight_scale_inv"].shape == torch.Size([256, 4096, 64])
+    assert state["model.layers.0.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size([4096, 4096])
+    assert state["model.layers.0.mlp.shared_experts.down_proj.weight"].shape == torch.Size([4096, 2048])
 
 
 def test_deepseek_v4_tp8_model_uses_local_attention_sink_shape():
@@ -197,15 +154,11 @@ def test_deepseek_v4_checkpoint_metadata_maps_to_runtime_shapes():
     )
     assert _tensor_shape("layers.2.attn.compressor.wkv.weight") == (1024, 4096)
     assert _tensor_shape("layers.2.attn.compressor.wgate.weight") == (1024, 4096)
-    assert state["model.layers.2.self_attn.compressor.wkv_gate.weight"].shape == torch.Size(
-        [2048, 4096]
-    )
+    assert state["model.layers.2.self_attn.compressor.wkv_gate.weight"].shape == torch.Size([2048, 4096])
 
     assert _tensor_shape("layers.0.ffn.shared_experts.w1.weight") == (2048, 4096)
     assert _tensor_shape("layers.0.ffn.shared_experts.w3.weight") == (2048, 4096)
-    assert state["model.layers.0.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size(
-        [4096, 4096]
-    )
+    assert state["model.layers.0.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size([4096, 4096])
 
     assert _tensor_shape("layers.0.ffn.experts.0.w1.weight") == (2048, 2048)
     assert _tensor_shape("layers.0.ffn.experts.0.w3.weight") == (2048, 2048)
@@ -214,59 +167,13 @@ def test_deepseek_v4_checkpoint_metadata_maps_to_runtime_shapes():
     assert state["model.layers.0.mlp.experts.w2_weight"].shape[1:] == torch.Size([4096, 1024])
 
 
-def test_deepseek_v4_mtp_checkpoint_metadata_maps_to_runtime_shapes(monkeypatch):
-    monkeypatch.setenv(DSV4_EXPERIMENTAL_MTP_ENV, "1")
-    set_tp_info(0, 1)
-    cfg = ModelConfig.from_hf(_local_hf_config())
-    with torch.device("meta"), torch_dtype(torch.bfloat16):
-        state = create_model(cfg).state_dict()
-
-    direct_pairs = {
-        "mtp.0.e_proj.weight": "mtp.e_proj.weight",
-        "mtp.0.e_proj.scale": "mtp.e_proj.weight_scale_inv",
-        "mtp.0.h_proj.weight": "mtp.h_proj.weight",
-        "mtp.0.h_proj.scale": "mtp.h_proj.weight_scale_inv",
-        "mtp.0.enorm.weight": "mtp.enorm.weight",
-        "mtp.0.hnorm.weight": "mtp.hnorm.weight",
-        "mtp.0.norm.weight": "mtp.shared_head.norm.weight",
-        "mtp.0.attn.wq_a.weight": "mtp.decoder.self_attn.wq_a.weight",
-        "mtp.0.attn.wq_a.scale": "mtp.decoder.self_attn.wq_a.weight_scale_inv",
-        "mtp.0.attn_norm.weight": "mtp.decoder.input_layernorm.weight",
-        "mtp.0.ffn_norm.weight": "mtp.decoder.post_attention_layernorm.weight",
-        "mtp.0.ffn.gate.weight": "mtp.decoder.mlp.gate.weight",
-        "mtp.0.ffn.gate.bias": "mtp.decoder.mlp.gate.e_score_correction_bias",
-        "mtp.0.hc_attn_fn": "mtp.decoder.hc_attn_fn",
-        "mtp.0.hc_head_fn": "mtp.hc_head_fn",
-    }
-    for raw_name, runtime_name in direct_pairs.items():
-        assert _remap_deepseek_v4_mtp_weight_name(raw_name) == runtime_name
-        assert _tensor_shape(raw_name) == tuple(state[runtime_name].shape)
-
-    assert _remap_deepseek_v4_mtp_weight_name("mtp.0.emb.tok_emb") is None
-    assert _remap_deepseek_v4_mtp_weight_name("mtp.0.head.weight") is None
-    assert (
-        _remap_deepseek_v4_mtp_weight_name("mtp.0.ffn.shared_experts.w1.weight")
-        == "mtp.decoder.mlp.shared_experts.gate_proj.weight"
-    )
-    assert _tensor_shape("mtp.0.ffn.shared_experts.w1.weight") == (2048, 4096)
-    assert state["mtp.decoder.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size(
-        [4096, 4096]
-    )
-
-    assert (
-        _remap_deepseek_v4_mtp_weight_name("mtp.0.ffn.experts.0.w1.weight")
-        == "mtp.decoder.mlp.experts.0.gate_proj.weight"
-    )
-    assert _tensor_shape("mtp.0.ffn.experts.0.w1.weight") == (2048, 2048)
-    assert state["mtp.decoder.mlp.experts.w13_weight"].shape[1:] == torch.Size([2, 2048, 2048])
-
-
 def test_deepseek_v4_weight_sharding_splits_attention_sink_by_local_heads():
     raw = torch.arange(64, dtype=torch.float32)
 
     shard = _shard_deepseek_v4_tensor("model.layers.0.self_attn.attn_sink", raw, r=3, n=8)
 
     assert torch.equal(shard, torch.arange(24, 32, dtype=torch.float32))
+
 
 
 def test_deepseek_v4_load_weight_packs_synthetic_checkpoint(tmp_path):
@@ -338,112 +245,12 @@ def test_deepseek_v4_load_weight_packs_synthetic_checkpoint(tmp_path):
     loaded = dict(load_weight(str(tmp_path), torch.device("cpu")))
 
     assert loaded["model.embed_tokens.weight"].shape == torch.Size([16, 8])
-    assert loaded["model.layers.0.self_attn.compressor.wkv_gate.weight"].shape == torch.Size(
-        [16, 8]
-    )
-    assert loaded["model.layers.0.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size(
-        [8, 8]
-    )
-    assert loaded[
-        "model.layers.0.mlp.shared_experts.gate_up_proj.weight_scale_inv"
-    ].shape == torch.Size([2, 1])
+    assert loaded["model.layers.0.self_attn.compressor.wkv_gate.weight"].shape == torch.Size([16, 8])
+    assert loaded["model.layers.0.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size([8, 8])
+    assert loaded["model.layers.0.mlp.shared_experts.gate_up_proj.weight_scale_inv"].shape == torch.Size([2, 1])
     assert loaded["model.layers.0.mlp.experts.w13_weight"].shape == torch.Size([2, 2, 4, 4])
-    assert loaded["model.layers.0.mlp.experts.w13_weight_scale_inv"].shape == torch.Size(
-        [2, 2, 4, 1]
-    )
+    assert loaded["model.layers.0.mlp.experts.w13_weight_scale_inv"].shape == torch.Size([2, 2, 4, 1])
     assert loaded["model.layers.0.mlp.experts.w2_weight"].shape == torch.Size([2, 8, 2])
     assert loaded["model.layers.0.mlp.experts.w2_weight_scale_inv"].shape == torch.Size([2, 8, 1])
     assert loaded["model.layers.0.mlp.experts.w13_weight"][1, 0, 0, 0].item() == 2
     assert loaded["model.layers.0.mlp.experts.w13_weight"][1, 1, 0, 0].item() == 4
-
-
-def test_deepseek_v4_mtp_load_weight_optin_packs_synthetic_checkpoint(tmp_path):
-    from safetensors.torch import save_file
-    from minisgl.models.weight import load_weight
-
-    fp8 = getattr(torch, "float8_e4m3fn", None)
-    e8m0 = getattr(torch, "float8_e8m0fnu", None)
-    if fp8 is None or e8m0 is None:
-        pytest.skip("torch float8 dtypes are required for DSV4 MTP weight tests")
-
-    config = {
-        "architectures": ["DeepseekV4ForCausalLM"],
-        "model_type": "deepseek_v4",
-        "hidden_size": 8,
-        "vocab_size": 16,
-        "num_hidden_layers": 1,
-        "num_nextn_predict_layers": 1,
-        "num_attention_heads": 2,
-        "num_key_value_heads": 1,
-        "head_dim": 4,
-        "q_lora_rank": 2,
-        "o_lora_rank": 2,
-        "qk_rope_head_dim": 1,
-        "max_position_embeddings": 32,
-        "hidden_act": "silu",
-        "rms_norm_eps": 1e-6,
-        "moe_intermediate_size": 4,
-        "n_routed_experts": 2,
-        "n_shared_experts": 1,
-        "num_experts_per_tok": 1,
-        "norm_topk_prob": True,
-        "expert_dtype": "fp4",
-        "o_groups": 1,
-        "index_head_dim": 2,
-        "index_n_heads": 2,
-        "index_topk": 2,
-        "hc_mult": 1,
-        "hc_sinkhorn_iters": 1,
-        "compress_ratios": [4],
-        "rope_theta": 10000,
-    }
-    (tmp_path / "config.json").write_text(json.dumps(config))
-
-    tensors = {
-        "mtp.0.e_proj.weight": torch.zeros(8, 8, dtype=fp8),
-        "mtp.0.e_proj.scale": torch.ones(1, 1, dtype=e8m0),
-        "mtp.0.h_proj.weight": torch.zeros(8, 8, dtype=fp8),
-        "mtp.0.h_proj.scale": torch.ones(1, 1, dtype=e8m0),
-        "mtp.0.norm.weight": torch.ones(8, dtype=torch.bfloat16),
-        "mtp.0.ffn.shared_experts.w1.weight": torch.zeros(4, 8, dtype=fp8),
-        "mtp.0.ffn.shared_experts.w3.weight": torch.ones(4, 8, dtype=fp8),
-        "mtp.0.ffn.shared_experts.w1.scale": torch.ones(1, 1, dtype=e8m0),
-        "mtp.0.ffn.shared_experts.w3.scale": torch.ones(1, 1, dtype=e8m0),
-        "mtp.0.emb.tok_emb": torch.full((16, 8), 3, dtype=torch.bfloat16),
-        "mtp.0.head.weight": torch.full((16, 8), 4, dtype=torch.bfloat16),
-    }
-    for expert in range(2):
-        tensors[f"mtp.0.ffn.experts.{expert}.w1.weight"] = torch.full(
-            (4, 4), expert + 1, dtype=torch.int8
-        )
-        tensors[f"mtp.0.ffn.experts.{expert}.w3.weight"] = torch.full(
-            (4, 4), expert + 3, dtype=torch.int8
-        )
-        tensors[f"mtp.0.ffn.experts.{expert}.w2.weight"] = torch.full(
-            (8, 2), expert + 5, dtype=torch.int8
-        )
-        tensors[f"mtp.0.ffn.experts.{expert}.w1.scale"] = torch.ones(4, 1, dtype=e8m0)
-        tensors[f"mtp.0.ffn.experts.{expert}.w3.scale"] = torch.ones(4, 1, dtype=e8m0)
-        tensors[f"mtp.0.ffn.experts.{expert}.w2.scale"] = torch.ones(8, 1, dtype=e8m0)
-    save_file(tensors, tmp_path / "model.safetensors")
-
-    set_tp_info(0, 1)
-    assert dict(load_weight(str(tmp_path), torch.device("cpu"))) == {}
-
-    loaded = dict(load_weight(str(tmp_path), torch.device("cpu"), enable_dsv4_mtp=True))
-
-    assert "mtp.embed_tokens.weight" not in loaded
-    assert "mtp.shared_head.head.weight" not in loaded
-    assert loaded["mtp.e_proj.weight"].shape == torch.Size([8, 8])
-    assert loaded["mtp.e_proj.weight_scale_inv"].shape == torch.Size([1, 1])
-    assert loaded["mtp.shared_head.norm.weight"].shape == torch.Size([8])
-    assert loaded["mtp.decoder.mlp.shared_experts.gate_up_proj.weight"].shape == torch.Size([8, 8])
-    assert loaded[
-        "mtp.decoder.mlp.shared_experts.gate_up_proj.weight_scale_inv"
-    ].shape == torch.Size([2, 1])
-    assert loaded["mtp.decoder.mlp.experts.w13_weight"].shape == torch.Size([2, 2, 4, 4])
-    assert loaded["mtp.decoder.mlp.experts.w13_weight_scale_inv"].shape == torch.Size([2, 2, 4, 1])
-    assert loaded["mtp.decoder.mlp.experts.w2_weight"].shape == torch.Size([2, 8, 2])
-    assert loaded["mtp.decoder.mlp.experts.w2_weight_scale_inv"].shape == torch.Size([2, 8, 1])
-    assert loaded["mtp.decoder.mlp.experts.w13_weight"][1, 0, 0, 0].item() == 2
-    assert loaded["mtp.decoder.mlp.experts.w13_weight"][1, 1, 0, 0].item() == 4

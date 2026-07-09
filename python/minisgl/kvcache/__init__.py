@@ -35,7 +35,6 @@ def create_kvcache_pool(
     max_running_req: int | None = None,
     dsv4_swa_num_pages: int | None = None,
     dsv4_dummy_token_start: int | None = None,
-    dsv4_online_c128_mtp_max_draft_tokens: int = 0,
 ) -> BaseKVCachePool:
     if model_config.is_deepseek_v4:
         from .deepseek_v4_pool import DeepSeekV4KVCache
@@ -51,7 +50,6 @@ def create_kvcache_pool(
             max_running_req=max_running_req,
             swa_num_pages=dsv4_swa_num_pages,
             dummy_token_start=dsv4_dummy_token_start,
-            online_c128_mtp_max_draft_tokens=dsv4_online_c128_mtp_max_draft_tokens,
         )
 
     from .mha_pool import MHAKVCache

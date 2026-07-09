@@ -121,36 +121,6 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         help="Use dummy weights for testing.",
     )
 
-    parser.add_argument(
-        "--enable-dsv4-mtp",
-        action="store_true",
-        dest="enable_dsv4_mtp",
-        help=(
-            "Explicitly enable experimental DeepSeek V4 MTP/nextn weight loading "
-            "and one-step oracle helpers. Does not enable speculative decoding."
-        ),
-    )
-    parser.add_argument(
-        "--enable-dsv4-mtp-speculative",
-        action="store_true",
-        dest="enable_dsv4_mtp_speculative",
-        help=(
-            "Enable experimental DeepSeek V4 greedy top-k=1 MTP speculative sidecar. "
-            "This forces MTP weight loading, supports greedy only, and disables "
-            "DeepSeek V4 CUDA graph capture."
-        ),
-    )
-    parser.add_argument(
-        "--dsv4-mtp-spec-draft-len",
-        type=int,
-        default=ServerArgs.dsv4_mtp_spec_draft_len,
-        help=(
-            "DeepSeek V4 MTP speculative draft length. Supports 1, 2, or 4 "
-            "for greedy top-k=1 frozen-KV verification; sampling and top-k>1 "
-            "tree speculation are not implemented."
-        ),
-    )
-
     assert ServerArgs.use_pynccl == True
     parser.add_argument(
         "--disable-pynccl",

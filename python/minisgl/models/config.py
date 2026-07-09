@@ -61,7 +61,6 @@ class ModelConfig:
     rope_factor: float = 1.0
     beta_fast: int = 32
     beta_slow: int = 1
-    num_nextn_predict_layers: int = 0
     quantization_config: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -90,9 +89,7 @@ class ModelConfig:
         model_type = getattr(config, "model_type", "llama")
         is_deepseek_v4 = model_type == "deepseek_v4"
         num_kv_heads = getattr(config, "num_key_value_heads", config.num_attention_heads)
-        head_dim = (
-            getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
-        )
+        head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
         tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
         n_routed_experts = getattr(config, "n_routed_experts", 0)
         num_experts = getattr(
@@ -180,8 +177,7 @@ class ModelConfig:
             hc_sinkhorn_iters=getattr(config, "hc_sinkhorn_iters", 0) or 0,
             hc_eps=getattr(config, "hc_eps", 1e-6),
             o_groups=getattr(config, "o_groups", 1) or 1,
-            n_hash_layers=getattr(config, "num_hash_layers", getattr(config, "n_hash_layers", 0))
-            or 0,
+            n_hash_layers=getattr(config, "num_hash_layers", getattr(config, "n_hash_layers", 0)) or 0,
             swiglu_limit=getattr(config, "swiglu_limit", None),
             topk_method=getattr(config, "topk_method", ""),
             n_group=getattr(config, "n_group", getattr(config, "num_expert_groups", 1)) or 1,
@@ -190,6 +186,5 @@ class ModelConfig:
             rope_factor=rope_factor,
             beta_fast=beta_fast,
             beta_slow=beta_slow,
-            num_nextn_predict_layers=getattr(config, "num_nextn_predict_layers", 0) or 0,
             quantization_config=dict(quantization_config),
         )

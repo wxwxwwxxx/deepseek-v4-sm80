@@ -148,12 +148,12 @@ The archive is historical source material, not the active todo list.
 ## Current Recommendation
 
 TARGET 08 should remain closed unless a future feature changes prefix/SWA/cache
-ownership.  The active next route is TARGET 11 MTP speculative decoding:
+ownership.  TARGET 11 MTP was investigated after this route and is now paused
+for release; it should not be treated as the active continuation of TARGET 08.
 
-```text
-prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md
-```
+After MTP cleanup, validate this prefix/SWA baseline with a short non-MTP soak:
+text sanity, graph replay health, `serving_mixed_112req_wave16`, and
+`prefix_multi_112req_wave16` on the promoted TARGET 10 preset.
 
 If future profiling reopens TARGET 08, start from a fresh attribution on the
 current promoted baseline rather than replaying old metadata-cleanup prompts.
-

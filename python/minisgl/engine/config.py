@@ -29,9 +29,6 @@ class EngineConfig:
     memory_ratio: float = 0.9
     distributed_timeout: float = 60.0
     use_dummy_weight: bool = False
-    enable_dsv4_mtp: bool = False
-    enable_dsv4_mtp_speculative: bool = False
-    dsv4_mtp_spec_draft_len: int = 1
     use_pynccl: bool = True
     max_seq_len_override: int | None = None
     num_page_override: int | None = None  # if not None, will override the number of pages

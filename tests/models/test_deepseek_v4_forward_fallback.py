@@ -17,15 +17,12 @@ from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
 from minisgl.models.deepseek_v4 import (
-    DSV4_EXPERIMENTAL_MTP_ENV,
     DeepseekV4Model,
     DSV4Attention,
     DSV4FusedRoutedExperts,
     DSV4MoE,
     DSV4MoEGate,
     DSV4SharedExperts,
-    _wo_a_bf16_bmm_projection,
-    _wo_a_bf16_bmm_projection_row_invariant,
 )
 from minisgl.models.register import get_model_class
 
@@ -75,30 +72,6 @@ def _reset_globals(*, tp_rank: int = 0, tp_size: int = 1) -> None:
     core._GLOBAL_CTX = None
     dist_info._TP_INFO = None
     set_tp_info(tp_rank, tp_size)
-
-
-def test_wo_a_bf16_bmm_projection_row_invariant_matches_one_row_loop():
-    o = torch.randn(3, 2, 8, dtype=torch.bfloat16)
-    cached_weight = torch.randn(2, 8, 4, dtype=torch.bfloat16)
-
-    expected = torch.cat(
-        [
-            _wo_a_bf16_bmm_projection(
-                o[row : row + 1],
-                cached_weight,
-                owner_label="test.wo_a",
-            )
-            for row in range(o.shape[0])
-        ],
-        dim=0,
-    )
-    actual = _wo_a_bf16_bmm_projection_row_invariant(
-        o,
-        cached_weight,
-        owner_label="test.wo_a",
-    )
-
-    assert torch.equal(actual, expected)
 
 
 @pytest.fixture(autouse=True)
@@ -208,69 +181,6 @@ def test_deepseek_v4_small_prefill_forward_fallback_reaches_logits():
 
     assert logits.shape == (1, cfg.vocab_size)
     assert torch.isfinite(logits).all()
-
-
-def test_deepseek_v4_mtp_one_step_oracle_fallback_reaches_logits(monkeypatch):
-    _reset_globals()
-    monkeypatch.setenv(DSV4_EXPERIMENTAL_MTP_ENV, "1")
-    cfg = replace(_tiny_dsv4_config(), num_nextn_predict_layers=1)
-    model = get_model_class(cfg.architectures[0], cfg)
-    assert hasattr(model, "mtp")
-    _fill_forward_weights(model)
-
-    input_ids = torch.tensor([1, 2, 3], dtype=torch.int32)
-    ctx = _install_dsv4_context(cfg, max_len=input_ids.numel() + 1)
-    req = Req(
-        input_ids=input_ids,
-        table_idx=0,
-        cached_len=0,
-        output_len=2,
-        uid=0,
-        sampling_params=SamplingParams(max_tokens=2),
-        cache_handle=None,  # type: ignore[arg-type]
-    )
-    batch = Batch(reqs=[req], phase="prefill")
-    batch.padded_reqs = batch.reqs
-    batch.input_ids = input_ids
-    batch.positions = torch.arange(input_ids.numel(), dtype=torch.int32)
-    batch.out_loc = torch.arange(input_ids.numel(), dtype=torch.int32)
-    ctx.attn_backend.prepare_metadata(batch)
-
-    with ctx.forward_batch(batch):
-        target_output = model.forward_with_hidden()
-
-    assert target_output.logits.shape == (1, cfg.vocab_size)
-    assert target_output.hidden_states_before_norm.shape == (
-        1,
-        cfg.hc_mult * cfg.hidden_size,
-    )
-    assert torch.isfinite(target_output.hidden_states_before_norm).all()
-
-    bonus_token = target_output.logits.argmax(dim=-1).to(torch.int32)
-    req.cached_len = req.device_len - 1
-    mtp_batch = Batch(reqs=[req], phase="decode")
-    mtp_batch.padded_reqs = mtp_batch.reqs
-    mtp_batch.input_ids = bonus_token
-    mtp_batch.positions = torch.tensor([req.device_len - 1], dtype=torch.int32)
-    mtp_batch.out_loc = ctx.page_table[
-        torch.tensor([req.table_idx], dtype=torch.long),
-        mtp_batch.positions.long(),
-    ]
-    ctx.attn_backend.prepare_metadata(mtp_batch)
-
-    with ctx.forward_batch(mtp_batch):
-        mtp_output = model.mtp_forward_one_step(
-            bonus_token,
-            target_output.hidden_states_before_norm,
-        )
-
-    assert mtp_output.logits.shape == (1, cfg.vocab_size)
-    assert mtp_output.hidden_states.shape == (1, cfg.hidden_size)
-    assert mtp_output.hidden_states_before_norm.shape == (
-        1,
-        cfg.hc_mult * cfg.hidden_size,
-    )
-    assert torch.isfinite(mtp_output.logits).all()
 
 
 def test_deepseek_v4_ratio4_prefill_forward_fallback_reaches_logits():
@@ -568,7 +478,6 @@ def test_deepseek_v4_prepare_releases_marlin_weights_after_all_prebuilds(monkeyp
     calls: list[tuple[str, int]] = []
 
     for idx, layer in enumerate(model.layers.op_list):
-
         def fake_prepare(*, release_original=False, idx=idx):
             assert release_original is False
             calls.append(("prebuild", idx))
@@ -621,7 +530,6 @@ def test_deepseek_v4_prepare_does_not_release_after_prebuild_failure(monkeypatch
     calls: list[tuple[str, int]] = []
 
     for idx, layer in enumerate(model.layers.op_list):
-
         def fake_prepare(*, release_original=False, idx=idx):
             assert release_original is False
             calls.append(("prebuild", idx))

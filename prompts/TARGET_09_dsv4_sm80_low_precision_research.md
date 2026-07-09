@@ -37,7 +37,9 @@ algorithm, prove why it is simpler, correct, and faster before integrating it.
 
 ## Current Decision
 
-Pause TARGET 09 and explore TARGET 11 MTP speculative decoding first.
+TARGET 09 remains deferred.  TARGET 11 MTP speculative decoding was explored
+after the first low-precision pass and is now paused for release, so it is no
+longer the active reason to keep TARGET 09 closed.
 
 The most recent low-precision evidence did not show an obvious short win:
 
@@ -114,9 +116,7 @@ Reopen FP8 KV/cache only if:
 
 ## Current Recommendation
 
-Keep TARGET 09 deferred.  The active next route is:
-
-```text
-prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md
-```
-
+Keep TARGET 09 deferred until a fresh profile or memory ledger shows that
+low-precision work is the best next lever.  After MTP cleanup, first establish a
+non-MTP post-cleanup speed and correctness baseline on the promoted TARGET 10
+path.

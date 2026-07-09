@@ -49,7 +49,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed prefix baseline plus SWA/metadata history | Built DSV4 radix prefix cache, Route-B ownership, SWA lifecycle work, and direct replay metadata cleanup; detailed child targets remain as history for prefix/SWA correctness and capacity work. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | deferred | Low-precision research is paused after the INT8 MoE feasibility pass did not show an obvious short win; keep the evidence for later INT8/FP8 work. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
-| TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | active MTP route | MTP weights/oracle, V1 sidecar, frozen-KV rollback, row0/`wo_a`, row/depth, `bs=4`, `bs=5`, path census, 11.8 contract, 11.9 explicit SGLang-shaped runtime, 11.10 attention/KV parity, 11.11 `wo_b` parity, 11.12 downstream census, 11.13 operator harness, and 11.14 q/wq_b fix narrowed the blocker to exact-input MoE output drift; next is TARGET 11.15 MoE output sub-boundary parity. |
+| TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | paused and archived | MTP speculative decoding was investigated and preserved on `dsv4-mtp-paused-reference`, but the current target-verify runtime failed the no-spec target decode equivalence contract.  Current release branch removes active MTP runtime/opt-ins and should establish a post-MTP-cleanup non-MTP baseline. |
 
 ## Current Milestones
 
@@ -134,7 +134,11 @@ TARGET 09 low-precision work is now summarized in `prompts/TARGET_09_dsv4_sm80_l
 - INT8 MoE remains a possible research lane, but the feasibility pass did not yet identify a low-risk W8A8 backend/quantization path that clearly beats the current MXFP4/WNA16 Marlin expert route.
 - FP8 KV/cache should not proceed as a broad E2E feature until a fresh memory ledger shows real ROI after SWA lifecycle and Marlin release capacity improvements.
 - Dense FP8 projection is currently a memory/capacity feature, not a throughput win.
-- TARGET 09 is deferred while TARGET 11 MTP speculative decoding is explored.
+- TARGET 09 is deferred until a fresh profile or memory ledger makes
+  low-precision work clearly valuable again.
+- TARGET 11 MTP is paused for release; its code/debug history is preserved on
+  `dsv4-mtp-paused-reference`, and fine-grained prompts are archived under
+  `prompts/archive/target11/`.
 
 ## Archive Policy
 
@@ -145,20 +149,23 @@ prompts/archive/target07/
 prompts/archive/target08/
 prompts/archive/target09/
 prompts/archive/target10/
+prompts/archive/target11/
 ```
 
 For new child threads, start from:
 
 1. `prompts/target.md`
-2. the active target prompt, currently
-   `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md`
-3. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
+2. the current route prompt for the task; after MTP cleanup there is no active
+   TARGET 11 child prompt
+3. `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` only for the MTP
+   pause report and future restart conditions
+4. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
    milestone history
-4. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache history and
+5. `prompts/TARGET_08_radix_prefix_dsv4.md` for prefix-cache history and
    SWA/cache ownership history
-5. `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` for the
+6. `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` for the
    closed communication default and rollback policy
-6. `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` only when reopening
+7. `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` only when reopening
    deferred low-precision research
 
 Do not ask new threads to read every archived prompt unless they need exact

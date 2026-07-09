@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -20,7 +19,6 @@ from minisgl.utils import (
     div_even,
     dsv4_direct_copy_nvtx,
     dsv4_memory_debug,
-    dsv4_mtp_debug,
     dsv4_owner_timing,
     dsv4_prefix_debug,
 )
@@ -35,9 +33,15 @@ _MARLIN_WNA16_KEEP_HIDDEN_REF_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_KEEP_HIDDEN
 _MARLIN_WNA16_FORCE_PREPACKED_RAW_PRESENT_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_FORCE_PREPACKED_WITH_RAW_PRESENT"
 )
-_MARLIN_WNA16_RELEASE_LAYER_FILTER_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER"
-_MARLIN_WNA16_RELEASE_WEIGHTS_ONLY_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_WEIGHTS_ONLY"
-_MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_SCALES_ONLY"
+_MARLIN_WNA16_RELEASE_LAYER_FILTER_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_LAYER_FILTER"
+)
+_MARLIN_WNA16_RELEASE_WEIGHTS_ONLY_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_WEIGHTS_ONLY"
+)
+_MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_SCALES_ONLY"
+)
 _MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_AFTER_GRAPH_CAPTURE"
 )
@@ -45,55 +49,30 @@ _MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMI
 _MARLIN_WNA16_POISON_HIDDEN_REF_PATTERN_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_HIDDEN_REF_PATTERN"
 )
-_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
-_MARLIN_WNA16_QUARANTINE_BYTES_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
-_MARLIN_WNA16_QUARANTINE_PATTERN_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
-_MARLIN_WNA16_POISON_THEN_FREE_ENV = dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV
+_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
+)
+_MARLIN_WNA16_QUARANTINE_BYTES_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
+)
+_MARLIN_WNA16_QUARANTINE_PATTERN_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
+)
+_MARLIN_WNA16_POISON_THEN_FREE_ENV = (
+    dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV
+)
 _MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV = (
     dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV
 )
 _MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV = (
     dsv4_memory_debug.DSV4_MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV
 )
-_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS_ENV = "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS"
+_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS_ENV = (
+    "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_LAYERS"
+)
 _MARLIN_WNA16_CACHE_INTEGRITY_MAX_FORWARD_LOGS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_MAX_FORWARD_LOGS"
 )
-DSV4_EXPERIMENTAL_MTP_ENV = "MINISGL_DSV4_EXPERIMENTAL_MTP"
-DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_ENV = (
-    "MINISGL_DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH"
-)
-DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_TIMING_ENV = (
-    "MINISGL_DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_TIMING"
-)
-DSV4_MTP_Q_WQB_CONTRACT_ORACLE_ENV = "MINISGL_DSV4_MTP_Q_WQB_CONTRACT_ORACLE"
-DSV4_MTP_Q_WQB_TARGET_NORMAL_SHAPE_ENV = (
-    "MINISGL_DSV4_MTP_Q_WQB_TARGET_NORMAL_SHAPE"
-)
-DSV4_MTP_Q_WQB_TARGET_FULL_ROWS_ENV = "MINISGL_DSV4_MTP_Q_WQB_TARGET_FULL_ROWS"
-DSV4_MTP_Q_WQB_GLOBAL_ROW_INVARIANT_ENV = (
-    "MINISGL_DSV4_MTP_Q_WQB_GLOBAL_ROW_INVARIANT"
-)
-DSV4_MTP_Q_WQB_REFERENCE_GATE_ENV = "MINISGL_DSV4_MTP_Q_WQB_REFERENCE_GATE"
-DSV4_MTP_SHARED_EXPERT_MICROBENCH_ENV = (
-    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH"
-)
-DSV4_MTP_SHARED_EXPERT_MICROBENCH_RANKS_ENV = (
-    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH_RANKS"
-)
-DSV4_MTP_SHARED_EXPERT_MICROBENCH_POSITION_ENV = (
-    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH_POSITION"
-)
-DSV4_MTP_SHARED_EXPERT_MICROBENCH_TOKEN_ENV = (
-    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH_TOKEN"
-)
-DSV4_MTP_SHARED_EXPERT_MICROBENCH_MAX_RECORDS_ENV = (
-    "MINISGL_DSV4_MTP_SHARED_EXPERT_MICROBENCH_MAX_RECORDS"
-)
-
-
-def dsv4_experimental_mtp_enabled() -> bool:
-    return dsv4_kernel.dsv4_env_flag(DSV4_EXPERIMENTAL_MTP_ENV)
 
 
 def _dsv4_capture_nvtx(name: str):
@@ -255,624 +234,7 @@ def _capture_debug_activation(
             include_integrity=True,
             extra={"activation_name": name},
         )
-    dsv4_mtp_debug.record_row0_tensor(batch, name, tensor)
     dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
-
-
-def _dsv4_debug_batch() -> Batch | None:
-    try:
-        return get_global_ctx().batch
-    except Exception:
-        return None
-
-
-def _dsv4_debug_positions(batch: Batch | None, *, device: torch.device) -> torch.Tensor | None:
-    positions = getattr(batch, "positions", None)
-    if not isinstance(positions, torch.Tensor) or positions.numel() == 0:
-        return None
-    try:
-        return positions.to(device=device, dtype=torch.long)
-    except Exception:
-        return positions
-
-
-def _dsv4_is_target_verify_batch(batch: Batch | None) -> bool:
-    return bool(getattr(batch, "dsv4_target_verify_metadata", None) is not None)
-
-
-def _dsv4_target_verify_moe_microbatch_enabled() -> bool:
-    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_ENV)
-
-
-def _dsv4_target_verify_moe_microbatch_timing_enabled() -> bool:
-    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_TIMING_ENV)
-
-
-def _dsv4_mtp_q_wqb_contract_oracle_enabled() -> bool:
-    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_CONTRACT_ORACLE_ENV)
-
-
-def _dsv4_mtp_q_wqb_target_normal_shape_enabled() -> bool:
-    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_TARGET_NORMAL_SHAPE_ENV)
-
-
-def _dsv4_mtp_q_wqb_target_full_rows_enabled() -> bool:
-    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_TARGET_FULL_ROWS_ENV)
-
-
-def _dsv4_mtp_q_wqb_global_row_invariant_enabled() -> bool:
-    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_GLOBAL_ROW_INVARIANT_ENV)
-
-
-def _dsv4_mtp_q_wqb_reference_gate_enabled() -> bool:
-    return dsv4_kernel.dsv4_env_flag(DSV4_MTP_Q_WQB_REFERENCE_GATE_ENV)
-
-
-def _dsv4_mtp_shared_expert_microbench_enabled(layer_id: int | None = None) -> bool:
-    if not dsv4_kernel.dsv4_env_flag(DSV4_MTP_SHARED_EXPERT_MICROBENCH_ENV):
-        return False
-    if layer_id is not None and not dsv4_mtp_debug.operator_parity_layer_enabled(layer_id):
-        return False
-    raw = os.environ.get(DSV4_MTP_SHARED_EXPERT_MICROBENCH_RANKS_ENV, "").strip()
-    if not raw:
-        return True
-    try:
-        rank = int(get_tp_info().rank)
-        selected: set[int] | None = set()
-        if raw.lower() in {"all", "*"}:
-            selected = None
-        else:
-            for part in raw.split(","):
-                token = part.strip()
-                if not token:
-                    continue
-                if "-" in token:
-                    start_s, end_s = token.split("-", 1)
-                    start, end = int(start_s), int(end_s)
-                    if end < start:
-                        start, end = end, start
-                    selected.update(range(start, end + 1))
-                else:
-                    selected.add(int(token))
-    except Exception:
-        return True
-    return selected is None or rank in selected
-
-
-def _dsv4_mtp_shared_expert_microbench_max_records() -> int:
-    raw = os.environ.get(DSV4_MTP_SHARED_EXPERT_MICROBENCH_MAX_RECORDS_ENV, "").strip()
-    if not raw:
-        return 1
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        return 1
-
-
-def _dsv4_mtp_shared_expert_microbench_scalar_filter(
-    env_name: str,
-) -> int | None:
-    raw = os.environ.get(env_name, "").strip()
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
-
-
-@dataclass(frozen=True)
-class _DSV4TargetVerifyMoEMicrobatchContract:
-    batch_size: int
-    verify_width: int
-    rows: int
-    row_order: str
-    chunk_rows: int
-    chunk_count: int
-    active_rows: int
-    padded_rows: int
-    row_depths: tuple[int, ...]
-    row_to_batch_index: tuple[int, ...]
-    row_to_parent_batch_index: tuple[int, ...]
-    active_row_mask: tuple[bool, ...]
-    padded_row_mask: tuple[bool, ...]
-    source_rows_per_chunk: tuple[tuple[int, ...], ...]
-
-    def as_record(self) -> dict[str, object]:
-        return {
-            "batch_size": int(self.batch_size),
-            "verify_width": int(self.verify_width),
-            "rows": int(self.rows),
-            "row_order": self.row_order,
-            "chunk_rows": int(self.chunk_rows),
-            "chunk_count": int(self.chunk_count),
-            "active_rows": int(self.active_rows),
-            "padded_rows": int(self.padded_rows),
-            "chunking": "contiguous_flattened_chunks",
-            "row_depths": [int(x) for x in self.row_depths],
-            "row_to_batch_index": [int(x) for x in self.row_to_batch_index],
-            "row_to_parent_batch_index": [
-                int(x) for x in self.row_to_parent_batch_index
-            ],
-            "active_row_mask": [bool(x) for x in self.active_row_mask],
-            "padded_row_mask": [bool(x) for x in self.padded_row_mask],
-            "source_rows_per_chunk": [
-                [int(row) for row in rows] for rows in self.source_rows_per_chunk
-            ],
-        }
-
-
-@dataclass(frozen=True)
-class _DSV4TargetVerifyQWQBNormalShapeContract:
-    parent_batch_size: int
-    rows: int
-    row_to_parent_batch_index: tuple[int, ...]
-    row_depths: tuple[int, ...]
-    active_rows: int
-    padded_rows: int
-
-    @property
-    def depth_count(self) -> int:
-        if not self.row_depths:
-            return 0
-        return max(self.row_depths) + 1
-
-    def as_record(self) -> dict[str, object]:
-        return {
-            "parent_batch_size": int(self.parent_batch_size),
-            "rows": int(self.rows),
-            "row_to_parent_batch_index": [int(x) for x in self.row_to_parent_batch_index],
-            "row_depths": [int(x) for x in self.row_depths],
-            "active_rows": int(self.active_rows),
-            "padded_rows": int(self.padded_rows),
-            "depth_count": int(self.depth_count),
-            "chunking": "row_depth_parent_batch_slots",
-        }
-
-
-def _dsv4_target_verify_q_wqb_normal_shape_contract(
-    batch: Batch | None,
-    rows: int,
-    *,
-    require_enabled: bool,
-) -> _DSV4TargetVerifyQWQBNormalShapeContract | None:
-    if require_enabled and not _dsv4_mtp_q_wqb_target_normal_shape_enabled():
-        return None
-    if not _dsv4_is_target_verify_batch(batch):
-        return None
-    metadata = getattr(batch, "dsv4_target_verify_metadata", None)
-    if not isinstance(metadata, dict):
-        raise RuntimeError(
-            "DeepSeek V4 target-verify q_wqb normal-shape contract requires "
-            "dsv4_target_verify_metadata."
-        )
-    rows = int(rows)
-    if rows <= 0:
-        raise RuntimeError("DeepSeek V4 target-verify q_wqb contract got no rows.")
-
-    def _int_list(name: str) -> list[int]:
-        value = metadata.get(name)
-        if isinstance(value, torch.Tensor):
-            return [int(x) for x in value.detach().reshape(-1).cpu().tolist()]
-        if isinstance(value, (list, tuple)):
-            return [int(x) for x in value]
-        return []
-
-    row_to_parent = _int_list("row_to_parent_batch_index")
-    if len(row_to_parent) != rows:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify q_wqb normal-shape contract cannot derive "
-            "normal row slots: metadata.row_to_parent_batch_index is missing or "
-            f"has length {len(row_to_parent)} for rows={rows}."
-        )
-    try:
-        parent_batch_size = int(metadata.get("parent_batch_size", 0))
-    except (TypeError, ValueError):
-        parent_batch_size = 0
-    if parent_batch_size <= 0:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify q_wqb normal-shape contract cannot derive "
-            "normal row count: metadata.parent_batch_size is missing."
-        )
-    if any(slot < 0 or slot >= parent_batch_size for slot in row_to_parent):
-        raise RuntimeError(
-            "DeepSeek V4 target-verify q_wqb normal-shape contract got an invalid "
-            f"parent row slot: slots={row_to_parent[:16]}, "
-            f"parent_batch_size={parent_batch_size}."
-        )
-
-    row_depths = _int_list("row_depths")
-    if len(row_depths) != rows:
-        row_depths = list(range(rows))
-    active_mask = metadata.get("active_row_mask")
-    padded_mask = metadata.get("padded_row_mask")
-    active_rows = (
-        sum(1 for value in active_mask if bool(value))
-        if isinstance(active_mask, (list, tuple))
-        else rows
-    )
-    padded_rows = (
-        sum(1 for value in padded_mask if bool(value))
-        if isinstance(padded_mask, (list, tuple))
-        else 0
-    )
-    return _DSV4TargetVerifyQWQBNormalShapeContract(
-        parent_batch_size=parent_batch_size,
-        rows=rows,
-        row_to_parent_batch_index=tuple(row_to_parent),
-        row_depths=tuple(int(x) for x in row_depths),
-        active_rows=int(active_rows),
-        padded_rows=int(padded_rows),
-    )
-
-
-def _dsv4_target_verify_moe_microbatch_contract(
-    batch: Batch | None,
-    rows: int,
-) -> _DSV4TargetVerifyMoEMicrobatchContract | None:
-    if not _dsv4_target_verify_moe_microbatch_enabled():
-        return None
-    if not _dsv4_is_target_verify_batch(batch):
-        return None
-    metadata = getattr(batch, "dsv4_target_verify_metadata", None)
-    if not isinstance(metadata, dict):
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch requires "
-            "dsv4_target_verify_metadata."
-        )
-    rows = int(rows)
-    if rows <= 0:
-        raise RuntimeError("DeepSeek V4 target-verify MoE microbatch got no rows.")
-
-    extend_lens = metadata.get("extend_lens")
-    if not isinstance(extend_lens, (list, tuple)) or not extend_lens:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch cannot derive B: "
-            "metadata.extend_lens is missing."
-        )
-    batch_size = int(len(extend_lens))
-    if batch_size <= 0:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch cannot derive a positive B."
-        )
-    live_batch_size = int(getattr(batch, "size", 0) or len(getattr(batch, "reqs", [])) or 0)
-    if live_batch_size != batch_size:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch B mismatch: "
-            f"metadata B={batch_size}, batch.size={live_batch_size}."
-        )
-
-    raw_width = metadata.get("speculative_num_draft_tokens")
-    try:
-        verify_width = int(raw_width)
-    except (TypeError, ValueError):
-        verify_width = 0
-    if verify_width <= 0:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch cannot derive W: "
-            "metadata.speculative_num_draft_tokens is missing."
-        )
-    if any(int(length) != verify_width for length in extend_lens):
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch requires fixed-width rows: "
-            f"extend_lens={list(extend_lens)}, W={verify_width}."
-        )
-    if rows != batch_size * verify_width:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch shape mismatch: "
-            f"rows={rows}, B={batch_size}, W={verify_width}."
-        )
-
-    row_depths = metadata.get("row_depths")
-    if not isinstance(row_depths, (list, tuple)) or len(row_depths) != rows:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch cannot derive row order: "
-            "metadata.row_depths is missing or has the wrong length."
-        )
-    depth_values = [int(value) for value in row_depths]
-    request_major = [
-        depth for _request in range(batch_size) for depth in range(verify_width)
-    ]
-    depth_major = [
-        depth for depth in range(verify_width) for _request in range(batch_size)
-    ]
-    if depth_values == request_major:
-        row_order = "request_major"
-    elif depth_values == depth_major:
-        row_order = "depth_major"
-    else:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch cannot generalize row order: "
-            f"row_depths_head={depth_values[: min(len(depth_values), 16)]}, "
-            f"B={batch_size}, W={verify_width}."
-        )
-
-    active_mask = metadata.get("active_row_mask")
-    padded_mask = metadata.get("padded_row_mask")
-    if not isinstance(active_mask, (list, tuple)) or len(active_mask) != rows:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch requires active_row_mask "
-            "with one entry per row."
-        )
-    if not isinstance(padded_mask, (list, tuple)) or len(padded_mask) != rows:
-        raise RuntimeError(
-            "DeepSeek V4 target-verify MoE microbatch requires padded_row_mask "
-            "with one entry per row."
-        )
-    active_rows = sum(1 for value in active_mask if bool(value))
-    padded_rows = sum(1 for value in padded_mask if bool(value))
-    row_to_batch = metadata.get("row_to_batch_index")
-    if isinstance(row_to_batch, (list, tuple)) and len(row_to_batch) == rows:
-        row_to_batch_values = tuple(int(value) for value in row_to_batch)
-    else:
-        row_to_batch_values = tuple()
-    row_to_parent = metadata.get("row_to_parent_batch_index")
-    if isinstance(row_to_parent, (list, tuple)) and len(row_to_parent) == rows:
-        row_to_parent_values = tuple(int(value) for value in row_to_parent)
-    else:
-        row_to_parent_values = tuple()
-    chunk_rows = batch_size
-    source_rows_per_chunk = tuple(
-        tuple(range(start, min(start + chunk_rows, rows)))
-        for start in range(0, rows, chunk_rows)
-    )
-
-    return _DSV4TargetVerifyMoEMicrobatchContract(
-        batch_size=batch_size,
-        verify_width=verify_width,
-        rows=rows,
-        row_order=row_order,
-        chunk_rows=chunk_rows,
-        chunk_count=verify_width,
-        active_rows=active_rows,
-        padded_rows=padded_rows,
-        row_depths=tuple(depth_values),
-        row_to_batch_index=row_to_batch_values,
-        row_to_parent_batch_index=row_to_parent_values,
-        active_row_mask=tuple(bool(value) for value in active_mask),
-        padded_row_mask=tuple(bool(value) for value in padded_mask),
-        source_rows_per_chunk=source_rows_per_chunk,
-    )
-
-
-def _dsv4_moe_needs_router_logits() -> bool:
-    return any(
-        dsv4_mtp_debug.operator_parity_enabled(name)
-        for name in ("router_logits", "topk_ids", "topk_weights")
-    )
-
-
-def _dsv4_moe_tensor_head(tensor: torch.Tensor | None, *, limit: int = 16) -> list[object]:
-    if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
-        return []
-    try:
-        flat = tensor.detach().reshape(-1)[: int(limit)].cpu()
-        values = flat.tolist()
-        if not isinstance(values, list):
-            values = [values]
-        out: list[object] = []
-        for value in values:
-            if hasattr(value, "item"):
-                value = value.item()
-            if isinstance(value, bool):
-                out.append(bool(value))
-            elif isinstance(value, int):
-                out.append(int(value))
-            else:
-                out.append(float(value))
-        return out
-    except Exception:
-        return []
-
-
-def _dsv4_moe_tensor_brief(tensor: torch.Tensor | None) -> dict[str, object]:
-    if not isinstance(tensor, torch.Tensor):
-        return {"available": False}
-    info: dict[str, object] = {
-        "available": True,
-        "shape": [int(x) for x in tensor.shape],
-        "dtype": str(tensor.dtype),
-        "device": str(tensor.device),
-        "stride": [int(x) for x in tensor.stride()],
-        "storage_offset": int(tensor.storage_offset()),
-        "data_ptr": int(tensor.data_ptr()),
-        "is_contiguous": bool(tensor.is_contiguous()),
-        "head": _dsv4_moe_tensor_head(tensor, limit=16),
-    }
-    if tensor.ndim > 1 and tensor.shape[0] > 0:
-        info["row0_head"] = _dsv4_moe_tensor_head(tensor[0], limit=16)
-    return info
-
-
-def _dsv4_moe_row0_checksum(tensor: torch.Tensor | None) -> str | None:
-    if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0 or tensor.ndim == 0:
-        return None
-    try:
-        row = tensor.detach()[0].float().contiguous().cpu()
-        return hashlib.sha256(row.numpy().tobytes()).hexdigest()[:16]
-    except Exception:
-        return None
-
-
-def _dsv4_moe_reduce_tensor_census(tensor: torch.Tensor | None) -> dict[str, object]:
-    info = _dsv4_moe_tensor_brief(tensor)
-    checksum = _dsv4_moe_row0_checksum(tensor)
-    if checksum is not None:
-        info["row0_checksum"] = checksum
-    return info
-
-
-def _dsv4_moe_reduce_census_enabled() -> bool:
-    return dsv4_mtp_debug.operator_parity_enabled(
-        "expert_reduce_output"
-    ) or dsv4_mtp_debug.operator_parity_enabled("moe_output")
-
-
-def _dsv4_moe_reduce_tensor_census_if_enabled(
-    tensor: torch.Tensor | None,
-) -> dict[str, object]:
-    if not _dsv4_moe_reduce_census_enabled():
-        return {"available": False, "disabled": True}
-    return _dsv4_moe_reduce_tensor_census(tensor)
-
-
-def _dsv4_moe_preserve_pre_reduce_tensor_enabled(layer_id: int) -> bool:
-    operator_trace = dsv4_mtp_debug.operator_parity_layer_enabled(layer_id) and any(
-        dsv4_mtp_debug.operator_parity_enabled(name)
-        for name in (
-            "expert_aggregate_before_reduce",
-            "expert_reduce_output",
-            "moe_output",
-        )
-    )
-    return operator_trace or dsv4_mtp_debug.moe_contract_oracle_enabled(layer_id)
-
-
-def _dsv4_moe_comm_backend_name(comm: DistributedCommunicator) -> str:
-    try:
-        return type(comm.plugins[-1]).__name__
-    except Exception:
-        return "unknown"
-
-
-def _dsv4_moe_reduce_boundary_base_extra(
-    *,
-    stage: str,
-    tp_size: int,
-    comm: DistributedCommunicator,
-    reduce_label: str,
-    pre_reduce: torch.Tensor,
-) -> dict[str, object]:
-    try:
-        tp_rank = int(get_tp_info().rank)
-    except Exception:
-        tp_rank = -1
-    return {
-        "stage": stage,
-        "tp_size": int(tp_size),
-        "tp_rank": tp_rank,
-        "pre_reduce": _dsv4_moe_reduce_tensor_census_if_enabled(pre_reduce),
-        "local_rank_contribution": _dsv4_moe_reduce_tensor_census_if_enabled(pre_reduce),
-        "communication_backend": _dsv4_moe_comm_backend_name(comm),
-        "communication_label": str(reduce_label),
-        "communication_op": "all_reduce" if tp_size > 1 else "none",
-        "all_reduce": bool(tp_size > 1),
-        "reduce_scatter": False,
-        "skip_post_experts_all_reduce": False,
-        "final_cast_site": "moe_output",
-    }
-
-
-def _dsv4_moe_expert_histogram(indices: torch.Tensor | None) -> list[dict[str, int]]:
-    if not isinstance(indices, torch.Tensor) or indices.numel() == 0:
-        return []
-    try:
-        flat = indices.detach().reshape(-1).cpu().long()
-        valid = flat[flat >= 0]
-        if valid.numel() == 0:
-            return []
-        experts, counts = torch.unique(valid, sorted=True, return_counts=True)
-        return [
-            {"expert_id": int(expert), "count": int(count)}
-            for expert, count in zip(experts.tolist()[:32], counts.tolist()[:32])
-        ]
-    except Exception:
-        return []
-
-
-def _dsv4_moe_route_extra(
-    *,
-    weights: torch.Tensor | None,
-    indices: torch.Tensor | None,
-    input_ids: torch.Tensor | None = None,
-    moe_plan: dsv4_kernel.DSV4MoEExecutionPlan | None = None,
-    reduce_once: bool | None = None,
-    hash_topk: bool | None = None,
-    stage: str | None = None,
-) -> dict[str, object]:
-    extra: dict[str, object] = {}
-    if stage is not None:
-        extra["stage"] = stage
-    if reduce_once is not None:
-        extra["reduce_once"] = bool(reduce_once)
-    if hash_topk is not None:
-        extra["hash_topk"] = bool(hash_topk)
-    if isinstance(input_ids, torch.Tensor):
-        extra["input_ids"] = _dsv4_moe_tensor_brief(input_ids)
-    if isinstance(indices, torch.Tensor):
-        extra.update(
-            {
-                "topk_ids": _dsv4_moe_tensor_brief(indices),
-                "expert_histogram": _dsv4_moe_expert_histogram(indices),
-            }
-        )
-        if indices.ndim >= 2:
-            extra["tokens"] = int(indices.shape[0])
-            extra["topk"] = int(indices.shape[1])
-    if isinstance(weights, torch.Tensor):
-        extra["topk_weights"] = _dsv4_moe_tensor_brief(weights)
-    if moe_plan is not None:
-        route_plan = moe_plan.route_plan
-        extra["moe_plan"] = {
-            "tokens": int(moe_plan.tokens),
-            "hidden": int(moe_plan.hidden),
-            "num_experts": int(moe_plan.num_experts),
-            "reduce_once": bool(moe_plan.reduce_once),
-            "final_reduce_label": str(moe_plan.final_reduce_label),
-            "route_count": int(route_plan.route_count),
-            "topk": int(route_plan.topk),
-            "block_size_m": int(route_plan.block_size_m),
-            "sorted_route_ids": _dsv4_moe_tensor_brief(route_plan.sorted_route_ids),
-            "expert_ids": _dsv4_moe_tensor_brief(route_plan.expert_ids),
-            "num_tokens_post_padded": _dsv4_moe_tensor_brief(
-                route_plan.num_tokens_post_padded
-            ),
-        }
-    return extra
-
-
-def _dsv4_moe_record_operator(
-    batch: Batch | None,
-    *,
-    operator_name: str,
-    layer_id: int,
-    input_tensor: torch.Tensor | None,
-    output_tensor: torch.Tensor | None,
-    positions: torch.Tensor | None,
-    path: str,
-    params: dict[str, object] | None = None,
-    extra: dict[str, object] | None = None,
-    input_row0: torch.Tensor | None = None,
-) -> None:
-    if not dsv4_mtp_debug.operator_parity_enabled(operator_name):
-        return
-    if input_row0 is None:
-        input_row0 = dsv4_mtp_debug.clone_operator_row0_input(operator_name, input_tensor)
-    dsv4_mtp_debug.record_operator_capture(
-        batch,
-        operator_name=operator_name,
-        layer_id=int(layer_id),
-        input_row0=input_row0,
-        input_tensor=input_tensor,
-        output_tensor=output_tensor,
-        positions=positions,
-        path=path,
-        params=params,
-        extra=extra,
-    )
-
-
-def _dsv4_moe_router_logits_debug(
-    gate: "DSV4MoEGate",
-    flat: torch.Tensor,
-) -> torch.Tensor | None:
-    if not _dsv4_moe_needs_router_logits():
-        return None
-    try:
-        weight = _cached_gate_fp32_weight(gate, "_cached_gate_weight_fp32", gate.weight)
-        return F.linear(flat.float(), weight.float())
-    except Exception:
-        return None
 
 
 def _debug_can_materialize_tensor(tensor: torch.Tensor) -> bool:
@@ -985,10 +347,7 @@ def _owner_timing_prefix(owner_label: str) -> str:
         return "dsv4.owner.attn.q_wqb"
     if owner_label.endswith(".attn.wo_b") or ".attn.wo_b" in owner_label:
         return "dsv4.owner.attn.wo_b"
-    if (
-        owner_label.endswith(".shared_experts.down_proj")
-        or ".shared_experts.down_proj" in owner_label
-    ):
+    if owner_label.endswith(".shared_experts.down_proj") or ".shared_experts.down_proj" in owner_label:
         return "dsv4.owner.shared_down"
     return f"dsv4.owner.{owner_label}"
 
@@ -1278,7 +637,9 @@ def _linear_cached_bf16_weight(
     owner_label: str,
 ) -> torch.Tensor:
     if not dsv4_owner_timing.enabled():
-        if not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE):
+        if not dsv4_kernel.dsv4_env_flag(
+            dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
+        ):
             return F.linear(x, weight)
         rows = x.numel() // x.shape[-1]
         if rows > 16:
@@ -1341,189 +702,6 @@ def _linear_cached_bf16_weight(
         {**metadata, "output": dsv4_owner_timing.tensor_metadata(y)},
     ):
         return y.reshape(*x.shape[:-1], weight_t.shape[-1])
-
-
-def _fp8_cached_bf16_weight_local_projection(
-    x: torch.Tensor,
-    cached_weight: torch.Tensor,
-    *,
-    owner: object,
-    cache_name: str,
-    owner_label: str,
-    accum_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
-    if accum_dtype is not None:
-        x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
-        return F.linear(
-            x_quant.to(accum_dtype),
-            cached_weight.to(accum_dtype),
-        ).to(x.dtype)
-    if not dsv4_owner_timing.enabled():
-        x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
-        return _linear_cached_bf16_weight(
-            x_quant,
-            cached_weight,
-            owner=owner,
-            cache_name=cache_name,
-            owner_label=owner_label,
-        )
-
-    prefix = _owner_timing_prefix(owner_label)
-    metadata = {
-        "owner_label": owner_label,
-        "input": dsv4_owner_timing.tensor_metadata(x),
-        "weight": dsv4_owner_timing.tensor_metadata(cached_weight),
-    }
-    with dsv4_owner_timing.maybe_cuda_range(f"{prefix}.bf16_cache_local_total", metadata):
-        with dsv4_owner_timing.maybe_cuda_range(
-            f"{prefix}.bf16_cache_activation_quantize",
-            metadata,
-        ):
-            x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
-        return _linear_cached_bf16_weight(
-            x_quant,
-            cached_weight,
-            owner=owner,
-            cache_name=cache_name,
-            owner_label=owner_label,
-        )
-
-
-def _fp8_cached_bf16_weight_local_projection_row_invariant(
-    x: torch.Tensor,
-    cached_weight: torch.Tensor,
-    *,
-    owner: object,
-    cache_name: str,
-    owner_label: str,
-    accum_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
-    rows = x.numel() // x.shape[-1]
-    if rows <= 1:
-        return _fp8_cached_bf16_weight_local_projection(
-            x,
-            cached_weight,
-            owner=owner,
-            cache_name=cache_name,
-            owner_label=owner_label,
-            accum_dtype=accum_dtype,
-        )
-    x_2d = x.reshape(rows, x.shape[-1])
-    chunks = [
-        _fp8_cached_bf16_weight_local_projection(
-            x_2d[row : row + 1],
-            cached_weight,
-            owner=owner,
-            cache_name=cache_name,
-            owner_label=owner_label,
-            accum_dtype=accum_dtype,
-        )
-        for row in range(rows)
-    ]
-    y = torch.cat(chunks, dim=0)
-    return y.reshape(*x.shape[:-1], y.shape[-1])
-
-
-def _fp8_cached_bf16_weight_local_projection_target_normal_shape(
-    x: torch.Tensor,
-    cached_weight: torch.Tensor,
-    *,
-    owner: object,
-    cache_name: str,
-    owner_label: str,
-    contract: _DSV4TargetVerifyQWQBNormalShapeContract,
-    dummy_fill: str = "zero",
-) -> torch.Tensor:
-    rows = x.numel() // x.shape[-1]
-    if rows != int(contract.rows):
-        raise RuntimeError(
-            "DeepSeek V4 q_wqb normal-shape contract row mismatch: "
-            f"x rows={rows}, contract rows={contract.rows}."
-        )
-    if rows <= 0:
-        return _fp8_cached_bf16_weight_local_projection(
-            x,
-            cached_weight,
-            owner=owner,
-            cache_name=cache_name,
-            owner_label=owner_label,
-        )
-    x_2d = x.reshape(rows, x.shape[-1])
-    parent_rows = int(contract.parent_batch_size)
-    row_depths = list(contract.row_depths)
-    row_slots = list(contract.row_to_parent_batch_index)
-    output_2d: torch.Tensor | None = None
-    for depth in sorted(set(row_depths)):
-        source_rows = [idx for idx, value in enumerate(row_depths) if int(value) == int(depth)]
-        if not source_rows:
-            continue
-        if dummy_fill == "repeat_first":
-            padded = x_2d[source_rows[0] : source_rows[0] + 1].expand(
-                parent_rows,
-                -1,
-            ).contiguous()
-        else:
-            padded = x_2d.new_zeros((parent_rows, x_2d.shape[-1]))
-        used_slots: set[int] = set()
-        for source_row in source_rows:
-            slot = int(row_slots[source_row])
-            if slot in used_slots:
-                raise RuntimeError(
-                    "DeepSeek V4 q_wqb normal-shape contract got duplicate rows "
-                    f"for depth={depth}, parent slot={slot}."
-                )
-            used_slots.add(slot)
-            padded[slot].copy_(x_2d[source_row])
-        projected = _fp8_cached_bf16_weight_local_projection(
-            padded,
-            cached_weight,
-            owner=owner,
-            cache_name=cache_name,
-            owner_label=owner_label,
-        ).reshape(parent_rows, -1)
-        if output_2d is None:
-            output_2d = x_2d.new_empty((rows, projected.shape[-1]))
-        for source_row in source_rows:
-            output_2d[source_row].copy_(projected[int(row_slots[source_row])])
-    if output_2d is None:
-        raise RuntimeError("DeepSeek V4 q_wqb normal-shape contract produced no rows.")
-    return output_2d.reshape(*x.shape[:-1], output_2d.shape[-1])
-
-
-def _row_invariant_all_reduce(
-    comm: DistributedCommunicator,
-    y: torch.Tensor,
-    *,
-    label: str,
-) -> torch.Tensor:
-    rows = y.numel() // y.shape[-1]
-    if rows <= 1:
-        return comm.all_reduce(y, label=label)
-    y_2d = y.reshape(rows, y.shape[-1])
-    chunks = [
-        comm.all_reduce(y_2d[row : row + 1].contiguous(), label=label)
-        for row in range(rows)
-    ]
-    return torch.cat(chunks, dim=0).reshape_as(y)
-
-
-def _projection_all_reduce(
-    comm: DistributedCommunicator,
-    y: torch.Tensor,
-    *,
-    label: str,
-    row_invariant_reduce: bool = False,
-    reduce_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
-    original_dtype = y.dtype
-    reduce_input = y if reduce_dtype is None or y.dtype == reduce_dtype else y.to(reduce_dtype)
-    if row_invariant_reduce:
-        reduced = _row_invariant_all_reduce(comm, reduce_input, label=label)
-    else:
-        reduced = comm.all_reduce(reduce_input, label=label)
-    if reduced.dtype != original_dtype:
-        reduced = reduced.to(original_dtype)
-    return reduced
 
 
 def _prepare_bf16_pretransposed_report(
@@ -1660,57 +838,6 @@ def _wo_a_bf16_bmm_projection(
     x = o.transpose(0, 1).contiguous()
     y = torch.bmm(x, cached_weight)
     return y.transpose(0, 1).reshape(tokens, num_local_groups * cached_weight.shape[2])
-
-
-def _wo_a_bf16_bmm_projection_row_invariant(
-    o: torch.Tensor,
-    cached_weight: torch.Tensor,
-    *,
-    owner_label: str,
-) -> torch.Tensor:
-    if o.ndim != 3 or o.shape[0] <= 1:
-        return _wo_a_bf16_bmm_projection(
-            o,
-            cached_weight,
-            owner_label=owner_label,
-        )
-    return torch.cat(
-        [
-            _wo_a_bf16_bmm_projection(
-                o[row : row + 1],
-                cached_weight,
-                owner_label=owner_label,
-            )
-            for row in range(o.shape[0])
-        ],
-        dim=0,
-    )
-
-
-def _wo_a_bf16_sglang_style_einsum_projection(
-    o: torch.Tensor,
-    cached_weight: torch.Tensor,
-    *,
-    owner_label: str,
-) -> torch.Tensor:
-    if o.dtype != torch.bfloat16:
-        raise RuntimeError(
-            f"{owner_label} SGLang-style wo_a projection requires bf16 activations, "
-            f"got {o.dtype}."
-        )
-    if cached_weight.dtype != torch.bfloat16:
-        raise RuntimeError(
-            f"{owner_label} SGLang-style wo_a projection requires bf16 cached weight, "
-            f"got {cached_weight.dtype}."
-        )
-    if o.ndim != 3 or cached_weight.ndim != 3:
-        raise RuntimeError(
-            f"{owner_label} SGLang-style wo_a projection expects o=[tokens, groups, d] "
-            f"and weight=[groups, d, rank], got o={tuple(o.shape)} "
-            f"weight={tuple(cached_weight.shape)}."
-        )
-    weight = cached_weight.transpose(1, 2).contiguous()
-    return torch.einsum("tgd,grd->tgr", o, weight).reshape(o.shape[0], -1)
 
 
 def _cached_gate_fp32_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
@@ -1878,10 +1005,6 @@ class DSV4Linear(BaseOP):
         reduce: bool = True,
         reduce_label: str | None = None,
         fp8_gemm: bool | None = None,
-        debug_pre_reduce_name: str | None = None,
-        debug_post_reduce_name: str | None = None,
-        row_invariant_reduce: bool = False,
-        reduce_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         scale = _cached_projection_scale(self, "_dsv4_weight_scale_fp32_contiguous", scale)
@@ -1897,19 +1020,11 @@ class DSV4Linear(BaseOP):
             )
         else:
             y = F.linear(x, self.weight.to(x.dtype))
-        if debug_pre_reduce_name is not None:
-            _capture_debug_activation(debug_pre_reduce_name, y)
         if reduce and self.row_parallel and self._tp_size > 1:
-            label = reduce_label or "dsv4.row_parallel_projection_all_reduce"
-            y = _projection_all_reduce(
-                self._comm,
+            y = self._comm.all_reduce(
                 y,
-                label=label,
-                row_invariant_reduce=row_invariant_reduce,
-                reduce_dtype=reduce_dtype,
+                label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
             )
-        if debug_post_reduce_name is not None:
-            _capture_debug_activation(debug_post_reduce_name, y)
         return y
 
     def prepare_fp8_bf16_weight_cache(
@@ -1973,10 +1088,6 @@ class DSV4Linear(BaseOP):
         owner_label: str,
         reduce: bool = False,
         reduce_label: str | None = None,
-        debug_pre_reduce_name: str | None = None,
-        debug_post_reduce_name: str | None = None,
-        row_invariant_reduce: bool = False,
-        reduce_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         y = _forward_fp8_marlin_weight(
             self,
@@ -1984,19 +1095,11 @@ class DSV4Linear(BaseOP):
             x,
             owner_label=owner_label,
         )
-        if debug_pre_reduce_name is not None:
-            _capture_debug_activation(debug_pre_reduce_name, y)
         if reduce and self.row_parallel and self._tp_size > 1:
-            label = reduce_label or "dsv4.row_parallel_projection_all_reduce"
-            y = _projection_all_reduce(
-                self._comm,
+            y = self._comm.all_reduce(
                 y,
-                label=label,
-                row_invariant_reduce=row_invariant_reduce,
-                reduce_dtype=reduce_dtype,
+                label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
             )
-        if debug_post_reduce_name is not None:
-            _capture_debug_activation(debug_post_reduce_name, y)
         return y
 
     def forward_fp8_cached_bf16_weight(
@@ -2007,12 +1110,6 @@ class DSV4Linear(BaseOP):
         owner_label: str,
         reduce: bool = False,
         reduce_label: str | None = None,
-        debug_pre_reduce_name: str | None = None,
-        debug_post_reduce_name: str | None = None,
-        row_invariant_local: bool = False,
-        row_invariant_reduce: bool = False,
-        local_accum_dtype: torch.dtype | None = None,
-        reduce_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         scale = getattr(self, "weight_scale_inv", None)
         cached_weight = _cached_fp8_bf16_weight(
@@ -2024,60 +1121,46 @@ class DSV4Linear(BaseOP):
             allow_build=False,
             owner_label=owner_label,
         )
-        local_projection = (
-            _fp8_cached_bf16_weight_local_projection_row_invariant
-            if row_invariant_local
-            else _fp8_cached_bf16_weight_local_projection
-        )
-        y = local_projection(
-            x,
-            cached_weight,
-            owner=self,
-            cache_name=cache_name,
-            owner_label=owner_label,
-            accum_dtype=local_accum_dtype,
-        )
-        if debug_pre_reduce_name is not None:
-            _capture_debug_activation(debug_pre_reduce_name, y)
-        if reduce and self.row_parallel and self._tp_size > 1:
-            label = reduce_label or "dsv4.row_parallel_projection_all_reduce"
-            y = _projection_all_reduce(
-                self._comm,
-                y,
-                label=label,
-                row_invariant_reduce=row_invariant_reduce,
-                reduce_dtype=reduce_dtype,
+        if not dsv4_owner_timing.enabled():
+            x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+            y = _linear_cached_bf16_weight(
+                x_quant,
+                cached_weight,
+                owner=self,
+                cache_name=cache_name,
+                owner_label=owner_label,
             )
-        if debug_post_reduce_name is not None:
-            _capture_debug_activation(debug_post_reduce_name, y)
+            if reduce and self.row_parallel and self._tp_size > 1:
+                y = self._comm.all_reduce(
+                    y,
+                    label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
+                )
+            return y
+        prefix = _owner_timing_prefix(owner_label)
+        metadata = {
+            "owner_label": owner_label,
+            "input": dsv4_owner_timing.tensor_metadata(x),
+            "weight": dsv4_owner_timing.tensor_metadata(cached_weight),
+        }
+        with dsv4_owner_timing.maybe_cuda_range(f"{prefix}.bf16_cache_local_total", metadata):
+            with dsv4_owner_timing.maybe_cuda_range(
+                f"{prefix}.bf16_cache_activation_quantize",
+                metadata,
+            ):
+                x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+            y = _linear_cached_bf16_weight(
+                x_quant,
+                cached_weight,
+                owner=self,
+                cache_name=cache_name,
+                owner_label=owner_label,
+            )
+        if reduce and self.row_parallel and self._tp_size > 1:
+            y = self._comm.all_reduce(
+                y,
+                label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
+            )
         return y
-
-    def forward_fp8_cached_bf16_weight_row_invariant(
-        self,
-        x: torch.Tensor,
-        *,
-        cache_name: str,
-        owner_label: str,
-        reduce: bool = False,
-        reduce_label: str | None = None,
-        debug_pre_reduce_name: str | None = None,
-        debug_post_reduce_name: str | None = None,
-        row_invariant_reduce: bool = False,
-        reduce_dtype: torch.dtype | None = None,
-    ) -> torch.Tensor:
-        return self.forward_fp8_cached_bf16_weight(
-            x,
-            cache_name=cache_name,
-            owner_label=owner_label,
-            reduce=reduce,
-            reduce_label=reduce_label,
-            debug_pre_reduce_name=debug_pre_reduce_name,
-            debug_post_reduce_name=debug_post_reduce_name,
-            row_invariant_local=True,
-            row_invariant_reduce=row_invariant_reduce,
-            local_accum_dtype=None,
-            reduce_dtype=reduce_dtype,
-        )
 
 
 class DSV4Compressor(BaseOP):
@@ -2243,13 +1326,7 @@ class DSV4Indexer(BaseOP):
 
 
 class DSV4Attention(BaseOP):
-    def __init__(
-        self,
-        config: ModelConfig,
-        layer_id: int,
-        *,
-        compress_ratio_override: int | None = None,
-    ):
+    def __init__(self, config: ModelConfig, layer_id: int):
         tp = get_tp_info()
         self.layer_id = layer_id
         self.num_heads = config.num_qo_heads
@@ -2262,11 +1339,7 @@ class DSV4Attention(BaseOP):
         self.num_local_groups = div_even(config.o_groups, tp.size)
         self.o_lora_rank = config.o_lora_rank
         self.rms_norm_eps = config.rms_norm_eps
-        ratio = (
-            compress_ratio_override
-            if compress_ratio_override is not None
-            else (config.compress_ratios[layer_id] if layer_id < len(config.compress_ratios) else 0)
-        )
+        ratio = config.compress_ratios[layer_id] if layer_id < len(config.compress_ratios) else 0
         self.compress_ratio = ratio
         self.rope_base = (
             config.compress_rope_theta
@@ -2321,8 +1394,12 @@ class DSV4Attention(BaseOP):
 
     @staticmethod
     def _swa_store_out_loc(attn_backend, batch: Batch | torch.Tensor) -> torch.Tensor:
-        out_loc = batch.out_loc if isinstance(batch, Batch) else batch
-        metadata = getattr(batch, "attn_metadata", None) if isinstance(batch, Batch) else None
+        if isinstance(batch, torch.Tensor):
+            out_loc = batch
+            metadata = None
+        else:
+            out_loc = batch.out_loc
+            metadata = getattr(batch, "attn_metadata", None)
         if isinstance(metadata, DSV4AttentionMetadata):
             cached = getattr(metadata.core_metadata, "swa_out_loc", None)
             rows = int(out_loc.shape[0])
@@ -2500,277 +1577,6 @@ class DSV4Attention(BaseOP):
             attn_sink=self.attn_sink,
         )
 
-    def _q_wqb_per_row_probe(
-        self,
-        q_lora: torch.Tensor,
-        q_batched: torch.Tensor,
-        *,
-        path: str,
-    ) -> dict[str, object] | None:
-        if not dsv4_mtp_debug.operator_parity_enabled("wq_b"):
-            return None
-        rows = q_lora.numel() // q_lora.shape[-1]
-        if rows <= 1:
-            return {
-                "available": False,
-                "reason": "single row",
-                "rows": int(rows),
-            }
-        try:
-            q_lora_2d = q_lora.reshape(rows, q_lora.shape[-1])
-            if dsv4_kernel.dense_fp8_marlin_projection_enabled():
-                chunks = [
-                    self.wq_b.forward_fp8_marlin_weight(
-                        q_lora_2d[row : row + 1],
-                        cache_name=self._q_wqb_marlin_weight_cache_name,
-                        owner_label=self._q_wqb_owner_label,
-                    )
-                    for row in range(rows)
-                ]
-            elif dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
-                chunks = [
-                    self.wq_b.forward_fp8_cached_bf16_weight(
-                        q_lora_2d[row : row + 1],
-                        cache_name=self._q_wqb_bf16_weight_cache_name,
-                        owner_label=self._q_wqb_owner_label,
-                    )
-                    for row in range(rows)
-                ]
-            else:
-                q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
-                    "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
-                )
-                chunks = [
-                    self.wq_b.forward(
-                        q_lora_2d[row : row + 1],
-                        fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
-                    )
-                    for row in range(rows)
-                ]
-            q_per_row = torch.cat(chunks, dim=0).view_as(q_batched)
-            if q_per_row.is_cuda:
-                torch.cuda.synchronize(q_per_row.device)
-            return {
-                "available": True,
-                "source": "same q_wqb path executed one row at a time",
-                "path": path,
-                "rows": int(rows),
-                "per_row_vs_batched": dsv4_mtp_debug.tensor_compare_stats(
-                    q_per_row,
-                    q_batched,
-                ),
-            }
-        except Exception as exc:
-            return {
-                "available": False,
-                "path": path,
-                "rows": int(rows),
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            }
-
-    def _q_wqb_weight_cache_probe(self, *, path: str) -> dict[str, object]:
-        probe: dict[str, object] = {
-            "available": True,
-            "owner_label": self._q_wqb_owner_label,
-            "path": str(path),
-            "dense_fp8_marlin_projection": bool(
-                dsv4_kernel.dense_fp8_marlin_projection_enabled()
-            ),
-            "q_wqb_bf16_weight_cache": bool(
-                dsv4_kernel.dsv4_env_flag(
-                    dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
-                )
-            ),
-            "q_wqb_fp8_gemm": bool(
-                dsv4_kernel.dsv4_sm80_triton_enabled(
-                    "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
-                )
-            ),
-            "source_weight": dsv4_mtp_debug.tensor_probe_record(
-                getattr(self.wq_b, "weight", None)
-            ),
-            "source_scale": dsv4_mtp_debug.tensor_probe_record(
-                getattr(self.wq_b, "weight_scale_inv", None)
-            ),
-        }
-        if dsv4_kernel.dense_fp8_marlin_projection_enabled():
-            cache_name = self._q_wqb_marlin_weight_cache_name
-            cached = getattr(self.wq_b, cache_name, None)
-            probe["cache_name"] = cache_name
-            probe["cache_kind"] = "dense_fp8_marlin"
-            if cached is None:
-                probe["cache"] = {"available": False}
-            else:
-                probe["cache"] = {
-                    "available": True,
-                    "shape": [int(cached.size_n), int(cached.size_k)],
-                    "source_signature": [
-                        {
-                            "data_ptr": int(sig[0]),
-                            "shape": [int(x) for x in sig[1]],
-                            "dtype": str(sig[2]),
-                        }
-                        for sig in getattr(cached, "source_signature", ())
-                    ],
-                    "prepared_weight": dsv4_mtp_debug.tensor_probe_record(
-                        getattr(cached, "weight", None)
-                    ),
-                    "prepared_scale": dsv4_mtp_debug.tensor_probe_record(
-                        getattr(cached, "weight_scale", None)
-                    ),
-                    "workspace": dsv4_mtp_debug.tensor_probe_record(
-                        getattr(cached, "workspace", None)
-                    ),
-                }
-            return probe
-
-        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
-            cache_name = self._q_wqb_bf16_weight_cache_name
-            probe["cache_name"] = cache_name
-            probe["cache_kind"] = "fp8_cached_bf16_weight"
-            probe["cache"] = dsv4_mtp_debug.tensor_probe_record(
-                getattr(self.wq_b, cache_name, None)
-            )
-            return probe
-
-        probe["cache_name"] = None
-        probe["cache_kind"] = "quantized_linear_ref"
-        probe["cache"] = {"available": False, "reason": "no prepared q_wqb cache path"}
-        return probe
-
-    def _q_wqb_contract_oracle_probe(
-        self,
-        q_lora: torch.Tensor,
-        selected_output: torch.Tensor,
-        *,
-        batch: Batch | None,
-        selected_path: str,
-    ) -> dict[str, object] | None:
-        if not _dsv4_mtp_q_wqb_contract_oracle_enabled():
-            return None
-        if not dsv4_mtp_debug.operator_parity_enabled("wq_b"):
-            return None
-        if not dsv4_mtp_debug.operator_parity_layer_enabled(int(self.layer_id)):
-            return None
-        if not _dsv4_is_target_verify_batch(batch):
-            return None
-        rows = q_lora.numel() // q_lora.shape[-1]
-        try:
-            contract = _dsv4_target_verify_q_wqb_normal_shape_contract(
-                batch,
-                rows,
-                require_enabled=False,
-            )
-        except Exception as exc:
-            return {
-                "available": False,
-                "selected_path": str(selected_path),
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            }
-        if contract is None:
-            return {"available": False, "reason": "not a target-verify batch"}
-        try:
-            cached_weight = _cached_fp8_bf16_weight(
-                self.wq_b,
-                self._q_wqb_bf16_weight_cache_name,
-                self.wq_b.weight,
-                getattr(self.wq_b, "weight_scale_inv", None),
-                out_dtype=q_lora.dtype,
-                allow_build=False,
-                owner_label=self._q_wqb_owner_label,
-            )
-            outputs: dict[str, torch.Tensor] = {
-                "selected": selected_output.reshape(rows, -1),
-                "target_row_invariant": _fp8_cached_bf16_weight_local_projection_row_invariant(
-                    q_lora,
-                    cached_weight,
-                    owner=self.wq_b,
-                    cache_name=self._q_wqb_bf16_weight_cache_name,
-                    owner_label=self._q_wqb_owner_label,
-                ).reshape(rows, -1),
-                "target_normal_shape_zero": _fp8_cached_bf16_weight_local_projection_target_normal_shape(
-                    q_lora,
-                    cached_weight,
-                    owner=self.wq_b,
-                    cache_name=self._q_wqb_bf16_weight_cache_name,
-                    owner_label=self._q_wqb_owner_label,
-                    contract=contract,
-                    dummy_fill="zero",
-                ).reshape(rows, -1),
-                "target_normal_shape_repeat": _fp8_cached_bf16_weight_local_projection_target_normal_shape(
-                    q_lora,
-                    cached_weight,
-                    owner=self.wq_b,
-                    cache_name=self._q_wqb_bf16_weight_cache_name,
-                    owner_label=self._q_wqb_owner_label,
-                    contract=contract,
-                    dummy_fill="repeat_first",
-                ).reshape(rows, -1),
-                "target_full_rows": _fp8_cached_bf16_weight_local_projection(
-                    q_lora,
-                    cached_weight,
-                    owner=self.wq_b,
-                    cache_name=self._q_wqb_bf16_weight_cache_name,
-                    owner_label=self._q_wqb_owner_label,
-                ).reshape(rows, -1),
-            }
-            q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
-                "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
-            )
-            outputs["target_reference_gate"] = self.wq_b.forward(
-                q_lora,
-                fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
-            ).reshape(rows, -1)
-            row_records: list[dict[str, object]] = []
-            max_rows = min(rows, 8)
-            for row in range(max_rows):
-                row_outputs = {
-                    name: dsv4_mtp_debug.tensor_probe_record(tensor[row])
-                    for name, tensor in outputs.items()
-                }
-                row_pairwise: dict[str, object] = {}
-                names = list(outputs)
-                for i, lhs_name in enumerate(names):
-                    for rhs_name in names[i + 1 :]:
-                        row_pairwise[f"{lhs_name}_vs_{rhs_name}"] = (
-                            dsv4_mtp_debug.tensor_compare_stats(
-                                outputs[lhs_name][row],
-                                outputs[rhs_name][row],
-                                atol=0.0,
-                                rtol=0.0,
-                            )
-                        )
-                row_records.append(
-                    {
-                        "row": int(row),
-                        "row_depth": int(contract.row_depths[row]),
-                        "parent_batch_index": int(contract.row_to_parent_batch_index[row]),
-                        "outputs": row_outputs,
-                        "pairwise": row_pairwise,
-                    }
-                )
-            return {
-                "available": True,
-                "selected_path": str(selected_path),
-                "contract": contract.as_record(),
-                "cached_weight": dsv4_mtp_debug.tensor_probe_record(cached_weight),
-                "output_tensor_metadata": {
-                    name: dsv4_mtp_debug.tensor_probe_record(tensor, max_sample_elements=64)
-                    for name, tensor in outputs.items()
-                },
-                "row_records": row_records,
-            }
-        except Exception as exc:
-            return {
-                "available": False,
-                "selected_path": str(selected_path),
-                "contract": contract.as_record(),
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            }
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
         with dsv4_direct_copy_nvtx(
@@ -2781,16 +1587,9 @@ class DSV4Attention(BaseOP):
         attn_backend = getattr(get_global_ctx(), "attn_backend", None)
         attn_metadata = getattr(batch, "attn_metadata", None)
         use_dsv4_backend = isinstance(attn_metadata, DSV4AttentionMetadata)
-        read_only_frozen_kv = bool(getattr(batch, "frozen_kv_read_only", False))
-        force_verify_exact_kv_store = bool(
-            getattr(batch, "dsv4_force_exact_kv_store", False)
-        )
-        is_target_verify = getattr(batch, "dsv4_target_verify_metadata", None) is not None
         kv_norm_rope_store_enabled = (
             use_dsv4_backend
             and attn_backend is not None
-            and not read_only_frozen_kv
-            and not force_verify_exact_kv_store
             and x.is_cuda
             and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_KV_BF16")
         )
@@ -2802,21 +1601,6 @@ class DSV4Attention(BaseOP):
             kv_norm_rope_store_enabled
             and dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE")
         )
-        q_hidden_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
-            "q_path_hidden_input",
-            x,
-        )
-        dsv4_mtp_debug.record_operator_capture(
-            batch,
-            operator_name="q_path_hidden_input",
-            layer_id=int(self.layer_id),
-            input_row0=q_hidden_debug_input,
-            output_tensor=x,
-            positions=positions,
-            path="mini.attention.q_path_hidden_input",
-            params={"hidden_size": int(x.shape[-1])},
-            extra={"is_target_verify": bool(is_target_verify)},
-        )
         kv_from_shared_wqa_wkv = None
         kv = None
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_proj"):
@@ -2826,8 +1610,6 @@ class DSV4Attention(BaseOP):
             fused_wqa_wkv_shared_act = dsv4_kernel.dsv4_sm80_triton_enabled(
                 "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT"
             )
-            wq_a_debug_input = dsv4_mtp_debug.clone_operator_row0_input("wq_a", x)
-            wq_a_path = "mini.wq_a.quantized_linear_ref"
             if fused_wqa_wkv_shared_act:
                 cached_fused_weight = _cached_fused_wqa_wkv_fp8_weight(
                     self,
@@ -2839,7 +1621,6 @@ class DSV4Attention(BaseOP):
                     out_dtype=x.dtype,
                 )
                 if cached_fused_weight is not None:
-                    wq_a_path = "mini.fused_wqa_wkv.cached_bf16_weight.shared_fp8_activation"
                     x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
                     qkv = _linear_cached_bf16_weight(
                         x_quant,
@@ -2853,7 +1634,6 @@ class DSV4Attention(BaseOP):
                         dim=-1,
                     )
                 else:
-                    wq_a_path = "mini.fused_wqa_wkv.quantized_linear_fp8_pair_shared_activation_ref"
                     q_lora_raw, kv_from_shared_wqa_wkv = (
                         dsv4_kernel.quantized_linear_fp8_pair_shared_activation_ref(
                             x,
@@ -2864,56 +1644,19 @@ class DSV4Attention(BaseOP):
                         )
                     )
             else:
-                if q_wqa_fp8_gemm:
-                    wq_a_path = "mini.wq_a.quantized_linear_ref.fp8_gemm"
                 q_lora_raw = self.wq_a.forward(
                     x,
                     fp8_gemm=q_wqa_fp8_gemm if q_wqa_fp8_gemm else None,
                 )
             _capture_debug_activation(f"layer{self.layer_id}.wqa_output", q_lora_raw)
-            dsv4_mtp_debug.record_operator_capture(
-                batch,
-                operator_name="wq_a",
-                layer_id=int(self.layer_id),
-                input_row0=wq_a_debug_input,
-                output_tensor=q_lora_raw,
-                positions=positions,
-                path=wq_a_path,
-                params={
-                    "input_size": int(x.shape[-1]),
-                    "q_lora_rank": int(q_lora_raw.shape[-1]),
-                    "fused_wqa_wkv_shared_act": bool(fused_wqa_wkv_shared_act),
-                    "q_wqa_fp8_gemm": bool(q_wqa_fp8_gemm),
-                },
-                extra={"output_boundary": "q_lora_raw"},
-            )
             if kv_from_shared_wqa_wkv is not None:
                 _capture_debug_activation(
                     f"layer{self.layer_id}.wkv_shared_activation_output",
                     kv_from_shared_wqa_wkv,
                 )
             if not fused_q_kv_rmsnorm:
-                q_norm_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
-                    "q_norm",
-                    q_lora_raw,
-                )
                 q_lora = self.q_norm.forward(q_lora_raw)
                 _capture_debug_activation(f"layer{self.layer_id}.q_lora_after_norm", q_lora)
-                dsv4_mtp_debug.record_operator_capture(
-                    batch,
-                    operator_name="q_norm",
-                    layer_id=int(self.layer_id),
-                    input_row0=q_norm_debug_input,
-                    output_tensor=q_lora,
-                    positions=positions,
-                    path="mini.DSV4RMSNorm.forward",
-                    params={
-                        "rms_norm_eps": float(self.rms_norm_eps),
-                        "q_lora_rank": int(q_lora.shape[-1]),
-                    },
-                    extra={"output_boundary": "q_norm_output_and_wq_b_input"},
-                    private={"q_norm_weight": self.q_norm.weight},
-                )
         if fused_q_kv_rmsnorm:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
                 kv = (
@@ -2923,10 +1666,6 @@ class DSV4Attention(BaseOP):
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.wkv_output", kv)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_kv_rmsnorm"):
-                q_norm_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
-                    "q_norm",
-                    q_lora_raw,
-                )
                 q_lora, kv = dsv4_kernel.rms_norm_pair_fallback(
                     q_lora_raw,
                     kv,
@@ -2936,194 +1675,28 @@ class DSV4Attention(BaseOP):
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.q_lora_after_norm", q_lora)
                 _capture_debug_activation(f"layer{self.layer_id}.kv_after_kv_norm", kv)
-                dsv4_mtp_debug.record_operator_capture(
-                    batch,
-                    operator_name="q_norm",
-                    layer_id=int(self.layer_id),
-                    input_row0=q_norm_debug_input,
-                    output_tensor=q_lora,
-                    positions=positions,
-                    path="mini.rms_norm_pair_fallback.q_branch",
-                    params={
-                        "rms_norm_eps": float(self.rms_norm_eps),
-                        "q_lora_rank": int(q_lora.shape[-1]),
-                        "fused_q_kv_rmsnorm": bool(fused_q_kv_rmsnorm),
-                    },
-                    extra={"output_boundary": "q_norm_output_and_wq_b_input"},
-                    private={"q_norm_weight": self.q_norm.weight},
-                )
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_wqb"):
-            wq_b_debug_input = dsv4_mtp_debug.clone_operator_row0_input("wq_b", q_lora)
-            q_wqb_path = "mini.wq_b.quantized_linear_ref"
-            q_wqb_contract: _DSV4TargetVerifyQWQBNormalShapeContract | None = None
-            q_wqb_row_invariant_local = False
-            q_wqb_target_full_rows_contract = False
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
-                q_wqb_path = "mini.wq_b.forward_fp8_marlin_weight"
-                q_flat = self.wq_b.forward_fp8_marlin_weight(
+                q = self.wq_b.forward_fp8_marlin_weight(
                     q_lora,
                     cache_name=self._q_wqb_marlin_weight_cache_name,
                     owner_label=self._q_wqb_owner_label,
-                )
+                ).view(-1, self.num_local_heads, self.head_dim)
             elif dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
-                if is_target_verify and _dsv4_mtp_q_wqb_reference_gate_enabled():
-                    q_wqb_path = "mini.wq_b.quantized_linear_ref.target_reference_gate"
-                    q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
-                        "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
-                    )
-                    q_flat = self.wq_b.forward(
-                        q_lora,
-                        fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
-                    )
-                else:
-                    q_wqb_path = "mini.wq_b.forward_fp8_cached_bf16_weight"
-                    q_wqb_contract = _dsv4_target_verify_q_wqb_normal_shape_contract(
-                        batch,
-                        q_lora.numel() // q_lora.shape[-1],
-                        require_enabled=True,
-                    )
-                    if q_wqb_contract is not None:
-                        q_wqb_path = (
-                            "mini.wq_b.forward_fp8_cached_bf16_weight."
-                            "target_normal_shape"
-                        )
-                        cached_weight = _cached_fp8_bf16_weight(
-                            self.wq_b,
-                            self._q_wqb_bf16_weight_cache_name,
-                            self.wq_b.weight,
-                            getattr(self.wq_b, "weight_scale_inv", None),
-                            out_dtype=q_lora.dtype,
-                            allow_build=False,
-                            owner_label=self._q_wqb_owner_label,
-                        )
-                        q_flat = _fp8_cached_bf16_weight_local_projection_target_normal_shape(
-                            q_lora,
-                            cached_weight,
-                            owner=self.wq_b,
-                            cache_name=self._q_wqb_bf16_weight_cache_name,
-                            owner_label=self._q_wqb_owner_label,
-                            contract=q_wqb_contract,
-                            dummy_fill="zero",
-                        )
-                    else:
-                        q_wqb_target_full_rows_contract = bool(
-                            is_target_verify
-                            and _dsv4_mtp_q_wqb_target_full_rows_enabled()
-                        )
-                        q_wqb_row_invariant_local = bool(
-                            (
-                                is_target_verify
-                                and not q_wqb_target_full_rows_contract
-                            )
-                            or _dsv4_mtp_q_wqb_global_row_invariant_enabled()
-                        )
-                        if q_wqb_target_full_rows_contract:
-                            q_wqb_path = (
-                                "mini.wq_b.forward_fp8_cached_bf16_weight."
-                                "target_full_rows"
-                            )
-                        elif q_wqb_row_invariant_local:
-                            q_wqb_path = (
-                                "mini.wq_b.forward_fp8_cached_bf16_weight."
-                                "row_invariant_local"
-                            )
-                        q_flat = self.wq_b.forward_fp8_cached_bf16_weight(
-                            q_lora,
-                            cache_name=self._q_wqb_bf16_weight_cache_name,
-                            owner_label=self._q_wqb_owner_label,
-                            row_invariant_local=q_wqb_row_invariant_local,
-                        )
+                q = self.wq_b.forward_fp8_cached_bf16_weight(
+                    q_lora,
+                    cache_name=self._q_wqb_bf16_weight_cache_name,
+                    owner_label=self._q_wqb_owner_label,
+                ).view(-1, self.num_local_heads, self.head_dim)
             else:
                 q_wqb_fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled(
                     "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
                 )
-                if q_wqb_fp8_gemm:
-                    q_wqb_path = "mini.wq_b.quantized_linear_ref.fp8_gemm"
-                q_flat = self.wq_b.forward(
+                q = self.wq_b.forward(
                     q_lora,
                     fp8_gemm=q_wqb_fp8_gemm if q_wqb_fp8_gemm else None,
-                )
-            q = q_flat.view(-1, self.num_local_heads, self.head_dim)
+                ).view(-1, self.num_local_heads, self.head_dim)
             _capture_debug_activation(f"layer{self.layer_id}.q_wqb_output", q)
-            q_wqb_per_row_probe = self._q_wqb_per_row_probe(
-                q_lora,
-                q,
-                path=q_wqb_path,
-            )
-            q_wqb_weight_cache_probe = None
-            if dsv4_mtp_debug.operator_parity_enabled(
-                "wq_b"
-            ) and dsv4_mtp_debug.operator_parity_layer_enabled(int(self.layer_id)):
-                q_wqb_weight_cache_probe = self._q_wqb_weight_cache_probe(
-                    path=q_wqb_path
-                )
-            q_wqb_contract_oracle = self._q_wqb_contract_oracle_probe(
-                q_lora,
-                q_flat,
-                batch=batch,
-                selected_path=q_wqb_path,
-            )
-            dsv4_mtp_debug.record_operator_capture(
-                batch,
-                operator_name="wq_b",
-                layer_id=int(self.layer_id),
-                input_row0=wq_b_debug_input,
-                input_tensor=q_lora,
-                output_tensor=q,
-                positions=positions,
-                path=q_wqb_path,
-                params={
-                    "q_lora_rank": int(q_lora.shape[-1]),
-                    "num_local_heads": int(self.num_local_heads),
-                    "head_dim": int(self.head_dim),
-                    "q_wqb_bf16_weight_cache": bool(
-                        dsv4_kernel.dsv4_env_flag(
-                            dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
-                        )
-                    ),
-                    "dense_fp8_marlin_projection": bool(
-                        dsv4_kernel.dense_fp8_marlin_projection_enabled()
-                    ),
-                    "row_invariant_local": bool(
-                        q_wqb_row_invariant_local
-                    ),
-                    "target_normal_shape_contract": bool(q_wqb_contract is not None),
-                    "target_full_rows_contract": bool(q_wqb_target_full_rows_contract),
-                    "global_row_invariant_contract": bool(
-                        _dsv4_mtp_q_wqb_global_row_invariant_enabled()
-                    ),
-                    "reference_gate_contract": bool(
-                        is_target_verify and _dsv4_mtp_q_wqb_reference_gate_enabled()
-                    ),
-                },
-                extra={
-                    "output_boundary": "wq_b_local_output_q_wqb_output",
-                    "per_row_probe": q_wqb_per_row_probe,
-                    "weight_cache_probe": q_wqb_weight_cache_probe,
-                    "q_wqb_contract": (
-                        q_wqb_contract.as_record() if q_wqb_contract is not None else None
-                    ),
-                    "q_wqb_contract_oracle": q_wqb_contract_oracle,
-                },
-            )
-            q_wqb_output_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
-                "q_wqb_output",
-                q,
-            )
-            dsv4_mtp_debug.record_operator_capture(
-                batch,
-                operator_name="q_wqb_output",
-                layer_id=int(self.layer_id),
-                input_row0=q_wqb_output_debug_input,
-                output_tensor=q,
-                positions=positions,
-                path=q_wqb_path,
-                params={
-                    "num_local_heads": int(self.num_local_heads),
-                    "head_dim": int(self.head_dim),
-                },
-                extra={"boundary": "q_wqb_output"},
-            )
         if fused_q_kv_norm_rope_store and kv is None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
                 kv = (
@@ -3132,47 +1705,17 @@ class DSV4Attention(BaseOP):
                     else self.wkv.forward(x)
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.wkv_output", kv)
-        q_norm_rope_debug_input = dsv4_mtp_debug.clone_operator_row0_input(
-            "q_norm_rope",
-            q,
-        )
-        q_norm_rope_common_params = {
-            "rms_norm_eps": float(self.rms_norm_eps),
-            "rotary_dim": int(self.rope_head_dim),
-            "base": float(self.rope_base),
-            "original_seq_len": int(self.original_seq_len),
-            "factor": float(self.rope_factor),
-            "beta_fast": int(self.beta_fast),
-            "beta_slow": int(self.beta_slow),
-            "num_local_heads": int(self.num_local_heads),
-            "head_dim": int(self.head_dim),
-        }
-        q_norm_rope_path = "mini.q_norm_rope_fallback"
         q_kv_norm_rope_cache_written = False
-        layer2_swa_lifecycle_trace = (
-            dsv4_mtp_debug.swa_lifecycle_trace_enabled(int(self.layer_id))
-            and use_dsv4_backend
-            and attn_backend is not None
-            and not read_only_frozen_kv
-            and isinstance(batch, Batch)
-        )
         if fused_q_kv_norm_rope_store and kv is not None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.q_kv_norm_rope_store"):
-                swa_store_out_loc = self._swa_store_out_loc(attn_backend, batch)
-                swa_cache = attn_backend.kvcache.swa_cache(self.layer_id)
-                swa_cache_before = (
-                    dsv4_mtp_debug.capture_cache_rows(swa_cache, swa_store_out_loc)
-                    if layer2_swa_lifecycle_trace
-                    else None
-                )
                 q_kv_norm_rope_cache_written = dsv4_kernel.q_kv_norm_rope_cache_fallback(
                     q,
                     kv,
                     positions,
                     norm_weight=self.kv_norm.weight,
                     rms_norm_eps=self.rms_norm_eps,
-                    cache=swa_cache,
-                    out_loc=swa_store_out_loc,
+                    cache=attn_backend.kvcache.swa_cache(self.layer_id),
+                    out_loc=self._swa_store_out_loc(attn_backend, batch),
                     rotary_dim=self.rope_head_dim,
                     base=float(self.rope_base),
                     original_seq_len=self.original_seq_len,
@@ -3181,29 +1724,6 @@ class DSV4Attention(BaseOP):
                     beta_slow=self.beta_slow,
                 )
                 if q_kv_norm_rope_cache_written:
-                    dsv4_mtp_debug.record_layer2_swa_store(
-                        batch,
-                        layer_id=int(self.layer_id),
-                        path="q_kv_norm_rope_cache_fallback",
-                        kv=kv,
-                        full_out_loc=getattr(batch, "out_loc", None),
-                        swa_out_loc=swa_store_out_loc,
-                        positions=positions,
-                        cache_before=swa_cache_before,
-                        cache_after=(
-                            dsv4_mtp_debug.capture_cache_rows(
-                                swa_cache,
-                                swa_store_out_loc,
-                            )
-                            if layer2_swa_lifecycle_trace
-                            else None
-                        ),
-                        extra={
-                            "fused_q_kv_norm_rope_store": True,
-                            "is_target_verify": bool(is_target_verify),
-                        },
-                    )
-                    q_norm_rope_path = "mini.q_kv_norm_rope_cache_fallback"
                     _capture_debug_activation(f"layer{self.layer_id}.q_after_q_norm_rope", q)
                     _capture_debug_activation(f"layer{self.layer_id}.kv_after_kv_norm_rope", kv)
         if not q_kv_norm_rope_cache_written:
@@ -3220,27 +1740,6 @@ class DSV4Attention(BaseOP):
                     beta_slow=self.beta_slow,
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.q_after_q_norm_rope", q)
-        dsv4_mtp_debug.record_operator_capture(
-            batch,
-            operator_name="q_norm_rope",
-            layer_id=int(self.layer_id),
-            input_row0=q_norm_rope_debug_input,
-            output_tensor=q,
-            positions=positions,
-            path=q_norm_rope_path,
-            params=q_norm_rope_common_params,
-            extra={
-                "fused_q_kv_norm_rope_store_requested": bool(
-                    fused_q_kv_norm_rope_store
-                ),
-                "q_kv_norm_rope_cache_written": bool(
-                    q_kv_norm_rope_cache_written
-                ),
-                "kv_norm_rope_store_enabled": bool(kv_norm_rope_store_enabled),
-                "fused_q_kv_rmsnorm": bool(fused_q_kv_rmsnorm),
-                "is_target_verify": bool(is_target_verify),
-            },
-        )
 
         if kv is None:
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_proj"):
@@ -3254,48 +1753,19 @@ class DSV4Attention(BaseOP):
         if kv_norm_rope_store_enabled:
             if not q_kv_norm_rope_cache_written:
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.kv_norm_rope_store"):
-                    swa_store_out_loc = self._swa_store_out_loc(attn_backend, batch)
-                    swa_cache = attn_backend.kvcache.swa_cache(self.layer_id)
-                    swa_cache_before = (
-                        dsv4_mtp_debug.capture_cache_rows(swa_cache, swa_store_out_loc)
-                        if layer2_swa_lifecycle_trace
-                        else None
-                    )
                     dsv4_kernel.k_norm_rope_cache_fallback(
                         kv,
                         positions,
                         norm_weight=self.kv_norm.weight,
                         rms_norm_eps=self.rms_norm_eps,
-                        cache=swa_cache,
-                        out_loc=swa_store_out_loc,
+                        cache=attn_backend.kvcache.swa_cache(self.layer_id),
+                        out_loc=self._swa_store_out_loc(attn_backend, batch),
                         rotary_dim=self.rope_head_dim,
                         base=float(self.rope_base),
                         original_seq_len=self.original_seq_len,
                         factor=self.rope_factor,
                         beta_fast=self.beta_fast,
                         beta_slow=self.beta_slow,
-                    )
-                    dsv4_mtp_debug.record_layer2_swa_store(
-                        batch,
-                        layer_id=int(self.layer_id),
-                        path="kv_norm_rope_cache_fallback",
-                        kv=kv,
-                        full_out_loc=getattr(batch, "out_loc", None),
-                        swa_out_loc=swa_store_out_loc,
-                        positions=positions,
-                        cache_before=swa_cache_before,
-                        cache_after=(
-                            dsv4_mtp_debug.capture_cache_rows(
-                                swa_cache,
-                                swa_store_out_loc,
-                            )
-                            if layer2_swa_lifecycle_trace
-                            else None
-                        ),
-                        extra={
-                            "fused_q_kv_norm_rope_store": False,
-                            "is_target_verify": bool(is_target_verify),
-                        },
                     )
                     _capture_debug_activation(
                         f"layer{self.layer_id}.kv_after_kv_norm_rope",
@@ -3407,11 +1877,7 @@ class DSV4Attention(BaseOP):
                     indexer_kv,
                     row_indices=compressed_debug_rows,
                 )
-            if (
-                use_dsv4_backend
-                and not read_only_frozen_kv
-                and hasattr(attn_backend, "store_indexer")
-            ):
+            if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.indexer_store"):
                     indexer_store_norm_weight = None
                     if compress_store_fuses_norm:
@@ -3484,36 +1950,7 @@ class DSV4Attention(BaseOP):
                     compressed_kv,
                     row_indices=compressed_debug_rows,
                 )
-            if (
-                use_dsv4_backend
-                and not read_only_frozen_kv
-                and self.compress_ratio == 128
-                and hasattr(attn_backend, "write_c128_mtp_prefix_states")
-            ):
-                with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.c128_mtp_prefix"):
-                    online_compressed_kv = attn_backend.write_c128_mtp_prefix_states(
-                        self.layer_id,
-                        self.compressor,
-                        x,
-                        batch,
-                        apply_norm=not compress_store_fuses_norm,
-                    )
-                    if online_compressed_kv is not None:
-                        compressed_kv = online_compressed_kv
-                        _capture_debug_activation(
-                            f"layer{self.layer_id}.compressor_output_online_c128",
-                            compressed_kv,
-                            row_indices=_compressed_debug_row_indices(
-                                positions,
-                                self.compress_ratio,
-                                batch,
-                            ),
-                        )
-            if (
-                use_dsv4_backend
-                and not read_only_frozen_kv
-                and hasattr(attn_backend, "store_compressed")
-            ):
+            if use_dsv4_backend and hasattr(attn_backend, "store_compressed"):
                 with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.compress_store"):
                     attn_backend.store_compressed(
                         self.layer_id,
@@ -3581,48 +2018,11 @@ class DSV4Attention(BaseOP):
                     allow_build=False,
                     owner_label=self._wo_a_owner_label,
                 )
-                if dsv4_mtp_debug.wo_a_projection_oracle_enabled(self.layer_id):
-                    actual_row_o = _wo_a_bf16_bmm_projection(
-                        o,
-                        cached_wo_a,
-                        owner_label=self._wo_a_owner_label,
-                    )
-                    row_invariant_o = _wo_a_bf16_bmm_projection_row_invariant(
-                        o,
-                        cached_wo_a,
-                        owner_label=self._wo_a_owner_label,
-                    )
-                    sglang_einsum_o = _wo_a_bf16_sglang_style_einsum_projection(
-                        o,
-                        cached_wo_a,
-                        owner_label=self._wo_a_owner_label,
-                    )
-                    dsv4_mtp_debug.record_wo_a_projection_oracle(
-                        batch,
-                        layer_id=self.layer_id,
-                        input_tensor=o,
-                        cached_weight=cached_wo_a,
-                        outputs={
-                            "actual_row_bf16_bmm": actual_row_o,
-                            "row_invariant_bf16_bmm": row_invariant_o,
-                            "sglang_style_bf16_einsum": sglang_einsum_o,
-                        },
-                        selected_output="actual_row_bf16_bmm",
-                        backend_path="mini.cached_bf16_bmm.actual_row",
-                        extra={
-                            "is_target_verify": bool(is_target_verify),
-                            "num_local_groups": int(self.num_local_groups),
-                            "d_per_group": int(d_per_group),
-                            "o_lora_rank": int(self.o_lora_rank),
-                        },
-                    )
-                    o = actual_row_o
-                else:
-                    o = _wo_a_bf16_bmm_projection(
-                        o,
-                        cached_wo_a,
-                        owner_label=self._wo_a_owner_label,
-                    )
+                o = _wo_a_bf16_bmm_projection(
+                    o,
+                    cached_wo_a,
+                    owner_label=self._wo_a_owner_label,
+                )
             else:
                 wo_a_scale = _cached_projection_scale(
                     self.wo_a,
@@ -3636,10 +2036,7 @@ class DSV4Attention(BaseOP):
                     num_local_groups=self.num_local_groups,
                     o_lora_rank=self.o_lora_rank,
                 )
-            _capture_debug_activation(f"layer{self.layer_id}.attention_wo_a_output", o)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.attn.wo_b"):
-            wo_b_local_name = f"layer{self.layer_id}.attention_wo_b_local_output_before_reduce"
-            wo_b_reduce_name = f"layer{self.layer_id}.attention_wo_b_post_all_reduce_output"
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
                 out = self.wo_b.forward_fp8_marlin_weight(
                     o,
@@ -3647,88 +2044,16 @@ class DSV4Attention(BaseOP):
                     owner_label=self._wo_b_owner_label,
                     reduce=True,
                     reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
-                    debug_pre_reduce_name=wo_b_local_name,
-                    debug_post_reduce_name=wo_b_reduce_name,
-                    row_invariant_reduce=False,
-                    reduce_dtype=torch.float32,
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
                 return out
             if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE):
-                if dsv4_mtp_debug.wo_b_projection_oracle_enabled(self.layer_id):
-                    wo_b_scale = getattr(self.wo_b, "weight_scale_inv", None)
-                    cached_wo_b = _cached_fp8_bf16_weight(
-                        self.wo_b,
-                        self._wo_b_bf16_weight_cache_name,
-                        self.wo_b.weight,
-                        wo_b_scale,
-                        out_dtype=o.dtype,
-                        allow_build=False,
-                        owner_label=self._wo_b_owner_label,
-                    )
-                    actual_row_local = _fp8_cached_bf16_weight_local_projection(
-                        o,
-                        cached_wo_b,
-                        owner=self.wo_b,
-                        cache_name=self._wo_b_bf16_weight_cache_name,
-                        owner_label=self._wo_b_owner_label,
-                    )
-                    actual_row_fp32_accum_local = (
-                        _fp8_cached_bf16_weight_local_projection(
-                            o,
-                            cached_wo_b,
-                            owner=self.wo_b,
-                            cache_name=self._wo_b_bf16_weight_cache_name,
-                            owner_label=self._wo_b_owner_label,
-                            accum_dtype=torch.float32,
-                        )
-                    )
-                    row_invariant_local = (
-                        _fp8_cached_bf16_weight_local_projection_row_invariant(
-                            o,
-                            cached_wo_b,
-                            owner=self.wo_b,
-                            cache_name=self._wo_b_bf16_weight_cache_name,
-                            owner_label=self._wo_b_owner_label,
-                        )
-                    )
-                    dsv4_mtp_debug.record_wo_b_projection_oracle(
-                        batch,
-                        layer_id=self.layer_id,
-                        input_tensor=o,
-                        cached_weight=cached_wo_b,
-                        outputs={
-                            "actual_row_cached_bf16_linear": actual_row_local,
-                            "actual_row_cached_fp32_accum_linear": (
-                                actual_row_fp32_accum_local
-                            ),
-                            "row_invariant_cached_bf16_linear": row_invariant_local,
-                        },
-                        selected_output=(
-                            "actual_row_cached_fp32_accum_linear"
-                        ),
-                        backend_path="mini.fp8_cached_bf16_weight.actual_row_fp32_accum",
-                        extra={
-                            "is_target_verify": bool(is_target_verify),
-                            "local_accum_dtype": "torch.float32",
-                            "reduce_label": "dsv4.attn.wo_b.row_parallel_projection_all_reduce",
-                            "row_invariant_local": False,
-                            "row_invariant_reduce": False,
-                            "reduce_dtype": "torch.float32",
-                        },
-                    )
                 out = self.wo_b.forward_fp8_cached_bf16_weight(
                     o,
                     cache_name=self._wo_b_bf16_weight_cache_name,
                     owner_label=self._wo_b_owner_label,
                     reduce=True,
                     reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
-                    debug_pre_reduce_name=wo_b_local_name,
-                    debug_post_reduce_name=wo_b_reduce_name,
-                    row_invariant_local=False,
-                    row_invariant_reduce=False,
-                    local_accum_dtype=torch.float32,
-                    reduce_dtype=torch.float32,
                 )
                 _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
                 return out
@@ -3736,10 +2061,6 @@ class DSV4Attention(BaseOP):
             out = self.wo_b.forward(
                 o,
                 fp8_gemm=wo_b_fp8_gemm if wo_b_fp8_gemm else None,
-                debug_pre_reduce_name=wo_b_local_name,
-                debug_post_reduce_name=wo_b_reduce_name,
-                row_invariant_reduce=False,
-                reduce_dtype=torch.float32,
             )
             _capture_debug_activation(f"layer{self.layer_id}.final_attention_output", out)
             return out
@@ -3772,34 +2093,8 @@ class DSV4MoEGate(BaseOP):
         scoring_func: str,
         routed_scaling_factor: float,
         hash_topk: DSV4TopK | None = None,
-        row_invariant_local: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         weight = _cached_gate_fp32_weight(self, "_cached_gate_weight_fp32", self.weight)
-        rows = hidden_states.numel() // hidden_states.shape[-1]
-        if row_invariant_local and rows > 1:
-            hidden_2d = hidden_states.reshape(rows, hidden_states.shape[-1])
-            input_ids_1d = None
-            if isinstance(input_ids, torch.Tensor):
-                input_ids_1d = input_ids.reshape(-1)
-            weight_chunks: list[torch.Tensor] = []
-            index_chunks: list[torch.Tensor] = []
-            for row in range(rows):
-                row_input_ids = None
-                if input_ids_1d is not None and row < int(input_ids_1d.numel()):
-                    row_input_ids = input_ids_1d[row : row + 1]
-                row_weights, row_indices = dsv4_kernel.moe_gate_fallback(
-                    hidden_2d[row : row + 1],
-                    weight,
-                    input_ids=row_input_ids,
-                    topk=topk,
-                    scoring_func=scoring_func,
-                    routed_scaling_factor=routed_scaling_factor,
-                    correction_bias=getattr(self, "e_score_correction_bias", None),
-                    hash_topk=hash_topk,
-                )
-                weight_chunks.append(row_weights)
-                index_chunks.append(row_indices)
-            return torch.cat(weight_chunks, dim=0), torch.cat(index_chunks, dim=0)
         return dsv4_kernel.moe_gate_fallback(
             hidden_states,
             weight,
@@ -3937,7 +2232,9 @@ class DSV4FusedRoutedExperts(BaseOP):
                 "layer_id": self.layer_id,
                 "raw_missing": self._missing_raw_expert_weights(),
                 "released_original": bool(self._marlin_wna16_released_original_expert_weights),
-                "released_original_bytes": int(self._marlin_wna16_released_original_expert_bytes),
+                "released_original_bytes": int(
+                    self._marlin_wna16_released_original_expert_bytes
+                ),
                 "hidden_ref_count": len(self._marlin_wna16_hidden_original_expert_refs),
                 "hidden_ref_bytes": int(
                     sum(
@@ -4142,8 +2439,12 @@ class DSV4FusedRoutedExperts(BaseOP):
                     "weights_only": dsv4_kernel.dsv4_env_flag(
                         _MARLIN_WNA16_RELEASE_WEIGHTS_ONLY_ENV
                     ),
-                    "scales_only": dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV),
-                    "keep_hidden_ref": dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_KEEP_HIDDEN_REF_ENV),
+                    "scales_only": dsv4_kernel.dsv4_env_flag(
+                        _MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV
+                    ),
+                    "keep_hidden_ref": dsv4_kernel.dsv4_env_flag(
+                        _MARLIN_WNA16_KEEP_HIDDEN_REF_ENV
+                    ),
                 },
             )
             if name not in release_names:
@@ -4522,311 +2823,10 @@ class DSV4SharedExperts(BaseOP):
             owner_label=self._down_owner_label,
         )
 
-    @staticmethod
-    def _debug_tensor_meta(tensor: torch.Tensor | None) -> dict[str, object]:
-        if not isinstance(tensor, torch.Tensor):
-            return {"available": False}
-        return _dsv4_moe_reduce_tensor_census(tensor)
-
-    def _debug_weight_cache_probe(self) -> dict[str, object]:
-        gate_up_cache = getattr(
-            self.gate_up_proj,
-            self._gate_up_bf16_weight_cache_name,
-            None,
-        )
-        down_bf16_cache = getattr(
-            self.down_proj,
-            self._down_bf16_weight_cache_name,
-            None,
-        )
-        down_marlin_cache = getattr(
-            self.down_proj,
-            self._down_marlin_weight_cache_name,
-            None,
-        )
-        return {
-            "layer_id": None if self.layer_id is None else int(self.layer_id),
-            "use_bf16_weight_cache": bool(
-                dsv4_kernel.dsv4_env_flag(
-                    dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-                )
-            ),
-            "dense_fp8_marlin_projection": bool(
-                dsv4_kernel.dense_fp8_marlin_projection_enabled()
-            ),
-            "shared_fp8_gemm": bool(
-                dsv4_kernel.dsv4_sm80_triton_enabled(
-                    "MINISGL_DSV4_SM80_SHARED_FP8_GEMM"
-                )
-            ),
-            "bf16_small_gemm_pretranspose": bool(
-                dsv4_kernel.dsv4_env_flag(
-                    dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
-                )
-            ),
-            "gate_up_owner": self._gate_up_owner_label,
-            "down_owner": self._down_owner_label,
-            "gate_up_cache_name": self._gate_up_bf16_weight_cache_name,
-            "down_bf16_cache_name": self._down_bf16_weight_cache_name,
-            "down_marlin_cache_name": self._down_marlin_weight_cache_name,
-            "gate_up_weight_present": hasattr(self.gate_up_proj, "weight"),
-            "gate_up_scale_present": hasattr(self.gate_up_proj, "weight_scale_inv"),
-            "down_weight_present": hasattr(self.down_proj, "weight"),
-            "down_scale_present": hasattr(self.down_proj, "weight_scale_inv"),
-            "gate_up_weight": self._debug_tensor_meta(
-                getattr(self.gate_up_proj, "weight", None)
-            ),
-            "gate_up_scale": self._debug_tensor_meta(
-                getattr(self.gate_up_proj, "weight_scale_inv", None)
-            ),
-            "down_weight": self._debug_tensor_meta(
-                getattr(self.down_proj, "weight", None)
-            ),
-            "down_scale": self._debug_tensor_meta(
-                getattr(self.down_proj, "weight_scale_inv", None)
-            ),
-            "gate_up_bf16_cache": self._debug_tensor_meta(gate_up_cache),
-            "down_bf16_cache": self._debug_tensor_meta(down_bf16_cache),
-            "down_marlin_cache": self._debug_tensor_meta(down_marlin_cache),
-        }
-
-    @staticmethod
-    def _debug_metadata_value(metadata: dict[str, object], name: str, row: int) -> object:
-        values = metadata.get(name)
-        try:
-            if isinstance(values, torch.Tensor) and 0 <= int(row) < int(values.numel()):
-                value = values.detach().reshape(-1)[int(row)].cpu().item()
-                return bool(value) if isinstance(value, bool) else int(value)
-            if isinstance(values, (list, tuple)) and 0 <= int(row) < len(values):
-                value = values[int(row)]
-                if isinstance(value, bool):
-                    return bool(value)
-                return int(value)
-        except Exception:
-            return None
-        return None
-
-    def _debug_source_row_records(
-        self,
-        batch: Batch | None,
-        positions: torch.Tensor | None,
-        *,
-        rows: int,
-        context: dict[str, object],
-    ) -> list[dict[str, object]]:
-        source_rows = context.get("source_rows")
-        if not isinstance(source_rows, (list, tuple)):
-            source_rows = list(range(int(rows)))
-        metadata = getattr(batch, "dsv4_target_verify_metadata", None)
-        if not isinstance(metadata, dict):
-            metadata = {}
-
-        def _tensor_scalar(tensor: torch.Tensor | None, row: int) -> int | None:
-            if not isinstance(tensor, torch.Tensor):
-                return None
-            try:
-                if 0 <= int(row) < int(tensor.numel()):
-                    return int(tensor.detach().reshape(-1)[int(row)].cpu().item())
-            except Exception:
-                return None
-            return None
-
-        input_ids = getattr(batch, "input_ids", None)
-        out_loc = getattr(batch, "out_loc", None)
-        records: list[dict[str, object]] = []
-        for chunk_row in range(min(int(rows), len(source_rows))):
-            source_row = int(source_rows[chunk_row])
-            record = {
-                "chunk_row": int(chunk_row),
-                "source_row": source_row,
-                "input_token": _tensor_scalar(input_ids, source_row),
-                "position": _tensor_scalar(positions, source_row),
-                "out_cache_loc": _tensor_scalar(out_loc, source_row),
-                "row_depth": self._debug_metadata_value(
-                    metadata, "row_depths", source_row
-                ),
-                "row_to_batch_index": self._debug_metadata_value(
-                    metadata, "row_to_batch_index", source_row
-                ),
-                "row_to_parent_batch_index": self._debug_metadata_value(
-                    metadata, "row_to_parent_batch_index", source_row
-                ),
-                "active_row": self._debug_metadata_value(
-                    metadata, "active_row_mask", source_row
-                ),
-                "padded_row": self._debug_metadata_value(
-                    metadata, "padded_row_mask", source_row
-                ),
-            }
-            records.append(record)
-        return records
-
-    def _debug_positions_for_forward(
-        self,
-        batch: Batch | None,
-        hidden_states: torch.Tensor,
-        *,
-        context: dict[str, object],
-    ) -> torch.Tensor | None:
-        positions = _dsv4_debug_positions(batch, device=hidden_states.device)
-        source_rows = context.get("source_rows")
-        rows = hidden_states.numel() // hidden_states.shape[-1]
-        if (
-            isinstance(positions, torch.Tensor)
-            and isinstance(source_rows, (list, tuple))
-            and len(source_rows) >= int(rows)
-        ):
-            try:
-                index = torch.tensor(
-                    [int(row) for row in source_rows[: int(rows)]],
-                    device=positions.device,
-                    dtype=torch.long,
-                )
-                if index.numel() > 0 and int(index.max().item()) < int(positions.numel()):
-                    return positions.reshape(-1).index_select(0, index)
-            except Exception:
-                return positions
-        return positions
-
-    def _record_shared_boundary(
-        self,
-        *,
-        operator_name: str,
-        input_tensor: torch.Tensor | None,
-        output_tensor: torch.Tensor | None,
-        path: str,
-        stage: str,
-        params: dict[str, object],
-        extra: dict[str, object] | None = None,
-    ) -> None:
-        batch = _dsv4_debug_batch()
-        if bool(getattr(batch, "_dsv4_shared_expert_suppress_operator_trace", False)):
-            return
-        if not dsv4_mtp_debug.operator_parity_enabled(operator_name):
-            return
-        source_tensor = output_tensor if isinstance(output_tensor, torch.Tensor) else input_tensor
-        if not isinstance(source_tensor, torch.Tensor):
-            return
-        context = getattr(batch, "_dsv4_shared_expert_forward_context", None)
-        if not isinstance(context, dict):
-            context = {}
-        positions = self._debug_positions_for_forward(
-            batch,
-            source_tensor,
-            context=context,
-        )
-        rows = source_tensor.numel() // source_tensor.shape[-1]
-        record_extra: dict[str, object] = {
-            "stage": stage,
-            "input_census": _dsv4_moe_reduce_tensor_census(input_tensor),
-            "output_census": _dsv4_moe_reduce_tensor_census(output_tensor),
-            "shared_forward_context": {
-                key: value
-                for key, value in context.items()
-                if not str(key).startswith("_")
-            },
-            "source_row_records": self._debug_source_row_records(
-                batch,
-                _dsv4_debug_positions(batch, device=source_tensor.device),
-                rows=int(rows),
-                context=context,
-            ),
-        }
-        if extra:
-            record_extra.update(extra)
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name=operator_name,
-            layer_id=-1 if self.layer_id is None else int(self.layer_id),
-            input_tensor=input_tensor,
-            output_tensor=output_tensor,
-            positions=positions,
-            path=path,
-            params=params,
-            extra=record_extra,
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        *,
-        reduce: bool = True,
-        row_invariant_local: bool = False,
-    ) -> torch.Tensor:
-        rows = hidden_states.numel() // hidden_states.shape[-1]
-        shared_params = {
-            "shared_experts_forward": True,
-            "reduce": bool(reduce),
-            "row_invariant_local": bool(row_invariant_local),
-            "rows": int(rows),
-            "swiglu_limit": float(self.swiglu_limit),
-        }
-        self._record_shared_boundary(
-            operator_name="shared_expert_forward_input",
-            input_tensor=hidden_states,
-            output_tensor=hidden_states,
-            path="mini.shared_experts.forward.input",
-            stage="shared_experts.forward.input",
-            params=shared_params,
-            extra={
-                "backend": self._debug_weight_cache_probe(),
-            },
-        )
-        if row_invariant_local and rows > 1:
-            hidden_2d = hidden_states.reshape(rows, hidden_states.shape[-1])
-            batch = _dsv4_debug_batch()
-            base_context = getattr(batch, "_dsv4_shared_expert_forward_context", None)
-            if not isinstance(base_context, dict):
-                base_context = {}
-            base_source_rows = base_context.get("source_rows")
-            chunks: list[torch.Tensor] = []
-            for row in range(rows):
-                row_context = dict(base_context)
-                if isinstance(base_source_rows, (list, tuple)) and row < len(base_source_rows):
-                    row_context["source_rows"] = [int(base_source_rows[row])]
-                else:
-                    row_context["source_rows"] = [int(row)]
-                row_context["row_invariant_local_parent_rows"] = int(rows)
-                row_context["row_invariant_local_chunk_row"] = int(row)
-                previous_context = getattr(
-                    batch, "_dsv4_shared_expert_forward_context", None
-                )
-                if batch is not None:
-                    setattr(batch, "_dsv4_shared_expert_forward_context", row_context)
-                try:
-                    chunks.append(
-                        self.forward(
-                            hidden_2d[row : row + 1],
-                            reduce=reduce,
-                            row_invariant_local=False,
-                        )
-                    )
-                finally:
-                    if batch is not None:
-                        if previous_context is None:
-                            try:
-                                delattr(batch, "_dsv4_shared_expert_forward_context")
-                            except AttributeError:
-                                pass
-                        else:
-                            setattr(
-                                batch,
-                                "_dsv4_shared_expert_forward_context",
-                                previous_context,
-                            )
-            return torch.cat(chunks, dim=0).reshape(*hidden_states.shape[:-1], -1)
+    def forward(self, hidden_states: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
         fp8_gemm = dsv4_kernel.dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_SHARED_FP8_GEMM")
         use_bf16_weight_cache = dsv4_kernel.dsv4_env_flag(
             dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-        )
-        shared_params.update(
-            {
-                "use_bf16_weight_cache": bool(use_bf16_weight_cache),
-                "dense_fp8_marlin_projection": bool(
-                    dsv4_kernel.dense_fp8_marlin_projection_enabled()
-                ),
-                "shared_fp8_gemm": bool(fp8_gemm),
-            }
         )
         with _dsv4_capture_nvtx("shared_experts.gate_up_proj"):
             if use_bf16_weight_cache:
@@ -4840,48 +2840,11 @@ class DSV4SharedExperts(BaseOP):
                     hidden_states,
                     fp8_gemm=fp8_gemm if fp8_gemm else None,
                 )
-        self._record_shared_boundary(
-            operator_name="shared_expert_gate_up",
-            input_tensor=hidden_states,
-            output_tensor=gate_up,
-            path="mini.shared_experts.gate_up_proj",
-            stage="shared_experts.gate_up_proj",
-            params=shared_params,
-            extra={"backend": self._debug_weight_cache_probe()},
-        )
         gate, up = gate_up.chunk(2, dim=-1)
-        self._record_shared_boundary(
-            operator_name="shared_expert_gate_chunk",
-            input_tensor=gate_up,
-            output_tensor=gate,
-            path="mini.shared_experts.gate_up_proj.chunk.gate",
-            stage="shared_experts.gate_chunk",
-            params=shared_params,
-        )
-        self._record_shared_boundary(
-            operator_name="shared_expert_up_chunk",
-            input_tensor=gate_up,
-            output_tensor=up,
-            path="mini.shared_experts.gate_up_proj.chunk.up",
-            stage="shared_experts.up_chunk",
-            params=shared_params,
-        )
         hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
             gate,
             up,
             swiglu_limit=self.swiglu_limit,
-        )
-        self._record_shared_boundary(
-            operator_name="shared_expert_silu_and_mul_clamp",
-            input_tensor=gate_up,
-            output_tensor=hidden,
-            path="mini.shared_experts.silu_and_mul_clamp_fallback",
-            stage="shared_experts.silu_and_mul_clamp",
-            params=shared_params,
-            extra={
-                "gate": _dsv4_moe_reduce_tensor_census(gate),
-                "up": _dsv4_moe_reduce_tensor_census(up),
-            },
         )
         with _dsv4_capture_nvtx("shared_experts.down_proj"):
             with dsv4_direct_copy_nvtx(
@@ -4889,51 +2852,28 @@ class DSV4SharedExperts(BaseOP):
                 hidden=hidden,
             ):
                 hidden_for_down = hidden.to(up.dtype)
-            self._record_shared_boundary(
-                operator_name="shared_expert_hidden_for_down",
-                input_tensor=hidden,
-                output_tensor=hidden_for_down,
-                path="mini.shared_experts.hidden_for_down",
-                stage="shared_experts.hidden_for_down",
-                params=shared_params,
-                extra={
-                    "hidden_dtype_before_cast": str(hidden.dtype),
-                    "hidden_dtype_after_cast": str(hidden_for_down.dtype),
-                },
-            )
             if dsv4_kernel.dense_fp8_marlin_projection_enabled():
-                down = self.down_proj.forward_fp8_marlin_weight(
+                return self.down_proj.forward_fp8_marlin_weight(
                     hidden_for_down,
                     cache_name=self._down_marlin_weight_cache_name,
                     owner_label=self._down_owner_label,
                     reduce=reduce,
                     reduce_label="dsv4.shared_expert_all_reduce",
                 )
-            elif use_bf16_weight_cache:
-                down = self.down_proj.forward_fp8_cached_bf16_weight(
+            if use_bf16_weight_cache:
+                return self.down_proj.forward_fp8_cached_bf16_weight(
                     hidden_for_down,
                     cache_name=self._down_bf16_weight_cache_name,
                     owner_label=self._down_owner_label,
                     reduce=reduce,
                     reduce_label="dsv4.shared_expert_all_reduce",
                 )
-            else:
-                down = self.down_proj.forward(
-                    hidden_for_down,
-                    reduce=reduce,
-                    reduce_label="dsv4.shared_expert_all_reduce",
-                    fp8_gemm=fp8_gemm if fp8_gemm else None,
-                )
-            self._record_shared_boundary(
-                operator_name="shared_expert_down_proj",
-                input_tensor=hidden_for_down,
-                output_tensor=down,
-                path="mini.shared_experts.down_proj",
-                stage="shared_experts.down_proj",
-                params=shared_params,
-                extra={"backend": self._debug_weight_cache_probe()},
+            return self.down_proj.forward(
+                hidden_for_down,
+                reduce=reduce,
+                reduce_label="dsv4.shared_expert_all_reduce",
+                fp8_gemm=fp8_gemm if fp8_gemm else None,
             )
-            return down
 
 
 def _dsv4_moe_reduce_once_input(
@@ -4993,7 +2933,6 @@ class DSV4FusedMoERunner:
         input_ids: torch.Tensor,
         *,
         hash_topk: DSV4TopK | None,
-        row_invariant_local: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.gate.forward(
             flat,
@@ -5002,7 +2941,6 @@ class DSV4FusedMoERunner:
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             hash_topk=hash_topk,
-            row_invariant_local=row_invariant_local,
         )
 
     def prepare(
@@ -5048,26 +2986,6 @@ class DSV4FusedMoERunner:
             moe_plan=prepared.moe_plan,
         )
 
-    def apply_experts_row_invariant(
-        self,
-        flat: torch.Tensor,
-        prepared: DSV4FusedMoERunnerPrepareResult,
-    ) -> torch.Tensor:
-        rows = flat.numel() // flat.shape[-1]
-        if rows <= 1:
-            return self.apply_experts(flat, prepared)
-        flat_2d = flat.reshape(rows, flat.shape[-1])
-        weights_2d = prepared.weights.reshape(rows, prepared.weights.shape[-1])
-        indices_2d = prepared.indices.reshape(rows, prepared.indices.shape[-1])
-        chunks: list[torch.Tensor] = []
-        for row in range(rows):
-            row_flat = flat_2d[row : row + 1].contiguous()
-            row_weights = weights_2d[row : row + 1].contiguous()
-            row_indices = indices_2d[row : row + 1].contiguous()
-            row_prepared = self.prepare(row_flat, row_weights, row_indices)
-            chunks.append(self.apply_experts(row_flat, row_prepared))
-        return torch.cat(chunks, dim=0).reshape_as(flat)
-
     def finalize_routed(self, routed_output: torch.Tensor) -> torch.Tensor:
         # The current grouped FP4 backend already applies top-k weights and
         # sums routes to [tokens, hidden]. Keep the boundary explicit so a
@@ -5078,79 +2996,15 @@ class DSV4FusedMoERunner:
         ):
             return routed_output.float()
 
-    def apply_shared_raw(
-        self,
-        flat: torch.Tensor,
-        *,
-        row_invariant_local: bool = False,
-    ) -> torch.Tensor | None:
+    def apply_shared(self, flat: torch.Tensor) -> torch.Tensor | None:
         if self.shared_experts is None:
             return None
-        return self.shared_experts.forward(
-            flat,
-            reduce=False,
-            row_invariant_local=row_invariant_local,
-        )
-
-    def _apply_shared_raw_with_debug_context(
-        self,
-        flat: torch.Tensor,
-        *,
-        row_invariant_local: bool,
-        batch: Batch | None,
-        stage: str,
-        source_rows: list[int] | tuple[int, ...] | None = None,
-        chunk_start: int | None = None,
-        chunk_end: int | None = None,
-        variant: str | None = None,
-        contract: dict[str, object] | None = None,
-    ) -> torch.Tensor | None:
-        if batch is None:
-            return self.apply_shared_raw(
-                flat,
-                row_invariant_local=row_invariant_local,
-            )
-        rows = int(flat.shape[0]) if flat.ndim > 0 else 0
-        if source_rows is None:
-            source_rows = list(range(rows))
-        context: dict[str, object] = {
-            "stage": str(stage),
-            "source_rows": [int(row) for row in list(source_rows)[:rows]],
-            "chunk_start": None if chunk_start is None else int(chunk_start),
-            "chunk_end": None if chunk_end is None else int(chunk_end),
-            "variant": variant,
-            "row_invariant_local": bool(row_invariant_local),
-        }
-        if contract is not None:
-            context["microbatch_contract"] = contract
-        previous_context = getattr(batch, "_dsv4_shared_expert_forward_context", None)
-        setattr(batch, "_dsv4_shared_expert_forward_context", context)
-        try:
-            return self.apply_shared_raw(
-                flat,
-                row_invariant_local=row_invariant_local,
-            )
-        finally:
-            if previous_context is None:
-                try:
-                    delattr(batch, "_dsv4_shared_expert_forward_context")
-                except AttributeError:
-                    pass
-            else:
-                setattr(batch, "_dsv4_shared_expert_forward_context", previous_context)
-
-    def finalize_shared(self, shared_output: torch.Tensor) -> torch.Tensor:
+        shared = self.shared_experts.forward(flat, reduce=False)
         with dsv4_direct_copy_nvtx(
             f"moe_shared_expert_staging.runner_shared_to_fp32.layer{self.layer_id}",
-            shared=shared_output,
+            shared=shared,
         ):
-            return shared_output.float()
-
-    def apply_shared(self, flat: torch.Tensor) -> torch.Tensor | None:
-        shared = self.apply_shared_raw(flat)
-        if shared is None:
-            return None
-        return self.finalize_shared(shared)
+            return shared.float()
 
     def maybe_reduce_final(
         self,
@@ -5159,14 +3013,7 @@ class DSV4FusedMoERunner:
         comm: DistributedCommunicator,
         hidden_dtype: torch.dtype,
         reduce_label: str,
-    ) -> tuple[torch.Tensor, dict[str, object]]:
-        boundary_extra = _dsv4_moe_reduce_boundary_base_extra(
-            stage="runner.post_all_reduce",
-            tp_size=self._tp_size,
-            comm=comm,
-            reduce_label=reduce_label,
-            pre_reduce=output,
-        )
+    ) -> torch.Tensor:
         if self._tp_size > 1:
             output = _dsv4_moe_reduce_once_input(
                 output,
@@ -5174,1067 +3021,7 @@ class DSV4FusedMoERunner:
                 layer_id=self.layer_id,
                 path="runner_output",
             )
-            boundary_extra["communication_input"] = _dsv4_moe_reduce_tensor_census_if_enabled(output)
-            boundary_extra["communication_input_dtype"] = str(output.dtype)
-            output = comm.all_reduce(output, label=reduce_label)
-            boundary_extra["post_reduce"] = _dsv4_moe_reduce_tensor_census_if_enabled(output)
-            boundary_extra["communication_output_dtype"] = str(output.dtype)
-            return output, boundary_extra
-        boundary_extra["communication_input"] = _dsv4_moe_reduce_tensor_census_if_enabled(output)
-        boundary_extra["communication_input_dtype"] = str(output.dtype)
-        boundary_extra["post_reduce"] = _dsv4_moe_reduce_tensor_census_if_enabled(output)
-        boundary_extra["communication_output_dtype"] = str(output.dtype)
-        return output, boundary_extra
-
-    def _contract_active_source_rows(self, batch: Batch | None, rows: int) -> list[int]:
-        metadata = getattr(batch, "dsv4_target_verify_metadata", None)
-        if not isinstance(metadata, dict):
-            return list(range(int(rows)))
-        mask = metadata.get("active_row_mask")
-        if isinstance(mask, torch.Tensor):
-            values = [bool(x) for x in mask.detach().reshape(-1).cpu().tolist()]
-        elif isinstance(mask, (list, tuple)):
-            values = [bool(x) for x in mask]
-        else:
-            values = []
-        if len(values) < int(rows):
-            return list(range(int(rows)))
-        return [idx for idx, active in enumerate(values[: int(rows)]) if active]
-
-    def _contract_chunk_size(self, batch: Batch | None, rows: int) -> int:
-        raw = os.environ.get("MINISGL_DSV4_MTP_MOE_CONTRACT_ORACLE_MICROBATCH", "").strip()
-        if raw:
-            try:
-                value = int(raw)
-                if value > 0:
-                    return min(value, int(rows))
-            except ValueError:
-                pass
-        size = int(getattr(batch, "size", 0) or len(getattr(batch, "reqs", [])) or 0)
-        if size <= 0:
-            size = 1
-        return min(size, int(rows))
-
-    @staticmethod
-    def _contract_cat_optional(chunks: list[torch.Tensor | None]) -> torch.Tensor | None:
-        tensors = [chunk for chunk in chunks if isinstance(chunk, torch.Tensor)]
-        if not tensors:
-            return None
-        if len(tensors) != len(chunks):
-            return None
-        return torch.cat(tensors, dim=0)
-
-    def _contract_run_once(
-        self,
-        flat: torch.Tensor,
-        flat_input_ids: torch.Tensor,
-        *,
-        comm: DistributedCommunicator,
-        hash_topk: DSV4TopK | None,
-        row_invariant_local: bool,
-        batch: Batch | None = None,
-        source_rows: list[int] | tuple[int, ...] | None = None,
-        chunk_start: int | None = None,
-        chunk_end: int | None = None,
-        variant: str | None = None,
-        contract: dict[str, object] | None = None,
-    ) -> dict[str, torch.Tensor | None]:
-        weights, indices = self.route(
-            flat,
-            flat_input_ids,
-            hash_topk=hash_topk,
-            row_invariant_local=row_invariant_local,
-        )
-        prepared = self.prepare(flat, weights, indices)
-        if row_invariant_local:
-            routed_raw = self.apply_experts_row_invariant(flat, prepared)
-        else:
-            routed_raw = self.apply_experts(flat, prepared)
-        routed = self.finalize_routed(routed_raw)
-        shared_raw = self._apply_shared_raw_with_debug_context(
-            flat,
-            batch=batch,
-            stage="runner.contract_run_once.shared",
-            source_rows=source_rows,
-            chunk_start=chunk_start,
-            chunk_end=chunk_end,
-            variant=variant,
-            contract=contract,
-            row_invariant_local=row_invariant_local,
-        )
-        shared = self.finalize_shared(shared_raw) if shared_raw is not None else None
-        aggregate = routed + shared if shared is not None else routed
-        aggregate_before_reduce = aggregate
-        if _dsv4_moe_preserve_pre_reduce_tensor_enabled(self.layer_id):
-            aggregate_before_reduce = aggregate.detach().clone()
-        reduced, _reduce_extra = self.maybe_reduce_final(
-            aggregate,
-            comm=comm,
-            hidden_dtype=flat.dtype,
-            reduce_label=prepared.moe_plan.final_reduce_label,
-        )
-        output = reduced.to(flat.dtype)
-        return {
-            "topk_ids": indices,
-            "topk_weights": weights,
-            "routed_expert_output_raw": routed_raw,
-            "routed_expert_output": routed,
-            "shared_expert_output_raw": shared_raw,
-            "shared_expert_output": shared,
-            "expert_aggregate_before_reduce": aggregate_before_reduce,
-            "expert_reduce_output": reduced,
-            "moe_output": output,
-        }
-
-    def _contract_run_variant(
-        self,
-        flat: torch.Tensor,
-        flat_input_ids: torch.Tensor,
-        *,
-        comm: DistributedCommunicator,
-        hash_topk: DSV4TopK | None,
-        source_rows: list[int],
-        row_invariant_local: bool,
-        chunk_size: int | None = None,
-        batch: Batch | None = None,
-        variant: str | None = None,
-        contract: dict[str, object] | None = None,
-    ) -> dict[str, torch.Tensor | None]:
-        rows = int(flat.shape[0])
-        if chunk_size is None or int(chunk_size) <= 0 or int(chunk_size) >= rows:
-            return self._contract_run_once(
-                flat,
-                flat_input_ids,
-                comm=comm,
-                hash_topk=hash_topk,
-                row_invariant_local=row_invariant_local,
-                batch=batch,
-                source_rows=source_rows,
-                chunk_start=0,
-                chunk_end=rows,
-                variant=variant,
-                contract=contract,
-            )
-        by_name: dict[str, list[torch.Tensor | None]] = {}
-        for start in range(0, rows, int(chunk_size)):
-            end = min(start + int(chunk_size), rows)
-            chunk_source_rows = list(source_rows[start:end])
-            chunk = self._contract_run_once(
-                flat[start:end].contiguous(),
-                flat_input_ids[start:end].contiguous(),
-                comm=comm,
-                hash_topk=hash_topk,
-                row_invariant_local=row_invariant_local,
-                batch=batch,
-                source_rows=chunk_source_rows,
-                chunk_start=start,
-                chunk_end=end,
-                variant=variant,
-                contract=contract,
-            )
-            for name, tensor in chunk.items():
-                by_name.setdefault(name, []).append(tensor)
-        return {
-            name: self._contract_cat_optional(chunks)
-            for name, chunks in by_name.items()
-        }
-
-    def _record_contract_variant(
-        self,
-        batch: Batch | None,
-        *,
-        variant: str,
-        source_rows: list[int],
-        tensors: dict[str, torch.Tensor | None],
-        positions: torch.Tensor | None,
-        reference_tensor: torch.Tensor,
-        params: dict[str, object],
-        extra: dict[str, object],
-    ) -> None:
-        dsv4_mtp_debug.record_moe_contract_oracle(
-            batch,
-            layer_id=self.layer_id,
-            variant=variant,
-            source_rows=source_rows,
-            tensors=tensors,
-            positions=positions,
-            params=params,
-            extra=extra,
-            reference_tensor=reference_tensor,
-        )
-
-    @staticmethod
-    def _microbench_compare(
-        lhs: torch.Tensor | None,
-        rhs: torch.Tensor | None,
-    ) -> dict[str, object]:
-        if not isinstance(lhs, torch.Tensor) or not isinstance(rhs, torch.Tensor):
-            return {"available": False}
-        if tuple(lhs.shape) != tuple(rhs.shape):
-            return {
-                "available": False,
-                "reason": "shape mismatch",
-                "lhs_shape": [int(x) for x in lhs.shape],
-                "rhs_shape": [int(x) for x in rhs.shape],
-            }
-        try:
-            lhs_cpu = lhs.detach().float().contiguous().cpu()
-            rhs_cpu = rhs.detach().float().contiguous().cpu()
-            delta = lhs_cpu - rhs_cpu
-            abs_delta = delta.abs()
-            max_abs = float(abs_delta.max().item()) if abs_delta.numel() else 0.0
-            denom = rhs_cpu.abs().clamp_min(1.0e-12)
-            max_rel = (
-                float((abs_delta / denom).max().item()) if abs_delta.numel() else 0.0
-            )
-            return {
-                "available": True,
-                "bit_exact": bool(torch.equal(lhs_cpu, rhs_cpu)),
-                "max_abs": max_abs,
-                "max_rel": max_rel,
-                "lhs_checksum": _dsv4_moe_row0_checksum(lhs),
-                "rhs_checksum": _dsv4_moe_row0_checksum(rhs),
-            }
-        except Exception as exc:
-            return {
-                "available": False,
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            }
-
-    @staticmethod
-    def _shared_microbench_tensor_scalar(
-        tensor: torch.Tensor | None,
-        row: int,
-    ) -> int | None:
-        if not isinstance(tensor, torch.Tensor):
-            return None
-        try:
-            flat = tensor.detach().reshape(-1)
-            if 0 <= int(row) < int(flat.numel()):
-                return int(flat[int(row)].cpu().item())
-        except Exception:
-            return None
-        return None
-
-    @staticmethod
-    def _shared_microbench_contract_value(
-        values: list[object] | tuple[object, ...] | torch.Tensor | None,
-        row: int,
-    ) -> object | None:
-        try:
-            if isinstance(values, torch.Tensor) and 0 <= int(row) < int(values.numel()):
-                value = values.detach().reshape(-1)[int(row)].cpu().item()
-                if isinstance(value, bool):
-                    return bool(value)
-                return int(value)
-            if isinstance(values, (list, tuple)) and 0 <= int(row) < len(values):
-                value = values[int(row)]
-                if isinstance(value, bool):
-                    return bool(value)
-                return int(value)
-        except Exception:
-            return None
-        return None
-
-    def _shared_microbench_select_row(
-        self,
-        batch: Batch | None,
-        flat_input_ids: torch.Tensor,
-        positions: torch.Tensor | None,
-    ) -> int | None:
-        if batch is None:
-            return None
-        if not dsv4_mtp_debug.operator_parity_enabled("shared_expert_microbench"):
-            return None
-        if not _dsv4_mtp_shared_expert_microbench_enabled(self.layer_id):
-            return None
-        count = int(getattr(self, "_shared_expert_microbench_records", 0))
-        if count >= _dsv4_mtp_shared_expert_microbench_max_records():
-            return None
-        token_filter = _dsv4_mtp_shared_expert_microbench_scalar_filter(
-            DSV4_MTP_SHARED_EXPERT_MICROBENCH_TOKEN_ENV
-        )
-        position_filter = _dsv4_mtp_shared_expert_microbench_scalar_filter(
-            DSV4_MTP_SHARED_EXPERT_MICROBENCH_POSITION_ENV
-        )
-        try:
-            rows = int(flat_input_ids.detach().reshape(-1).numel())
-        except Exception:
-            return None
-        if rows <= 0:
-            return None
-        for row in range(rows):
-            token = self._shared_microbench_tensor_scalar(flat_input_ids, row)
-            if token_filter is not None and token != token_filter:
-                continue
-            position = self._shared_microbench_tensor_scalar(positions, row)
-            if position_filter is not None and position != position_filter:
-                continue
-            return int(row)
-        return None
-
-    def _shared_microbench_run_current(
-        self,
-        batch: Batch | None,
-        x: torch.Tensor,
-    ) -> torch.Tensor | None:
-        if self.shared_experts is None:
-            return None
-        previous_suppress = bool(
-            getattr(batch, "_dsv4_shared_expert_suppress_operator_trace", False)
-        )
-        if batch is not None:
-            setattr(batch, "_dsv4_shared_expert_suppress_operator_trace", True)
-        try:
-            return self.apply_shared_raw(x.contiguous(), row_invariant_local=False)
-        finally:
-            if batch is not None:
-                if previous_suppress:
-                    setattr(batch, "_dsv4_shared_expert_suppress_operator_trace", True)
-                else:
-                    try:
-                        delattr(batch, "_dsv4_shared_expert_suppress_operator_trace")
-                    except AttributeError:
-                        pass
-
-    def _shared_microbench_run_reference(
-        self,
-        x: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, dict[str, object]]:
-        if self.shared_experts is None:
-            return None, {"available": False, "reason": "no shared experts"}
-        shared = self.shared_experts
-        if not hasattr(shared.gate_up_proj, "weight"):
-            return None, {
-                "available": False,
-                "reason": "gate_up original weight unavailable",
-            }
-        if not hasattr(shared.down_proj, "weight"):
-            return None, {
-                "available": False,
-                "reason": "down original weight unavailable",
-            }
-        try:
-            gate_up = shared.gate_up_proj.forward(
-                x.contiguous(),
-                fp8_gemm=False,
-            )
-            gate, up = gate_up.chunk(2, dim=-1)
-            hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
-                gate,
-                up,
-                swiglu_limit=shared.swiglu_limit,
-            )
-            hidden_for_down = hidden.to(up.dtype)
-            out = shared.down_proj.forward(
-                hidden_for_down,
-                reduce=False,
-                fp8_gemm=False,
-            )
-            return out, {"available": True, "path": "torch_quantized_linear_ref"}
-        except Exception as exc:
-            return None, {
-                "available": False,
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            }
-
-    def _maybe_record_shared_expert_microbench(
-        self,
-        batch: Batch | None,
-        *,
-        flat: torch.Tensor,
-        flat_input_ids: torch.Tensor,
-        positions: torch.Tensor | None,
-        runtime_shared_raw: torch.Tensor | None,
-        contract: _DSV4TargetVerifyMoEMicrobatchContract,
-    ) -> None:
-        selected_row = self._shared_microbench_select_row(
-            batch,
-            flat_input_ids,
-            positions,
-        )
-        if selected_row is None:
-            return
-        setattr(
-            self,
-            "_shared_expert_microbench_records",
-            int(getattr(self, "_shared_expert_microbench_records", 0)) + 1,
-        )
-        if flat.ndim != 2 or flat.shape[0] <= 0:
-            return
-        selected_row = max(0, min(int(selected_row), int(flat.shape[0]) - 1))
-        row = flat[selected_row : selected_row + 1].contiguous()
-        target_metadata = getattr(batch, "dsv4_target_verify_metadata", None)
-        parent_rows_value = int(contract.batch_size)
-        if isinstance(target_metadata, dict):
-            try:
-                parent_rows_value = int(
-                    target_metadata.get("parent_batch_size", parent_rows_value)
-                )
-            except Exception:
-                parent_rows_value = int(contract.batch_size)
-        parent_rows = max(1, parent_rows_value)
-        parent_slot = 0
-        if 0 <= selected_row < len(contract.row_to_parent_batch_index):
-            parent_slot = int(contract.row_to_parent_batch_index[selected_row])
-        parent_slot = max(0, min(parent_slot, parent_rows - 1))
-        selected_position = None
-        if isinstance(positions, torch.Tensor) and positions.numel() > selected_row:
-            try:
-                selected_position = positions.reshape(-1)[
-                    selected_row : selected_row + 1
-                ].contiguous()
-            except Exception:
-                selected_position = None
-        selected_runtime_shared_raw = None
-        if (
-            isinstance(runtime_shared_raw, torch.Tensor)
-            and runtime_shared_raw.ndim > 0
-            and selected_row < int(runtime_shared_raw.shape[0])
-        ):
-            selected_runtime_shared_raw = runtime_shared_raw[
-                selected_row : selected_row + 1
-            ].contiguous()
-
-        def _parent_tensor(fill: str, source: torch.Tensor) -> torch.Tensor:
-            if fill == "repeat":
-                parent = source.repeat(parent_rows, 1)
-            else:
-                parent = torch.zeros(
-                    (parent_rows, source.shape[-1]),
-                    device=source.device,
-                    dtype=source.dtype,
-                )
-            parent[parent_slot : parent_slot + 1].copy_(source)
-            return parent.contiguous()
-
-        def _padded_neighbors(source: torch.Tensor) -> torch.Tensor:
-            rows = max(3, int(flat.shape[0]))
-            padded = torch.zeros(
-                (rows, source.shape[-1]),
-                device=source.device,
-                dtype=source.dtype,
-            )
-            padded[0:1].copy_(source)
-            return padded.contiguous()
-
-        def _select_row(tensor: torch.Tensor | None, index: int = 0) -> torch.Tensor | None:
-            if not isinstance(tensor, torch.Tensor) or tensor.ndim == 0:
-                return None
-            if int(index) < 0 or int(index) >= int(tensor.shape[0]):
-                return None
-            return tensor[int(index) : int(index) + 1].contiguous()
-
-        variants: dict[str, torch.Tensor | None] = {}
-        with torch.no_grad():
-            repeated = [
-                self._shared_microbench_run_current(batch, row)
-                for _ in range(3)
-            ]
-            variants["one_row"] = repeated[0]
-            variants["target_full_rows_3"] = _select_row(
-                self._shared_microbench_run_current(batch, flat.contiguous()),
-                selected_row,
-            )
-            parent_zero = _parent_tensor("zero", row)
-            variants["parent_like_4_zero_fill"] = _select_row(
-                self._shared_microbench_run_current(batch, parent_zero),
-                parent_slot,
-            )
-            parent_repeat = _parent_tensor("repeat", row)
-            variants["parent_like_4_repeat_fill"] = _select_row(
-                self._shared_microbench_run_current(batch, parent_repeat),
-                parent_slot,
-            )
-            variants["padded_neighbor_rows_zero"] = _select_row(
-                self._shared_microbench_run_current(batch, _padded_neighbors(row)),
-                0,
-            )
-            ref, ref_meta = self._shared_microbench_run_reference(row)
-            variants["reference_torch_one_row"] = ref
-
-            value_sweeps: list[dict[str, object]] = []
-            sweep_inputs = [
-                ("zeros", torch.zeros_like(row)),
-                ("small_scale_0.125x", row * 0.125),
-                ("original", row),
-                ("scale_2x", row * 2.0),
-                ("scale_4x", row * 4.0),
-                ("sign_flipped", -row),
-            ]
-            for label, sweep_row in sweep_inputs:
-                one = self._shared_microbench_run_current(batch, sweep_row)
-                parent = _parent_tensor("zero", sweep_row)
-                parent_out = _select_row(
-                    self._shared_microbench_run_current(batch, parent),
-                    parent_slot,
-                )
-                value_sweeps.append(
-                    {
-                        "variant": label,
-                        "one_row": _dsv4_moe_reduce_tensor_census(one),
-                        "parent_like_4_zero_fill": _dsv4_moe_reduce_tensor_census(
-                            parent_out
-                        ),
-                        "one_vs_parent_like_4": self._microbench_compare(one, parent_out),
-                    }
-                )
-
-        repeat_comparisons = [
-            self._microbench_compare(repeated[0], item)
-            for item in repeated[1:]
-            if isinstance(repeated[0], torch.Tensor)
-        ]
-        base = variants.get("one_row")
-        row_shape_rows = []
-        for name, tensor in variants.items():
-            row_shape_rows.append(
-                {
-                    "variant": name,
-                    "output": _dsv4_moe_reduce_tensor_census(tensor),
-                    "vs_one_row": (
-                        {"available": True, "bit_exact": True, "max_abs": 0.0, "max_rel": 0.0}
-                        if name == "one_row"
-                        else self._microbench_compare(base, tensor)
-                    ),
-                }
-            )
-
-        source_record = {
-            "source_row": int(selected_row),
-            "chunk_row": int(selected_row),
-            "parent_row": int(parent_slot),
-            "input_token": self._shared_microbench_tensor_scalar(
-                flat_input_ids,
-                selected_row,
-            ),
-            "position": self._shared_microbench_tensor_scalar(
-                positions,
-                selected_row,
-            ),
-            "out_cache_loc": self._shared_microbench_tensor_scalar(
-                getattr(batch, "out_loc", None),
-                selected_row,
-            ),
-            "row_depth": self._shared_microbench_contract_value(
-                contract.row_depths,
-                selected_row,
-            ),
-            "row_to_batch_index": self._shared_microbench_contract_value(
-                contract.row_to_batch_index,
-                selected_row,
-            ),
-            "row_to_parent_batch_index": self._shared_microbench_contract_value(
-                contract.row_to_parent_batch_index,
-                selected_row,
-            ),
-            "active_row": self._shared_microbench_contract_value(
-                contract.active_row_mask,
-                selected_row,
-            ),
-            "padded_row": self._shared_microbench_contract_value(
-                contract.padded_row_mask,
-                selected_row,
-            ),
-        }
-        extra = {
-            "stage": "runner.target_verify_microbatch.shared_expert_microbench",
-            "selected_source_row": int(selected_row),
-            "source_row_records": [source_record],
-            "microbench": {
-                "real_row_source": f"rank-local target verify flat row {selected_row}",
-                "parent_rows": int(parent_rows),
-                "parent_slot": int(parent_slot),
-                "contract": contract.as_record(),
-                "repeated_same_input_same_shape": {
-                    "runs": [
-                        _dsv4_moe_reduce_tensor_census(item) for item in repeated
-                    ],
-                    "comparisons_to_first": repeat_comparisons,
-                },
-                "row_shape_oracles": row_shape_rows,
-                "reference_torch": ref_meta,
-                "value_sweep": value_sweeps,
-            },
-        }
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="shared_expert_microbench",
-            layer_id=self.layer_id,
-            input_tensor=row,
-            output_tensor=selected_runtime_shared_raw,
-            positions=selected_position,
-            path="mini.moe.runner.target_verify_microbatch.shared_expert_microbench",
-            params={
-                "runner": True,
-                "target_verify_moe_microbatch_runtime": True,
-                "microbench": True,
-            },
-            extra=extra,
-        )
-        dsv4_mtp_debug.record_moe_microbatch_runtime(
-            batch,
-            {
-                "layer_id": int(self.layer_id),
-                "record_type": "shared_expert_microbench",
-                "enabled": True,
-                "input_tensor_metadata": DSV4SharedExperts._debug_tensor_meta(row),
-                "output_tensor_metadata": DSV4SharedExperts._debug_tensor_meta(
-                    selected_runtime_shared_raw
-                ),
-                "input_census": _dsv4_moe_reduce_tensor_census(row),
-                "output_census": _dsv4_moe_reduce_tensor_census(
-                    selected_runtime_shared_raw
-                ),
-                **extra,
-            },
-        )
-
-    def _maybe_record_contract_oracle(
-        self,
-        *,
-        batch: Batch | None,
-        hidden_states: torch.Tensor,
-        flat: torch.Tensor,
-        flat_input_ids: torch.Tensor,
-        positions: torch.Tensor | None,
-        comm: DistributedCommunicator,
-        hash_topk: DSV4TopK | None,
-        common_params: dict[str, object],
-    ) -> None:
-        if not dsv4_mtp_debug.moe_contract_oracle_enabled(self.layer_id):
-            return
-        if not _dsv4_is_target_verify_batch(batch):
-            return
-        if flat.ndim != 2 or flat.shape[0] <= 0:
-            return
-        try:
-            if flat.is_cuda and torch.cuda.is_current_stream_capturing():
-                return
-        except Exception:
-            return
-        rows = int(flat.shape[0])
-        source_rows = list(range(rows))
-        active_rows = self._contract_active_source_rows(batch, rows)
-        if not active_rows:
-            active_rows = source_rows
-        microbatch = self._contract_chunk_size(batch, rows)
-        variants: list[tuple[str, list[int], torch.Tensor, torch.Tensor, bool, int | None, dict[str, object]]] = [
-            (
-                "target_full_batch",
-                source_rows,
-                flat,
-                flat_input_ids,
-                False,
-                None,
-                {
-                    "contract": "full target verify batch",
-                    "runtime_warning": "debug-only oracle; replays MoE and all-reduce",
-                },
-            ),
-            (
-                "target_active_only",
-                active_rows,
-                flat[active_rows].contiguous(),
-                flat_input_ids[active_rows].contiguous(),
-                False,
-                None,
-                {
-                    "contract": "active-only target rows",
-                    "active_rows": active_rows,
-                    "runtime_warning": "debug-only oracle; replays MoE and all-reduce",
-                },
-            ),
-            (
-                "target_row_by_row_reference",
-                source_rows,
-                flat,
-                flat_input_ids,
-                False,
-                1,
-                {
-                    "contract": "row-by-row reference",
-                    "runtime_warning": "slow correctness oracle; one MoE/reduce per row",
-                },
-            ),
-            (
-                "target_normal_shape_microbatch",
-                source_rows,
-                flat,
-                flat_input_ids,
-                False,
-                microbatch,
-                {
-                    "contract": "normal-shape-compatible microbatch",
-                    "microbatch_rows": int(microbatch),
-                    "runtime_warning": "debug-only oracle; one MoE/reduce per microbatch",
-                },
-            ),
-            (
-                "target_current_row_invariant_replay",
-                source_rows,
-                flat,
-                flat_input_ids,
-                True,
-                None,
-                {
-                    "contract": "Mini current target row-invariant local replay",
-                    "runtime_warning": "debug-only replay of current local contract",
-                },
-            ),
-        ]
-        with torch.no_grad():
-            for (
-                variant,
-                variant_source_rows,
-                variant_flat,
-                variant_input_ids,
-                row_invariant_local,
-                chunk_size,
-                extra,
-            ) in variants:
-                tensors = self._contract_run_variant(
-                    variant_flat,
-                    variant_input_ids,
-                    comm=comm,
-                    hash_topk=hash_topk,
-                    source_rows=variant_source_rows,
-                    row_invariant_local=row_invariant_local,
-                    chunk_size=chunk_size,
-                    batch=batch,
-                    variant=variant,
-                )
-                self._record_contract_variant(
-                    batch,
-                    variant=variant,
-                    source_rows=variant_source_rows,
-                    tensors=tensors,
-                    positions=positions,
-                    reference_tensor=hidden_states,
-                    params={
-                        **common_params,
-                        "contract_oracle": True,
-                        "row_invariant_local": bool(row_invariant_local),
-                        "chunk_size": None if chunk_size is None else int(chunk_size),
-                    },
-                    extra=extra,
-                )
-
-    def _forward_target_verify_microbatch(
-        self,
-        hidden_states: torch.Tensor,
-        input_ids: torch.Tensor,
-        *,
-        flat: torch.Tensor,
-        flat_input_ids: torch.Tensor,
-        batch: Batch,
-        positions: torch.Tensor | None,
-        comm: DistributedCommunicator,
-        hash_topk: DSV4TopK | None,
-        common_params: dict[str, object],
-        contract: _DSV4TargetVerifyMoEMicrobatchContract,
-    ) -> torch.Tensor:
-        runtime_params = {
-            **common_params,
-            "target_verify_row_invariant_local": False,
-            "target_verify_moe_microbatch_runtime": True,
-            "target_verify_moe_microbatch_contract": contract.as_record(),
-        }
-        timing_ms: float | None = None
-        timing_enabled = _dsv4_target_verify_moe_microbatch_timing_enabled()
-        start_event = None
-        end_event = None
-        start_s = 0.0
-        if timing_enabled and flat.is_cuda:
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-        elif timing_enabled:
-            start_s = time.perf_counter()
-
-        with _dsv4_capture_nvtx(
-            f"layer{self.layer_id}.mlp.runner.target_verify_moe_microbatch"
-        ):
-            tensors = self._contract_run_variant(
-                flat,
-                flat_input_ids,
-                comm=comm,
-                hash_topk=hash_topk,
-                source_rows=list(range(int(flat.shape[0]))),
-                row_invariant_local=False,
-                chunk_size=contract.chunk_rows,
-                batch=batch,
-                variant="target_verify_microbatch_runtime",
-                contract=contract.as_record(),
-            )
-
-        if timing_enabled and start_event is not None and end_event is not None:
-            end_event.record()
-            end_event.synchronize()
-            timing_ms = float(start_event.elapsed_time(end_event))
-        elif timing_enabled:
-            timing_ms = float((time.perf_counter() - start_s) * 1000.0)
-
-        output = tensors.get("moe_output")
-        if not isinstance(output, torch.Tensor):
-            raise RuntimeError(
-                "DeepSeek V4 target-verify MoE microbatch did not produce moe_output."
-            )
-        output = output.view_as(hidden_states)
-        weights = tensors.get("topk_weights")
-        indices = tensors.get("topk_ids")
-        routed_raw = tensors.get("routed_expert_output_raw")
-        routed = tensors.get("routed_expert_output")
-        shared_raw = tensors.get("shared_expert_output_raw")
-        shared = tensors.get("shared_expert_output")
-        aggregate = tensors.get("expert_aggregate_before_reduce")
-        reduced = tensors.get("expert_reduce_output")
-        self._maybe_record_shared_expert_microbench(
-            batch,
-            flat=flat,
-            flat_input_ids=flat_input_ids,
-            positions=positions,
-            runtime_shared_raw=shared_raw if isinstance(shared_raw, torch.Tensor) else None,
-            contract=contract,
-        )
-        pre_reduce_snapshot_preserved = (
-            isinstance(aggregate, torch.Tensor)
-            and isinstance(reduced, torch.Tensor)
-            and int(aggregate.data_ptr()) != int(reduced.data_ptr())
-        )
-
-        route_extra = {
-            "stage": "runner.target_verify_moe_microbatch",
-            "microbatch_contract": contract.as_record(),
-            "runtime_warning": "target-verify MoE executes one route/expert/reduce path per microbatch",
-        }
-        if isinstance(weights, torch.Tensor) and isinstance(indices, torch.Tensor):
-            route_extra.update(
-                _dsv4_moe_route_extra(
-                    weights=weights,
-                    indices=indices,
-                    input_ids=flat_input_ids,
-                    reduce_once=True,
-                    hash_topk=hash_topk is not None,
-                    stage="runner.target_verify_moe_microbatch",
-                )
-            )
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="topk_ids",
-                layer_id=self.layer_id,
-                input_tensor=flat,
-                output_tensor=indices,
-                positions=positions,
-                path="mini.moe.runner.target_verify_microbatch.topk_ids",
-                params=runtime_params,
-                extra=route_extra,
-            )
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="topk_weights",
-                layer_id=self.layer_id,
-                input_tensor=flat,
-                output_tensor=weights,
-                positions=positions,
-                path="mini.moe.runner.target_verify_microbatch.topk_weights",
-                params=runtime_params,
-                extra=route_extra,
-            )
-        router_logits = _dsv4_moe_router_logits_debug(self.gate, flat)
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="router_logits",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=router_logits,
-            positions=positions,
-            path="mini.moe.runner.target_verify_microbatch.router_logits.linear_bf16_fp32_debug",
-            params=runtime_params,
-            extra=route_extra,
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="routed_expert_input",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=flat,
-            positions=positions,
-            path="mini.moe.runner.target_verify_microbatch.routed_expert_input",
-            params=runtime_params,
-            extra=route_extra,
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="routed_expert_output_raw",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=routed_raw,
-            positions=positions,
-            path="mini.moe.runner.target_verify_microbatch.routed_experts.forward_raw",
-            params=runtime_params,
-            extra={
-                **route_extra,
-                "stage": "runner.target_verify_microbatch.routed_output_raw",
-            },
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="routed_expert_output",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=routed,
-            positions=positions,
-            path="mini.moe.runner.target_verify_microbatch.routed_experts.forward_fp32_finalize",
-            params=runtime_params,
-            extra={
-                **route_extra,
-                "stage": "runner.target_verify_microbatch.routed_output_fp32_finalize",
-                "raw_output": _dsv4_moe_reduce_tensor_census(routed_raw),
-                "finalized_output": _dsv4_moe_reduce_tensor_census(routed),
-            },
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="shared_expert_input",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=flat,
-            positions=positions,
-            path="mini.moe.runner.target_verify_microbatch.shared_expert_input",
-            params=runtime_params,
-            extra={
-                "stage": "runner.target_verify_microbatch.shared_input",
-                "shared_experts_present": self.shared_experts is not None,
-                "microbatch_contract": contract.as_record(),
-            },
-        )
-        if isinstance(shared_raw, torch.Tensor):
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="shared_expert_output_raw",
-                layer_id=self.layer_id,
-                input_tensor=flat,
-                output_tensor=shared_raw,
-                positions=positions,
-                path="mini.moe.runner.target_verify_microbatch.shared_experts.forward_raw",
-                params=runtime_params,
-                extra={"stage": "runner.target_verify_microbatch.shared_output_raw"},
-            )
-        if isinstance(shared, torch.Tensor):
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="shared_expert_output",
-                layer_id=self.layer_id,
-                input_tensor=flat,
-                output_tensor=shared,
-                positions=positions,
-                path="mini.moe.runner.target_verify_microbatch.shared_experts.forward_fp32",
-                params=runtime_params,
-                extra={
-                    "stage": "runner.target_verify_microbatch.shared_output_fp32_finalize",
-                    "raw_output": _dsv4_moe_reduce_tensor_census(shared_raw),
-                    "finalized_output": _dsv4_moe_reduce_tensor_census(shared),
-                },
-            )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="expert_aggregate_before_reduce",
-            layer_id=self.layer_id,
-            input_tensor=routed,
-            output_tensor=aggregate,
-            positions=positions,
-            path="mini.moe.runner.target_verify_microbatch.routed_plus_shared_fp32",
-            params=runtime_params,
-            extra={
-                "stage": "runner.target_verify_microbatch.aggregate_before_reduce",
-                "shared_experts_present": shared is not None,
-                "routed_input": _dsv4_moe_reduce_tensor_census(routed),
-                "shared_input": _dsv4_moe_reduce_tensor_census(shared),
-                "aggregate_output": _dsv4_moe_reduce_tensor_census(aggregate),
-                "aggregate_order": "routed_fp32_plus_shared_fp32",
-                "pre_reduce_snapshot_preserved": bool(pre_reduce_snapshot_preserved),
-                "microbatch_contract": contract.as_record(),
-            },
-        )
-        reduce_label = "per_microbatch_moe_plan_final_reduce"
-        reduce_boundary_extra = _dsv4_moe_reduce_boundary_base_extra(
-            stage="runner.target_verify_microbatch.post_all_reduce",
-            tp_size=self._tp_size,
-            comm=comm,
-            reduce_label=reduce_label,
-            pre_reduce=aggregate if isinstance(aggregate, torch.Tensor) else flat,
-        )
-        reduce_boundary_extra.update(
-            {
-                "communication_input": _dsv4_moe_reduce_tensor_census_if_enabled(aggregate),
-                "communication_input_dtype": str(getattr(aggregate, "dtype", "")),
-                "post_reduce": _dsv4_moe_reduce_tensor_census_if_enabled(reduced),
-                "communication_output_dtype": str(getattr(reduced, "dtype", "")),
-                "pre_reduce_snapshot_preserved": bool(pre_reduce_snapshot_preserved),
-                "microbatch_contract": contract.as_record(),
-            }
-        )
-        reduce_input_row0 = dsv4_mtp_debug.clone_operator_row0_input(
-            "expert_reduce_output",
-            aggregate,
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="expert_reduce_output",
-            layer_id=self.layer_id,
-            input_tensor=aggregate,
-            output_tensor=reduced,
-            positions=positions,
-            path="mini.moe.runner.target_verify_microbatch.post_all_reduce",
-            params={**runtime_params, "reduce_label": reduce_label},
-            extra={**reduce_boundary_extra, "post_all_reduce": bool(self._tp_size > 1)},
-            input_row0=reduce_input_row0,
-        )
-        moe_output_extra = {
-            "stage": "runner.target_verify_microbatch.moe_output",
-            "final_cast_input": _dsv4_moe_reduce_tensor_census_if_enabled(reduced),
-            "final_cast_output": _dsv4_moe_reduce_tensor_census_if_enabled(output),
-            "final_cast_input_dtype": str(getattr(reduced, "dtype", "")),
-            "final_cast_output_dtype": str(output.dtype),
-            "final_cast_order": "post_reduce_to_hidden_dtype",
-            "microbatch_contract": contract.as_record(),
-        }
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="moe_output",
-            layer_id=self.layer_id,
-            input_tensor=reduced,
-            output_tensor=output,
-            positions=positions,
-            path="mini.moe.runner.target_verify_microbatch.output_to_hidden_dtype",
-            params=runtime_params,
-            extra=moe_output_extra,
-        )
-        dsv4_mtp_debug.record_moe_microbatch_runtime(
-            batch,
-            {
-                "layer_id": int(self.layer_id),
-                "enabled": True,
-                "expert_backend": dsv4_kernel.dsv4_moe_expert_backend(),
-                "original_moe_calls": 1,
-                "runtime_moe_calls": int(contract.chunk_count),
-                "elapsed_ms": timing_ms,
-                **contract.as_record(),
-            },
-        )
-        self._maybe_record_contract_oracle(
-            batch=batch,
-            hidden_states=hidden_states,
-            flat=flat,
-            flat_input_ids=flat_input_ids,
-            positions=positions,
-            comm=comm,
-            hash_topk=hash_topk,
-            common_params=runtime_params,
-        )
+            return comm.all_reduce(output, label=reduce_label)
         return output
 
     def forward(
@@ -6247,341 +3034,51 @@ class DSV4FusedMoERunner:
     ) -> torch.Tensor:
         flat = hidden_states.view(-1, hidden_states.shape[-1])
         flat_input_ids = input_ids.view(-1)
-        batch = _dsv4_debug_batch()
-        positions = _dsv4_debug_positions(batch, device=hidden_states.device)
-        is_target_verify = _dsv4_is_target_verify_batch(batch)
-        common_params = {
-            "runner": True,
-            "topk_count": int(self.topk_count),
-            "scoring_func": str(self.scoring_func),
-            "routed_scaling_factor": float(self.routed_scaling_factor),
-            "expert_backend": dsv4_kernel.dsv4_moe_expert_backend(),
-            "tp_size": int(self._tp_size),
-            "target_verify_row_invariant_local": bool(is_target_verify),
-        }
-        microbatch_contract = _dsv4_target_verify_moe_microbatch_contract(
-            batch,
-            int(flat.shape[0]),
-        )
-        if microbatch_contract is not None:
-            return self._forward_target_verify_microbatch(
-                hidden_states,
-                input_ids,
-                flat=flat,
-                flat_input_ids=flat_input_ids,
-                batch=batch,
-                positions=positions,
-                comm=comm,
-                hash_topk=hash_topk,
-                common_params=common_params,
-                contract=microbatch_contract,
-            )
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.route"):
-            weights, indices = self.route(
-                flat,
-                flat_input_ids,
-                hash_topk=hash_topk,
-                row_invariant_local=is_target_verify,
-            )
+            weights, indices = self.route(flat, flat_input_ids, hash_topk=hash_topk)
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
-        router_logits = _dsv4_moe_router_logits_debug(self.gate, flat)
-        route_extra = _dsv4_moe_route_extra(
-            weights=weights,
-            indices=indices,
-            input_ids=flat_input_ids,
-            reduce_once=True,
-            hash_topk=hash_topk is not None,
-            stage="runner.route",
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="router_logits",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=router_logits,
-            positions=positions,
-            path="mini.moe.runner.router_logits.linear_bf16_fp32_debug",
-            params=common_params,
-            extra=route_extra,
-        )
-        topk_input = router_logits if router_logits is not None else flat
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="topk_ids",
-            layer_id=self.layer_id,
-            input_tensor=topk_input,
-            output_tensor=indices,
-            positions=positions,
-            path="mini.moe.runner.topk_ids",
-            params=common_params,
-            extra=route_extra,
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="topk_weights",
-            layer_id=self.layer_id,
-            input_tensor=topk_input,
-            output_tensor=weights,
-            positions=positions,
-            path="mini.moe.runner.topk_weights",
-            params=common_params,
-            extra=route_extra,
-        )
         _record_warmup_memory("moe.route_plan", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.prepare"):
             prepared = self.prepare(flat, weights, indices)
         _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
-        route_extra = _dsv4_moe_route_extra(
-            weights=weights,
-            indices=indices,
-            input_ids=flat_input_ids,
-            moe_plan=prepared.moe_plan,
-            reduce_once=True,
-            hash_topk=hash_topk is not None,
-            stage="runner.prepare",
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="routed_expert_input",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=flat,
-            positions=positions,
-            path="mini.moe.runner.routed_expert_input",
-            params=common_params,
-            extra=route_extra,
-        )
         _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.experts"):
-            if is_target_verify:
-                routed = self.apply_experts_row_invariant(flat, prepared)
-            else:
-                routed = self.apply_experts(flat, prepared)
+            routed = self.apply_experts(flat, prepared)
         _record_warmup_memory("moe.routed_experts", "after", layer_id=self.layer_id)
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="routed_expert_output_raw",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=routed,
-            positions=positions,
-            path="mini.moe.runner.routed_experts.forward_raw",
-            params=common_params,
-            extra={**route_extra, "stage": "runner.routed_output_raw"},
-        )
         _record_warmup_memory("moe.finalize_routed", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.finalize"):
             y = self.finalize_routed(routed)
         _record_warmup_memory("moe.finalize_routed", "after", layer_id=self.layer_id)
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="routed_expert_output",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=y,
-            positions=positions,
-            path="mini.moe.runner.routed_experts.forward_fp32_finalize",
-            params=common_params,
-            extra={
-                **route_extra,
-                "stage": "runner.routed_output_fp32_finalize",
-                "raw_output": _dsv4_moe_reduce_tensor_census(routed),
-                "finalized_output": _dsv4_moe_reduce_tensor_census(y),
-            },
-        )
         _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="shared_expert_input",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=flat,
-            positions=positions,
-            path="mini.moe.runner.shared_expert_input",
-            params=common_params,
-            extra={"stage": "runner.shared_input", "shared_experts_present": self.shared_experts is not None},
-        )
-        routed_for_aggregate = y
-        shared = None
-        shared_raw = None
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.shared"):
-            shared_raw = self._apply_shared_raw_with_debug_context(
-                flat,
-                batch=batch,
-                stage="runner.forward.shared",
-                source_rows=list(range(int(flat.shape[0]))),
-                chunk_start=0,
-                chunk_end=int(flat.shape[0]),
-                variant="runner_forward",
-                row_invariant_local=is_target_verify,
-            )
-            if shared_raw is not None:
-                _dsv4_moe_record_operator(
-                    batch,
-                    operator_name="shared_expert_output_raw",
-                    layer_id=self.layer_id,
-                    input_tensor=flat,
-                    output_tensor=shared_raw,
-                    positions=positions,
-                    path="mini.moe.runner.shared_experts.forward_raw",
-                    params=common_params,
-                    extra={"stage": "runner.shared_output_raw"},
-                )
-                shared = self.finalize_shared(shared_raw)
+            shared = self.apply_shared(flat)
+            if shared is not None:
                 y = y + shared
         _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
-        if shared is not None:
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="shared_expert_output",
-                layer_id=self.layer_id,
-                input_tensor=flat,
-                output_tensor=shared,
-                positions=positions,
-                path="mini.moe.runner.shared_experts.forward_fp32",
-                params=common_params,
-                extra={
-                    "stage": "runner.shared_output_fp32_finalize",
-                    "raw_output": _dsv4_moe_reduce_tensor_census(shared_raw),
-                    "finalized_output": _dsv4_moe_reduce_tensor_census(shared),
-                },
-            )
-        if dsv4_mtp_debug.operator_parity_enabled("expert_aggregate_fp32_add_probe"):
-            aggregate_fp32_probe = (
-                routed_for_aggregate + shared
-                if shared is not None
-                else routed_for_aggregate
-            )
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="expert_aggregate_fp32_add_probe",
-                layer_id=self.layer_id,
-                input_tensor=routed_for_aggregate,
-                output_tensor=aggregate_fp32_probe,
-                positions=positions,
-                path="mini.moe.runner.routed_plus_shared_fp32_probe",
-                params=common_params,
-                extra={
-                    "stage": "runner.aggregate_fp32_add_probe",
-                    "shared_experts_present": shared is not None,
-                    "routed_input": _dsv4_moe_reduce_tensor_census(routed_for_aggregate),
-                    "shared_input": _dsv4_moe_reduce_tensor_census(shared),
-                },
-            )
-        if dsv4_mtp_debug.operator_parity_enabled("expert_aggregate_bf16_add_probe"):
-            routed_bf16 = routed_for_aggregate.to(flat.dtype)
-            if shared is None:
-                aggregate_bf16_probe = routed_bf16.float()
-            else:
-                aggregate_bf16_probe = (routed_bf16 + shared.to(flat.dtype)).float()
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="expert_aggregate_bf16_add_probe",
-                layer_id=self.layer_id,
-                input_tensor=routed_bf16,
-                output_tensor=aggregate_bf16_probe,
-                positions=positions,
-                path="mini.moe.runner.routed_plus_shared_hidden_dtype_probe",
-                params=common_params,
-                extra={
-                    "stage": "runner.aggregate_bf16_add_probe",
-                    "hidden_dtype": str(flat.dtype),
-                    "shared_experts_present": shared is not None,
-                    "routed_input": _dsv4_moe_reduce_tensor_census(routed_bf16),
-                    "shared_input": _dsv4_moe_reduce_tensor_census(
-                        shared.to(flat.dtype) if shared is not None else None
-                    ),
-                },
-            )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="expert_aggregate_before_reduce",
-            layer_id=self.layer_id,
-            input_tensor=routed_for_aggregate,
-            output_tensor=y,
-            positions=positions,
-            path="mini.moe.runner.routed_plus_shared_fp32",
-            params=common_params,
-            extra={
-                "stage": "runner.aggregate_before_reduce",
-                "shared_experts_present": shared is not None,
-                "routed_input": _dsv4_moe_reduce_tensor_census(routed_for_aggregate),
-                "shared_input": _dsv4_moe_reduce_tensor_census(shared),
-                "aggregate_output": _dsv4_moe_reduce_tensor_census(y),
-                "aggregate_order": "routed_fp32_plus_shared_fp32",
-            },
-        )
-        y_before_reduce = y
-        reduce_input_row0 = dsv4_mtp_debug.clone_operator_row0_input(
-            "expert_reduce_output",
-            y_before_reduce,
-        )
         _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.reduce_once"):
-            y, reduce_boundary_extra = self.maybe_reduce_final(
+            y = self.maybe_reduce_final(
                 y,
                 comm=comm,
                 hidden_dtype=flat.dtype,
                 reduce_label=prepared.moe_plan.final_reduce_label,
             )
         _record_warmup_memory("moe.reduce_once", "after", layer_id=self.layer_id)
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="expert_reduce_output",
-            layer_id=self.layer_id,
-            input_tensor=y_before_reduce,
-            output_tensor=y,
-            positions=positions,
-            path="mini.moe.runner.post_all_reduce",
-            params={**common_params, "reduce_label": str(prepared.moe_plan.final_reduce_label)},
-            extra={**reduce_boundary_extra, "post_all_reduce": bool(self._tp_size > 1)},
-            input_row0=reduce_input_row0,
-        )
         with dsv4_direct_copy_nvtx(
             f"moe_shared_expert_staging.runner_output_to_flat_dtype.layer{self.layer_id}",
             y=y,
         ):
-            output = y.to(flat.dtype).view_as(hidden_states)
-        moe_output_extra = {
-            "stage": "runner.moe_output",
-            "final_cast_input": _dsv4_moe_reduce_tensor_census_if_enabled(y),
-            "final_cast_output": _dsv4_moe_reduce_tensor_census_if_enabled(output),
-            "final_cast_input_dtype": str(y.dtype),
-            "final_cast_output_dtype": str(output.dtype),
-            "final_cast_order": "post_reduce_to_hidden_dtype",
-        }
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="moe_output",
-            layer_id=self.layer_id,
-            input_tensor=y,
-            output_tensor=output,
-            positions=positions,
-            path="mini.moe.runner.output_to_hidden_dtype",
-            params=common_params,
-            extra=moe_output_extra,
-        )
-        self._maybe_record_contract_oracle(
-            batch=batch,
-            hidden_states=hidden_states,
-            flat=flat,
-            flat_input_ids=flat_input_ids,
-            positions=positions,
-            comm=comm,
-            hash_topk=hash_topk,
-            common_params=common_params,
-        )
-        return output
+            return y.to(flat.dtype).view_as(hidden_states)
 
 
 class DSV4MoE(BaseOP):
-    def __init__(self, config: ModelConfig, layer_id: int, *, is_nextn: bool = False):
+    def __init__(self, config: ModelConfig, layer_id: int):
         tp = get_tp_info()
         self.layer_id = layer_id
         self._tp_size = tp.size
         self._comm = DistributedCommunicator()
-        is_hash_layer = layer_id < config.n_hash_layers and not is_nextn
+        is_hash_layer = layer_id < config.n_hash_layers
         self.topk_count = config.num_experts_per_tok
         self.scoring_func = config.scoring_func or "sqrtsoftplus"
         self.routed_scaling_factor = config.routed_scaling_factor
@@ -6603,46 +3100,15 @@ class DSV4MoE(BaseOP):
         )
 
     def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
-        batch = _dsv4_debug_batch()
-        positions = _dsv4_debug_positions(batch, device=hidden_states.device)
-        is_target_verify = _dsv4_is_target_verify_batch(batch)
-        flat = hidden_states.view(-1, hidden_states.shape[-1])
-        common_params = {
-            "runner": False,
-            "topk_count": int(self.topk_count),
-            "scoring_func": str(self.scoring_func),
-            "routed_scaling_factor": float(self.routed_scaling_factor),
-            "expert_backend": dsv4_kernel.dsv4_moe_expert_backend(),
-            "tp_size": int(self._tp_size),
-            "target_verify_row_invariant_local": bool(is_target_verify),
-        }
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="moe_input",
-            layer_id=self.layer_id,
-            input_tensor=hidden_states,
-            output_tensor=hidden_states,
-            positions=positions,
-            path="mini.moe.input",
-            params=common_params,
-            extra={"stage": "moe_input"},
-        )
         if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE):
-            output = self._runner.forward(
+            return self._runner.forward(
                 hidden_states,
                 input_ids,
                 comm=self._comm,
                 hash_topk=getattr(self, "topk", None),
             )
-            return output
-        if is_target_verify and _dsv4_target_verify_moe_microbatch_enabled():
-            raise RuntimeError(
-                "DeepSeek V4 target-verify MoE microbatch runtime requires the "
-                "fused MoE runner path. Enable the A100 victory/fused runner "
-                "MoE backend or disable "
-                f"{DSV4_MTP_TARGET_VERIFY_MOE_MICROBATCH_ENV}."
-            )
 
+        flat = hidden_states.view(-1, hidden_states.shape[-1])
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.gate"):
             weights, indices = self.gate.forward(
@@ -6652,56 +3118,8 @@ class DSV4MoE(BaseOP):
                 scoring_func=self.scoring_func,
                 routed_scaling_factor=self.routed_scaling_factor,
                 hash_topk=getattr(self, "topk", None),
-                row_invariant_local=is_target_verify,
             )
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
-        flat_input_ids = input_ids.view(-1)
-        router_logits = _dsv4_moe_router_logits_debug(self.gate, flat)
-        reduce_once = dsv4_kernel.dsv4_env_flag(
-            dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE
-        ) or dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
-        route_extra = _dsv4_moe_route_extra(
-            weights=weights,
-            indices=indices,
-            input_ids=flat_input_ids,
-            reduce_once=reduce_once,
-            hash_topk=hasattr(self, "topk"),
-            stage="non_runner.route",
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="router_logits",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=router_logits,
-            positions=positions,
-            path="mini.moe.router_logits.linear_bf16_fp32_debug",
-            params=common_params,
-            extra=route_extra,
-        )
-        topk_input = router_logits if router_logits is not None else flat
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="topk_ids",
-            layer_id=self.layer_id,
-            input_tensor=topk_input,
-            output_tensor=indices,
-            positions=positions,
-            path="mini.moe.topk_ids",
-            params=common_params,
-            extra=route_extra,
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="topk_weights",
-            layer_id=self.layer_id,
-            input_tensor=topk_input,
-            output_tensor=weights,
-            positions=positions,
-            path="mini.moe.topk_weights",
-            params=common_params,
-            extra=route_extra,
-        )
         moe_v2 = dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE)
         reduce_once = moe_v2 or dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
         moe_plan = None
@@ -6726,230 +3144,24 @@ class DSV4MoE(BaseOP):
                 reduce_once=reduce_once,
             )
             _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
-            route_extra = _dsv4_moe_route_extra(
-                weights=weights,
-                indices=indices,
-                input_ids=flat_input_ids,
-                moe_plan=moe_plan,
-                reduce_once=reduce_once,
-                hash_topk=hasattr(self, "topk"),
-                stage="non_runner.route_plan",
-            )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="routed_expert_input",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=flat,
-            positions=positions,
-            path="mini.moe.routed_expert_input",
-            params=common_params,
-            extra=route_extra,
-        )
         _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.routed"):
             if moe_plan is None:
-                routed_raw = self.experts.forward(
-                    flat,
-                    weights,
-                    indices,
-                    reduce=not reduce_once,
-                )
+                y = self.experts.forward(flat, weights, indices, reduce=not reduce_once).float()
             else:
-                routed_raw = self.experts.forward(
+                y = self.experts.forward(
                     flat,
                     weights,
                     indices,
                     reduce=not reduce_once,
                     moe_plan=moe_plan,
-                )
-            y = routed_raw.float()
+                ).float()
         _record_warmup_memory("moe.routed_experts", "after", layer_id=self.layer_id)
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="routed_expert_output_raw",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=routed_raw,
-            positions=positions,
-            path="mini.moe.routed_experts.forward_raw",
-            params=common_params,
-            extra={**route_extra, "stage": "non_runner.routed_output_raw"},
-        )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="routed_expert_output",
-            layer_id=self.layer_id,
-            input_tensor=flat,
-            output_tensor=y,
-            positions=positions,
-            path="mini.moe.routed_experts.forward_fp32",
-            params=common_params,
-            extra={
-                **route_extra,
-                "stage": "non_runner.routed_output_fp32_finalize",
-                "raw_output": _dsv4_moe_reduce_tensor_census(routed_raw),
-                "finalized_output": _dsv4_moe_reduce_tensor_census(y),
-            },
-        )
-        routed_for_aggregate = y
-        shared = None
-        shared_raw = None
         if hasattr(self, "shared_experts"):
             _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="shared_expert_input",
-                layer_id=self.layer_id,
-                input_tensor=flat,
-                output_tensor=flat,
-                positions=positions,
-                path="mini.moe.shared_expert_input",
-                params=common_params,
-                extra={"stage": "non_runner.shared_input", "shared_experts_present": True},
-            )
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.shared"):
-                previous_context = getattr(
-                    batch, "_dsv4_shared_expert_forward_context", None
-                )
-                if batch is not None:
-                    setattr(
-                        batch,
-                        "_dsv4_shared_expert_forward_context",
-                        {
-                            "stage": "non_runner.forward.shared",
-                            "source_rows": list(range(int(flat.shape[0]))),
-                            "chunk_start": 0,
-                            "chunk_end": int(flat.shape[0]),
-                            "variant": "non_runner_forward",
-                            "row_invariant_local": bool(is_target_verify),
-                        },
-                    )
-                try:
-                    shared_raw = self.shared_experts.forward(
-                        flat,
-                        reduce=not reduce_once,
-                        row_invariant_local=is_target_verify,
-                    )
-                finally:
-                    if batch is not None:
-                        if previous_context is None:
-                            try:
-                                delattr(batch, "_dsv4_shared_expert_forward_context")
-                            except AttributeError:
-                                pass
-                        else:
-                            setattr(
-                                batch,
-                                "_dsv4_shared_expert_forward_context",
-                                previous_context,
-                            )
-                _dsv4_moe_record_operator(
-                    batch,
-                    operator_name="shared_expert_output_raw",
-                    layer_id=self.layer_id,
-                    input_tensor=flat,
-                    output_tensor=shared_raw,
-                    positions=positions,
-                    path="mini.moe.shared_experts.forward_raw",
-                    params=common_params,
-                    extra={"stage": "non_runner.shared_output_raw"},
-                )
-                shared = shared_raw.float()
-                y = y + shared
+                y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()
             _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="shared_expert_output",
-                layer_id=self.layer_id,
-                input_tensor=flat,
-                output_tensor=shared,
-                positions=positions,
-                path="mini.moe.shared_experts.forward_fp32",
-                params=common_params,
-                extra={
-                    "stage": "non_runner.shared_output_fp32_finalize",
-                    "raw_output": _dsv4_moe_reduce_tensor_census(shared_raw),
-                    "finalized_output": _dsv4_moe_reduce_tensor_census(shared),
-                },
-            )
-        if dsv4_mtp_debug.operator_parity_enabled("expert_aggregate_fp32_add_probe"):
-            aggregate_fp32_probe = (
-                routed_for_aggregate + shared
-                if shared is not None
-                else routed_for_aggregate
-            )
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="expert_aggregate_fp32_add_probe",
-                layer_id=self.layer_id,
-                input_tensor=routed_for_aggregate,
-                output_tensor=aggregate_fp32_probe,
-                positions=positions,
-                path="mini.moe.routed_plus_shared_fp32_probe",
-                params=common_params,
-                extra={
-                    "stage": "non_runner.aggregate_fp32_add_probe",
-                    "shared_experts_present": shared is not None,
-                    "routed_input": _dsv4_moe_reduce_tensor_census(routed_for_aggregate),
-                    "shared_input": _dsv4_moe_reduce_tensor_census(shared),
-                },
-            )
-        if dsv4_mtp_debug.operator_parity_enabled("expert_aggregate_bf16_add_probe"):
-            routed_bf16 = routed_for_aggregate.to(flat.dtype)
-            if shared is None:
-                aggregate_bf16_probe = routed_bf16.float()
-            else:
-                aggregate_bf16_probe = (routed_bf16 + shared.to(flat.dtype)).float()
-            _dsv4_moe_record_operator(
-                batch,
-                operator_name="expert_aggregate_bf16_add_probe",
-                layer_id=self.layer_id,
-                input_tensor=routed_bf16,
-                output_tensor=aggregate_bf16_probe,
-                positions=positions,
-                path="mini.moe.routed_plus_shared_hidden_dtype_probe",
-                params=common_params,
-                extra={
-                    "stage": "non_runner.aggregate_bf16_add_probe",
-                    "hidden_dtype": str(flat.dtype),
-                    "shared_experts_present": shared is not None,
-                    "routed_input": _dsv4_moe_reduce_tensor_census(routed_bf16),
-                    "shared_input": _dsv4_moe_reduce_tensor_census(
-                        shared.to(flat.dtype) if shared is not None else None
-                    ),
-                },
-            )
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="expert_aggregate_before_reduce",
-            layer_id=self.layer_id,
-            input_tensor=routed_for_aggregate,
-            output_tensor=y,
-            positions=positions,
-            path="mini.moe.routed_plus_shared_fp32",
-            params=common_params,
-            extra={
-                "stage": "non_runner.aggregate_before_reduce",
-                "shared_experts_present": shared is not None,
-                "routed_input": _dsv4_moe_reduce_tensor_census(routed_for_aggregate),
-                "shared_input": _dsv4_moe_reduce_tensor_census(shared),
-                "aggregate_output": _dsv4_moe_reduce_tensor_census(y),
-                "aggregate_order": "routed_fp32_plus_shared_fp32",
-            },
-        )
-        y_before_reduce = y
-        reduce_input_row0 = dsv4_mtp_debug.clone_operator_row0_input(
-            "expert_reduce_output",
-            y_before_reduce,
-        )
-        reduce_boundary_extra = _dsv4_moe_reduce_boundary_base_extra(
-            stage="non_runner.post_all_reduce",
-            tp_size=self._tp_size if reduce_once else 1,
-            comm=self._comm,
-            reduce_label="dsv4.v1_moe_reduce_once_all_reduce",
-            pre_reduce=y_before_reduce,
-        )
         if reduce_once and self._tp_size > 1:
             _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.reduce_once"):
@@ -6959,82 +3171,19 @@ class DSV4MoE(BaseOP):
                     layer_id=self.layer_id,
                     path="non_runner_output",
                 )
-                reduce_boundary_extra["communication_input"] = (
-                    _dsv4_moe_reduce_tensor_census_if_enabled(y)
-                )
-                reduce_boundary_extra["communication_input_dtype"] = str(y.dtype)
                 y = self._comm.all_reduce(y, label="dsv4.v1_moe_reduce_once_all_reduce")
-                reduce_boundary_extra["post_reduce"] = (
-                    _dsv4_moe_reduce_tensor_census_if_enabled(y)
-                )
-                reduce_boundary_extra["communication_output_dtype"] = str(y.dtype)
             _record_warmup_memory("moe.reduce_once", "after", layer_id=self.layer_id)
-        else:
-            reduce_boundary_extra["communication_input"] = (
-                _dsv4_moe_reduce_tensor_census_if_enabled(y)
-            )
-            reduce_boundary_extra["communication_input_dtype"] = str(y.dtype)
-            reduce_boundary_extra["post_reduce"] = _dsv4_moe_reduce_tensor_census_if_enabled(y)
-            reduce_boundary_extra["communication_output_dtype"] = str(y.dtype)
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="expert_reduce_output",
-            layer_id=self.layer_id,
-            input_tensor=y_before_reduce,
-            output_tensor=y,
-            positions=positions,
-            path=(
-                "mini.moe.post_all_reduce" if reduce_once else "mini.moe.no_final_reduce"
-            ),
-            params={**common_params, "reduce_label": "dsv4.v1_moe_reduce_once_all_reduce"},
-            extra={
-                **reduce_boundary_extra,
-                "post_all_reduce": bool(reduce_once and self._tp_size > 1),
-            },
-            input_row0=reduce_input_row0,
-        )
-        output = y.to(flat.dtype).view_as(hidden_states)
-        moe_output_extra = {
-            "stage": "moe_output",
-            "final_cast_input": _dsv4_moe_reduce_tensor_census_if_enabled(y),
-            "final_cast_output": _dsv4_moe_reduce_tensor_census_if_enabled(output),
-            "final_cast_input_dtype": str(y.dtype),
-            "final_cast_output_dtype": str(output.dtype),
-            "final_cast_order": "post_reduce_to_hidden_dtype",
-        }
-        _dsv4_moe_record_operator(
-            batch,
-            operator_name="moe_output",
-            layer_id=self.layer_id,
-            input_tensor=y,
-            output_tensor=output,
-            positions=positions,
-            path="mini.moe.output_to_hidden_dtype",
-            params=common_params,
-            extra=moe_output_extra,
-        )
-        return output
+        return y.to(flat.dtype).view_as(hidden_states)
 
 
 class DeepseekV4DecoderLayer(BaseOP):
-    def __init__(
-        self,
-        config: ModelConfig,
-        layer_id: int,
-        *,
-        is_nextn: bool = False,
-        compress_ratio_override: int | None = None,
-    ):
+    def __init__(self, config: ModelConfig, layer_id: int):
         self.hc_mult = config.hc_mult
         self.norm_eps = config.rms_norm_eps
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
-        self.self_attn = DSV4Attention(
-            config,
-            layer_id,
-            compress_ratio_override=compress_ratio_override,
-        )
-        self.mlp = DSV4MoE(config, layer_id, is_nextn=is_nextn)
+        self.self_attn = DSV4Attention(config, layer_id)
+        self.mlp = DSV4MoE(config, layer_id)
         self.input_layernorm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
 
@@ -7100,7 +3249,6 @@ class DeepseekV4DecoderLayer(BaseOP):
         _record_warmup_memory("layer.hc_attn_post", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_post"):
             x = self._hc_post(y, residual, post, comb)
-            _capture_debug_activation(f"layer{layer_id}.post_attention_residual", x)
         _record_warmup_memory("layer.hc_attn_post", "after", layer_id=layer_id)
 
         residual = x
@@ -7122,322 +3270,9 @@ class DeepseekV4DecoderLayer(BaseOP):
         _record_warmup_memory("layer.hc_ffn_post", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_ffn_post"):
             output = self._hc_post(y, residual, post, comb)
-            _capture_debug_activation(f"layer{layer_id}.post_moe_residual", output)
         _record_warmup_memory("layer.hc_ffn_post", "after", layer_id=layer_id)
         _record_warmup_memory("layer.output", "after", layer_id=layer_id)
         return output
-
-
-@dataclass(frozen=True)
-class DSV4HiddenForwardOutput:
-    logits: torch.Tensor
-    hidden_states: torch.Tensor
-    hidden_states_before_norm: torch.Tensor
-
-
-@dataclass(frozen=True)
-class DSV4MTPForwardOutput:
-    logits: torch.Tensor
-    hidden_states: torch.Tensor
-    hidden_states_before_norm: torch.Tensor
-
-
-class DSV4MTPSharedHead(BaseOP):
-    def __init__(self, config: ModelConfig):
-        self.norm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
-
-
-class DeepseekV4MTPModel(BaseOP):
-    def __init__(self, config: ModelConfig):
-        self.config = config
-        self.hc_mult = config.hc_mult
-        self.hidden_size = config.hidden_size
-        self.backbone_hidden_size = config.hc_mult * config.hidden_size
-        self.rms_norm_eps = config.rms_norm_eps
-        self.hc_eps = config.hc_eps
-        self.enorm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.hnorm = DSV4RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.e_proj = DSV4Linear(
-            config.hidden_size,
-            config.hidden_size,
-            weight_dtype=dsv4_kernel.fp8_dtype(),
-            scale_dtype=dsv4_kernel.e8m0_dtype(),
-        )
-        self.h_proj = DSV4Linear(
-            config.hidden_size,
-            config.hidden_size,
-            weight_dtype=dsv4_kernel.fp8_dtype(),
-            scale_dtype=dsv4_kernel.e8m0_dtype(),
-        )
-
-        decoder_config = config
-        if not config.compress_ratios or config.compress_ratios[0] != 0:
-            ratios = [0] + list(config.compress_ratios[1:])
-            decoder_config = replace(config, compress_ratios=ratios)
-        self.decoder = DeepseekV4DecoderLayer(
-            decoder_config,
-            layer_id=0,
-            is_nextn=True,
-            compress_ratio_override=0,
-        )
-        hc_dim = config.hc_mult * config.hidden_size
-        self.hc_head_fn = torch.empty(config.hc_mult, hc_dim, dtype=torch.float32)
-        self.hc_head_base = torch.empty(config.hc_mult, dtype=torch.float32)
-        self.hc_head_scale = torch.empty(1, dtype=torch.float32)
-        self.shared_head = DSV4MTPSharedHead(config)
-        self._hc_head_fn_bf16: torch.Tensor | None = None
-        self._hc_head_fn_bf16_meta: tuple | None = None
-
-    def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
-        q_wqb_reports: list[dict[str, object]] = []
-        report = self.decoder.self_attn.prepare_q_wqb_bf16_weight_cache()
-        if report is not None:
-            q_wqb_reports.append(report)
-
-        q_wqb_marlin_reports: list[dict[str, object]] = []
-        report = self.decoder.self_attn.prepare_q_wqb_marlin_weight_cache()
-        if report is not None:
-            q_wqb_marlin_reports.append(report)
-
-        wo_b_reports: list[dict[str, object]] = []
-        report = self.decoder.self_attn.prepare_wo_b_bf16_weight_cache()
-        if report is not None:
-            wo_b_reports.append(report)
-
-        wo_b_marlin_reports: list[dict[str, object]] = []
-        report = self.decoder.self_attn.prepare_wo_b_marlin_weight_cache()
-        if report is not None:
-            wo_b_marlin_reports.append(report)
-
-        wo_a_reports: list[dict[str, object]] = []
-        report = self.decoder.self_attn.prepare_wo_a_bf16_bmm_cache()
-        if report is not None:
-            wo_a_reports.append(report)
-
-        indexer_wq_b_reports: list[dict[str, object]] = []
-        report = self.decoder.self_attn.prepare_indexer_wq_b_bf16_weight_cache()
-        if report is not None:
-            indexer_wq_b_reports.append(report)
-
-        fused_wqa_wkv_reports: list[dict[str, object]] = []
-        report = self.decoder.self_attn.prepare_fused_wqa_wkv_pretranspose_cache()
-        if report is not None:
-            fused_wqa_wkv_reports.append(report)
-
-        shared_expert_reports: list[dict[str, object]] = []
-        shared_experts = getattr(self.decoder.mlp, "shared_experts", None)
-        if shared_experts is not None:
-            shared_expert_reports.extend(shared_experts.prepare_bf16_weight_cache())
-
-        shared_down_marlin_reports: list[dict[str, object]] = []
-        if shared_experts is not None:
-            report = shared_experts.prepare_down_marlin_weight_cache()
-            if report is not None:
-                shared_down_marlin_reports.append(report)
-
-        moe_marlin_wna16_reports: list[dict[str, object]] = []
-        moe_marlin_backend = dsv4_kernel.dsv4_moe_expert_backend()
-        moe_marlin_prebuild_enabled = dsv4_kernel.dsv4_env_flag(
-            dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV
-        )
-        if (
-            moe_marlin_prebuild_enabled
-            and moe_marlin_backend == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
-        ):
-            moe_marlin_wna16_reports.append(
-                self.decoder.mlp.experts.prepare_marlin_wna16_weight_cache(
-                    release_original=False,
-                )
-            )
-
-        total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
-        total_wo_b_bytes = int(sum(int(report["bytes"]) for report in wo_b_reports))
-        total_wo_a_bytes = int(sum(int(report["bytes"]) for report in wo_a_reports))
-        total_indexer_wq_b_bytes = int(sum(int(report["bytes"]) for report in indexer_wq_b_reports))
-        total_shared_expert_bytes = int(
-            sum(int(report["bytes"]) for report in shared_expert_reports)
-        )
-        marlin_reports = q_wqb_marlin_reports + wo_b_marlin_reports + shared_down_marlin_reports
-        total_marlin_persistent_bytes = int(
-            sum(int(report["persistent_bytes"]) for report in marlin_reports)
-        )
-        total_marlin_workspace_bytes = int(
-            sum(int(report["workspace_bytes"]) for report in marlin_reports)
-        )
-        total_moe_marlin_wna16_persistent_bytes = int(
-            sum(int(report["persistent_bytes"]) for report in moe_marlin_wna16_reports)
-        )
-        total_moe_marlin_wna16_source_bytes = int(
-            sum(int(report["source_bytes"]) for report in moe_marlin_wna16_reports)
-        )
-        total_pretransposed_bytes = int(
-            sum(int(report.get("pretransposed_bytes", 0)) for report in fused_wqa_wkv_reports)
-            + sum(int(report.get("pretransposed_bytes", 0)) for report in q_wqb_reports)
-            + sum(int(report.get("pretransposed_bytes", 0)) for report in wo_b_reports)
-            + sum(int(report.get("pretransposed_bytes", 0)) for report in indexer_wq_b_reports)
-            + sum(int(report.get("pretransposed_bytes", 0)) for report in shared_expert_reports)
-        )
-        return {
-            "q_wqb_bf16_weight_cache": {
-                "enabled": bool(q_wqb_reports),
-                "layers_cached": len(q_wqb_reports),
-                "total_bytes": total_q_wqb_bytes,
-                "entries": q_wqb_reports,
-            },
-            "wo_b_bf16_weight_cache": {
-                "enabled": bool(wo_b_reports),
-                "layers_cached": len(wo_b_reports),
-                "total_bytes": total_wo_b_bytes,
-                "entries": wo_b_reports,
-            },
-            "wo_a_bf16_bmm_cache": {
-                "enabled": bool(wo_a_reports),
-                "layers_cached": len(wo_a_reports),
-                "total_bytes": total_wo_a_bytes,
-                "entries": wo_a_reports,
-            },
-            "indexer_wq_b_bf16_weight_cache": {
-                "enabled": bool(indexer_wq_b_reports),
-                "layers_cached": len(indexer_wq_b_reports),
-                "total_bytes": total_indexer_wq_b_bytes,
-                "entries": indexer_wq_b_reports,
-            },
-            "fused_wqa_wkv_bf16_pretranspose_cache": {
-                "enabled": bool(fused_wqa_wkv_reports),
-                "layers_cached": len(fused_wqa_wkv_reports),
-                "total_bytes": int(sum(int(report["bytes"]) for report in fused_wqa_wkv_reports)),
-                "total_pretransposed_bytes": int(
-                    sum(
-                        int(report.get("pretransposed_bytes", 0))
-                        for report in fused_wqa_wkv_reports
-                    )
-                ),
-                "entries": fused_wqa_wkv_reports,
-            },
-            "shared_expert_bf16_weight_cache": {
-                "enabled": bool(shared_expert_reports),
-                "layers_cached": max(
-                    sum(
-                        1
-                        for report in shared_expert_reports
-                        if str(report["owner"]).endswith("gate_up_proj")
-                    ),
-                    sum(
-                        1
-                        for report in shared_expert_reports
-                        if str(report["owner"]).endswith("down_proj")
-                    ),
-                ),
-                "total_bytes": total_shared_expert_bytes,
-                "entries": shared_expert_reports,
-            },
-            "projection_bf16_weight_cache_total": {
-                "total_bytes": (
-                    total_q_wqb_bytes
-                    + total_wo_b_bytes
-                    + total_wo_a_bytes
-                    + total_indexer_wq_b_bytes
-                    + total_shared_expert_bytes
-                ),
-            },
-            "dense_fp8_marlin_projection_cache": {
-                "enabled": bool(marlin_reports),
-                "layers_cached": max(
-                    len(q_wqb_marlin_reports),
-                    len(wo_b_marlin_reports),
-                    len(shared_down_marlin_reports),
-                ),
-                "total_persistent_bytes": total_marlin_persistent_bytes,
-                "total_workspace_bytes": total_marlin_workspace_bytes,
-                "q_wqb": q_wqb_marlin_reports,
-                "wo_b": wo_b_marlin_reports,
-                "shared_down": shared_down_marlin_reports,
-            },
-            "moe_marlin_wna16_cache": {
-                "enabled": bool(moe_marlin_wna16_reports),
-                "backend": moe_marlin_backend,
-                "prebuild_requested": bool(moe_marlin_prebuild_enabled),
-                "layers_cached": len(moe_marlin_wna16_reports),
-                "total_persistent_bytes": total_moe_marlin_wna16_persistent_bytes,
-                "total_source_bytes": total_moe_marlin_wna16_source_bytes,
-                "entries": moe_marlin_wna16_reports,
-            },
-            "bf16_small_gemm_pretranspose_cache_total": {
-                "enabled": total_pretransposed_bytes > 0,
-                "total_pretransposed_bytes": total_pretransposed_bytes,
-            },
-        }
-
-    def _reshape_target_hidden(self, target_hidden_states: torch.Tensor) -> torch.Tensor:
-        if target_hidden_states.ndim == 3:
-            expected = (self.hc_mult, self.hidden_size)
-            if tuple(target_hidden_states.shape[1:]) != expected:
-                raise ValueError(
-                    "DeepSeek V4 MTP target hidden must have trailing shape "
-                    f"{expected}, got {tuple(target_hidden_states.shape[1:])}"
-                )
-            return target_hidden_states
-        if target_hidden_states.ndim != 2:
-            raise ValueError(
-                "DeepSeek V4 MTP target hidden must be [tokens, hc_mult * hidden] "
-                f"or [tokens, hc_mult, hidden], got rank {target_hidden_states.ndim}"
-            )
-        expected_last_dim = self.hc_mult * self.hidden_size
-        if target_hidden_states.shape[-1] != expected_last_dim:
-            raise ValueError(
-                "DeepSeek V4 MTP target hidden last dimension must be "
-                f"{expected_last_dim}, got {target_hidden_states.shape[-1]}"
-            )
-        return target_hidden_states.view(-1, self.hc_mult, self.hidden_size)
-
-    def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
-        hc_head_fn = _cached_hc_bf16_weight(self, "_hc_head_fn_bf16", self.hc_head_fn)
-        return dsv4_kernel.hc_head_fallback(
-            x,
-            hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
-            eps=self.hc_eps,
-            norm_eps=self.rms_norm_eps,
-        )
-
-    def forward_one_step(
-        self,
-        input_ids: torch.Tensor,
-        target_hidden_states: torch.Tensor,
-        *,
-        embed_tokens: DSV4VocabParallelEmbedding,
-        lm_head: DSV4VocabParallelEmbedding,
-    ) -> DSV4MTPForwardOutput:
-        token_hidden = embed_tokens.forward(input_ids)
-        if token_hidden.shape[0] > 0:
-            target_hidden = self._reshape_target_hidden(target_hidden_states).to(
-                device=token_hidden.device,
-                dtype=token_hidden.dtype,
-            )
-            if target_hidden.shape[0] != token_hidden.shape[0]:
-                raise ValueError(
-                    "DeepSeek V4 MTP input_ids and target hidden must have the same "
-                    f"token count, got {token_hidden.shape[0]} and {target_hidden.shape[0]}"
-                )
-            flat_hidden = target_hidden.reshape(-1, self.hidden_size)
-            h_proj = self.h_proj.forward(self.hnorm.forward(flat_hidden))
-            h_proj = h_proj.view(token_hidden.shape[0], self.hc_mult, self.hidden_size)
-            e_proj = self.e_proj.forward(self.enorm.forward(token_hidden))
-            hidden_states = e_proj[:, None, :] + h_proj
-        else:
-            hidden_states = token_hidden.unsqueeze(1).repeat(1, self.hc_mult, 1)
-
-        hidden_states = self.decoder.forward(hidden_states, input_ids)
-        pre_hc_head = hidden_states.flatten(1)
-        hidden_states = self._hc_head(hidden_states)
-        hidden_states = self.shared_head.norm.forward(hidden_states)
-        logits = lm_head.linear(hidden_states)
-        return DSV4MTPForwardOutput(
-            logits=logits,
-            hidden_states=hidden_states,
-            hidden_states_before_norm=pre_hc_head,
-        )
 
 
 class DeepseekV4Model(BaseOP):
@@ -7559,11 +3394,9 @@ class DeepseekV4Model(BaseOP):
             moe_marlin_wna16_reports = moe_marlin_wna16_prebuild_reports
             self.audit_marlin_wna16_cache_integrity("after_full_model_prebuild")
             if moe_marlin_release_original and not moe_marlin_release_deferred:
-                moe_marlin_wna16_release_reports = (
-                    self.release_marlin_wna16_original_expert_weights(
-                        stage_label="model_prepare_release",
-                    )["entries"]
-                )
+                moe_marlin_wna16_release_reports = self.release_marlin_wna16_original_expert_weights(
+                    stage_label="model_prepare_release",
+                )["entries"]
                 moe_marlin_wna16_reports = moe_marlin_wna16_release_reports
         total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
         total_wo_b_bytes = int(sum(int(report["bytes"]) for report in wo_b_reports))
@@ -7629,7 +3462,9 @@ class DeepseekV4Model(BaseOP):
         return {
             "attribution_disable_toggles": {
                 "env": dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
-                "raw": os.environ.get(dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, ""),
+                "raw": os.environ.get(
+                    dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, ""
+                ),
                 "disabled_toggles": list(dsv4_kernel.dsv4_env_disabled_toggles()),
             },
             "fused_wqa_wkv_bf16_pretranspose_cache": {
@@ -7784,7 +3619,9 @@ class DeepseekV4Model(BaseOP):
                 "release_scales_only": dsv4_kernel.dsv4_env_flag(
                     _MARLIN_WNA16_RELEASE_SCALES_ONLY_ENV
                 ),
-                "keep_hidden_ref": dsv4_kernel.dsv4_env_flag(_MARLIN_WNA16_KEEP_HIDDEN_REF_ENV),
+                "keep_hidden_ref": dsv4_kernel.dsv4_env_flag(
+                    _MARLIN_WNA16_KEEP_HIDDEN_REF_ENV
+                ),
                 "layers_cached": len(moe_marlin_wna16_reports),
                 "total_persistent_bytes": total_moe_marlin_wna16_persistent_bytes,
                 "total_source_bytes": total_moe_marlin_wna16_source_bytes,
@@ -7892,14 +3729,10 @@ class DeepseekV4Model(BaseOP):
         if target_bytes is None:
             target_bytes = total_released
         target_bytes = max(0, min(int(target_bytes), total_released))
-        pattern = (
-            os.environ.get(
-                _MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV,
-                "nan_byte",
-            )
-            .strip()
-            .lower()
-        )
+        pattern = os.environ.get(
+            _MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV,
+            "nan_byte",
+        ).strip().lower()
         device = self._marlin_wna16_release_device()
         if device is None or device.type != "cuda":
             return {
@@ -8036,7 +3869,9 @@ class DeepseekV4Model(BaseOP):
                 "source_released_item": item,
                 "tensor": dsv4_memory_debug.tensor_summary(tensor),
             }
-            if dsv4_memory_debug.env_flag(dsv4_memory_debug.DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV):
+            if dsv4_memory_debug.env_flag(
+                dsv4_memory_debug.DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV
+            ):
                 guard_record["initial_integrity"] = dsv4_memory_debug.tensor_integrity_summary(
                     tensor
                 )
@@ -8202,12 +4037,7 @@ class DeepseekV4Model(BaseOP):
             norm_eps=self.norm_eps,
         )
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        *,
-        return_hidden_states_before_norm: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         _record_warmup_memory("model.embed", "before")
         with _dsv4_capture_nvtx("model.embed"):
             x = self.embed_tokens.forward(input_ids)
@@ -8223,8 +4053,6 @@ class DeepseekV4Model(BaseOP):
             x = layer.forward(x, input_ids)
             _record_warmup_memory("decoder_layer", "after", layer_id=layer_id)
         _record_warmup_memory("model.hc_head", "before")
-        hidden_states_before_norm = x.flatten(1)
-        _capture_debug_activation("hidden_before_final_norm", hidden_states_before_norm)
         with _dsv4_capture_nvtx("model.hc_head"):
             x = self._hc_head(x)
         _record_warmup_memory("model.hc_head", "after")
@@ -8233,8 +4061,6 @@ class DeepseekV4Model(BaseOP):
             x = self.norm.forward(x)
             _capture_debug_activation("final_norm", x)
             _record_warmup_memory("model.final_norm", "after")
-            if return_hidden_states_before_norm:
-                return x, hidden_states_before_norm
             return x
 
 
@@ -8242,17 +4068,10 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
     def __init__(self, config: ModelConfig):
         self.model = DeepseekV4Model(config)
         self.lm_head = DSV4VocabParallelEmbedding(config.vocab_size, config.hidden_size)
-        if dsv4_experimental_mtp_enabled():
-            self.mtp = DeepseekV4MTPModel(config)
         super().__init__()
 
     def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
-        report = self.model.prepare_for_cuda_graph_capture()
-        mtp = getattr(self, "mtp", None)
-        if mtp is not None:
-            report = dict(report)
-            report["mtp"] = mtp.prepare_for_cuda_graph_capture()
-        return report
+        return self.model.prepare_for_cuda_graph_capture()
 
     def release_marlin_wna16_original_expert_weights(
         self,
@@ -8284,49 +4103,5 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
             _record_warmup_memory("lm_head", "after")
             return logits
 
-    def forward_with_hidden(self) -> DSV4HiddenForwardOutput:
-        batch = get_global_ctx().batch
-        output, hidden_states_before_norm = self.model.forward(
-            batch.input_ids,
-            return_hidden_states_before_norm=True,
-        )
-        if batch.is_prefill:
-            last_indices = batch.attn_metadata.get_last_indices(batch.size)
-            output = output[last_indices].contiguous()
-            hidden_states_before_norm = hidden_states_before_norm[last_indices].contiguous()
-        logits = self.lm_head.linear(output)
-        _capture_debug_activation("lm_head_logits", logits)
-        return DSV4HiddenForwardOutput(
-            logits=logits,
-            hidden_states=output,
-            hidden_states_before_norm=hidden_states_before_norm,
-        )
 
-    def mtp_forward_one_step(
-        self,
-        input_ids: torch.Tensor,
-        target_hidden_states: torch.Tensor,
-    ) -> DSV4MTPForwardOutput:
-        mtp = getattr(self, "mtp", None)
-        if mtp is None:
-            raise RuntimeError(
-                f"DeepSeek V4 MTP is not enabled. Set {DSV4_EXPERIMENTAL_MTP_ENV}=1 "
-                "or pass --enable-dsv4-mtp before constructing the model."
-            )
-        return mtp.forward_one_step(
-            input_ids,
-            target_hidden_states,
-            embed_tokens=self.model.embed_tokens,
-            lm_head=self.lm_head,
-        )
-
-
-__all__ = [
-    "DeepseekV4ForCausalLM",
-    "DeepseekV4Model",
-    "DeepseekV4MTPModel",
-    "DSV4FallbackAttentionMetadata",
-    "DSV4AttentionMetadata",
-    "DSV4_EXPERIMENTAL_MTP_ENV",
-    "dsv4_experimental_mtp_enabled",
-]
+__all__ = ["DeepseekV4ForCausalLM", "DSV4FallbackAttentionMetadata", "DSV4AttentionMetadata"]

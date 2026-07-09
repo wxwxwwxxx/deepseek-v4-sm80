@@ -14,7 +14,6 @@ from minisgl.utils import (
     div_ceil,
     dsv4_direct_copy_nvtx,
     dsv4_memory_debug,
-    dsv4_mtp_debug,
     dsv4_owner_timing,
     dsv4_prefix_debug,
 )
@@ -235,7 +234,6 @@ def _capture_debug_activation(
         batch = get_global_ctx().batch
     except Exception:
         batch = None
-    dsv4_mtp_debug.record_row0_tensor(batch, name, tensor)
     dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
 
 
@@ -288,7 +286,6 @@ class DSV4CoreAttentionMetadata(BaseAttnMetadata):
     c4_sparse_source_elided_for_graph: bool = False
     c128_source_elided_for_graph: bool = False
     swa_ownership_version: int = 0
-    target_verify_decode_rows: bool = False
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
         return self.cu_seqlens_q[1 : 1 + bs] - 1
@@ -311,385 +308,6 @@ class DSV4CompressMetadata:
     write_loc: torch.Tensor | None
     seq_lens: torch.Tensor
     positions: torch.Tensor
-
-
-@dataclass
-class _OnlineC128VerifyContext:
-    req_pool_indices: torch.Tensor
-    seq_lens: torch.Tensor
-    num_verify_tokens: int
-
-
-@dataclass
-class _OnlineC128LayerRuntime:
-    layer_id: int
-    head_dim: int
-    state: torch.Tensor
-    state_slot_offset: int
-
-
-class OnlineC128MTPController:
-    def __init__(self, backend: "DSV4AttentionBackend") -> None:
-        self.backend = backend
-        self._verify_ctx: _OnlineC128VerifyContext | None = None
-        self._layer_runtimes: list[_OnlineC128LayerRuntime] | None = None
-        self.mark_pending_calls = 0
-        self.write_prefix_calls = 0
-        self.write_prefix_tokens = 0
-        self.commit_pending_calls = 0
-        self.commit_pending_rows = 0
-        self.write_committed_calls = 0
-        self.write_committed_rows = 0
-
-    def ready(self) -> bool:
-        kv_cache = self.backend.kvcache
-        if not any(m.compress_ratio == 128 for m in kv_cache.layer_mapping):
-            return True
-        try:
-            return (
-                int(kv_cache.get_online_c128_mtp_max_draft_tokens()) > 0
-                and int(kv_cache.get_online_c128_mtp_state_slot_offset()) > 0
-                and kv_cache.get_online_c128_mtp_pending_seq_lens().numel() > 0
-                and bool(list(self._iter_layer_runtimes()))
-            )
-        except Exception:
-            return False
-
-    def read_surface_ready(self) -> bool:
-        if not self.has_c128_layers():
-            return True
-        if not self.ready():
-            return False
-        try:
-            for runtime in self._iter_layer_runtimes():
-                if int(runtime.state_slot_offset) <= 0:
-                    return False
-                if int(runtime.state.shape[-1]) != int(runtime.head_dim) * 3:
-                    return False
-            return True
-        except Exception:
-            return False
-
-    def has_c128_layers(self) -> bool:
-        return any(m.compress_ratio == 128 for m in self.backend.kvcache.layer_mapping)
-
-    def state_slot_offset(self) -> int:
-        if not self.has_c128_layers():
-            return 0
-        return int(self.backend.kvcache.get_online_c128_mtp_state_slot_offset())
-
-    def max_draft_tokens(self) -> int:
-        if not self.has_c128_layers():
-            return 0
-        return int(self.backend.kvcache.get_online_c128_mtp_max_draft_tokens())
-
-    def clear(self) -> None:
-        self._verify_ctx = None
-
-    def prepare_forward(
-        self,
-        batch: Batch,
-        metadata: DSV4AttentionMetadata,
-    ) -> int:
-        del metadata
-        target_verify_metadata = getattr(batch, "dsv4_target_verify_metadata", None)
-        if target_verify_metadata is None:
-            self.clear()
-            return 0
-        if not self.ready():
-            self.clear()
-            return 0
-        reqs = batch.padded_reqs
-        if not reqs:
-            self.clear()
-            return 0
-        num_verify_tokens = int(target_verify_metadata.get("speculative_num_draft_tokens", 0))
-        max_draft_tokens = self.max_draft_tokens()
-        if num_verify_tokens <= 0 or num_verify_tokens > max_draft_tokens:
-            self.clear()
-            return 0
-        committed_seq_lens = [
-            int(x) for x in target_verify_metadata.get("committed_seq_lens", [])
-        ]
-        if len(committed_seq_lens) != len(reqs):
-            self.clear()
-            return 0
-        req_pool_indices = torch.tensor(
-            [int(req.table_idx) for req in reqs],
-            dtype=torch.int32,
-            device=self.backend.device,
-        )
-        seq_lens = torch.tensor(
-            committed_seq_lens,
-            dtype=torch.int32,
-            device=self.backend.device,
-        )
-        pending = self.backend.kvcache.get_online_c128_mtp_pending_seq_lens()
-        dsv4_kernel.online_c128_mtp_mark_pending(
-            seq_lens,
-            req_pool_indices,
-            pending,
-            bs=int(req_pool_indices.numel()),
-            max_num_reqs=int(self.backend.kvcache.max_online_c128_mtp_num_reqs),
-            head_dim=int(self.backend.config.head_dim),
-        )
-        self._verify_ctx = _OnlineC128VerifyContext(
-            req_pool_indices=req_pool_indices.detach(),
-            seq_lens=seq_lens.detach(),
-            num_verify_tokens=num_verify_tokens,
-        )
-        self.mark_pending_calls += 1
-        return self.state_slot_offset()
-
-    def write_prefix_states(
-        self,
-        layer_id: int,
-        compressor,
-        kv_score_input: torch.Tensor,
-        *,
-        apply_norm: bool,
-    ) -> torch.Tensor | None:
-        ctx = self._verify_ctx
-        if ctx is None or not self.ready():
-            return None
-        if int(getattr(compressor, "ratio", 0)) != 128 or kv_score_input.numel() == 0:
-            return None
-        head_dim = int(getattr(compressor, "head_dim", self.backend.config.head_dim))
-        layer_bs = min(
-            int(ctx.req_pool_indices.numel()),
-            int(ctx.seq_lens.numel()),
-            int(kv_score_input.reshape(-1, head_dim * 2).shape[0])
-            // max(int(ctx.num_verify_tokens), 1),
-        )
-        if layer_bs <= 0:
-            return None
-        state = self.backend.kvcache.get_online_c128_mtp_state(layer_id)
-        compressed = dsv4_kernel.online_c128_mtp_boundary_compressed_rows(
-            kv_score_input.float(),
-            ctx.seq_lens,
-            ctx.req_pool_indices,
-            get_global_ctx().page_table,
-            self.backend.kvcache.full_to_swa_index_mapping,
-            compressor.ape.reshape(128, head_dim).float(),
-            state,
-            layer_bs=layer_bs,
-            swa_page_size=int(self.backend.kvcache.online_c128_mtp_swa_page_size),
-            num_verify_tokens=int(ctx.num_verify_tokens),
-        )
-        if apply_norm and compressed.numel() > 0:
-            compressed = compressor.norm.forward(compressed)
-        dsv4_kernel.online_c128_mtp_write_prefix_states(
-            kv_score_input.float(),
-            ctx.seq_lens,
-            ctx.req_pool_indices,
-            get_global_ctx().page_table,
-            self.backend.kvcache.full_to_swa_index_mapping,
-            compressor.ape.reshape(128, head_dim).float(),
-            state,
-            layer_bs=layer_bs,
-            swa_page_size=int(self.backend.kvcache.online_c128_mtp_swa_page_size),
-            num_verify_tokens=int(ctx.num_verify_tokens),
-            state_slot_stride=int(self.backend.kvcache.get_online_c128_mtp_state_slot_offset()),
-        )
-        self.write_prefix_calls += 1
-        self.write_prefix_tokens += int(layer_bs * ctx.num_verify_tokens)
-        return compressed
-
-    def write_committed_states(
-        self,
-        layer_id: int,
-        compressor,
-        kv_score_input: torch.Tensor,
-        batch: Batch,
-        *,
-        apply_norm: bool,
-    ) -> torch.Tensor | None:
-        if not self.ready():
-            return None
-        if int(getattr(compressor, "ratio", 0)) != 128 or kv_score_input.numel() == 0:
-            return None
-        if getattr(batch, "dsv4_target_verify_metadata", None) is not None:
-            return None
-        metadata = getattr(batch, "attn_metadata", None)
-        if not isinstance(metadata, DSV4AttentionMetadata):
-            return None
-        head_dim = int(getattr(compressor, "head_dim", self.backend.config.head_dim))
-        kv_score = kv_score_input.reshape(-1, head_dim * 2)
-        core = metadata.core_attn_metadata
-        positions = core.positions
-        table_indices = core.req_table_indices
-        rows = min(int(positions.numel()), int(table_indices.numel()), int(kv_score.shape[0]))
-        if rows <= 0 or int(kv_score.shape[0]) != rows:
-            return None
-        pending = self.backend.kvcache.get_online_c128_mtp_pending_seq_lens()
-        state = self.backend.kvcache.get_online_c128_mtp_state(layer_id)
-        state_slot_stride = int(self.backend.kvcache.get_online_c128_mtp_state_slot_offset())
-        positions_cpu = positions[:rows].detach().to(device="cpu", dtype=torch.long)
-        tables_cpu = table_indices[:rows].detach().to(device="cpu", dtype=torch.long)
-        outputs: list[torch.Tensor] = []
-        offset = 0
-        while offset < rows:
-            req = int(tables_cpu[offset].item())
-            group_end = offset + 1
-            while group_end < rows and int(tables_cpu[group_end].item()) == req:
-                group_end += 1
-            expected = int(positions_cpu[offset].item())
-            if any(
-                int(positions_cpu[row].item()) != expected + row - offset
-                for row in range(offset, group_end)
-            ):
-                return None
-
-            chunk_start = offset
-            while chunk_start < group_end:
-                chunk_len = min(8, group_end - chunk_start)
-                seq_before = int(positions_cpu[chunk_start].item())
-                seq_lens = torch.tensor(
-                    [seq_before],
-                    dtype=torch.int32,
-                    device=self.backend.device,
-                )
-                req_pool_indices = torch.tensor(
-                    [req],
-                    dtype=torch.int32,
-                    device=self.backend.device,
-                )
-                chunk_kv = kv_score[chunk_start : chunk_start + chunk_len].contiguous()
-                compressed_chunk = dsv4_kernel.online_c128_mtp_boundary_compressed_rows(
-                    chunk_kv.float(),
-                    seq_lens,
-                    req_pool_indices,
-                    get_global_ctx().page_table,
-                    self.backend.kvcache.full_to_swa_index_mapping,
-                    compressor.ape.reshape(128, head_dim).float(),
-                    state,
-                    layer_bs=1,
-                    swa_page_size=int(self.backend.kvcache.online_c128_mtp_swa_page_size),
-                    num_verify_tokens=chunk_len,
-                )
-                if compressed_chunk.numel() > 0:
-                    outputs.append(compressed_chunk)
-                dsv4_kernel.online_c128_mtp_mark_pending(
-                    seq_lens,
-                    req_pool_indices,
-                    pending,
-                    bs=1,
-                    max_num_reqs=int(self.backend.kvcache.max_online_c128_mtp_num_reqs),
-                    head_dim=head_dim,
-                )
-                dsv4_kernel.online_c128_mtp_write_prefix_states(
-                    chunk_kv.float(),
-                    seq_lens,
-                    req_pool_indices,
-                    get_global_ctx().page_table,
-                    self.backend.kvcache.full_to_swa_index_mapping,
-                    compressor.ape.reshape(128, head_dim).float(),
-                    state,
-                    layer_bs=1,
-                    swa_page_size=int(self.backend.kvcache.online_c128_mtp_swa_page_size),
-                    num_verify_tokens=chunk_len,
-                    state_slot_stride=state_slot_stride,
-                )
-                dsv4_kernel.online_c128_mtp_commit_pending(
-                    torch.tensor(
-                        [seq_before + chunk_len],
-                        dtype=torch.int32,
-                        device=self.backend.device,
-                    ),
-                    req_pool_indices,
-                    get_global_ctx().page_table,
-                    self.backend.kvcache.full_to_swa_index_mapping,
-                    pending,
-                    state,
-                    cur_bs=1,
-                    swa_page_size=int(self.backend.kvcache.online_c128_mtp_swa_page_size),
-                    num_verify_tokens=chunk_len,
-                    state_slot_stride=state_slot_stride,
-                    max_num_reqs=int(self.backend.kvcache.max_online_c128_mtp_num_reqs),
-                )
-                chunk_start += chunk_len
-            offset = group_end
-
-        compressed = (
-            torch.cat(outputs, dim=0)
-            if outputs
-            else kv_score_input.new_empty((0, head_dim))
-        )
-        if apply_norm and compressed.numel() > 0:
-            compressed = compressor.norm.forward(compressed)
-        self.write_committed_calls += 1
-        self.write_committed_rows += int(rows)
-        return compressed
-
-    def commit_pending(
-        self,
-        req_pool_indices: torch.Tensor,
-        seq_lens: torch.Tensor,
-    ) -> None:
-        ctx = self._verify_ctx
-        if ctx is None:
-            return
-        if not self.ready():
-            self.clear()
-            return
-        cur_bs = min(int(req_pool_indices.numel()), int(seq_lens.numel()))
-        if cur_bs <= 0 or ctx.num_verify_tokens <= 0:
-            self.clear()
-            return
-        pending = self.backend.kvcache.get_online_c128_mtp_pending_seq_lens()
-        for runtime in self._iter_layer_runtimes():
-            dsv4_kernel.online_c128_mtp_commit_pending(
-                seq_lens,
-                req_pool_indices,
-                get_global_ctx().page_table,
-                self.backend.kvcache.full_to_swa_index_mapping,
-                pending,
-                runtime.state,
-                cur_bs=cur_bs,
-                swa_page_size=int(self.backend.kvcache.online_c128_mtp_swa_page_size),
-                num_verify_tokens=int(ctx.num_verify_tokens),
-                state_slot_stride=int(runtime.state_slot_offset),
-                max_num_reqs=int(self.backend.kvcache.max_online_c128_mtp_num_reqs),
-            )
-        self.commit_pending_calls += 1
-        self.commit_pending_rows += int(cur_bs)
-        self.clear()
-
-    def status(self) -> dict[str, int | bool]:
-        return {
-            "has_c128_layers": bool(self.has_c128_layers()),
-            "ready": bool(self.ready()),
-            "state_slot_offset": int(self.state_slot_offset()),
-            "max_draft_tokens": int(self.max_draft_tokens()),
-            "pending_context": bool(self._verify_ctx is not None),
-            "mark_pending_calls": int(self.mark_pending_calls),
-            "write_prefix_calls": int(self.write_prefix_calls),
-            "write_prefix_tokens": int(self.write_prefix_tokens),
-            "commit_pending_calls": int(self.commit_pending_calls),
-            "commit_pending_rows": int(self.commit_pending_rows),
-            "write_committed_calls": int(self.write_committed_calls),
-            "write_committed_rows": int(self.write_committed_rows),
-        }
-
-    def _iter_layer_runtimes(self):
-        if self._layer_runtimes is None:
-            runtimes: list[_OnlineC128LayerRuntime] = []
-            for mapping in self.backend.kvcache.layer_mapping:
-                if mapping.compress_ratio != 128:
-                    continue
-                state = self.backend.kvcache.get_online_c128_mtp_state(mapping.layer_id)
-                runtimes.append(
-                    _OnlineC128LayerRuntime(
-                        layer_id=int(mapping.layer_id),
-                        head_dim=int(state.shape[-1] // 3),
-                        state=state,
-                        state_slot_offset=int(
-                            self.backend.kvcache.get_online_c128_mtp_state_slot_offset()
-                        ),
-                    )
-                )
-            self._layer_runtimes = runtimes
-        return iter(self._layer_runtimes)
 
 
 @dataclass
@@ -744,7 +362,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._swa_page_table_cache_rows = 0
         self._swa_page_table_cache: torch.Tensor | None = None
         self._swa_page_table_cache_signatures: dict[int, tuple[int, ...]] = {}
-        self.online_c128_mtp = OnlineC128MTPController(self)
         dsv4_kernel.warmup_indexer_fp8_backend(self.device)
 
     @property
@@ -763,9 +380,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         return self.kvcache.get_layer_mapping(layer_id).compress_ratio
 
     def prepare_metadata(self, batch: Batch) -> None:
-        metadata = self._build_metadata(batch)
-        batch.attn_metadata = metadata
-        self.online_c128_mtp.prepare_forward(batch, metadata)
+        batch.attn_metadata = self._build_metadata(batch)
 
     def forward(
         self,
@@ -786,11 +401,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 "DSV4AttentionBackend requires DSV4AttentionMetadata. "
                 "Call prepare_metadata before DSV4 model forward."
             )
-        read_only_frozen_kv = bool(getattr(batch, "frozen_kv_read_only", False))
         ratio = compress_ratio
         if ratio is None:
             ratio = self.get_layer_compress_ratio(layer_id)
-        if not read_only_frozen_kv and not swa_cache_written:
+        if not swa_cache_written:
             if layer_id == 0:
                 self._debug_check_swa_write_liveness(
                     batch.out_loc,
@@ -810,14 +424,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 )
             else:
                 dsv4_kernel.store_swa_fallback(self.kvcache, layer_id, k, batch.out_loc)
-        return self._fallback_attention(
-            q,
-            layer_id,
-            metadata.core_metadata,
-            ratio,
-            attn_sink,
-            force_torch=bool(getattr(batch, "dsv4_force_torch_attention", False)),
-        )
+        return self._fallback_attention(q, layer_id, metadata.core_metadata, ratio, attn_sink)
 
     def store_compressed(
         self,
@@ -838,8 +445,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         metadata = batch.attn_metadata
         if not isinstance(metadata, DSV4AttentionMetadata):
             return
-        if bool(getattr(batch, "frozen_kv_read_only", False)):
-            return
         compress_metadata = (
             metadata.c4_compress_metadata
             if compress_ratio == 4
@@ -854,24 +459,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if loc.numel() == positions.numel():
             n = min(loc.numel(), positions.numel(), kv.shape[0])
             compressed_positions = positions[:n]
-            compressed_kv = kv[:n]
         else:
+            n = min(loc.numel(), kv.shape[0])
             boundary = (positions + 1) % compress_ratio == 0
             compressed_positions = positions[boundary]
-            if kv.shape[0] == positions.shape[0]:
-                boundary_kv = kv[boundary]
-            else:
-                boundary_kv = kv
-            n = min(loc.numel(), boundary_kv.shape[0])
             if compressed_positions.numel() < n:
                 n = compressed_positions.numel()
-            compressed_kv = boundary_kv[:n]
         if n == 0:
             return
         dsv4_kernel.compress_norm_rope_store_fallback(
             self.kvcache,
             layer_id,
-            compressed_kv,
+            kv[:n],
             loc[:n],
             positions=compressed_positions[:n],
             norm_weight=norm_weight,
@@ -883,35 +482,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             beta_fast=beta_fast,
             beta_slow=beta_slow,
             cache_type="compressed",
-        )
-
-    def write_c128_mtp_prefix_states(
-        self,
-        layer_id: int,
-        compressor,
-        x: torch.Tensor,
-        batch: Batch,
-        *,
-        apply_norm: bool = False,
-    ) -> torch.Tensor | None:
-        if bool(getattr(batch, "frozen_kv_read_only", False)):
-            return None
-        if not self.online_c128_mtp.ready():
-            return None
-        kv_score_input = compressor.wkv_gate.forward(x).float()
-        if getattr(batch, "dsv4_target_verify_metadata", None) is not None:
-            return self.online_c128_mtp.write_prefix_states(
-                layer_id,
-                compressor,
-                kv_score_input,
-                apply_norm=apply_norm,
-            )
-        return self.online_c128_mtp.write_committed_states(
-            layer_id,
-            compressor,
-            kv_score_input,
-            batch,
-            apply_norm=apply_norm,
         )
 
     def store_indexer(
@@ -933,8 +503,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         metadata = batch.attn_metadata
         if not isinstance(metadata, DSV4AttentionMetadata):
             return
-        if bool(getattr(batch, "frozen_kv_read_only", False)):
-            return
         compress_metadata = metadata.c4_compress_metadata
         if compress_metadata is None:
             return
@@ -945,24 +513,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if loc.numel() == positions.numel():
             n = min(loc.numel(), positions.numel(), kv.shape[0])
             compressed_positions = positions[:n]
-            compressed_kv = kv[:n]
         else:
+            n = min(loc.numel(), kv.shape[0])
             boundary = (positions + 1) % compress_metadata.ratio == 0
             compressed_positions = positions[boundary]
-            if kv.shape[0] == positions.shape[0]:
-                boundary_kv = kv[boundary]
-            else:
-                boundary_kv = kv
-            n = min(loc.numel(), boundary_kv.shape[0])
             if compressed_positions.numel() < n:
                 n = compressed_positions.numel()
-            compressed_kv = boundary_kv[:n]
         if n == 0:
             return
         dsv4_kernel.compress_norm_rope_store_fallback(
             self.kvcache,
             layer_id,
-            compressed_kv,
+            kv[:n],
             loc[:n],
             positions=compressed_positions[:n],
             norm_weight=norm_weight,
@@ -1129,14 +691,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 include_integrity=True,
                 extra={"layer_id": int(layer_id), "backend": out.backend},
             )
-        layer2_split_trace = (
-            int(layer_id) == 2
-            and dsv4_mtp_debug.env_flag(
-                "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT"
-            )
-            and dsv4_mtp_debug.row_tensor_trace_enabled()
-        )
-        if not (_debug_activations_enabled() or layer2_split_trace):
+        if not _debug_activations_enabled():
             return
         prefix = f"layer{layer_id}.indexer_select"
         _capture_debug_activation(f"{prefix}.seq_lens", seq_lens)
@@ -1460,47 +1015,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
             raise ValueError("DSV4 attention metadata requires at least one request")
 
         device = self.device
-        target_verify_metadata = getattr(batch, "dsv4_target_verify_metadata", None)
-        is_target_verify = target_verify_metadata is not None
-        if is_target_verify:
-            extend_lens_list = [
-                int(x) for x in target_verify_metadata.get("extend_lens", [])
-            ]
-            committed_seq_lens = [
-                int(x) for x in target_verify_metadata.get("committed_seq_lens", [])
-            ]
-            if len(extend_lens_list) != len(reqs) or len(committed_seq_lens) != len(reqs):
-                raise RuntimeError(
-                    "DSV4 target-verify metadata shape mismatch: "
-                    f"extend_lens={extend_lens_list}, "
-                    f"committed_seq_lens={committed_seq_lens}, reqs={len(reqs)}."
-                )
-            speculative_num_draft_tokens = int(
-                target_verify_metadata.get("speculative_num_draft_tokens", 0)
-            )
-            if speculative_num_draft_tokens <= 0 or any(
-                length != speculative_num_draft_tokens for length in extend_lens_list
-            ):
-                raise RuntimeError(
-                    "DSV4 target-verify metadata requires fixed "
-                    "speculative_num_draft_tokens rows per request: "
-                    f"speculative_num_draft_tokens={speculative_num_draft_tokens}, "
-                    f"extend_lens={extend_lens_list}."
-                )
-            req_seq_lens_list = [
-                committed + speculative_num_draft_tokens
-                for committed in committed_seq_lens
-            ]
-            metadata_phase = "target_verify"
-        else:
-            extend_lens_list = [int(req.extend_len) for req in reqs]
-            req_seq_lens_list = [int(req.device_len) for req in reqs]
-            metadata_phase = batch.phase
-        rows = int(sum(extend_lens_list))
+        rows = int(sum(req.extend_len for req in reqs))
         has_c4 = any(m.compress_ratio == 4 for m in self.kvcache.layer_mapping)
         has_c128 = any(m.compress_ratio == 128 for m in self.kvcache.layer_mapping)
         timing_base = {
-            "phase": metadata_phase,
+            "phase": batch.phase,
             "batch_size": int(batch.size),
             "padded_size": int(getattr(batch, "padded_size", batch.size)),
             "rows": rows,
@@ -1509,17 +1028,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
             ),
         }
         with dsv4_owner_timing.maybe_host_range(
-            f"dsv4.metadata.{metadata_phase}.scalar_source",
+            f"dsv4.metadata.{batch.phase}.scalar_source",
             timing_base,
         ):
             positions = _to_int32(batch.positions, device)
             raw_out_loc = _to_int32(batch.out_loc, device)
-            if positions.numel() != rows or raw_out_loc.numel() != rows:
-                raise RuntimeError(
-                    "DSV4 metadata scalar source row mismatch: "
-                    f"phase={metadata_phase}, positions={positions.numel()}, "
-                    f"out_loc={raw_out_loc.numel()}, rows={rows}."
-                )
+            extend_lens_list = [req.extend_len for req in reqs]
+            req_seq_lens_list = [req.device_len for req in reqs]
             max_seqlen_q = max(extend_lens_list)
             max_seqlen_k = max(req_seq_lens_list)
 
@@ -1533,10 +1048,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)
             )
             swa_direct_token_metadata = bool(
-                swa_independent
-                and batch.is_decode
-                and not is_target_verify
-                and _swa_direct_token_metadata_enabled()
+                swa_independent and batch.is_decode and _swa_direct_token_metadata_enabled()
             )
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.metadata.build.table_indices",
@@ -1550,12 +1062,12 @@ class DSV4AttentionBackend(BaseAttnBackend):
         assert offset == positions.numel()
 
         with dsv4_owner_timing.maybe_host_range(
-            f"dsv4.metadata.{metadata_phase}.seq_lens",
+            f"dsv4.metadata.{batch.phase}.seq_lens",
             timing_base,
         ):
             seq_lens = positions + 1
         with dsv4_owner_timing.maybe_host_range(
-            f"dsv4.metadata.{metadata_phase}.swa_page_table_source",
+            f"dsv4.metadata.{batch.phase}.swa_page_table_source",
             {
                 **timing_base,
                 "max_seqlen_k": int(max_seqlen_k),
@@ -1563,7 +1075,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 "cache_enabled": bool(
                     swa_independent
                     and batch.is_decode
-                    and not is_target_verify
                     and not swa_direct_token_metadata
                     and _swa_metadata_page_table_cache_enabled()
                 ),
@@ -1579,7 +1090,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     "cache_enabled": bool(
                         swa_independent
                         and batch.is_decode
-                        and not is_target_verify
                         and not swa_direct_token_metadata
                         and _swa_metadata_page_table_cache_enabled()
                     ),
@@ -1592,30 +1102,23 @@ class DSV4AttentionBackend(BaseAttnBackend):
                         max_seqlen_k,
                         table_indices=table_indices,
                         use_cache=batch.is_decode
-                        and not is_target_verify
                         and _swa_metadata_page_table_cache_enabled(),
                         timing_base=timing_base,
-                        row_counts=extend_lens_list,
                     )
                     if swa_independent and not swa_direct_token_metadata
                     else None
                 )
 
         with dsv4_owner_timing.maybe_host_range(
-            f"dsv4.metadata.{metadata_phase}.component_page_tables_source",
+            f"dsv4.metadata.{batch.phase}.component_page_tables_source",
             {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
         ):
             with dsv4_owner_timing.maybe_cuda_range(
                 "dsv4.metadata.decode.make_component_page_tables",
                 {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
             ):
-                if (
-                    component_ownership
-                    and batch.is_decode
-                    and not is_target_verify
-                    and dsv4_kernel.dsv4_env_flag(
-                        dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE
-                    )
+                if component_ownership and batch.is_decode and dsv4_kernel.dsv4_env_flag(
+                    dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE
                 ):
                     component_tables = self._make_component_page_tables_cached(
                         reqs,
@@ -1623,15 +1126,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
                         table_indices,
                         has_c4=has_c4,
                         has_c128=has_c128,
-                        row_counts=extend_lens_list,
                     )
                 else:
                     component_tables = (
-                        self._make_component_page_tables(
-                            reqs,
-                            max_seqlen_k,
-                            row_counts=extend_lens_list,
-                        )
+                        self._make_component_page_tables(reqs, max_seqlen_k)
                         if component_ownership
                         else None
                     )
@@ -1644,7 +1142,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         deforested = None
         if (
             batch.is_decode
-            and not is_target_verify
             and not swa_independent
             and dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE)
             and not self._should_elide_index_source_for_graph(
@@ -1930,10 +1427,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 c4_sparse_source_elided_for_graph=c4_sparse_source_elided,
                 c128_source_elided_for_graph=c128_source_elided,
                 swa_ownership_version=self._current_swa_ownership_version(),
-                target_verify_decode_rows=bool(
-                    is_target_verify
-                    and getattr(batch, "dsv4_target_verify_decode_rows", False)
-                ),
             )
             self._record_metadata_build_bytes(batch, core)
             self._record_marlin_wna16_metadata_owners(batch, core)
@@ -1991,36 +1484,23 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self,
         reqs,
         max_seq_len: int,
-        *,
-        row_counts: list[int] | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        return self._make_component_page_tables_uncached(
-            reqs,
-            max_seq_len,
-            row_counts=row_counts,
-        )
+        return self._make_component_page_tables_uncached(reqs, max_seq_len)
 
     def _make_component_page_tables_uncached(
         self,
         reqs,
         max_seq_len: int,
-        *,
-        row_counts: list[int] | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
-        repeat_counts = (
-            [int(req.extend_len) for req in reqs]
-            if row_counts is None
-            else [int(x) for x in row_counts]
-        )
-        rows = sum(repeat_counts)
+        rows = sum(req.extend_len for req in reqs)
         c4_rows: list[torch.Tensor] = []
         c128_rows: list[torch.Tensor] = []
         indexer_rows: list[torch.Tensor] = []
         has_c4 = any(m.compress_ratio == 4 for m in self.kvcache.layer_mapping)
         has_c128 = any(m.compress_ratio == 128 for m in self.kvcache.layer_mapping)
 
-        for req, repeat_count in zip(reqs, repeat_counts):
+        for req in reqs:
             c4_table, c128_table, indexer_table = self._build_component_page_table_row(
                 req,
                 table_len,
@@ -2028,7 +1508,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 has_c128=has_c128,
             )
 
-            for _ in range(repeat_count):
+            for _ in range(req.extend_len):
                 if c4_table is not None:
                     c4_rows.append(c4_table)
                 if c128_table is not None:
@@ -2128,14 +1608,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
         *,
         has_c4: bool,
         has_c128: bool,
-        row_counts: list[int] | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
-        rows = (
-            sum(int(req.extend_len) for req in reqs)
-            if row_counts is None
-            else sum(int(x) for x in row_counts)
-        )
+        rows = sum(req.extend_len for req in reqs)
         timing_metadata = {"phase": "decode", "rows": int(rows), "table_width": int(table_len)}
         with dsv4_owner_timing.maybe_host_range(
             "dsv4.metadata.decode.component_page_table_cache.ensure",
@@ -2206,11 +1681,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if dsv4_kernel.dsv4_env_flag(
             dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE
         ):
-            oracle = self._make_component_page_tables_uncached(
-                reqs,
-                max_seq_len,
-                row_counts=row_counts,
-            )
+            oracle = self._make_component_page_tables_uncached(reqs, max_seq_len)
             for name, got, expected in zip(
                 ("c4_page_table", "c128_page_table", "c4_indexer_page_table"),
                 result,
@@ -2350,7 +1821,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         table_indices: torch.Tensor,
         use_cache: bool,
         timing_base: dict[str, int | str | bool],
-        row_counts: list[int] | None = None,
     ) -> torch.Tensor:
         if use_cache:
             return self._make_swa_page_tables_cached(
@@ -2358,13 +1828,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 max_seq_len,
                 table_indices,
                 timing_base=timing_base,
-                row_counts=row_counts,
             )
         return self._make_swa_page_tables_uncached(
             reqs,
             max_seq_len,
             timing_base=timing_base,
-            row_counts=row_counts,
         )
 
     def _make_swa_page_tables_uncached(
@@ -2373,21 +1841,15 @@ class DSV4AttentionBackend(BaseAttnBackend):
         max_seq_len: int,
         *,
         timing_base: dict[str, int | str | bool],
-        row_counts: list[int] | None = None,
     ) -> torch.Tensor:
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
-        repeat_counts = (
-            [int(req.extend_len) for req in reqs]
-            if row_counts is None
-            else [int(x) for x in row_counts]
-        )
-        rows = sum(repeat_counts)
+        rows = sum(req.extend_len for req in reqs)
         chunks: list[torch.Tensor] = []
         profile = {} if dsv4_owner_timing.enabled() else None
         started = _profile_start(profile) if profile is not None else 0.0
-        for req, repeat_count in zip(reqs, repeat_counts):
+        for req in reqs:
             row = self._build_swa_page_table_row(req, table_len, profile=profile)
-            for _ in range(repeat_count):
+            for _ in range(req.extend_len):
                 chunks.append(row)
         if profile is not None:
             _profile_add(profile, "row_construction", started)
@@ -2413,14 +1875,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
         table_indices: torch.Tensor,
         *,
         timing_base: dict[str, int | str | bool],
-        row_counts: list[int] | None = None,
     ) -> torch.Tensor:
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
-        rows = (
-            sum(int(req.extend_len) for req in reqs)
-            if row_counts is None
-            else sum(int(x) for x in row_counts)
-        )
+        rows = sum(req.extend_len for req in reqs)
         profile = {} if dsv4_owner_timing.enabled() else None
         started = _profile_start(profile) if profile is not None else 0.0
         self._ensure_swa_page_table_cache(table_len)
@@ -3186,8 +2643,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         metadata: DSV4CoreAttentionMetadata,
         compress_ratio: DSV4CompressRatio,
         attn_sink: torch.Tensor | None,
-        *,
-        force_torch: bool = False,
     ) -> torch.Tensor:
         fast = self._sparse_attention_two_source(
             q,
@@ -3195,7 +2650,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             metadata,
             compress_ratio,
             attn_sink,
-            force_torch=force_torch,
         )
         if fast is not None:
             return fast
@@ -3915,14 +3369,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         attn_sink: torch.Tensor | None,
         merged_output: torch.Tensor,
     ) -> None:
-        layer2_split_trace = (
-            int(layer_id) == 2
-            and dsv4_mtp_debug.env_flag(
-                "MINISGL_DSV4_NORMAL_PRODUCER_TRACE_LAYER2_ATTENTION_SPLIT"
-            )
-            and dsv4_mtp_debug.row_tensor_trace_enabled()
-        )
-        if not (_debug_activations_enabled() or layer2_split_trace):
+        if not _debug_activations_enabled():
             return
         row_indices = self._debug_attention_rows(metadata, rows, q.device)
         prefix = f"layer{layer_id}.attention_backend"
@@ -3993,8 +3440,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         metadata: DSV4CoreAttentionMetadata,
         compress_ratio: DSV4CompressRatio,
         attn_sink: torch.Tensor | None,
-        *,
-        force_torch: bool = False,
     ) -> torch.Tensor | None:
         rows = q.shape[0]
         if rows == 0:
@@ -4128,59 +3573,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 label="c128",
             )
 
-        if force_torch:
-            with dsv4_direct_copy_nvtx(
-                f"attention_boundary.swa_cache_to_q_dtype.force_torch.layer{layer_id}.rows{rows}",
-                src=self.kvcache.swa_cache(layer_id),
-            ):
-                torch_swa_cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
-            out = self._two_source_attention_torch(
-                q,
-                torch_swa_cache,
-                swa_indices,
-                swa_lengths,
-                compressed_cache=compressed_cache,
-                compressed_indices=compressed_indices,
-                compressed_lengths=compressed_lengths,
-                attn_sink=attn_sink,
-            )
-            self._capture_attention_debug(
-                layer_id,
-                q,
-                metadata,
-                rows,
-                swa_indices=swa_indices,
-                swa_lengths=swa_lengths,
-                swa_cache=torch_swa_cache,
-                compressed_cache=compressed_cache,
-                compressed_indices=compressed_indices,
-                compressed_lengths=compressed_lengths,
-                compress_ratio=compress_ratio,
-                attn_sink=attn_sink,
-                merged_output=out,
-            )
-            dsv4_mtp_debug.record_attention_backend(
-                get_global_ctx().batch,
-                layer_id=layer_id,
-                backend="force_torch",
-                rows=rows,
-                metadata=metadata,
-                compress_ratio=compress_ratio or 0,
-                query=q,
-                merged_output=out,
-                swa_indices=swa_indices,
-                swa_lengths=swa_lengths,
-                swa_cache=torch_swa_cache,
-                compressed_indices=compressed_indices,
-                compressed_lengths=compressed_lengths,
-                compressed_cache=compressed_cache,
-            )
-            return out
-
-        use_decode_row_splitk = bool(
-            metadata.max_seqlen_q <= 1 or metadata.target_verify_decode_rows
-        )
-        if use_decode_row_splitk:
+        if metadata.max_seqlen_q <= 1:
             with dsv4_direct_copy_nvtx(
                 f"attention_boundary.swa_cache_to_q_dtype.splitk.layer{layer_id}.rows{rows}",
                 src=self.kvcache.swa_cache(layer_id),
@@ -4199,11 +3592,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )
             if fast is not None:
                 self._debug_sync_sparse_attention(
-                    backend=(
-                        "splitk_target_verify"
-                        if metadata.target_verify_decode_rows
-                        else "splitk"
-                    ),
+                    backend="splitk",
                     layer_id=layer_id,
                     rows=rows,
                     metadata=metadata,
@@ -4227,26 +3616,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     compress_ratio=compress_ratio,
                     attn_sink=attn_sink,
                     merged_output=fast,
-                )
-                dsv4_mtp_debug.record_attention_backend(
-                    get_global_ctx().batch,
-                    layer_id=layer_id,
-                    backend=(
-                        "splitk_target_verify"
-                        if metadata.target_verify_decode_rows
-                        else "splitk"
-                    ),
-                    rows=rows,
-                    metadata=metadata,
-                    compress_ratio=compress_ratio or 0,
-                    query=q,
-                    merged_output=fast,
-                    swa_indices=swa_indices,
-                    swa_lengths=swa_lengths,
-                    swa_cache=splitk_swa_cache,
-                    compressed_indices=compressed_indices,
-                    compressed_lengths=compressed_lengths,
-                    compressed_cache=compressed_cache,
                 )
                 return fast
 
@@ -4293,38 +3662,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 attn_sink=attn_sink,
                 merged_output=fast,
             )
-            dsv4_mtp_debug.record_attention_backend(
-                get_global_ctx().batch,
-                layer_id=layer_id,
-                backend="base",
-                rows=rows,
-                metadata=metadata,
-                compress_ratio=compress_ratio or 0,
-                query=q,
-                merged_output=fast,
-                swa_indices=swa_indices,
-                swa_lengths=swa_lengths,
-                swa_cache=base_swa_cache,
-                compressed_indices=compressed_indices,
-                compressed_lengths=compressed_lengths,
-                compressed_cache=compressed_cache,
-            )
             return fast
         if compressed_cache is None:
-            dsv4_mtp_debug.record_attention_backend(
-                get_global_ctx().batch,
-                layer_id=layer_id,
-                backend="none",
-                rows=rows,
-                metadata=metadata,
-                compress_ratio=compress_ratio or 0,
-                query=q,
-                swa_indices=swa_indices,
-                swa_lengths=swa_lengths,
-                compressed_indices=compressed_indices,
-                compressed_lengths=compressed_lengths,
-                compressed_cache=compressed_cache,
-            )
             return None
         with dsv4_direct_copy_nvtx(
             f"attention_boundary.swa_cache_to_q_dtype.torch_fallback.layer{layer_id}.rows{rows}",
@@ -4355,22 +3694,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             compress_ratio=compress_ratio,
             attn_sink=attn_sink,
             merged_output=out,
-        )
-        dsv4_mtp_debug.record_attention_backend(
-            get_global_ctx().batch,
-            layer_id=layer_id,
-            backend="torch_fallback",
-            rows=rows,
-            metadata=metadata,
-            compress_ratio=compress_ratio or 0,
-            query=q,
-            merged_output=out,
-            swa_indices=swa_indices,
-            swa_lengths=swa_lengths,
-            swa_cache=fallback_swa_cache,
-            compressed_indices=compressed_indices,
-            compressed_lengths=compressed_lengths,
-            compressed_cache=compressed_cache,
         )
         return out
 
