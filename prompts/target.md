@@ -166,6 +166,20 @@ TARGET 12 should first compare mini's replay boundary with SGLang and vLLM:
   feeds `g.replay()`, so stable buffers, deforestation, in-graph prep, and
   direct/fused graph metadata writers have higher priority.
 
+Current TARGET 12 child:
+
+```text
+prompts/TARGET_12.45_dsv4_sm80_ingraph_metadata_promotion_soak.md
+```
+
+TARGET 12.4 implemented an opt-in SGLang-style in-graph metadata prep PoC with
+the current replay metadata path preserved as fallback/oracle.  It removed the
+main `prepare_for_replay` clamp/copy owner in the short probe and passed
+unit/wrapper/text/oracle gates without increasing capture memory.  The current
+route is a repeat-paired promotion soak across short, long-decode, serving, and
+prefix scenarios before deciding whether to default-promote, keep opt-in, or
+move to TARGET 12.5 direct/fused graph metadata writers.
+
 ## Archive Policy
 
 Completed detailed execution prompts live in:

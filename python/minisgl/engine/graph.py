@@ -95,24 +95,43 @@ class GraphCaptureBuffer:
 
     def copy_from(self, batch: Batch) -> int:
         _slice = slice(batch.padded_size)
-        with dsv4_direct_copy_nvtx(
-            f"graph_input_staging.input_ids.bs{batch.size}.padded{batch.padded_size}",
-            dst=self.input_ids[_slice],
-            src=batch.input_ids,
-        ):
-            self.input_ids[_slice] = batch.input_ids
-        with dsv4_direct_copy_nvtx(
-            f"graph_input_staging.out_loc.bs{batch.size}.padded{batch.padded_size}",
-            dst=self.out_loc[_slice],
-            src=batch.out_loc,
-        ):
-            self.out_loc[_slice] = batch.out_loc
-        with dsv4_direct_copy_nvtx(
-            f"graph_input_staging.positions.bs{batch.size}.padded{batch.padded_size}",
-            dst=self.positions[_slice],
-            src=batch.positions,
-        ):
-            self.positions[_slice] = batch.positions
+        timing_base = {
+            "phase": "decode" if batch.is_decode else batch.phase,
+            "batch_size": int(batch.size),
+            "padded_size": int(batch.padded_size),
+            "rows": int(batch.padded_size),
+        }
+        with dsv4_owner_timing.maybe_host_range("graph.copy_from.total", timing_base):
+            with dsv4_direct_copy_nvtx(
+                f"graph_input_staging.input_ids.bs{batch.size}.padded{batch.padded_size}",
+                dst=self.input_ids[_slice],
+                src=batch.input_ids,
+            ):
+                with dsv4_owner_timing.maybe_host_range(
+                    "graph.copy_from.input_ids",
+                    {**timing_base, "field": "input_ids"},
+                ):
+                    self.input_ids[_slice] = batch.input_ids
+            with dsv4_direct_copy_nvtx(
+                f"graph_input_staging.out_loc.bs{batch.size}.padded{batch.padded_size}",
+                dst=self.out_loc[_slice],
+                src=batch.out_loc,
+            ):
+                with dsv4_owner_timing.maybe_host_range(
+                    "graph.copy_from.out_loc",
+                    {**timing_base, "field": "out_loc"},
+                ):
+                    self.out_loc[_slice] = batch.out_loc
+            with dsv4_direct_copy_nvtx(
+                f"graph_input_staging.positions.bs{batch.size}.padded{batch.padded_size}",
+                dst=self.positions[_slice],
+                src=batch.positions,
+            ):
+                with dsv4_owner_timing.maybe_host_range(
+                    "graph.copy_from.positions",
+                    {**timing_base, "field": "positions"},
+                ):
+                    self.positions[_slice] = batch.positions
         copied_items = int(batch.padded_size)
         return copied_items * (
             self.input_ids.element_size()
@@ -499,6 +518,17 @@ class GraphRunner:
                 "capture_compressed_locs_in_graph_component_guarded",
                 False,
             )
+        )
+        self.capture_status["prep_metadata_in_graph_requested"] = bool(
+            getattr(self.attn_backend, "prep_metadata_in_graph_requested", False)
+        )
+        self.capture_status["prep_metadata_in_graph"] = bool(
+            getattr(self.attn_backend, "prep_metadata_in_graph", False)
+        )
+        self.capture_status["prep_metadata_in_graph_unsupported_reason"] = getattr(
+            self.attn_backend,
+            "prep_metadata_in_graph_unsupported_reason",
+            None,
         )
 
         pbar = tqdm(
@@ -895,6 +925,9 @@ class GraphRunner:
                     f"context={replay_context}"
                 ) from exc
         self._debug_sync_replay("after_graph_replay", batch)
+        validate_after_replay = getattr(self.attn_backend, "validate_after_replay", None)
+        if validate_after_replay is not None:
+            validate_after_replay(batch)
         self.capture_status["replay_count"] = int(self.capture_status["replay_count"]) + 1
         self.capture_status["replay_input_copy_bytes"] = int(
             self.capture_status["replay_input_copy_bytes"]

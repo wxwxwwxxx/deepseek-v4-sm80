@@ -92,6 +92,8 @@ DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
 DSV4_BF16_PROJECTION_CACHE_TOGGLE = "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE"
 DSV4_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
 DSV4_DECODE_METADATA_DEFOREST_TOGGLE = "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
+DSV4_PREP_METADATA_IN_GRAPH_TOGGLE = "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH"
+DSV4_PREP_METADATA_IN_GRAPH_ORACLE_ENV = "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH_ORACLE"
 DSV4_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
 DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
@@ -104,6 +106,9 @@ DSV4_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJ
 DSV4_PROMOTED_ROUTE_B_LIFETIME_VARIANT = "dsv4_sm80_a100_victory_prefix_routeb_lifetime"
 DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_moereducebf16"
+)
+DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_INGRAPH_METADATA_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_moereducebf16_ingraphmetadata"
 )
 DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_swa_independent"
@@ -1027,6 +1032,23 @@ VARIANTS: tuple[Variant, ...] = (
         enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
+        DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_INGRAPH_METADATA_VARIANT,
+        {
+            **DSV4_ROUTE_B_LIFETIME_ENV,
+            DSV4_MOE_REDUCE_BF16_TOGGLE: "1",
+            DSV4_PREP_METADATA_IN_GRAPH_TOGGLE: "1",
+        },
+        (
+            "TARGET 12.4 smoke opt-in: TARGET10.27 Route B lifetime BF16 "
+            "MoE-reduce preset plus in-graph decode metadata materialization."
+        ),
+        use_pynccl=True,
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+    ),
+    Variant(
         DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_VARIANT,
         dict(DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_ENV),
         (
@@ -1152,6 +1174,7 @@ def _preserved_dsv4_sm80_env_names(dsv4_kernel) -> tuple[str, ...]:
             "DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE",
             "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY",
         ),
+        DSV4_PREP_METADATA_IN_GRAPH_ORACLE_ENV,
         getattr(
             dsv4_kernel,
             "DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG_ENV",
