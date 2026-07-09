@@ -2252,6 +2252,76 @@ class DSV4Attention(BaseOP):
                 "error": str(exc),
             }
 
+    def _q_wqb_weight_cache_probe(self, *, path: str) -> dict[str, object]:
+        probe: dict[str, object] = {
+            "available": True,
+            "owner_label": self._q_wqb_owner_label,
+            "path": str(path),
+            "dense_fp8_marlin_projection": bool(
+                dsv4_kernel.dense_fp8_marlin_projection_enabled()
+            ),
+            "q_wqb_bf16_weight_cache": bool(
+                dsv4_kernel.dsv4_env_flag(
+                    dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
+                )
+            ),
+            "q_wqb_fp8_gemm": bool(
+                dsv4_kernel.dsv4_sm80_triton_enabled(
+                    "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM"
+                )
+            ),
+            "source_weight": dsv4_mtp_debug.tensor_probe_record(
+                getattr(self.wq_b, "weight", None)
+            ),
+            "source_scale": dsv4_mtp_debug.tensor_probe_record(
+                getattr(self.wq_b, "weight_scale_inv", None)
+            ),
+        }
+        if dsv4_kernel.dense_fp8_marlin_projection_enabled():
+            cache_name = self._q_wqb_marlin_weight_cache_name
+            cached = getattr(self.wq_b, cache_name, None)
+            probe["cache_name"] = cache_name
+            probe["cache_kind"] = "dense_fp8_marlin"
+            if cached is None:
+                probe["cache"] = {"available": False}
+            else:
+                probe["cache"] = {
+                    "available": True,
+                    "shape": [int(cached.size_n), int(cached.size_k)],
+                    "source_signature": [
+                        {
+                            "data_ptr": int(sig[0]),
+                            "shape": [int(x) for x in sig[1]],
+                            "dtype": str(sig[2]),
+                        }
+                        for sig in getattr(cached, "source_signature", ())
+                    ],
+                    "prepared_weight": dsv4_mtp_debug.tensor_probe_record(
+                        getattr(cached, "weight", None)
+                    ),
+                    "prepared_scale": dsv4_mtp_debug.tensor_probe_record(
+                        getattr(cached, "weight_scale", None)
+                    ),
+                    "workspace": dsv4_mtp_debug.tensor_probe_record(
+                        getattr(cached, "workspace", None)
+                    ),
+                }
+            return probe
+
+        if dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE):
+            cache_name = self._q_wqb_bf16_weight_cache_name
+            probe["cache_name"] = cache_name
+            probe["cache_kind"] = "fp8_cached_bf16_weight"
+            probe["cache"] = dsv4_mtp_debug.tensor_probe_record(
+                getattr(self.wq_b, cache_name, None)
+            )
+            return probe
+
+        probe["cache_name"] = None
+        probe["cache_kind"] = "quantized_linear_ref"
+        probe["cache"] = {"available": False, "reason": "no prepared q_wqb cache path"}
+        return probe
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
         with dsv4_direct_copy_nvtx(
@@ -2469,11 +2539,19 @@ class DSV4Attention(BaseOP):
                 q,
                 path=q_wqb_path,
             )
+            q_wqb_weight_cache_probe = None
+            if dsv4_mtp_debug.operator_parity_enabled(
+                "wq_b"
+            ) and dsv4_mtp_debug.operator_parity_layer_enabled(int(self.layer_id)):
+                q_wqb_weight_cache_probe = self._q_wqb_weight_cache_probe(
+                    path=q_wqb_path
+                )
             dsv4_mtp_debug.record_operator_capture(
                 batch,
                 operator_name="wq_b",
                 layer_id=int(self.layer_id),
                 input_row0=wq_b_debug_input,
+                input_tensor=q_lora,
                 output_tensor=q,
                 positions=positions,
                 path=q_wqb_path,
@@ -2489,10 +2567,18 @@ class DSV4Attention(BaseOP):
                     "dense_fp8_marlin_projection": bool(
                         dsv4_kernel.dense_fp8_marlin_projection_enabled()
                     ),
+                    "row_invariant_local": bool(
+                        is_target_verify
+                        and dsv4_kernel.dsv4_env_flag(
+                            dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE
+                        )
+                        and not dsv4_kernel.dense_fp8_marlin_projection_enabled()
+                    ),
                 },
                 extra={
                     "output_boundary": "wq_b_local_output_q_wqb_output",
                     "per_row_probe": q_wqb_per_row_probe,
+                    "weight_cache_probe": q_wqb_weight_cache_probe,
                 },
             )
             q_wqb_output_debug_input = dsv4_mtp_debug.clone_operator_row0_input(

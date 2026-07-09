@@ -134,6 +134,8 @@ Run these in order.
 | TARGET 11.253 | `prompts/TARGET_11.253_dsv4_sm80_mtp_swa_layer1_commit_row_value_parity.md` | After 11.252 skips uninitialized C4 indexer state, classify the first valid SWA layer1 accepted-commit row value owner into producer, copy, or restore/cleanup. |
 | TARGET 11.254 | `prompts/TARGET_11.254_dsv4_sm80_mtp_layer1_swa_producer_boundary_parity.md` | After 11.253 proves accepted commit only preserves an already-wrong SWA row, bisect target-verify producer parity from layer0 through layer1 SWA store input. |
 | TARGET 11.255 | `prompts/TARGET_11.255_dsv4_sm80_mtp_layer0_output_subboundary_parity.md` | After 11.254 localizes the producer mismatch to layer0 output, split layer0 attention, MoE, reduce, and residual sub-boundaries for the same correction row. |
+| TARGET 11.256 | `prompts/TARGET_11.256_dsv4_sm80_mtp_rank6_layer0_q_wqb_projection_parity.md` | After 11.255 proves the first rank-local mismatch is rank6 layer0 `q_wqb_output`, compare q_wqb input, weight/cache, dispatch, row-shape, and precision/backend behavior. |
+| TARGET 11.257 | `prompts/TARGET_11.257_dsv4_sm80_mtp_q_wqb_cached_bf16_row_shape_contract.md` | After 11.256 proves cached-BF16 q_wqb is row-shape sensitive, choose and test a target-verify q_wqb row-shape contract or correctness gate. |
 | TARGET 11.3 | `prompts/TARGET_11.3_dsv4_sm80_mtp_attention_graph_perf.md` | After accepted-KV commit is exact and useful eager target-pass reduction is proven, align DSV4 attention/compression metadata and graph replay with SGLang, then profile throughput. |
 
 ## Correctness Contract
@@ -381,6 +383,16 @@ Do not promote MTP by default unless all of these are true:
   `layer0.post_moe_residual` is the first mismatch, stop at TARGET 11.255 and
   split layer0 into attention, MoE, reduce, and residual sub-boundaries before
   changing layer1, SWA commit, logits, sampler, graph/perf, or unrelated state.
+- If TARGET 11.255 proves the first true layer0 producer mismatch is rank-local
+  `rank6 layer0.q_wqb_output`, stop at TARGET 11.256 and compare q_wqb input,
+  weight/cache, dispatch, row-shape, and precision/backend behavior before
+  changing q_norm_rope, attention backend, wo_a/wo_b, MoE, layer1, logits,
+  sampler, graph/perf, or unrelated state.
+- If TARGET 11.256 proves q_wqb input and cached weights are aligned but
+  cached-BF16 q_wqb is row-shape sensitive, stop at TARGET 11.257 and choose a
+  q_wqb row-shape contract or correctness gate before changing q_norm_rope,
+  attention backend, wo_a/wo_b, MoE, layer1, logits, sampler, graph/perf, or
+  unrelated state.
 
 ## Deliverables
 

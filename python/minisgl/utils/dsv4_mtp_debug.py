@@ -343,9 +343,12 @@ def record_operator_capture(
         input_row_tensors: dict[int, torch.Tensor] = {}
         output_row_tensors: dict[int, torch.Tensor] = {}
         row_records: list[dict[str, Any]] = []
+        input_metadata_tensor = (
+            input_tensor if isinstance(input_tensor, torch.Tensor) else input_row0
+        )
         if isinstance(input_row0, torch.Tensor):
             row = input_row0.detach().contiguous().cpu()
-            entry["input_tensor_metadata"] = _tensor_metadata(input_row0)
+            entry["input_tensor_metadata"] = _tensor_metadata(input_metadata_tensor)
             entry["input_summary"] = _tensor_summary(row.float())
             entry["_input_row0_tensor"] = row
         else:
@@ -1798,6 +1801,58 @@ def tensor_compare_stats(
     )
 
 
+def tensor_probe_record(
+    tensor: torch.Tensor | None,
+    *,
+    max_sample_elements: int = 4096,
+) -> dict[str, Any]:
+    if not isinstance(tensor, torch.Tensor):
+        return {"available": False}
+    if tensor.numel() == 0:
+        return {
+            "available": True,
+            "metadata": _tensor_metadata(tensor),
+            "sampled_raw_sha256": None,
+            "sample_numel": 0,
+        }
+    if tensor.is_cuda:
+        try:
+            if torch.cuda.is_current_stream_capturing():
+                return {
+                    "available": False,
+                    "reason": "cuda graph capture active",
+                    "metadata": _tensor_metadata(tensor),
+                }
+        except Exception:
+            pass
+    try:
+        flat = tensor.detach().reshape(-1)
+        sample_count = min(int(max_sample_elements), int(flat.numel()))
+        if sample_count <= 0:
+            sample = flat[:0].contiguous().cpu()
+        elif sample_count >= int(flat.numel()):
+            sample = flat.contiguous().cpu()
+        else:
+            head_count = sample_count // 2
+            tail_count = sample_count - head_count
+            sample = torch.cat((flat[:head_count], flat[-tail_count:])).contiguous().cpu()
+        sample_float = sample.float()
+        return {
+            "available": True,
+            "metadata": _tensor_metadata(tensor),
+            "sample_numel": int(sample.numel()),
+            "source_numel": int(flat.numel()),
+            "sampled_raw_sha256": _raw_checksum(sample),
+            "sample_summary": _tensor_summary(sample_float),
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "metadata": _tensor_metadata(tensor),
+        }
+
+
 def _q_norm_rope_micro_probe(
     normal: dict[str, Any],
     target: dict[str, Any],
@@ -2271,6 +2326,7 @@ def _tensor_metadata(tensor: torch.Tensor, *, row0: bool = False) -> dict[str, A
         "storage_offset": int(tensor.storage_offset()),
         "is_contiguous": bool(tensor.is_contiguous()),
         "numel": int(tensor.numel()),
+        "data_ptr": int(tensor.data_ptr()),
     }
 
 
@@ -2533,6 +2589,7 @@ __all__ = [
     "record_moe_contract_oracle",
     "record_moe_microbatch_runtime",
     "tensor_compare_stats",
+    "tensor_probe_record",
     "wo_a_projection_oracle_enabled",
     "wo_b_projection_oracle_enabled",
 ]
