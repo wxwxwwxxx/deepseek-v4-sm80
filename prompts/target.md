@@ -50,6 +50,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | deferred | Low-precision research is paused after the INT8 MoE feasibility pass did not show an obvious short win; keep the evidence for later INT8/FP8 work. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 | TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | paused and archived | MTP speculative decoding was investigated and preserved on `dsv4-mtp-paused-reference`, but the current target-verify runtime failed the no-spec target decode equivalence contract.  Current release branch removes active MTP runtime/opt-ins and should establish a post-MTP-cleanup non-MTP baseline. |
+| TARGET 12 | `prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md` | active | Post-MTP-cleanup non-MTP performance follow-up: compare mini with SGLang/vLLM graph replay metadata, stable buffers, safe replay attribution, in-graph metadata prep, and direct/fused graph metadata writers. |
 
 ## Current Milestones
 
@@ -140,6 +141,31 @@ TARGET 09 low-precision work is now summarized in `prompts/TARGET_09_dsv4_sm80_l
   `dsv4-mtp-paused-reference`, and fine-grained prompts are archived under
   `prompts/archive/target11/`.
 
+TARGET 12 starting point:
+
+```text
+TARGET 12 follows the post-MTP-cleanup replay attribution report:
+performance_milestones/misc_post_mtp_cleanup_replay_attribution/README.md
+
+Current evidence says the remaining non-MTP regression is concentrated around
+decode CUDA graph replay setup and metadata preparation/staging before
+`g.replay()`, not communication count/bytes, wrapper count, or graph replay
+coverage.
+```
+
+TARGET 12 should first compare mini's replay boundary with SGLang and vLLM:
+
+- SGLang's decode CUDA graph runner uses stable input buffers and grouped GPU
+  copies, and its DeepSeek V4 backend can convert raw decode metadata into full
+  graph-consumed metadata inside the captured graph.
+- vLLM's CUDA graph wrapper keeps graph replay separate from persistent buffer
+  ownership, and its DeepSeek V4 attention path uses preallocated metadata
+  surfaces around sparse/SWA attention.
+- Multi-stream overlap is not part of the current TARGET 12 route: mini's
+  measured replay metadata byte volume is small, and same-step metadata still
+  feeds `g.replay()`, so stable buffers, deforestation, in-graph prep, and
+  direct/fused graph metadata writers have higher priority.
+
 ## Archive Policy
 
 Completed detailed execution prompts live in:
@@ -155,8 +181,8 @@ prompts/archive/target11/
 For new child threads, start from:
 
 1. `prompts/target.md`
-2. the current route prompt for the task; after MTP cleanup there is no active
-   TARGET 11 child prompt
+2. the current route prompt for the task; after MTP cleanup, TARGET 12 is the
+   active non-MTP performance route
 3. `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` only for the MTP
    pause report and future restart conditions
 4. `prompts/TARGET_07_dsv4_sm80_vllm_gap_closure.md` only for TARGET 07
@@ -167,6 +193,9 @@ For new child threads, start from:
    closed communication default and rollback policy
 7. `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` only when reopening
    deferred low-precision research
+8. `prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md` for
+   decode replay metadata, graph-buffer, safe replay attribution, in-graph
+   metadata prep, and direct/fused graph metadata writer work
 
 Do not ask new threads to read every archived prompt unless they need exact
 historical commands or stop conditions.

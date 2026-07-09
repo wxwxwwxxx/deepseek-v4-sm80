@@ -883,16 +883,25 @@ class DSV4AttentionBackend(BaseAttnBackend):
             return
         if metadata.max_seqlen_q != 1:
             return
-        materialized_seq_lens = self._graph_replay_materialized_seq_lens(batch, rows)
-        if materialized_seq_lens is None:
+        materialized_values = self._graph_replay_materialized_seq_len_values(batch, rows)
+        if materialized_values is None:
             return
-        rows = min(int(rows), int(metadata.seq_lens.shape[0]))
+        rows = min(int(rows), len(materialized_values), int(metadata.seq_lens.shape[0]))
         if rows <= 0:
             return
+        if not self._graph_replay_compressed_read_clamp_needed(
+            batch,
+            materialized_values,
+            rows,
+        ):
+            return
+        materialized_seq_lens = torch.tensor(
+            materialized_values[:rows],
+            dtype=torch.long,
+            device=self.device,
+        )
         seq_lens = metadata.seq_lens[:rows].to(device=self.device, dtype=torch.long)
         capped_seq_lens = torch.minimum(seq_lens, materialized_seq_lens[:rows])
-        if bool(torch.all(capped_seq_lens == seq_lens).item()):
-            return
 
         table_indices = metadata.req_table_indices[:rows]
         c4_layer = self._debug_first_layer_for_ratio(4)
@@ -927,11 +936,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
             self._copy_2d(metadata.c128_page_indices, page, rows, fill=-1)
             self._copy_2d(metadata.c128_full_indices, full, rows, fill=-1)
 
-    def _graph_replay_materialized_seq_lens(
+    def _graph_replay_materialized_seq_len_values(
         self,
         batch: Batch,
         rows: int,
-    ) -> torch.Tensor | None:
+    ) -> list[int] | None:
         if rows <= 0:
             return None
         values: list[int] = []
@@ -951,7 +960,30 @@ class DSV4AttentionBackend(BaseAttnBackend):
             return None
         if len(values) < rows:
             values.extend([0] * (rows - len(values)))
-        return torch.tensor(values[:rows], dtype=torch.long, device=self.device)
+        return values[:rows]
+
+    def _graph_replay_compressed_read_clamp_needed(
+        self,
+        batch: Batch,
+        materialized_values: list[int],
+        rows: int,
+    ) -> bool:
+        seq_len_values: list[int] = []
+        for req in getattr(batch, "padded_reqs", batch.reqs):
+            extend_len = max(int(getattr(req, "extend_len", 1)), 1)
+            if int(getattr(req, "uid", 0)) < 0:
+                seq_len = 0
+            else:
+                seq_len = int(getattr(req, "device_len", 0))
+            seq_len_values.extend([seq_len] * extend_len)
+            if len(seq_len_values) >= rows:
+                break
+        if len(seq_len_values) < rows:
+            seq_len_values.extend([0] * (rows - len(seq_len_values)))
+        return any(
+            int(materialized_values[idx]) < int(seq_len_values[idx])
+            for idx in range(min(rows, len(materialized_values), len(seq_len_values)))
+        )
 
     def _swa_version_guard_required(self) -> bool:
         return bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
@@ -1040,7 +1072,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
 
             extend_lens = torch.tensor(extend_lens_list, dtype=torch.int32, device=device)
             req_seq_lens = torch.tensor(req_seq_lens_list, dtype=torch.int32, device=device)
-            cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0), (1, 0))
+            cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0, dtype=torch.int32), (1, 0))
             component_ownership = bool(
                 getattr(self.kvcache, "component_loc_ownership_enabled", False)
             )
@@ -2884,7 +2916,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         *,
         stage: str,
     ) -> None:
-        if _cuda_graph_capture_active() or not _case_boundary_debug_enabled():
+        if not _case_boundary_debug_enabled() or _cuda_graph_capture_active():
             return
         rows = int(rows)
         if rows <= 0:
