@@ -446,11 +446,31 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
         in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
     )
     assert (
+        dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE
+        in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
+    )
+    assert (
         dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
         not in dsv4_kernel.DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST
     )
     assert (
         dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
+        in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
+    )
+    assert (
+        dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE
+        not in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
+    )
+    assert (
+        dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE
+        not in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
+    )
+    assert (
+        dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE
+        in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
+    )
+    assert (
+        dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE
         in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
     )
     assert (
@@ -461,10 +481,6 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
         dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
         not in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
     )
-    assert (
-        dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE
-        not in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
-    )
     assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE)
     assert not any(
         dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST
@@ -472,7 +488,14 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
 
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, "1")
     assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE)
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE
+    )
+    assert not dsv4_kernel.dsv4_env_flag(
+        dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE
+    )
+    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE)
+    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE)
     monkeypatch.setenv(
         dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
         "q_wqb,shared_expert,MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE",

@@ -61,6 +61,9 @@ DSV4_SPARSE_SYNC_DEBUG_ENV = "MINISGL_DSV4_SPARSE_SYNC_DEBUG"
 DSV4_SWA_METADATA_PAGE_TABLE_CACHE_ENV = "MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE"
 DSV4_SWA_DIRECT_TOKEN_METADATA_ENV = "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA"
 DSV4_PREP_METADATA_IN_GRAPH_ORACLE_ENV = "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH_ORACLE"
+DSV4_PREP_METADATA_IN_GRAPH_ORACLE_DEBUG_ENV = (
+    "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH_ORACLE_DEBUG"
+)
 
 
 def _swa_metadata_page_table_cache_enabled() -> bool:
@@ -73,6 +76,13 @@ def _swa_metadata_page_table_cache_enabled() -> bool:
 def _swa_direct_token_metadata_enabled() -> bool:
     return (
         os.environ.get(DSV4_SWA_DIRECT_TOKEN_METADATA_ENV, "").strip().lower()
+        in _TRUE_ENV_VALUES
+    )
+
+
+def _prep_metadata_in_graph_oracle_debug_enabled() -> bool:
+    return (
+        os.environ.get(DSV4_PREP_METADATA_IN_GRAPH_ORACLE_DEBUG_ENV, "").strip().lower()
         in _TRUE_ENV_VALUES
     )
 
@@ -393,6 +403,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._prep_metadata_in_graph_unsupported_reason: str | None = None
         self._pending_prep_metadata_oracle: DSV4AttentionMetadata | None = None
         self._pending_prep_metadata_oracle_rows = 0
+        self._prep_metadata_in_graph_oracle_replay_step = 0
         dsv4_kernel.warmup_indexer_fp8_backend(self.device)
 
     @property
@@ -980,6 +991,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._prep_metadata_in_graph_unsupported_reason = None
         self._pending_prep_metadata_oracle = None
         self._pending_prep_metadata_oracle_rows = 0
+        self._prep_metadata_in_graph_oracle_replay_step = 0
         if self.max_graph_bs == 0:
             if self._prep_metadata_in_graph_requested:
                 self._prep_metadata_in_graph_unsupported_reason = "cuda_graph_disabled"
@@ -1082,6 +1094,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
                             batch,
                             metadata.oracle_metadata.core_metadata,
                             batch.padded_size,
+                        )
+                        ok = self._run_prep_metadata_in_graph_kernel(int(batch.padded_size))
+                        if not ok:
+                            raise RuntimeError(
+                                f"{dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE}=1 "
+                                "oracle could not materialize the pre-forward metadata surface."
+                            )
+                        self._compare_prep_metadata_in_graph_oracle(
+                            self.capture.core_metadata,
+                            metadata.oracle_metadata.core_metadata,
+                            int(batch.padded_size),
+                            boundary="pre_forward",
                         )
                     self._pending_prep_metadata_oracle = metadata.oracle_metadata
                     self._pending_prep_metadata_oracle_rows = int(batch.padded_size)
@@ -1216,36 +1240,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             c4_page_table=core.c4_page_table,
             c128_page_table=core.c128_page_table,
         ):
-            ok = dsv4_kernel.prep_decode_metadata_in_graph(
-                ctx_page_table=get_global_ctx().page_table,
-                table_indices=core.req_table_indices,
-                positions=core.positions,
-                raw_out_loc=core.raw_out_loc,
-                materialized_seq_lens=core.materialized_seq_lens,
-                c4_page_table=core.c4_page_table,
-                c128_page_table=core.c128_page_table,
-                c4_indexer_page_table=core.c4_indexer_page_table,
-                dst_seq_lens=core.seq_lens,
-                dst_swa_topk_lengths=core.swa_topk_lengths,
-                dst_c4_topk_lengths_raw=core.c4_topk_lengths_raw,
-                dst_c4_topk_lengths_clamp1=core.c4_topk_lengths_clamp1,
-                dst_c4_sparse_topk_lengths=core.c4_sparse_topk_lengths,
-                dst_c128_topk_lengths_clamp1=core.c128_topk_lengths_clamp1,
-                dst_swa_page_indices=core.swa_page_indices,
-                dst_c4_sparse_raw_indices=core.c4_sparse_raw_indices,
-                dst_c4_sparse_page_indices=core.c4_sparse_page_indices,
-                dst_c4_sparse_full_indices=core.c4_sparse_full_indices,
-                dst_c128_raw_indices=core.c128_raw_indices,
-                dst_c128_page_indices=core.c128_page_indices,
-                dst_c128_full_indices=core.c128_full_indices,
-                dst_c4_out_loc=core.c4_out_loc,
-                dst_c128_out_loc=core.c128_out_loc,
-                dst_c4_indexer_out_loc=core.c4_indexer_out_loc,
-                rows=rows,
-                page_size=self.page_size,
-                window_size=self.window_size,
-                index_topk=self.index_topk,
-            )
+            ok = self._run_prep_metadata_in_graph_kernel(rows)
         if not ok:
             raise RuntimeError(
                 f"{dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE}=1 requested, "
@@ -1260,6 +1255,43 @@ class DSV4AttentionBackend(BaseAttnBackend):
             approx_bytes=self._prep_metadata_in_graph_dst_bytes(core, rows),
             elements=self._prep_metadata_in_graph_dst_bytes(core, rows) // 4,
             mandatory=True,
+        )
+
+    def _run_prep_metadata_in_graph_kernel(self, rows: int) -> bool:
+        if self.capture is None:
+            return False
+        core = self.capture.core_metadata
+        if core.materialized_seq_lens is None:
+            return False
+        return dsv4_kernel.prep_decode_metadata_in_graph(
+            ctx_page_table=get_global_ctx().page_table,
+            table_indices=core.req_table_indices,
+            positions=core.positions,
+            raw_out_loc=core.raw_out_loc,
+            materialized_seq_lens=core.materialized_seq_lens,
+            c4_page_table=core.c4_page_table,
+            c128_page_table=core.c128_page_table,
+            c4_indexer_page_table=core.c4_indexer_page_table,
+            dst_seq_lens=core.seq_lens,
+            dst_swa_topk_lengths=core.swa_topk_lengths,
+            dst_c4_topk_lengths_raw=core.c4_topk_lengths_raw,
+            dst_c4_topk_lengths_clamp1=core.c4_topk_lengths_clamp1,
+            dst_c4_sparse_topk_lengths=core.c4_sparse_topk_lengths,
+            dst_c128_topk_lengths_clamp1=core.c128_topk_lengths_clamp1,
+            dst_swa_page_indices=core.swa_page_indices,
+            dst_c4_sparse_raw_indices=core.c4_sparse_raw_indices,
+            dst_c4_sparse_page_indices=core.c4_sparse_page_indices,
+            dst_c4_sparse_full_indices=core.c4_sparse_full_indices,
+            dst_c128_raw_indices=core.c128_raw_indices,
+            dst_c128_page_indices=core.c128_page_indices,
+            dst_c128_full_indices=core.c128_full_indices,
+            dst_c4_out_loc=core.c4_out_loc,
+            dst_c128_out_loc=core.c128_out_loc,
+            dst_c4_indexer_out_loc=core.c4_indexer_out_loc,
+            rows=rows,
+            page_size=self.page_size,
+            window_size=self.window_size,
+            index_topk=self.index_topk,
         )
 
     def _prep_metadata_in_graph_dst_bytes(
@@ -1293,6 +1325,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._pending_prep_metadata_oracle_rows = 0
         if oracle is None or self.capture is None:
             return
+        self._prep_metadata_in_graph_oracle_replay_step += 1
         rows = max(0, min(int(rows), int(batch.padded_size)))
         if rows <= 0:
             return
@@ -1300,6 +1333,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             self.capture.core_metadata,
             oracle.core_metadata,
             rows,
+            boundary="post_forward",
         )
 
     def _compare_prep_metadata_in_graph_oracle(
@@ -1307,12 +1341,48 @@ class DSV4AttentionBackend(BaseAttnBackend):
         got: DSV4CoreAttentionMetadata,
         expected: DSV4CoreAttentionMetadata,
         rows: int,
+        *,
+        boundary: Literal["pre_forward", "post_forward"],
     ) -> None:
-        def fail(field: str) -> None:
-            raise RuntimeError(
+        check_indexer_mutable_c4 = boundary == "pre_forward"
+
+        def fail(field: str, row: int | None = None) -> None:
+            message = (
                 f"{dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE} oracle mismatch "
-                f"for {field} over active rows={rows}."
+                f"for {field} over active rows={rows} at {boundary}."
             )
+            if _prep_metadata_in_graph_oracle_debug_enabled():
+                message += " " + self._prep_metadata_in_graph_oracle_debug_summary(
+                    field,
+                    got,
+                    expected,
+                    rows,
+                    boundary=boundary,
+                    row=row,
+                )
+            raise RuntimeError(message)
+
+        def first_mismatch_1d(a: torch.Tensor, b: torch.Tensor) -> int | None:
+            active = min(rows, int(a.numel()), int(b.numel()))
+            if active <= 0:
+                return None
+            diff = a[:active].to(dtype=torch.int32) != b[:active].to(dtype=torch.int32)
+            if not bool(torch.any(diff)):
+                return None
+            return int(torch.nonzero(diff, as_tuple=False)[0].item())
+
+        def first_mismatch_2d(a: torch.Tensor, b: torch.Tensor, width: int) -> int | None:
+            active_rows = min(rows, int(a.shape[0]), int(b.shape[0]))
+            active_width = max(0, min(width, int(a.shape[1]), int(b.shape[1])))
+            if active_rows <= 0 or active_width <= 0:
+                return None
+            diff = (
+                a[:active_rows, :active_width].to(dtype=torch.int32)
+                != b[:active_rows, :active_width].to(dtype=torch.int32)
+            )
+            if not bool(torch.any(diff)):
+                return None
+            return int(torch.nonzero(diff, as_tuple=False)[0, 0].item())
 
         def eq_1d(field: str) -> None:
             a = getattr(got, field)
@@ -1321,8 +1391,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 return
             if a is None or b is None:
                 fail(field)
-            if not torch.equal(a[:rows].to(dtype=torch.int32), b[:rows].to(dtype=torch.int32)):
-                fail(field)
+            row = first_mismatch_1d(a, b)
+            if row is not None:
+                fail(field, row)
 
         def eq_component_write_loc(
             field: str,
@@ -1366,8 +1437,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
                             locs.to(torch.int32),
                             torch.full_like(locs, -1, dtype=torch.int32),
                         )
-            if not torch.equal(a[:rows].to(dtype=torch.int32), expected_locs):
-                fail(field)
+            row = first_mismatch_1d(a[:rows], expected_locs)
+            if row is not None:
+                fail(field, row)
 
         def eq_2d_active(field: str, lengths: torch.Tensor | None = None) -> None:
             a = getattr(got, field)
@@ -1378,11 +1450,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 fail(field)
             if lengths is None:
                 width = min(int(a.shape[1]), int(b.shape[1]))
-                if not torch.equal(
-                    a[:rows, :width].to(dtype=torch.int32),
-                    b[:rows, :width].to(dtype=torch.int32),
-                ):
-                    fail(field)
+                row = first_mismatch_2d(a, b, width)
+                if row is not None:
+                    fail(field, row)
                 return
             active_rows = min(rows, int(lengths.numel()), int(a.shape[0]), int(b.shape[0]))
             for row in range(active_rows):
@@ -1394,7 +1464,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     a[row, :width].to(dtype=torch.int32),
                     b[row, :width].to(dtype=torch.int32),
                 ):
-                    fail(field)
+                    fail(field, row)
 
         for field in (
             "raw_out_loc",
@@ -1406,10 +1476,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
             "swa_topk_lengths",
             "c4_topk_lengths_raw",
             "c4_topk_lengths_clamp1",
-            "c4_sparse_topk_lengths",
             "c128_topk_lengths_clamp1",
         ):
             eq_1d(field)
+        if check_indexer_mutable_c4:
+            eq_1d("c4_sparse_topk_lengths")
         eq_component_write_loc("c4_out_loc", expected.c4_page_table, 4)
         eq_component_write_loc("c128_out_loc", expected.c128_page_table, 128)
         eq_component_write_loc("c4_indexer_out_loc", expected.c4_indexer_page_table, 4)
@@ -1418,13 +1489,81 @@ class DSV4AttentionBackend(BaseAttnBackend):
         eq_2d_active("c128_page_table")
         eq_2d_active("c4_indexer_page_table")
         eq_2d_active("swa_page_indices", got.swa_topk_lengths[:rows])
-        eq_2d_active("c4_sparse_raw_indices", got.c4_sparse_topk_lengths[:rows])
-        eq_2d_active("c4_sparse_page_indices", got.c4_sparse_topk_lengths[:rows])
-        eq_2d_active("c4_sparse_full_indices", got.c4_sparse_topk_lengths[:rows])
+        if check_indexer_mutable_c4:
+            c4_widths = expected.c4_sparse_topk_lengths[:rows].clamp(min=0)
+            eq_2d_active("c4_sparse_raw_indices", c4_widths)
+            eq_2d_active("c4_sparse_page_indices", c4_widths)
+            eq_2d_active("c4_sparse_full_indices", c4_widths)
         c128_widths = expected.c128_topk_lengths_clamp1[:rows].clamp(min=0)
         eq_2d_active("c128_raw_indices", c128_widths)
         eq_2d_active("c128_page_indices", c128_widths)
         eq_2d_active("c128_full_indices", c128_widths)
+
+    def _prep_metadata_in_graph_oracle_debug_summary(
+        self,
+        field: str,
+        got: DSV4CoreAttentionMetadata,
+        expected: DSV4CoreAttentionMetadata,
+        rows: int,
+        *,
+        boundary: Literal["pre_forward", "post_forward"],
+        row: int | None,
+    ) -> str:
+        row_idx = max(0, min(int(row or 0), max(int(rows) - 1, 0)))
+        limit = 8
+
+        def rank() -> int | None:
+            try:
+                if torch.distributed.is_available() and torch.distributed.is_initialized():
+                    return int(torch.distributed.get_rank())
+            except Exception:
+                return None
+            return None
+
+        def scalar(tensor: torch.Tensor | None) -> int | None:
+            if tensor is None or int(tensor.numel()) <= row_idx:
+                return None
+            try:
+                return int(tensor.reshape(-1)[row_idx].detach().to("cpu").item())
+            except Exception:
+                return None
+
+        def row_values(tensor: torch.Tensor | None) -> list[int] | None:
+            if tensor is None or tensor.dim() < 2 or int(tensor.shape[0]) <= row_idx:
+                return None
+            width = min(limit, int(tensor.shape[1]))
+            try:
+                return [
+                    int(v)
+                    for v in tensor[row_idx, :width].detach().to("cpu", dtype=torch.int32).tolist()
+                ]
+            except Exception:
+                return None
+
+        replay_step = self._prep_metadata_in_graph_oracle_replay_step
+        if boundary == "pre_forward":
+            replay_step += 1
+        payload = {
+            "rank": rank(),
+            "replay_step": int(replay_step),
+            "boundary": boundary,
+            "row": int(row_idx),
+            "field": field,
+            "position": scalar(expected.positions),
+            "seq_len": scalar(expected.seq_lens),
+            "materialized_seq_len": scalar(got.materialized_seq_lens),
+            "expected_c4_topk_lengths_raw": scalar(expected.c4_topk_lengths_raw),
+            "got_c4_topk_lengths_raw": scalar(got.c4_topk_lengths_raw),
+            "expected_c4_sparse_topk_lengths": scalar(expected.c4_sparse_topk_lengths),
+            "got_c4_sparse_topk_lengths": scalar(got.c4_sparse_topk_lengths),
+            "expected_c4_sparse_raw_indices": row_values(expected.c4_sparse_raw_indices),
+            "got_c4_sparse_raw_indices": row_values(got.c4_sparse_raw_indices),
+            "expected_c4_sparse_page_indices": row_values(expected.c4_sparse_page_indices),
+            "got_c4_sparse_page_indices": row_values(got.c4_sparse_page_indices),
+            "expected_c4_sparse_full_indices": row_values(expected.c4_sparse_full_indices),
+            "got_c4_sparse_full_indices": row_values(got.c4_sparse_full_indices),
+        }
+        return f"debug={payload}"
 
     def _clamp_graph_replay_compressed_read_metadata(
         self,

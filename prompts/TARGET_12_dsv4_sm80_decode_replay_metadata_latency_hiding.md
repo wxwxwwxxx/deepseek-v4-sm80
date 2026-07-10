@@ -2,18 +2,25 @@
 
 ## Status
 
-Active follow-up after post-MTP-cleanup non-MTP baseline attribution.
+Active release-default follow-up after TARGET 12.50.
 
 TARGET 11 MTP is paused and archived.  The release branch should continue from
-the non-MTP DSV4 sm80/A100 serving baseline:
+the non-MTP DSV4 sm80/A100 Tier A release bundle:
 
 ```text
-dsv4_sm80_a100_victory_prefix_routeb_lifetime_moereducebf16
+dsv4_sm80_release_default
 MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE=1
 MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS=1
 MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS=c4
 MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE=1
 MINISGL_DSV4_SM80_MOE_REDUCE_BF16=1
+MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH=1
+MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND=marlin_wna16
+MINISGL_DSV4_MARLIN_WNA16_PREBUILD=1
+MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS=1
+MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING=before_kv_alloc
+MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT=1
+MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC=component
 PyNCCL threshold32m default for A100/sm80 DSV4
 --page-size 256 --num-pages 128
 --enable-dsv4-radix-prefix-cache
@@ -21,7 +28,7 @@ PyNCCL threshold32m default for A100/sm80 DSV4
 --allow-dsv4-cuda-graph --cuda-graph-bs 1 2 4 8 16
 ```
 
-The immediate trigger is:
+The original TARGET 12 trigger was:
 
 ```text
 performance_milestones/misc_post_mtp_cleanup_replay_attribution/README.md
@@ -31,6 +38,12 @@ That report shows the remaining regression is not MTP leakage, communication
 count/bytes, graph replay coverage, or wrapper count.  The gap is concentrated
 around decode CUDA graph replay setup and captured forward time, especially
 metadata preparation/staging before `g.replay()`.
+
+TARGET 12.50 resolved the Marlin WNA16 release-default gap and promoted the
+Tier A bundle.  The current remaining release-bundle question is whether SWA
+independent lifecycle can be defaulted.  It is correct and provides much larger
+KV capacity, but it currently disables in-graph metadata prep and regresses
+macro throughput; TARGET 12.51 focuses on that compatibility blocker.
 
 ## Goal
 
@@ -224,10 +237,16 @@ when executed, but this root TARGET 12 is the controlling roadmap.
 | TARGET 12.2 Safe Timing And Kernel Census | completed | Split `prepare_for_replay` safely without CUDA-event timing; identified a mandatory small-kernel/copy metadata cluster. Report: `performance_milestones/target12_safe_timing_kernel_census/README.md`. |
 | TARGET 12.3 Low-Risk Replay Deforestation | inline/deferred | Can harvest small cleanups during 12.4, but TARGET 12.2 showed the dominant owner is not mostly Python/env/debug guard logic. |
 | TARGET 12.4 SGLang-Style In-Graph Metadata Prep PoC | completed | Implemented opt-in in-graph decode metadata prep, passed unit/wrapper/text/oracle gates, removed the main `prepare_for_replay` clamp/copy owner in the short probe, and kept current replay metadata as default fallback/oracle. Report: `performance_milestones/target12_sglang_in_graph_metadata_prep/README.md`. |
-| TARGET 12.45 In-Graph Metadata Promotion Soak | active | Repeat-pair the short probe, run four-scenario soak, verify oracle/text/fallback boundaries, and decide whether to promote, continue opt-in, or move to TARGET 12.5. Prompt: `prompts/TARGET_12.45_dsv4_sm80_ingraph_metadata_promotion_soak.md`. |
-| TARGET 12.5 Direct/Fused Graph Metadata Writers | todo | If in-graph prep is incomplete or too risky, fuse direct C4/C128/SWA/component metadata generation into fewer kernels that write final captured buffers. |
+| TARGET 12.45 In-Graph Metadata Promotion Soak | completed with blocker | Performance was repeat-stable and positive across short, long-decode, serving, and prefix scenarios, but default promotion is blocked by a long-context oracle mismatch in `c4_sparse_raw_indices`. Report: `performance_milestones/target12_ingraph_metadata_promotion_soak/README.md`. |
+| TARGET 12.46 C4 Sparse Oracle Contract | completed | Fixed the oracle boundary around indexer-mutated C4 sparse fields; text oracle and long-context short oracle now pass. Report: `performance_milestones/target12_c4_sparse_oracle_contract/README.md`. |
+| TARGET 12.47 Final Promotion Rerun | completed | Reran the in-graph metadata promotion subset after the oracle fix with one fresh process per variant. It passed correctness and showed repeat-stable macro wins, so the path is ready for release-default cleanup. Report: `performance_milestones/target12_ingraph_metadata_final_promotion_rerun/README.md`. |
+| TARGET 12.48 Release Defaults Promotion Cleanup | completed | Folded the 12.47 recipe into the DSV4 A100/sm80 release defaults: Route-B C4 direct graph metadata, MoE BF16 reduce, in-graph replay metadata prep, page-size 256, radix prefix/component ownership, PyNCCL threshold32m, and CUDA graph buckets `[1,2,4,8,16]`. Keep fallback/oracle paths explicit via `MINISGL_DSV4_DISABLE_RELEASE_DEFAULTS=1` or dedicated benchmark variants. |
+| TARGET 12.49 Release Long-Context And Large-Batch Soak | completed with blocker | The release-default smoke failed before long-context/large-batch testing because A100 victory implies Marlin WNA16 but the default recipe does not yet prebuild/release raw expert weights or apply capacity credit. The Marlin release A/B passed, so the next step is release bundle opt-in cleanup rather than graph bucket expansion. Report: `performance_milestones/target12_release_long_context_large_batch_soak/README.md`. |
+| TARGET 12.50 Release Bundle Opt-In Promotion Gate | completed with SWA blocker | Promoted the Tier A release bundle: Marlin WNA16 prebuild/release/capacity credit, component-slot clear on page allocation, Route-B metadata, in-graph metadata prep for the non-SWA path, BF16 MoE reduce, and PyNCCL threshold32m. SWA independent remained opt-in because `prep_metadata_in_graph` fail-opened with `swa_independent_lifecycle_not_supported` and macro throughput regressed by about 12-18% despite large capacity wins. Report: `performance_milestones/target12_release_bundle_optin_promotion_gate/README.md`. |
+| TARGET 12.51 SWA Independent In-Graph Metadata Promotion | current | Remove the SWA-independent `prep_metadata_in_graph` compatibility blocker by extending the in-graph metadata prep kernel/API to consume SWA full-to-SWA page mapping, then rerun SWA promotion gates. Prompt: `prompts/TARGET_12.51_dsv4_sm80_swa_independent_ingraph_metadata_promotion.md`. |
+| TARGET 12.5 Direct/Fused Graph Metadata Writers | deferred | In-graph metadata prep is now promoted. Reopen only if a fresh profile shows residual `raw_graph_copy` or graph metadata kernels as a top release bottleneck. |
 | TARGET 12.6 Multi-Stream Latency-Hiding PoC | deferred | Not part of the current route. Reopen only if future evidence proves a material independent owner that cannot be removed, fused, or moved into graph capture. |
-| TARGET 12.7 Promotion Gate | todo | Run short and four-scenario non-MTP soak; promote only if correctness is clean and macro wins are repeat-stable. |
+| TARGET 12.7 Promotion Gate | todo | Run short and four-scenario non-MTP soak after 12.51 decides the SWA-independent default question; promote only if correctness is clean and macro wins/capacity tradeoffs are repeat-stable. |
 
 ## Required Work
 

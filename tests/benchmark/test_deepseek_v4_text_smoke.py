@@ -258,6 +258,49 @@ def test_configure_variant_preserves_marlin_release_layer_filter(monkeypatch):
     )
 
 
+def test_release_default_smoke_variant_leaves_dsv4_env_empty(monkeypatch):
+    smoke = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = ("MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",)
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            return os.environ.get(name) in {"1", "true"}
+
+    monkeypatch.setenv("MINISGL_DSV4_DISABLE_RELEASE_DEFAULTS", "1")
+    variant = smoke._variant_map()["dsv4_sm80_release_default"]
+    result = smoke.configure_variant(FakeKernel, variant)
+
+    assert variant.env == {}
+    assert variant.use_pynccl is True
+    assert variant.allow_dsv4_cuda_graph is True
+    assert variant.enable_dsv4_radix_prefix_cache is True
+    assert variant.enable_dsv4_component_loc_ownership is True
+    assert result["raw_dsv4_sm80_env"] == {}
+    assert "MINISGL_DSV4_DISABLE_RELEASE_DEFAULTS" not in os.environ
+
+
+def test_release_default_smoke_runtime_snapshot_preserves_injected_env(monkeypatch):
+    smoke = _load_module()
+
+    class FakeKernel:
+        DSV4_SM80_KNOWN_TOGGLES = ("MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",)
+
+        @staticmethod
+        def dsv4_env_flag(name: str) -> bool:
+            return os.environ.get(name) in {"1", "true"}
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE", "1")
+    variant = smoke._variant_map()["dsv4_sm80_release_default"]
+    result = smoke._runtime_variant_env(FakeKernel, variant)
+
+    assert result["cleared_dsv4_sm80_env"] == []
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
+    assert "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE" in result["active_dsv4_toggles"]
+    assert os.environ["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
+
+
 def test_configure_variant_records_promoted_route_b_metadata_lifetime(monkeypatch):
     smoke = _load_module()
 
@@ -267,6 +310,7 @@ def test_configure_variant_records_promoted_route_b_metadata_lifetime(monkeypatc
             "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS",
             "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS",
             "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE",
+            "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH",
         )
 
         @staticmethod
@@ -283,6 +327,7 @@ def test_configure_variant_records_promoted_route_b_metadata_lifetime(monkeypatc
         "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS": "1",
         "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS": "c4",
         "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE": "1",
+        "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH": "1",
     }
     assert variant.allow_dsv4_cuda_graph is True
     assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
@@ -291,8 +336,10 @@ def test_configure_variant_records_promoted_route_b_metadata_lifetime(monkeypatc
     assert (
         result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"] == "1"
     )
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH"] == "1"
     assert "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS" in result["active_dsv4_toggles"]
     assert "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH" in result["active_dsv4_toggles"]
     assert "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS" not in result["active_dsv4_toggles"]
 
 
@@ -318,6 +365,7 @@ def test_route_b_lifetime_moe_reduce_bf16_variant_extends_promoted_env(monkeypat
             "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS",
             "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE",
             "MINISGL_DSV4_SM80_MOE_REDUCE_BF16",
+            "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH",
         )
 
         @staticmethod
@@ -336,6 +384,7 @@ def test_route_b_lifetime_moe_reduce_bf16_variant_extends_promoted_env(monkeypat
     assert opt_in.cuda_graph_capture_greedy_sample == promoted.cuda_graph_capture_greedy_sample
     assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_MOE_REDUCE_BF16"] == "1"
     assert "MINISGL_DSV4_SM80_MOE_REDUCE_BF16" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH" in result["active_dsv4_toggles"]
 
 
 def test_marlin_release_smoke_variants_expand_full_policy_env(monkeypatch):
@@ -357,6 +406,9 @@ def test_marlin_release_smoke_variants_expand_full_policy_env(monkeypatch):
             "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN",
             "MINISGL_DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG",
             "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC",
+            "MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE",
+            "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA",
+            "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED",
         )
 
         @staticmethod
@@ -377,6 +429,12 @@ def test_marlin_release_smoke_variants_expand_full_policy_env(monkeypatch):
     ]
     prefix_release_swa = variants[
         "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent"
+    ]
+    prefix_release_swa_direct = variants[
+        "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent_swadirect"
+    ]
+    prefix_release_swa_replay_fused = variants[
+        "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent_swadirect_replaymetafused"
     ]
     prefix_safe_arena = variants[
         "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
@@ -408,6 +466,16 @@ def test_marlin_release_smoke_variants_expand_full_policy_env(monkeypatch):
     assert prefix_release_swa.env == {
         **prefix_release.env,
         "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE": "1",
+    }
+    assert prefix_release_swa_direct.env == {
+        **prefix_release_swa.env,
+        "MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE": "1",
+        "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA": "1",
+    }
+    assert prefix_release_swa_replay_fused.env == {
+        **prefix_release_swa_direct.env,
+        "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS": "swa,c4",
+        "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED": "1",
     }
     assert prefix_safe_arena.env == {
         **variants["dsv4_sm80_a100_victory_prefix_routeb_lifetime"].env,
@@ -444,8 +512,33 @@ def test_marlin_release_smoke_variants_expand_full_policy_env(monkeypatch):
     assert prefix_release_swa.enable_dsv4_radix_prefix_cache is True
     assert prefix_release_swa.enable_dsv4_component_loc_ownership is True
     assert prefix_release_swa.enable_dsv4_swa_independent_lifecycle is True
+    assert prefix_release_swa_direct.enable_dsv4_swa_independent_lifecycle is True
+    assert prefix_release_swa_replay_fused.enable_dsv4_swa_independent_lifecycle is True
+    swa_direct_result = smoke.configure_variant(FakeKernel, prefix_release_swa_direct)
+    assert (
+        swa_direct_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE"]
+        == "1"
+    )
+    assert (
+        swa_direct_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA"]
+        == "1"
+    )
+    swa_replay_result = smoke.configure_variant(FakeKernel, prefix_release_swa_replay_fused)
+    assert (
+        swa_replay_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED"]
+        == "1"
+    )
+    assert (
+        swa_replay_result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS"]
+        == "swa,c4"
+    )
     assert "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT" in result["active_dsv4_toggles"]
     assert release.allow_dsv4_cuda_graph is True
+    assert release.use_pynccl is True
+    assert prefix_release.use_pynccl is True
+    assert prefix_release_swa.use_pynccl is True
+    assert prefix_release_swa_direct.use_pynccl is True
+    assert prefix_release_swa_replay_fused.use_pynccl is True
     assert safe_arena.allow_dsv4_cuda_graph is True
     assert prefix_release.allow_dsv4_cuda_graph is True
     assert prefix_safe_arena.allow_dsv4_cuda_graph is True

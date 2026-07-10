@@ -86,6 +86,11 @@ DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
     "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
 )
 DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV = "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"
+DSV4_SWA_METADATA_PAGE_TABLE_CACHE_ENV = "MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE"
+DSV4_SWA_DIRECT_TOKEN_METADATA_ENV = "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA"
+DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_ENV = (
+    "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED"
+)
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
@@ -94,6 +99,7 @@ DSV4_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
 DSV4_DECODE_METADATA_DEFOREST_TOGGLE = "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
 DSV4_PREP_METADATA_IN_GRAPH_TOGGLE = "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH"
 DSV4_PREP_METADATA_IN_GRAPH_ORACLE_ENV = "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH_ORACLE"
+DSV4_DISABLE_RELEASE_DEFAULTS_ENV = "MINISGL_DSV4_DISABLE_RELEASE_DEFAULTS"
 DSV4_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
 DSV4_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
 DSV4_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
@@ -118,6 +124,7 @@ DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
 )
 DSV4_A100_MARLIN_PREBUILD_VARIANT = "dsv4_sm80_a100_victory_marlin_prebuild"
 DSV4_A100_MARLIN_RELEASE_VARIANT = "dsv4_sm80_a100_victory_marlin_release"
+DSV4_RELEASE_DEFAULT_VARIANT = "dsv4_sm80_release_default"
 DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_VARIANT = (
     "dsv4_sm80_a100_victory_marlin_release_safe_arena"
 )
@@ -127,6 +134,12 @@ DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT = (
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent"
 )
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent_swadirect"
+)
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_REPLAY_METADATA_FUSED_VARIANT = (
+    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent_swadirect_replaymetafused"
+)
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
 )
@@ -135,6 +148,7 @@ DSV4_ROUTE_B_LIFETIME_ENV = {
     DSV4_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE: "1",
     DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "c4",
     DSV4_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE: "1",
+    DSV4_PREP_METADATA_IN_GRAPH_TOGGLE: "1",
 }
 DSV4_A100_MARLIN_PREBUILD_ENV = {
     DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1",
@@ -163,6 +177,16 @@ DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_ENV = {
     **DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_ENV,
     DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV: "1",
 }
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_ENV = {
+    **DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_ENV,
+    DSV4_SWA_METADATA_PAGE_TABLE_CACHE_ENV: "1",
+    DSV4_SWA_DIRECT_TOKEN_METADATA_ENV: "1",
+}
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_REPLAY_METADATA_FUSED_ENV = {
+    **DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_ENV,
+    DSV4_DIRECT_GRAPH_METADATA_GROUPS_ENV: "swa,c4",
+    DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_ENV: "1",
+}
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_ENV = {
     **DSV4_ROUTE_B_LIFETIME_ENV,
     **DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_ENV,
@@ -188,7 +212,24 @@ class Variant:
 
 
 VARIANTS: tuple[Variant, ...] = (
-    Variant("fallback", {}, "All MINISGL_DSV4_SM80_* toggles cleared."),
+    Variant(
+        "fallback",
+        {DSV4_DISABLE_RELEASE_DEFAULTS_ENV: "1"},
+        "All MINISGL_DSV4_SM80_* toggles cleared; release defaults disabled.",
+    ),
+    Variant(
+        DSV4_RELEASE_DEFAULT_VARIANT,
+        {},
+        (
+            "TARGET 12.50 release-default smoke: leave DSV4 env empty so "
+            "Engine injects the A100/sm80 release bundle."
+        ),
+        use_pynccl=True,
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+    ),
     Variant("v0_bf16", {DSV4_V0_BF16_TOGGLE: "1"}, "TARGET 05.7 v0 BF16 whitelist bundle."),
     Variant(
         "v1_moe",
@@ -850,6 +891,7 @@ VARIANTS: tuple[Variant, ...] = (
             "original routed FP4 expert weights/scales released after full "
             "prebuild succeeds."
         ),
+        use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
     ),
@@ -861,6 +903,7 @@ VARIANTS: tuple[Variant, ...] = (
             "before-KV release capacity credit, with a 3.1875 GiB/rank "
             "sentinel guard arena held out of the released ranges."
         ),
+        use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
     ),
@@ -965,8 +1008,9 @@ VARIANTS: tuple[Variant, ...] = (
         dict(DSV4_ROUTE_B_LIFETIME_ENV),
         (
             "TARGET 08.29 promoted Route B prefix preset: A100 victory bundle, "
-            "direct C4 graph metadata buffers, and request-slot keyed component "
-            "page-table lifetime caching. Pair with --enable-dsv4-radix-prefix-cache, "
+            "direct C4 graph metadata buffers, in-graph replay metadata prep, "
+            "and request-slot keyed component page-table lifetime caching. "
+            "Pair with --enable-dsv4-radix-prefix-cache, "
             "--enable-dsv4-component-loc-ownership, --page-size 256, "
             "--num-pages 128, and graph buckets 1 2 4 8 16."
         ),
@@ -985,6 +1029,7 @@ VARIANTS: tuple[Variant, ...] = (
             "planning, and original routed FP4 expert weights/scales release "
             "after successful prebuild."
         ),
+        use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
         enable_dsv4_radix_prefix_cache=True,
@@ -998,6 +1043,37 @@ VARIANTS: tuple[Variant, ...] = (
             "plus Marlin WNA16 before-KV release capacity credit, component-slot "
             "clear on page allocation, and independent SWA lifecycle."
         ),
+        use_pynccl=True,
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+        enable_dsv4_swa_independent_lifecycle=True,
+    ),
+    Variant(
+        DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_VARIANT,
+        dict(DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_ENV),
+        (
+            "TARGET 08.50/12.50 smoke preset: Route B lifetime plus Marlin "
+            "WNA16 release, independent SWA lifecycle, SWA page-table cache, "
+            "and direct token-level SWA metadata."
+        ),
+        use_pynccl=True,
+        allow_dsv4_cuda_graph=True,
+        cuda_graph_capture_greedy_sample=True,
+        enable_dsv4_radix_prefix_cache=True,
+        enable_dsv4_component_loc_ownership=True,
+        enable_dsv4_swa_independent_lifecycle=True,
+    ),
+    Variant(
+        DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_REPLAY_METADATA_FUSED_VARIANT,
+        dict(DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_REPLAY_METADATA_FUSED_ENV),
+        (
+            "TARGET 08.54/12.50 smoke preset: Marlin release plus independent "
+            "SWA direct token metadata and fused replay metadata for direct "
+            "SWA graph index buffers."
+        ),
+        use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
         enable_dsv4_radix_prefix_cache=True,
@@ -1012,6 +1088,7 @@ VARIANTS: tuple[Variant, ...] = (
             "preset plus Marlin WNA16 before-KV release capacity credit and "
             "a 3.1875 GiB/rank sentinel guard arena."
         ),
+        use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
         enable_dsv4_radix_prefix_cache=True,
@@ -1039,8 +1116,9 @@ VARIANTS: tuple[Variant, ...] = (
             DSV4_PREP_METADATA_IN_GRAPH_TOGGLE: "1",
         },
         (
-            "TARGET 12.4 smoke opt-in: TARGET10.27 Route B lifetime BF16 "
-            "MoE-reduce preset plus in-graph decode metadata materialization."
+            "Legacy TARGET 12.4 smoke alias: TARGET10.27 Route B lifetime "
+            "BF16 MoE-reduce preset with in-graph decode metadata "
+            "materialization now included by the Route B lifetime env."
         ),
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
@@ -1163,6 +1241,9 @@ def _variant_map() -> dict[str, Variant]:
 def _all_dsv4_sm80_env_names(dsv4_kernel) -> list[str]:
     names = set(getattr(dsv4_kernel, "DSV4_SM80_KNOWN_TOGGLES", ()))
     names.add(DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV)
+    names.add(DSV4_SWA_METADATA_PAGE_TABLE_CACHE_ENV)
+    names.add(DSV4_SWA_DIRECT_TOKEN_METADATA_ENV)
+    names.add(DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_ENV)
     names.update(name for name in os.environ if name.startswith("MINISGL_DSV4_SM80_"))
     return sorted(names)
 
@@ -1219,7 +1300,9 @@ def configure_variant(dsv4_kernel, variant: Variant) -> dict[str, Any]:
         for name in _preserved_dsv4_sm80_env_names(dsv4_kernel)
         if name in os.environ
     }
-    cleared = _all_dsv4_sm80_env_names(dsv4_kernel)
+    cleared = sorted(
+        set(_all_dsv4_sm80_env_names(dsv4_kernel)) | {DSV4_DISABLE_RELEASE_DEFAULTS_ENV}
+    )
     for name in cleared:
         os.environ.pop(name, None)
     for name, value in variant.env.items():
@@ -1229,17 +1312,34 @@ def configure_variant(dsv4_kernel, variant: Variant) -> dict[str, Any]:
     return {
         "cleared_dsv4_sm80_env": cleared,
         "preserved_dsv4_sm80_env": preserved,
-        "active_dsv4_toggles": [
-            name
-            for name in _all_dsv4_sm80_env_names(dsv4_kernel)
-            if dsv4_kernel.dsv4_env_flag(name)
-        ],
-        "raw_dsv4_sm80_env": {
-            name: os.environ[name]
-            for name in sorted(os.environ)
-            if name.startswith("MINISGL_DSV4_")
-        },
+        "active_dsv4_toggles": active_dsv4_toggles(dsv4_kernel),
+        "raw_dsv4_sm80_env": raw_dsv4_env(),
     }
+
+
+def active_dsv4_toggles(dsv4_kernel) -> list[str]:
+    return [
+        name for name in _all_dsv4_sm80_env_names(dsv4_kernel) if dsv4_kernel.dsv4_env_flag(name)
+    ]
+
+
+def raw_dsv4_env() -> dict[str, str]:
+    return {
+        name: os.environ[name]
+        for name in sorted(os.environ)
+        if name.startswith("MINISGL_DSV4_")
+    }
+
+
+def _runtime_variant_env(dsv4_kernel, variant: Variant) -> dict[str, Any]:
+    if variant.name == DSV4_RELEASE_DEFAULT_VARIANT and not variant.env:
+        return {
+            "cleared_dsv4_sm80_env": [],
+            "preserved_dsv4_sm80_env": {},
+            "active_dsv4_toggles": active_dsv4_toggles(dsv4_kernel),
+            "raw_dsv4_sm80_env": raw_dsv4_env(),
+        }
+    return configure_variant(dsv4_kernel, variant)
 
 
 def load_dsv4_encoding(model_path: str):
@@ -1430,7 +1530,7 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
         allow_dsv4_cuda_graph = False
     cuda_graph_bs = args.cuda_graph_bs
     if allow_dsv4_cuda_graph and cuda_graph_bs is None:
-        cuda_graph_bs = [1, 2, 4]
+        cuda_graph_bs = [1, 2, 4, 8, 16]
     if not allow_dsv4_cuda_graph:
         cuda_graph_bs = []
     if getattr(args, "disable_cuda_graph_greedy_sample", False):
@@ -1525,7 +1625,7 @@ def run_variant(
 ) -> dict[str, Any] | None:
     from minisgl.core import SamplingParams
 
-    variant_env = configure_variant(dsv4_kernel, variant)
+    variant_env = _runtime_variant_env(dsv4_kernel, variant)
     llm.sync_all_ranks()
     tic = time.perf_counter()
     error = None

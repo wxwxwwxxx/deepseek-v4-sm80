@@ -30,6 +30,27 @@ logger = init_logger(__name__)
 
 _PYNCCL_MAX_BUFFER_SIZE_ENV = "MINISGL_PYNCCL_MAX_BUFFER_SIZE"
 _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES = 32 * 1024 * 1024
+_DSV4_DISABLE_RELEASE_DEFAULTS_ENV = "MINISGL_DSV4_DISABLE_RELEASE_DEFAULTS"
+_DSV4_SM80_DEFAULT_CUDA_GRAPH_BS = [1, 2, 4, 8, 16]
+_DSV4_SM80_RELEASE_DEFAULT_ENV = {
+    "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE": "1",
+    "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND": "marlin_wna16",
+    "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS": "1",
+    "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS": "c4",
+    "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE": "1",
+    "MINISGL_DSV4_SM80_MOE_REDUCE_BF16": "1",
+    "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH": "1",
+    "MINISGL_DSV4_MARLIN_WNA16_PREBUILD": "1",
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS": "1",
+    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING": "before_kv_alloc",
+    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT": "1",
+    "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC": "component",
+}
+_DSV4_SM80_RELEASE_DEFAULT_IGNORED_EXPLICIT_ENV = {
+    "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES",
+    "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH_ORACLE",
+    "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH_ORACLE_DEBUG",
+}
 _MARLIN_WNA16_RELEASE_ENV = "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
 _MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING"
 _MARLIN_WNA16_RELEASE_AFTER_GRAPH_CAPTURE_ENV = (
@@ -787,11 +808,57 @@ def _use_dsv4_sm80_default_pynccl_threshold(config: EngineConfig) -> bool:
     return tuple(int(part) for part in capability) == (8, 0)
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _has_explicit_dsv4_sm80_runtime_env() -> bool:
+    for name in os.environ:
+        if not name.startswith("MINISGL_DSV4_SM80_"):
+            continue
+        if name in _DSV4_SM80_RELEASE_DEFAULT_IGNORED_EXPLICIT_ENV:
+            continue
+        return True
+    return False
+
+
+def _dsv4_release_defaults_enabled() -> bool:
+    if _env_truthy(_DSV4_DISABLE_RELEASE_DEFAULTS_ENV):
+        return False
+    return not _has_explicit_dsv4_sm80_runtime_env()
+
+
 def _adjust_config(config: EngineConfig):
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)
 
     if config.model_config.is_deepseek_v4:
+        if _dsv4_release_defaults_enabled():
+            for name, value in _DSV4_SM80_RELEASE_DEFAULT_ENV.items():
+                os.environ.setdefault(name, value)
+            if config.page_size == 1:
+                override("page_size", 256)
+            if hasattr(config, "cache_type") and getattr(config, "cache_type") != "radix":
+                override("cache_type", "radix")
+            if hasattr(config, "enable_dsv4_radix_prefix_cache") and not getattr(
+                config, "enable_dsv4_radix_prefix_cache"
+            ):
+                override("enable_dsv4_radix_prefix_cache", True)
+            if hasattr(config, "enable_dsv4_component_loc_ownership") and not getattr(
+                config, "enable_dsv4_component_loc_ownership"
+            ):
+                override("enable_dsv4_component_loc_ownership", True)
+            graph_explicitly_disabled = config.cuda_graph_bs == [] or config.cuda_graph_max_bs == 0
+            if not graph_explicitly_disabled and not config.allow_dsv4_cuda_graph:
+                override("allow_dsv4_cuda_graph", True)
+            logger.info_rank0(
+                "Using DeepSeek V4 A100/sm80 release defaults: page_size=256, "
+                "radix prefix/component ownership, Route-B C4 graph metadata, "
+                "BF16 MoE reduce, in-graph replay metadata prep, Marlin WNA16 "
+                "prebuild/release/capacity credit, PyNCCL threshold32m, and "
+                f"CUDA graph buckets {_DSV4_SM80_DEFAULT_CUDA_GRAPH_BS}. "
+                f"Set {_DSV4_DISABLE_RELEASE_DEFAULTS_ENV}=1 for fallback/oracle runs."
+            )
         if config.attention_backend != "dsv4":
             override("attention_backend", "dsv4")
             logger.info_rank0("Using DSV4 attention backend for DeepSeek V4")
@@ -800,15 +867,15 @@ def _adjust_config(config: EngineConfig):
             override("cuda_graph_max_bs", 0)
         else:
             if config.cuda_graph_bs is None:
-                override("cuda_graph_bs", [1, 2, 4])
+                override("cuda_graph_bs", list(_DSV4_SM80_DEFAULT_CUDA_GRAPH_BS))
             if config.cuda_graph_max_bs is None:
                 override("cuda_graph_max_bs", max(config.cuda_graph_bs or [0]))
             override("cuda_graph_capture_fail_open", True)
             if getattr(config, "enable_dsv4_component_loc_ownership", False):
                 logger.info_rank0(
                     "Opting in to DeepSeek V4 Route B decode CUDA graph metadata "
-                    "copy; component-aware decode deforest and direct graph "
-                    "metadata buffers remain explicit env opt-ins."
+                    "copy; release defaults enable direct graph metadata buffers "
+                    "for the validated C4 group."
                 )
             logger.info_rank0(
                 f"Opting in to DeepSeek V4 decode CUDA graph sizes: {config.cuda_graph_bs}"

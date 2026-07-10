@@ -7,7 +7,7 @@ import minisgl.distributed.info as dist_info
 import pytest
 import torch
 from minisgl.attention import create_attention_backend
-from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata
+from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata, DSV4CoreAttentionMetadata
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
@@ -666,6 +666,92 @@ def test_dsv4_graph_replay_clamps_compressed_reads_to_materialized_prompt():
     assert capture.c4_sparse_raw_indices[0, :2].tolist() == [62, 63]
     assert capture.c4_sparse_page_indices[0, :2].tolist() == [62, 63]
     assert capture.c128_raw_indices[0, :3].tolist() == [0, 1, -1]
+
+
+def test_dsv4_prep_metadata_oracle_splits_pre_and_post_forward_c4_sparse_boundary():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=128, table_bases=[0], max_len=512)
+    backend = ctx.attn_backend
+
+    def make_core(
+        *,
+        c4_sparse_topk_lengths: list[int],
+        c4_sparse_raw_indices: list[list[int]],
+    ) -> DSV4CoreAttentionMetadata:
+        rows = len(c4_sparse_topk_lengths)
+        raw_out_loc = torch.arange(rows, dtype=torch.int32)
+        page_table = torch.arange(rows * 4, dtype=torch.int32).reshape(rows, 4)
+        cu_seqlens_q = torch.arange(rows + 1, dtype=torch.int32)
+        seq_lens = torch.tensor([256 + row for row in range(rows)], dtype=torch.int32)
+        positions = seq_lens - 1
+        req_seq_lens = seq_lens.clone()
+        extend_lens = torch.ones(rows, dtype=torch.int32)
+        req_table_indices = torch.zeros(rows, dtype=torch.int32)
+        swa_topk_lengths = torch.full((rows,), 4, dtype=torch.int32)
+        swa_page_indices = torch.arange(rows * 4, dtype=torch.int32).reshape(rows, 4)
+        c4_topk_lengths_raw = torch.full((rows,), 64, dtype=torch.int32)
+        c4_topk_lengths_clamp1 = c4_topk_lengths_raw.clone()
+        c4_sparse_lens = torch.tensor(c4_sparse_topk_lengths, dtype=torch.int32)
+        c4_raw = torch.tensor(c4_sparse_raw_indices, dtype=torch.int32)
+        c4_page = c4_raw.clone()
+        c4_full = c4_raw * 4 + 3
+        c4_full = torch.where(c4_raw >= 0, c4_full, c4_raw)
+        c128_lengths = torch.full((rows,), 2, dtype=torch.int32)
+        c128_raw = torch.tensor([[0, 1, -1, -1] for _ in range(rows)], dtype=torch.int32)
+        c128_page = c128_raw.clone()
+        c128_full = torch.where(c128_raw >= 0, c128_raw * 128 + 127, c128_raw)
+        return DSV4CoreAttentionMetadata(
+            raw_out_loc=raw_out_loc,
+            page_table=page_table,
+            cu_seqlens_q=cu_seqlens_q,
+            seq_lens=seq_lens,
+            req_seq_lens=req_seq_lens,
+            extend_lens=extend_lens,
+            positions=positions,
+            req_table_indices=req_table_indices,
+            max_seqlen_q=1,
+            max_seqlen_k=512,
+            swa_page_indices=swa_page_indices,
+            swa_topk_lengths=swa_topk_lengths,
+            c4_out_loc=None,
+            c128_out_loc=None,
+            c4_indexer_out_loc=None,
+            c4_topk_lengths_raw=c4_topk_lengths_raw,
+            c4_topk_lengths_clamp1=c4_topk_lengths_clamp1,
+            c4_sparse_topk_lengths=c4_sparse_lens,
+            c4_sparse_raw_indices=c4_raw,
+            c4_sparse_page_indices=c4_page,
+            c4_sparse_full_indices=c4_full,
+            c128_topk_lengths_clamp1=c128_lengths,
+            c128_raw_indices=c128_raw,
+            c128_page_indices=c128_page,
+            c128_full_indices=c128_full,
+            materialized_seq_lens=seq_lens.clone(),
+        )
+
+    expected = make_core(c4_sparse_topk_lengths=[2], c4_sparse_raw_indices=[[62, 63, -1, -1]])
+    pre_forward_mismatch = make_core(
+        c4_sparse_topk_lengths=[2],
+        c4_sparse_raw_indices=[[10, 11, -1, -1]],
+    )
+    with pytest.raises(RuntimeError, match="c4_sparse_raw_indices.*pre_forward"):
+        backend._compare_prep_metadata_in_graph_oracle(
+            pre_forward_mismatch,
+            expected,
+            1,
+            boundary="pre_forward",
+        )
+
+    post_forward_indexer_mutated = make_core(
+        c4_sparse_topk_lengths=[1],
+        c4_sparse_raw_indices=[[10, -1, -1, -1]],
+    )
+    backend._compare_prep_metadata_in_graph_oracle(
+        post_forward_indexer_mutated,
+        expected,
+        1,
+        boundary="post_forward",
+    )
 
 
 def test_dsv4_route_b_component_page_table_lifetime_cache_invalidates_lifecycle(

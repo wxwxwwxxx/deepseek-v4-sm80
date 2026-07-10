@@ -199,6 +199,8 @@ DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST: tuple[str, ...] = (
     DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE,
     DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE,
     DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE,
+    DSV4_SM80_MOE_REDUCE_BF16_TOGGLE,
+    DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE,
     DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE,
     DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE,
     DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE,
@@ -909,6 +911,14 @@ def _dsv4_disable_aliases() -> dict[str, tuple[str, ...]]:
         "projection_bf16_weight_cache": projection_caches,
         "all_tested_bf16_caches": (*projection_caches, *shared_expert),
         "all_bf16_caches": (*projection_caches, *shared_expert),
+        "direct_graph_metadata": (DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE,),
+        "route_b_metadata": (
+            DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE,
+            DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE,
+            DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE,
+        ),
+        "prep_metadata_in_graph": (DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE,),
+        "moe_reduce_bf16": (DSV4_SM80_MOE_REDUCE_BF16_TOGGLE,),
     }
 
 
