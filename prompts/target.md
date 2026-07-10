@@ -50,7 +50,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | deferred | Low-precision research is paused after the INT8 MoE feasibility pass did not show an obvious short win; keep the evidence for later INT8/FP8 work. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 | TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | paused and archived | MTP speculative decoding was investigated and preserved on `dsv4-mtp-paused-reference`, but the current target-verify runtime failed the no-spec target decode equivalence contract.  Current release branch removes active MTP runtime/opt-ins and should establish a post-MTP-cleanup non-MTP baseline. |
-| TARGET 12 | `prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md` | active release-default cleanup | Post-MTP-cleanup non-MTP performance follow-up: promoted the Tier A DSV4 A100/sm80 release bundle; next is removing the SWA-independent in-graph metadata blocker so SWA independent can enter the default bundle if performance recovers. |
+| TARGET 12 | `prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md` | active fallback census | Post-MTP-cleanup non-MTP performance follow-up: promoted the DSV4 A100/sm80 release bundle with SWA independent lifecycle, HC prenorm temporary elimination, and conservative 8192-token chunked prefill; current work is fallback/native-backend census after 12.56 showed larger chunks are limited by indexer fallback temporaries. |
 
 ## Current Milestones
 
@@ -70,7 +70,7 @@ dsv4-sm80-prefix-routeb-lifetime-baseline
 dsv4_sm80_a100_victory_prefix_routeb_lifetime
 MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE=1
 MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS=1
-MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS=c4
+MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS=swa,c4
 MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE=1
 --page-size 256 --num-pages 128
 --enable-dsv4-radix-prefix-cache
@@ -169,7 +169,7 @@ TARGET 12 should first compare mini's replay boundary with SGLang and vLLM:
 Current TARGET 12 child:
 
 ```text
-prompts/TARGET_12.51_dsv4_sm80_swa_independent_ingraph_metadata_promotion.md
+prompts/TARGET_12.57_dsv4_sm80_release_fallback_census_native_backend_gate.md
 ```
 
 TARGET 12.4 implemented an opt-in SGLang-style in-graph metadata prep PoC with
@@ -183,7 +183,7 @@ TARGET 12.47 reran the promotion subset with one fresh process per variant and
 confirmed correctness plus repeat-stable macro wins. TARGET 12.48 folds that
 recipe into the DSV4 A100/sm80 release defaults.
 
-Current release-default intent after TARGET 12.50:
+Current release-default intent after TARGET 12.53:
 
 ```text
 LLM("/models/DeepSeek-V4-Flash", ...)
@@ -198,16 +198,22 @@ cuda_graph_bs=[1,2,4,8,16]
 Release env defaults when no explicit MINISGL_DSV4_SM80_* runtime env is set:
 MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE=1
 MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS=1
-MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS=c4
+MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS=swa,c4
 MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE=1
 MINISGL_DSV4_SM80_MOE_REDUCE_BF16=1
 MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH=1
+MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP=1
+MINISGL_DSV4_SM80_LINEAR_BF16_FP32=1
 MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND=marlin_wna16
 MINISGL_DSV4_MARLIN_WNA16_PREBUILD=1
 MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS=1
 MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING=before_kv_alloc
 MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT=1
 MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC=component
+MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE=1
+MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE=1
+MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA=1
+MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED=1
 ```
 
 Fallback/oracle paths remain available through benchmark variants or:
@@ -216,15 +222,15 @@ Fallback/oracle paths remain available through benchmark variants or:
 MINISGL_DSV4_DISABLE_RELEASE_DEFAULTS=1
 ```
 
-TARGET 12.49 showed that the release-default recipe was missing Marlin WNA16
-prebuild/release/capacity-credit behavior before automatic KV planning.
-TARGET 12.50 fixed that and promoted the Tier A release bundle.  The true
+The first TARGET 12.49 attempt showed that the release-default recipe was
+missing Marlin WNA16 prebuild/release/capacity-credit behavior before automatic
+KV planning. TARGET 12.50 fixed that and promoted the Tier A release bundle.  The true
 no-env release-default smoke now passes with text sanity, CUDA graph capture
 for `[1,2,4,8,16]`, Marlin WNA16 prebuild/release capacity credit, and
 automatic KV planning.
 
-TARGET 12.50 kept SWA independent lifecycle opt-in even though it is correct
-and graph-replay clean, because it still disables in-graph metadata prep:
+TARGET 12.50 kept SWA independent lifecycle opt-in even though it was correct
+and graph-replay clean, because it still disabled in-graph metadata prep:
 
 ```text
 prep_metadata_in_graph_requested=true
@@ -232,7 +238,9 @@ prep_metadata_in_graph=false
 prep_metadata_in_graph_unsupported_reason="swa_independent_lifecycle_not_supported"
 ```
 
-That path has a large capacity upside:
+TARGET 12.51 fixed that blocker.  SWA independent now uses
+`prep_metadata_in_graph=true`, passes oracle/text/graph/macro gates, and keeps
+the large capacity upside:
 
 ```text
 Tier A default:       2763 pages / 707,328 tokens
@@ -240,18 +248,86 @@ SWA independent path: 6457 pages / 1,652,992 tokens
 per-page KV bytes:    19,313,920 B -> 8,041,728 B
 ```
 
-but macro throughput regressed by about 12-18% in the 12.50 gate. TARGET 12.51
-therefore focuses on extending `prep_metadata_in_graph` to support SWA
-independent page mapping. If that restores performance, SWA independent should
-enter the default bundle; if not, keep it opt-in with a precise remaining
-owner attribution.
+In the 12.51 paired macro gate, the SWA candidate was positive versus same-run
+release default by about `+1.15%` to `+9.52%` output tok/s, with zero eager
+decode fallback. TARGET 12.52 then promoted this path into the true no-env
+`dsv4_sm80_release_default` bundle. The 12.52 default smoke and macro gates
+passed with `prep_metadata_in_graph=true`, zero eager decode fallback, and
+about `1.65M` tokens of TP8 A100 planned capacity.
 
-Do not promote larger CUDA graph buckets yet. After 12.51 decides the SWA
-default question, rerun TARGET 12.49 to test long prefill sanity, larger active
-decode batches, graph private-pool memory, and whether release defaults should
-keep explicit `cuda_graph_bs=[1,2,4,8,16]` or adopt a vLLM/SGLang-style
-`cuda_graph_max_bs` policy that auto-generates dense small-batch buckets and
-coarser larger-batch buckets under a tested cap.
+TARGET 12.49 reran long-context and large-batch soak on the 12.52 release
+default.  The release path was healthy for text smoke, 8192-token long context,
+default-bucket large-batch decode through batch 128, and explicit graph bucket
+probes through max bucket 128.  It exposed one high-priority blocker: at 32768
+prefill tokens, both `prompt_len=32768,batch=1` and `prompt_len=128,batch=256`
+OOM in `hc_pre_fallback` on a 2 GiB FP32 prenorm temporary from
+`flat.float().square().mean(...)`.
+
+TARGET 12.53 fixed that blocker and promoted the HC release pair:
+
+```text
+MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP=1
+MINISGL_DSV4_SM80_LINEAR_BF16_FP32=1
+```
+
+The 12.53 report shows the old OOM shapes now pass and the four historical
+macro rows improve by about 5-9%:
+
+```text
+performance_milestones/target12_hc_prenorm_temp_elimination/README.md
+```
+
+TARGET 12.54 reran the true no-env release envelope after HC promotion.  Text
+sanity passed and `32768/16/1` now passes, but `65536/8/1` OOMs during first
+prefill in attention `wo_a` BF16 BMM:
+
+```text
+performance_milestones/target12_post_hc_release_envelope_rerun/README.md
+```
+
+The failing allocation is only `128 MiB` with about `45 MiB` free, while the
+planned KV capacity remains about `1.6M` tokens.  This points to release KV
+planning being too close to the memory limit: graph private pool,
+activation/workspace peak, fixed SWA cache, and allocator slack are not yet
+first-class reserves.
+
+TARGET 12.55 ran the memory-ratio sweep and concluded:
+
+```text
+CHUNKED_PREFILL_REQUIRED
+performance_milestones/target12_graph_activation_memory_accounting/README.md
+```
+
+Lowering `memory_ratio` from `0.90` to `0.85` freed about `3.92 GiB`,
+`524 pages`, or `134,144 tokens` of KV capacity, but `65536/8/1` still OOMed.
+As memory headroom increased, the failure owner moved from attention `wo_a`
+to MoE gate and then Marlin WNA16 MoE `route_out` workspace.  The Marlin owner
+is expected for full 64k prefill because `route_out` scales roughly as:
+
+```text
+[tokens * topk, hidden] bf16
+```
+
+Mini already has a `ChunkedReq` / `PrefillManager.token_budget` skeleton, and
+`SchedulerConfig.max_extend_tokens` defaults to `8192`.  However, the offline
+perf matrix had been setting `max_extend_tokens` to the scenario's full prefill
+length unless `--max-extend-tokens` was explicitly passed, so TARGET 12.54 and
+12.55 intentionally tested monolithic prefill.
+
+TARGET 12.56 validated and hardened the existing chunked-prefill path:
+
+```text
+performance_milestones/target12_chunked_prefill_long_context/README.md
+```
+
+It fixed DSV4 SWA/component capacity accounting for long-request admission,
+carried SWA eviction state across `ChunkedReq` segments, preserved decode CUDA
+graph replay for captured buckets, and selected `8192` as the conservative
+DSV4 A100/sm80 release prefill chunk token budget.  `24576` was fastest at 65k
+but failed at 131k; `16384` passed 131k but failed at 262k; `8192` passed 262k
+with 32 eager prefill chunks and decode graph replay unchanged.  The next work
+is TARGET 12.57, focused on the indexer/fallback temporaries that limit larger
+chunk budgets.
 
 ## Archive Policy
 

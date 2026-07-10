@@ -547,14 +547,16 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         name=DSV4_RELEASE_DEFAULT_VARIANT,
         env={},
         description=(
-            "TARGET 12.50 release-default benchmark: leave DSV4 env empty so "
-            "Engine injects the A100/sm80 release bundle."
+            "TARGET 12.52 release-default benchmark: leave DSV4 env empty so "
+            "Engine injects the A100/sm80 release bundle with SWA independent "
+            "lifecycle and SWA direct replay metadata."
         ),
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
         enable_dsv4_radix_prefix_cache=True,
         enable_dsv4_component_loc_ownership=True,
+        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name="v1_moe_v2",
@@ -3770,7 +3772,11 @@ def run_case(
             "memory_ratio": args.memory_ratio,
             "dtype": args.dtype,
             "max_seq_len": args.max_seq_len,
-            "max_extend_tokens": args.max_extend_tokens,
+            "max_extend_tokens": (
+                int(llm.prefill_budget) if llm.prefill_budget is not None else None
+            ),
+            "requested_max_extend_tokens": args.max_extend_tokens,
+            "use_serving_max_extend_tokens": args.use_serving_max_extend_tokens,
             "max_running_req": args.max_running_req,
             "token_id_range": args.token_id_range,
             "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
@@ -3819,11 +3825,16 @@ def _init_llm(
     BenchmarkLLM = make_benchmark_llm_class()
     dtype = _dtype_from_name(args.dtype)
     max_seq_len = args.max_seq_len or _max_seq_len(scenarios)
-    max_extend_tokens = args.max_extend_tokens or _max_extend_tokens(scenarios)
+    max_extend_tokens = args.max_extend_tokens
+    if max_extend_tokens is None and not args.use_serving_max_extend_tokens:
+        max_extend_tokens = _max_extend_tokens(scenarios)
     max_running_req = args.max_running_req or _max_running_req(scenarios)
     kwargs: dict[str, Any] = {}
     if distributed_init_method is not None:
         kwargs["distributed_init_method"] = distributed_init_method
+    if max_extend_tokens is not None:
+        kwargs["max_extend_tokens"] = max_extend_tokens
+        kwargs["max_extend_tokens_explicit"] = True
     tic = time.perf_counter()
     llm = BenchmarkLLM(
         args.model_path,
@@ -3831,7 +3842,6 @@ def _init_llm(
         tp_info=DistributedInfo(rank, tp_size),
         max_running_req=max_running_req,
         max_seq_len_override=max_seq_len,
-        max_extend_tokens=max_extend_tokens,
         num_page_override=args.num_pages,
         page_size=args.page_size,
         memory_ratio=args.memory_ratio,
@@ -3938,6 +3948,11 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
                         "page_size": args.page_size,
                         "num_pages": args.num_pages,
+                        "max_extend_tokens": (
+                            int(llm.prefill_budget) if llm.prefill_budget is not None else None
+                        ),
+                        "requested_max_extend_tokens": args.max_extend_tokens,
+                        "use_serving_max_extend_tokens": args.use_serving_max_extend_tokens,
                         "enable_dsv4_radix_prefix_cache": runtime_options[
                             "enable_dsv4_radix_prefix_cache"
                         ],
@@ -4035,6 +4050,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory-ratio", type=float, default=0.9)
     parser.add_argument("--max-seq-len", type=int, default=None)
     parser.add_argument("--max-extend-tokens", type=int, default=None)
+    parser.add_argument(
+        "--use-serving-max-extend-tokens",
+        action="store_true",
+        help=(
+            "Leave max_extend_tokens at the serving default instead of expanding it to "
+            "the largest selected scenario input."
+        ),
+    )
     parser.add_argument("--max-running-req", type=int, default=None)
     parser.add_argument(
         "--use-pynccl",

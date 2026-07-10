@@ -33,6 +33,7 @@ class LLM(Scheduler):
         tp_info: DistributedInfo | None = None,
         **kwargs,
     ):
+        kwargs.setdefault("max_extend_tokens_explicit", "max_extend_tokens" in kwargs)
         config = SchedulerConfig(
             model_path=model_path,
             tp_info=tp_info or DistributedInfo(0, 1),

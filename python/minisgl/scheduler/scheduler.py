@@ -229,6 +229,7 @@ class Scheduler(SchedulerIOMixin):
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
                 if isinstance(req, ChunkedReq):
+                    self.cache_manager.release_active_dsv4_swa_out_of_window(req)
                     continue
                 next_token = next_tokens_cpu[i]
                 req.append_host(next_token.unsqueeze(0))

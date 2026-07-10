@@ -132,10 +132,10 @@ class CacheManager:
             component_available_pages = int(self.kv_cache.available_component_pages())
             full_pages = len(self.free_slots) + live_full_tokens // self.page_size
             component_pages = component_available_pages + component_tokens // self.page_size
-            if self.dsv4_swa_independent_lifecycle:
-                swa_tokens = int(getattr(self.prefix_cache, "dsv4_evictable_swa_tokens", 0))
-                swa_pages = int(self.kv_cache.available_swa_pages()) + swa_tokens // self.page_size
-                return min(full_pages, component_pages, swa_pages) * self.page_size
+            # SWA-independent pages are a sliding-window runtime pool, not a
+            # full-sequence capacity owner.  Admission reserves full/component
+            # storage for the request; per-forward SWA pressure is checked when
+            # pages are allocated for the current extend chunk.
             return min(full_pages, component_pages) * self.page_size
         return self.prefix_cache.size_info.evictable_size + len(self.free_slots) * self.page_size
 

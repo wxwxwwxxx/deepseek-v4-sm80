@@ -61,6 +61,12 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     Returns:
         EngineConfig instance with parsed arguments
     """
+    max_extend_tokens_explicit = any(
+        arg in {"--max-prefill-length", "--max-extend-length"}
+        or arg.startswith("--max-prefill-length=")
+        or arg.startswith("--max-extend-length=")
+        for arg in args
+    )
     from minisgl.attention import validate_attn_backend
     from minisgl.kvcache import SUPPORTED_CACHE_MANAGER
     from minisgl.moe import SUPPORTED_MOE_BACKENDS
@@ -266,6 +272,7 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
 
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
+    kwargs["max_extend_tokens_explicit"] = max_extend_tokens_explicit
 
     # resolve some arguments
     run_shell |= kwargs.pop("shell_mode")

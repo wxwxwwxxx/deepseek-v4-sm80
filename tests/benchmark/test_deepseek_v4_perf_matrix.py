@@ -50,6 +50,8 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
     assert args.enable_dsv4_swa_tail_retention_v1 is False
     assert args.enable_dsv4_component_loc_ownership is False
     assert args.enable_dsv4_swa_independent_lifecycle is False
+    assert args.max_extend_tokens is None
+    assert args.use_serving_max_extend_tokens is False
     assert [variant.name for variant in variants] == ["fallback", "v0_bf16", "v1_moe"]
     assert {scenario.name for scenario in scenarios} >= {
         "long_prefill_bs1",
@@ -71,6 +73,10 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
 
     swa_args = bench.parse_args(["--enable-dsv4-swa-independent-lifecycle"])
     assert swa_args.enable_dsv4_swa_independent_lifecycle is True
+
+    serving_prefill_args = bench.parse_args(["--use-serving-max-extend-tokens"])
+    assert serving_prefill_args.max_extend_tokens is None
+    assert serving_prefill_args.use_serving_max_extend_tokens is True
 
 
 def test_num_pages_zero_selects_auto_capacity():
@@ -664,6 +670,7 @@ def test_release_default_benchmark_variant_leaves_dsv4_env_empty(monkeypatch):
     assert variant.allow_dsv4_cuda_graph is True
     assert variant.enable_dsv4_radix_prefix_cache is True
     assert variant.enable_dsv4_component_loc_ownership is True
+    assert variant.enable_dsv4_swa_independent_lifecycle is True
     assert result["raw_dsv4_sm80_env"] == {}
     assert "MINISGL_DSV4_DISABLE_RELEASE_DEFAULTS" not in os.environ
 
@@ -672,19 +679,77 @@ def test_release_default_benchmark_runtime_snapshot_preserves_injected_env(monke
     bench = _load_module()
 
     class FakeKernel:
-        DSV4_SM80_KNOWN_TOGGLES = ("MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",)
+        DSV4_SM80_KNOWN_TOGGLES = (
+            "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE",
+            "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS",
+            "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS",
+            "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE",
+            "MINISGL_DSV4_SM80_MOE_REDUCE_BF16",
+            "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH",
+            "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP",
+            "MINISGL_DSV4_SM80_LINEAR_BF16_FP32",
+            "MINISGL_DSV4_MARLIN_WNA16_PREBUILD",
+            "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS",
+            "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING",
+            "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT",
+            "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC",
+        )
 
         @staticmethod
         def dsv4_env_flag(name: str) -> bool:
+            if name in {
+                "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND",
+                "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS",
+            }:
+                return False
             return os.environ.get(name) in {"1", "true"}
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE", "1")
+    injected = {
+        "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE": "1",
+        "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND": "marlin_wna16",
+        "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS": "1",
+        "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS": "swa,c4",
+        "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE": "1",
+        "MINISGL_DSV4_SM80_MOE_REDUCE_BF16": "1",
+        "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH": "1",
+        "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP": "1",
+        "MINISGL_DSV4_SM80_LINEAR_BF16_FP32": "1",
+        "MINISGL_DSV4_MARLIN_WNA16_PREBUILD": "1",
+        "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS": "1",
+        "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING": "before_kv_alloc",
+        "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT": "1",
+        "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC": "component",
+        "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE": "1",
+        "MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE": "1",
+        "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA": "1",
+        "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED": "1",
+    }
+    for name, value in injected.items():
+        monkeypatch.setenv(name, value)
     variant = bench._variant_map()["dsv4_sm80_release_default"]
     result = bench.runtime_variant_env(FakeKernel, variant)
 
     assert result["cleared_dsv4_sm80_env"] == []
     assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
+    assert (
+        result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS"]
+        == "swa,c4"
+    )
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"] == "1"
+    assert result["raw_dsv4_sm80_env"]["MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED"] == "1"
     assert "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_MOE_REDUCE_BF16" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_LINEAR_BF16_FP32" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED" in result["active_dsv4_toggles"]
+    assert "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS" not in result["active_dsv4_toggles"]
     assert os.environ["MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"] == "1"
 
 

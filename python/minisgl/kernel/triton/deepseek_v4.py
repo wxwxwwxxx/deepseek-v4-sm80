@@ -1833,6 +1833,44 @@ def _hc_prenorm_split_pre_kernel(
 
 
 @triton.jit
+def _hc_prenorm_head_pre_kernel(
+    mixes_ptr,
+    x_ptr,
+    scale_ptr,
+    base_ptr,
+    pre_ptr,
+    tokens: tl.constexpr,
+    hidden: tl.constexpr,
+    hc_mult: tl.constexpr,
+    eps: tl.constexpr,
+    norm_eps: tl.constexpr,
+    BLOCK_HC: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+) -> None:
+    token = tl.program_id(0)
+    total = hidden * hc_mult
+    token_base = token * total
+
+    sq_sum = tl.zeros((), dtype=tl.float32)
+    for start in range(0, total, BLOCK_N):
+        offsets = start + tl.arange(0, BLOCK_N)
+        mask = offsets < total
+        values = tl.load(x_ptr + token_base + offsets, mask=mask, other=0.0).to(tl.float32)
+        sq_sum += tl.sum(values * values)
+    rsqrt = 1.0 / tl.sqrt(sq_sum / total + norm_eps)
+
+    hc_offsets = tl.arange(0, BLOCK_HC)
+    hc_mask = hc_offsets < hc_mult
+    scale = tl.load(scale_ptr + 0).to(tl.float32)
+    logits = tl.load(mixes_ptr + token * hc_mult + hc_offsets, mask=hc_mask, other=0.0).to(
+        tl.float32
+    ) * rsqrt * scale + tl.load(base_ptr + hc_offsets, mask=hc_mask, other=0.0).to(tl.float32)
+    pre = tl.sigmoid(logits) + eps
+    pre = tl.where(hc_mask, pre, 0.0)
+    tl.store(pre_ptr + token * hc_mult + hc_offsets, pre, mask=hc_mask)
+
+
+@triton.jit
 def _hc_layer_input_kernel(
     x_ptr,
     pre_ptr,
@@ -2400,6 +2438,71 @@ def _indexer_fp8_paged_logits_kernel(
         logits_ptr + row * stride_l_r + k_offsets * stride_l_n,
         out,
         mask=mask_n & (k_offsets < max_seq_len),
+    )
+
+
+@triton.jit
+def _remap_indexer_topk_locs_kernel(
+    raw_indices_ptr,
+    component_page_table_ptr,
+    full_page_table_ptr,
+    component_locs_ptr,
+    full_locs_ptr,
+    numel,
+    width: tl.constexpr,
+    component_table_width: tl.constexpr,
+    full_table_width: tl.constexpr,
+    component_page_size: tl.constexpr,
+    full_page_size: tl.constexpr,
+    ratio: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    active = offsets < numel
+    raw = tl.load(raw_indices_ptr + offsets, mask=active, other=-1).to(tl.int64)
+    rows = offsets // width
+
+    component_logical_page = raw // component_page_size
+    component_offset = raw - component_logical_page * component_page_size
+    component_valid = (
+        active
+        & (raw >= 0)
+        & (component_logical_page >= 0)
+        & (component_logical_page < component_table_width)
+    )
+    component_page = tl.load(
+        component_page_table_ptr
+        + rows * component_table_width
+        + component_logical_page,
+        mask=component_valid,
+        other=-1,
+    ).to(tl.int64)
+    component_loc = component_page * component_page_size + component_offset
+    tl.store(
+        component_locs_ptr + offsets,
+        tl.where(component_valid & (component_page >= 0), component_loc, -1),
+        mask=active,
+    )
+
+    full_position = raw * ratio + (ratio - 1)
+    full_logical_page = full_position // full_page_size
+    full_offset = full_position - full_logical_page * full_page_size
+    full_valid = (
+        active
+        & (raw >= 0)
+        & (full_logical_page >= 0)
+        & (full_logical_page < full_table_width)
+    )
+    full_page = tl.load(
+        full_page_table_ptr + rows * full_table_width + full_logical_page,
+        mask=full_valid,
+        other=-1,
+    ).to(tl.int64)
+    full_loc = full_page * full_page_size + full_offset
+    tl.store(
+        full_locs_ptr + offsets,
+        tl.where(full_valid & (full_page >= 0), full_loc, -1),
+        mask=active,
     )
 
 
@@ -5422,6 +5525,59 @@ def indexer_fp8_paged_logits(
     return logits
 
 
+def remap_indexer_topk_locs(
+    raw_indices: torch.Tensor,
+    component_page_table: torch.Tensor,
+    full_page_table: torch.Tensor,
+    *,
+    component_page_size: int,
+    full_page_size: int,
+    ratio: int,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if (
+        raw_indices.ndim != 2
+        or component_page_table.ndim != 2
+        or full_page_table.ndim != 2
+        or component_page_table.shape[0] != raw_indices.shape[0]
+        or full_page_table.shape[0] != raw_indices.shape[0]
+        or not raw_indices.is_cuda
+        or not component_page_table.is_cuda
+        or not full_page_table.is_cuda
+        or raw_indices.dtype not in (torch.int32, torch.int64)
+        or component_page_table.dtype not in (torch.int32, torch.int64)
+        or full_page_table.dtype not in (torch.int32, torch.int64)
+        or not raw_indices.is_contiguous()
+        or not component_page_table.is_contiguous()
+        or not full_page_table.is_contiguous()
+        or component_page_size <= 0
+        or full_page_size <= 0
+        or ratio <= 0
+    ):
+        return None
+    component_locs = torch.empty_like(raw_indices, dtype=torch.int32)
+    full_locs = torch.empty_like(raw_indices, dtype=torch.int32)
+    if raw_indices.numel() == 0:
+        return component_locs, full_locs
+    block = 256
+    _remap_indexer_topk_locs_kernel[(triton.cdiv(raw_indices.numel(), block),)](
+        raw_indices,
+        component_page_table,
+        full_page_table,
+        component_locs,
+        full_locs,
+        raw_indices.numel(),
+        width=raw_indices.shape[1],
+        component_table_width=component_page_table.shape[1],
+        full_table_width=full_page_table.shape[1],
+        component_page_size=int(component_page_size),
+        full_page_size=int(full_page_size),
+        ratio=int(ratio),
+        BLOCK=block,
+        num_warps=4,
+    )
+    return component_locs, full_locs
+
+
 def hc_split_pre(
     mixes: torch.Tensor,
     x: torch.Tensor,
@@ -5552,6 +5708,71 @@ def hc_prenorm_split_pre(
         num_warps=4,
     )
     return y, post, comb
+
+
+def hc_prenorm_head(
+    mixes: torch.Tensor,
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    hc_mult: int,
+    eps: float,
+    norm_eps: float,
+) -> torch.Tensor | None:
+    if (
+        x.ndim != 3
+        or mixes.ndim != 2
+        or x.numel() == 0
+        or not x.is_cuda
+        or not mixes.is_cuda
+        or not scale.is_cuda
+        or not base.is_cuda
+        or not x.is_contiguous()
+        or not mixes.is_contiguous()
+        or x.shape[0] != mixes.shape[0]
+        or x.shape[1] != hc_mult
+        or hc_mult < 1
+        or hc_mult > 8
+    ):
+        return None
+    if mixes.shape[1] != hc_mult or scale.numel() < 1 or base.numel() < hc_mult:
+        return None
+    if x.dtype is not torch.bfloat16:
+        return None
+    tokens, _, hidden = x.shape
+    pre = torch.empty((tokens, hc_mult), dtype=x.dtype, device=x.device)
+    y = torch.empty((tokens, hidden), dtype=x.dtype, device=x.device)
+    block_hc = triton.next_power_of_2(hc_mult)
+    _hc_prenorm_head_pre_kernel[(tokens,)](
+        mixes,
+        x,
+        scale.contiguous(),
+        base.contiguous(),
+        pre,
+        tokens=tokens,
+        hidden=hidden,
+        hc_mult=int(hc_mult),
+        eps=float(eps),
+        norm_eps=float(norm_eps),
+        BLOCK_HC=block_hc,
+        BLOCK_N=1024,
+        num_warps=4,
+    )
+    block_d = 256 if hidden >= 256 else 128
+    grid = (tokens, triton.cdiv(hidden, block_d))
+    _hc_layer_input_kernel[grid](
+        x,
+        pre,
+        y,
+        tokens=tokens,
+        hidden=hidden,
+        hc_mult=int(hc_mult),
+        BLOCK_HC=block_hc,
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return y
 
 
 def hc_post(
@@ -6273,6 +6494,7 @@ __all__ = [
     "build_moe_route_plan",
     "grouped_fp4_moe",
     "grouped_fp4_moe_fused_compute",
+    "hc_prenorm_head",
     "hc_prenorm_split_pre",
     "hc_post",
     "hc_split_pre",
@@ -6283,6 +6505,7 @@ __all__ = [
     "indexer_fp8_quantize",
     "indexer_fp8_quantize_fold",
     "indexer_fp8_quant_store",
+    "remap_indexer_topk_locs",
     "k_norm_rope_cache_bf16",
     "copy_masked_compressed_locs",
     "copy_component_write_locs_for_replay",

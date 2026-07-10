@@ -253,6 +253,87 @@ def test_indexer_fp8_paged_logits_and_topk_match_reference():
     )
 
 
+def test_indexer_fp8_paged_select_bounds_full_logits_workspace(monkeypatch):
+    rows = 4
+    max_seq_len = 100_000
+    q_values = torch.zeros((rows, 1, 1), dtype=torch.uint8)
+    weights = torch.ones((rows, 1), dtype=torch.float32)
+    packed_cache = torch.zeros((1, 5), dtype=torch.uint8)
+    seq_lens = torch.full((rows,), max_seq_len, dtype=torch.int32)
+    page_table = torch.zeros((rows, 1), dtype=torch.int32)
+
+    def fake_logits(q, _cache, lens, _table, *, _backend=None, **_kwargs):
+        if _backend is not None:
+            _backend.append("fake_native")
+        score_width = int(lens.max().item())
+        return torch.arange(score_width, dtype=torch.float32).expand(q.shape[0], -1).clone()
+
+    monkeypatch.setattr(dsv4_kernel, "indexer_fp8_paged_logits_fallback", fake_logits)
+    monkeypatch.setenv(dsv4_kernel.DSV4_INDEXER_MAX_LOGITS_MB_ENV, "8")
+    oracle = dsv4_kernel.indexer_select_fp8_paged_fallback(
+        q_values,
+        weights,
+        packed_cache,
+        seq_lens,
+        page_table,
+        page_size=1,
+        width=4,
+        ratio=4,
+    )
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_INDEXER_MAX_LOGITS_MB_ENV, "1")
+    bounded = dsv4_kernel.indexer_select_fp8_paged_fallback(
+        q_values,
+        weights,
+        packed_cache,
+        seq_lens,
+        page_table,
+        page_size=1,
+        width=4,
+        ratio=4,
+    )
+    assert bounded.logits.shape == (0, 0)
+    assert "bounded_query_chunks[2;1MiB]" in bounded.backend
+    assert torch.equal(bounded.topk.raw_indices, oracle.topk.raw_indices)
+    assert torch.equal(bounded.topk.page_indices, oracle.topk.page_indices)
+    assert torch.equal(bounded.topk.full_indices, oracle.topk.full_indices)
+    assert torch.equal(bounded.topk.topk_lens, oracle.topk.topk_lens)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_remap_indexer_topk_locs_triton(monkeypatch):
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE, "1")
+    raw = torch.tensor(
+        [[0, 63, 64, 127, -1], [1, 65, 129, -1, 5]],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    component_table = torch.tensor(
+        [[3, 7, 9], [4, 8, 10]], device="cuda", dtype=torch.int32
+    )
+    full_table = torch.tensor(
+        [[11, 12, 13], [14, 15, 16]], device="cuda", dtype=torch.int32
+    )
+    out = dsv4_kernel.remap_indexer_topk_locs(
+        raw,
+        component_table,
+        full_table,
+        component_page_size=64,
+        full_page_size=256,
+        ratio=4,
+    )
+    assert out is not None
+    component_locs, full_locs = out
+    assert component_locs.cpu().tolist() == [
+        [192, 255, 448, 511, -1],
+        [257, 513, 641, -1, 261],
+    ]
+    assert full_locs.cpu().tolist() == [
+        [2819, 3071, 3075, 3327, -1],
+        [3591, 3847, 4103, -1, 3607],
+    ]
+
+
 def _manual_two_source_sparse_attention(
     q: torch.Tensor,
     swa_cache: torch.Tensor,
@@ -426,6 +507,7 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
         in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     )
     assert dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
     assert (
         dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE
         in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
@@ -441,6 +523,7 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
     assert (
         dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
     )
+    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
     assert (
         dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE
         in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
@@ -533,6 +616,15 @@ def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
     assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE)
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE, "1")
     assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE)
+    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
+    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE)
+    monkeypatch.setenv(
+        dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
+        "hc_graph_cleanup,linear_bf16_fp32",
+    )
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE)
+    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE)
+    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, raising=False)
     monkeypatch.setenv(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE, "1")
     assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE)
     _clear_dsv4_sm80_env(monkeypatch)
@@ -1513,6 +1605,46 @@ def test_hc_head_maintains_bf16_linear_weight_cache(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_hc_head_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(30)
+
+    tokens = 8
+    hc_mult = 4
+    hidden = 256
+    x = torch.randn(tokens, hc_mult, hidden, device=device, dtype=torch.bfloat16).contiguous()
+    fn_fp32 = (torch.randn(hc_mult, hc_mult * hidden, device=device) * 0.02).contiguous()
+    fn_bf16 = fn_fp32.to(torch.bfloat16).contiguous()
+    scale = torch.tensor([0.1], device=device, dtype=torch.float32)
+    base = (torch.randn(hc_mult, device=device) * 0.01).contiguous()
+
+    expected = dsv4_kernel.hc_head_fallback(
+        x,
+        fn_fp32,
+        scale,
+        base,
+        eps=1e-6,
+        norm_eps=1e-6,
+    )
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_HC", "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE, "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
+    actual = dsv4_kernel.hc_head_fallback(
+        x,
+        fn_bf16,
+        scale,
+        base,
+        eps=1e-6,
+        norm_eps=1e-6,
+    )
+
+    assert actual.dtype is torch.bfloat16
+    assert torch.allclose(actual, expected, atol=4e-2, rtol=4e-2)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_hc_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
     device = torch.device("cuda")
     _clear_dsv4_sm80_env(monkeypatch)
@@ -1632,6 +1764,66 @@ def test_hc_graph_cleanup_opt_in_matches_current_hc_path(monkeypatch):
     assert torch.allclose(actual_post, expected_post, atol=1.1e-2, rtol=1.1e-2)
     assert torch.allclose(actual_comb, expected_comb, atol=1.1e-2, rtol=1.1e-2)
     assert torch.allclose(actual_post_out, expected_post_out, atol=1.1e-2, rtol=1.1e-2)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_hc_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(33)
+
+    tokens = 8
+    hc_mult = 4
+    hidden = 256
+    mix_hc = (2 + hc_mult) * hc_mult
+    x = torch.randn(tokens, hc_mult, hidden, device=device, dtype=torch.bfloat16).contiguous()
+    fn_fp32 = (torch.randn(mix_hc, hc_mult * hidden, device=device) * 0.02).contiguous()
+    fn_bf16 = fn_fp32.to(torch.bfloat16).contiguous()
+    scale = torch.tensor([0.15, 0.1, 0.08], device=device, dtype=torch.float32)
+    base = (torch.randn(mix_hc, device=device) * 0.01).contiguous()
+    post_input = torch.randn(tokens, hidden, device=device, dtype=torch.bfloat16)
+
+    monkeypatch.setenv("MINISGL_DSV4_SM80_HC", "1")
+    expected_y, expected_post, expected_comb = dsv4_kernel.hc_pre_fallback(
+        x,
+        fn_fp32,
+        scale,
+        base,
+        hc_mult=hc_mult,
+        sinkhorn_iters=20,
+        eps=1e-6,
+        norm_eps=1e-6,
+    )
+    expected_post_out = dsv4_kernel.hc_post_fallback(
+        post_input,
+        x,
+        expected_post,
+        expected_comb,
+    )
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE, "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
+    actual_y, actual_post, actual_comb = dsv4_kernel.hc_pre_fallback(
+        x,
+        fn_bf16,
+        scale,
+        base,
+        hc_mult=hc_mult,
+        sinkhorn_iters=20,
+        eps=1e-6,
+        norm_eps=1e-6,
+    )
+    actual_post_out = dsv4_kernel.hc_post_fallback(
+        post_input,
+        x,
+        actual_post,
+        actual_comb,
+    )
+
+    assert torch.allclose(actual_y, expected_y, atol=4e-2, rtol=4e-2)
+    assert torch.allclose(actual_post, expected_post, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(actual_comb, expected_comb, atol=8e-3, rtol=8e-3)
+    assert torch.allclose(actual_post_out, expected_post_out, atol=4e-2, rtol=4e-2)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")

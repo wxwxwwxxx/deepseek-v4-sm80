@@ -250,7 +250,7 @@ def _capture_debug_activation(
 
 def _debug_topk_scores(logits: torch.Tensor, raw_indices: torch.Tensor) -> torch.Tensor:
     if logits.numel() == 0 or raw_indices.numel() == 0:
-        return logits.new_empty(raw_indices.shape)
+        return logits.new_full(raw_indices.shape, float("-inf"))
     max_col = max(logits.shape[1] - 1, 0)
     gather = raw_indices.to(device=logits.device, dtype=torch.long).clamp(min=0, max=max_col)
     scores = torch.gather(logits, 1, gather)
@@ -872,6 +872,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 ratio=4,
                 layer_id=layer_id,
         )
+        if dsv4_owner_timing.enabled():
+            dsv4_owner_timing.record_counter(
+                "dsv4.indexer.select_backend",
+                {
+                    "backend": out.backend,
+                    "layer_id": int(layer_id),
+                    "phase": batch.phase,
+                    "rows": int(rows),
+                    "q_shape": list(q_values.shape),
+                    "page_table_shape": list(page_table.shape),
+                },
+            )
         self._capture_indexer_select_debug(layer_id, out, seq_lens, page_table)
         core = metadata.core_metadata
         raw_indices, page_indices, full_indices = self._remap_indexer_topk_for_attention(
@@ -943,6 +955,44 @@ class DSV4AttentionBackend(BaseAttnBackend):
         page_indices = out.topk.page_indices
         full_indices = out.topk.full_indices
         if core.component_loc_ownership and core.c4_page_table is not None:
+            component_page_size = self.kvcache.c4_component_page_size
+            remapped = dsv4_kernel.remap_indexer_topk_locs(
+                raw_indices,
+                core.c4_page_table[: raw_indices.shape[0]],
+                core.page_table[: raw_indices.shape[0]],
+                component_page_size=component_page_size,
+                full_page_size=self.page_size,
+                ratio=4,
+            )
+            if remapped is not None:
+                if dsv4_owner_timing.enabled():
+                    dsv4_owner_timing.record_counter(
+                        "dsv4.indexer.remap_backend",
+                        {
+                            "backend": "triton_fused_component_full",
+                            "rows": int(raw_indices.shape[0]),
+                            "width": int(raw_indices.shape[1]),
+                            "raw_shape": list(raw_indices.shape),
+                            "component_page_table_shape": list(
+                                core.c4_page_table[: raw_indices.shape[0]].shape
+                            ),
+                            "full_page_table_shape": list(
+                                core.page_table[: raw_indices.shape[0]].shape
+                            ),
+                        },
+                    )
+                page_indices, full_indices = remapped
+                return raw_indices, page_indices, full_indices
+            if dsv4_owner_timing.enabled():
+                dsv4_owner_timing.record_counter(
+                    "dsv4.indexer.remap_backend",
+                    {
+                        "backend": "torch_int64_matrix_fallback",
+                        "rows": int(raw_indices.shape[0]),
+                        "width": int(raw_indices.shape[1]),
+                        "raw_shape": list(raw_indices.shape),
+                    },
+                )
             page_indices = self._compressed_raw_to_component_locs(
                 core.c4_page_table[: raw_indices.shape[0]],
                 raw_indices,

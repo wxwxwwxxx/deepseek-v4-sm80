@@ -14,6 +14,7 @@ def _get_pid_suffix() -> str:
 @dataclass(frozen=True)
 class SchedulerConfig(EngineConfig):
     max_extend_tokens: int = 8192
+    max_extend_tokens_explicit: bool = False
     cache_type: str = "radix"
     enable_dsv4_radix_prefix_cache: bool = False
     enable_dsv4_swa_tail_retention_v1: bool = False

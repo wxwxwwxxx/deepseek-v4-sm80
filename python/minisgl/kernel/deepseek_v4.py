@@ -75,6 +75,8 @@ DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN
 DSV4_INDEXER_CAPTURE_WIDTH_DEBUG_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_WIDTH_DEBUG"
 DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_WIDTH_MODE"
 DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE"
+DSV4_INDEXER_MAX_LOGITS_MB_ENV = "MINISGL_DSV4_INDEXER_MAX_LOGITS_MB"
+DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT = 512
 DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
 DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
 DSV4_MARLIN_WNA16_CACHE_DEBUG_ENV = "MINISGL_DSV4_MARLIN_WNA16_CACHE_DEBUG"
@@ -918,6 +920,10 @@ def _dsv4_disable_aliases() -> dict[str, tuple[str, ...]]:
             DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE,
         ),
         "prep_metadata_in_graph": (DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE,),
+        "hc_graph_cleanup": (DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE,),
+        "hccleanup": (DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE,),
+        "linear_bf16_fp32": (DSV4_LINEAR_BF16_FP32_TOGGLE,),
+        "hc_linear_bf16_fp32": (DSV4_LINEAR_BF16_FP32_TOGGLE,),
         "moe_reduce_bf16": (DSV4_SM80_MOE_REDUCE_BF16_TOGGLE,),
     }
 
@@ -2833,6 +2839,10 @@ def indexer_fp8_paged_logits_fallback(
                     "DSV4 CUDA graph capture requires the Triton paged FP8 indexer logits path; "
                     "the current tensor layout/dtype was unsupported."
                 )
+        except torch.OutOfMemoryError:
+            # Retrying the full torch oracle with the same output shape only
+            # hides the native owner and doubles allocator pressure.
+            raise
         except Exception as exc:
             if capture_active:
                 raise RuntimeError(
@@ -2916,6 +2926,106 @@ def indexer_select_fp8_paged_fallback(
     ratio: int = 4,
     layer_id: int | None = None,
 ) -> DSV4IndexerSelectOutput:
+    rows = int(q_values.shape[0])
+    capture_active = _cuda_graph_capture_active(q_values.device)
+    max_seq_len = (
+        0
+        if capture_active
+        else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
+    )
+    raw_budget = os.environ.get(
+        DSV4_INDEXER_MAX_LOGITS_MB_ENV,
+        str(DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT),
+    ).strip()
+    try:
+        max_logits_mb = int(raw_budget)
+    except ValueError as exc:
+        raise ValueError(
+            f"{DSV4_INDEXER_MAX_LOGITS_MB_ENV} must be a positive integer, got {raw_budget!r}"
+        ) from exc
+    if max_logits_mb <= 0:
+        raise ValueError(
+            f"{DSV4_INDEXER_MAX_LOGITS_MB_ENV} must be positive, got {max_logits_mb}"
+        )
+    max_logits_bytes = max_logits_mb * 1024 * 1024
+    full_logits_bytes = rows * max(max_seq_len, 1) * torch.float32.itemsize
+
+    # vLLM bounds the sparse-indexer prefill logits workspace along the query
+    # dimension.  Preserve the existing mini Triton logits and native top-k
+    # kernels, but never require their full [all query rows, max_seq_len]
+    # product when it exceeds the configured workspace budget.
+    if (
+        not capture_active
+        and rows > 0
+        and max_seq_len > 0
+        and full_logits_bytes > max_logits_bytes
+    ):
+        max_chunk_rows = max(
+            1,
+            max_logits_bytes // (max_seq_len * torch.float32.itemsize),
+        )
+        raw_indices = torch.empty((rows, width), dtype=torch.int32, device=q_values.device)
+        page_indices = torch.empty_like(raw_indices)
+        full_indices = torch.empty_like(raw_indices)
+        topk_lens = torch.empty((rows,), dtype=torch.int32, device=q_values.device)
+        backend_names: set[str] = set()
+        chunk_count = 0
+        for start in range(0, rows, max_chunk_rows):
+            end = min(start + max_chunk_rows, rows)
+            logits_backend: list[str] = []
+            chunk_logits = indexer_fp8_paged_logits_fallback(
+                q_values[start:end],
+                packed_cache,
+                seq_lens[start:end],
+                page_table[start:end],
+                page_size=page_size,
+                weights=weights[start:end],
+                _backend=logits_backend,
+                layer_id=layer_id,
+            )
+            chunk_topk = topk_transform_512_full_fallback(
+                chunk_logits,
+                seq_lens[start:end].to(device=chunk_logits.device, dtype=torch.int32),
+                page_table[start:end].to(device=chunk_logits.device, dtype=torch.int32),
+                page_size=page_size,
+                width=width,
+                ratio=ratio,
+            )
+            raw_indices[start:end].copy_(chunk_topk.raw_indices)
+            page_indices[start:end].copy_(chunk_topk.page_indices)
+            full_indices[start:end].copy_(chunk_topk.full_indices)
+            if chunk_topk.topk_lens is None:
+                topk_lens[start:end].copy_(
+                    seq_lens[start:end].clamp(min=0, max=width).to(torch.int32)
+                )
+            else:
+                topk_lens[start:end].copy_(chunk_topk.topk_lens)
+            backend_names.add(logits_backend[0] if logits_backend else "torch_fp8_paged")
+            backend_names.add(chunk_topk.backend)
+            chunk_count += 1
+
+        # Full logits are an oracle/debug surface, not a release-path output.
+        # Returning an explicit empty tensor keeps the existing output contract
+        # while making it impossible for downstream release code to retain the
+        # bounded per-chunk workspaces.
+        logits = torch.empty((0, 0), dtype=torch.float32, device=q_values.device)
+        topk = DSV4TopKTransformOutput(
+            raw_indices,
+            page_indices,
+            full_indices,
+            "bounded_query_chunks",
+            topk_lens,
+        )
+        backends = ",".join(sorted(backend_names))
+        return DSV4IndexerSelectOutput(
+            logits=logits,
+            topk=topk,
+            backend=(
+                f"bounded_query_chunks[{chunk_count};{max_logits_mb}MiB]"
+                f"+{backends}"
+            ),
+        )
+
     logits_backend: list[str] = []
     logits = indexer_fp8_paged_logits_fallback(
         q_values,
@@ -2937,6 +3047,33 @@ def indexer_select_fp8_paged_fallback(
     )
     backend = logits_backend[0] if logits_backend else "torch_fp8_paged"
     return DSV4IndexerSelectOutput(logits=logits, topk=topk, backend=f"{backend}+{topk.backend}")
+
+
+def remap_indexer_topk_locs(
+    raw_indices: torch.Tensor,
+    component_page_table: torch.Tensor,
+    full_page_table: torch.Tensor,
+    *,
+    component_page_size: int,
+    full_page_size: int,
+    ratio: int,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Map compressed raw top-k indices without int64 matrix temporaries."""
+    if not dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+        return None
+    try:
+        return _triton_dsv4_ops().remap_indexer_topk_locs(
+            raw_indices,
+            component_page_table,
+            full_page_table,
+            component_page_size=int(component_page_size),
+            full_page_size=int(full_page_size),
+            ratio=int(ratio),
+        )
+    except Exception:
+        if _cuda_graph_capture_active(raw_indices.device):
+            raise
+        return None
 
 
 def indexer_select_fp8_fallback(
@@ -3115,6 +3252,21 @@ def hc_head_fallback(
 ) -> torch.Tensor:
     shape = x.shape
     flat = x.flatten(1)
+    if dsv4_sm80_triton_enabled(DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE) and dsv4_sm80_triton_enabled(
+        "MINISGL_DSV4_SM80_HC"
+    ):
+        mixes = linear_bf16_fp32_fallback(flat, fn)
+        fused = _triton_dsv4_ops().hc_prenorm_head(
+            mixes.contiguous(),
+            x,
+            scale,
+            base,
+            hc_mult=shape[1],
+            eps=eps,
+            norm_eps=norm_eps,
+        )
+        if fused is not None:
+            return fused
     flat_float = flat.float()
     rsqrt = torch.rsqrt(flat_float.square().mean(-1, keepdim=True) + norm_eps)
     mixes = linear_bf16_fp32_fallback(flat, fn) * rsqrt
@@ -4988,6 +5140,8 @@ __all__ = [
     "DSV4KernelMode",
     "DSV4IndexerFP8Query",
     "DSV4IndexerSelectOutput",
+    "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT",
+    "DSV4_INDEXER_MAX_LOGITS_MB_ENV",
     "DSV4_LINEAR_BF16_FP32_TOGGLE",
     "DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV",
     "DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE",
@@ -5125,6 +5279,7 @@ __all__ = [
     "quantize_fp8_activation_ref",
     "quantized_linear_fp8_pair_shared_activation_ref",
     "quantized_linear_ref",
+    "remap_indexer_topk_locs",
     "require_supported_moe_expert_backend",
     "rms_norm_pair_fallback",
     "scale_dim",

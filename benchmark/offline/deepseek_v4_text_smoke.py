@@ -221,14 +221,16 @@ VARIANTS: tuple[Variant, ...] = (
         DSV4_RELEASE_DEFAULT_VARIANT,
         {},
         (
-            "TARGET 12.50 release-default smoke: leave DSV4 env empty so "
-            "Engine injects the A100/sm80 release bundle."
+            "TARGET 12.52 release-default smoke: leave DSV4 env empty so "
+            "Engine injects the A100/sm80 release bundle with SWA independent "
+            "lifecycle and SWA direct replay metadata."
         ),
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
         enable_dsv4_radix_prefix_cache=True,
         enable_dsv4_component_loc_ownership=True,
+        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant("v0_bf16", {DSV4_V0_BF16_TOGGLE: "1"}, "TARGET 05.7 v0 BF16 whitelist bundle."),
     Variant(
