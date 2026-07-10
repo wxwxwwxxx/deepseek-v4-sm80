@@ -1140,8 +1140,11 @@ def _prep_decode_metadata_in_graph_kernel(
     dst_c4_out_loc_ptr,
     dst_c128_out_loc_ptr,
     dst_c4_indexer_out_loc_ptr,
+    swa_full_to_swa_page_ptr,
+    dst_swa_out_loc_ptr,
     ctx_page_table_stride0: tl.constexpr,
     ctx_page_table_width: tl.constexpr,
+    swa_full_to_swa_page_width: tl.constexpr,
     c4_page_table_width: tl.constexpr,
     c128_page_table_width: tl.constexpr,
     c4_indexer_page_table_width: tl.constexpr,
@@ -1151,6 +1154,10 @@ def _prep_decode_metadata_in_graph_kernel(
     page_size: tl.constexpr,
     window_size: tl.constexpr,
     index_topk: tl.constexpr,
+    swa_independent: tl.constexpr,
+    swa_dummy_token_start: tl.constexpr,
+    swa_dummy_page: tl.constexpr,
+    write_swa_out_loc: tl.constexpr,
     c4_component_page_size: tl.constexpr,
     c128_component_page_size: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -1185,11 +1192,51 @@ def _prep_decode_metadata_in_graph_kernel(
         mask=swa_valid & (swa_logical_pos < ctx_page_table_width),
         other=-1,
     )
+    if swa_independent:
+        full_page = swa_value // page_size
+        page_offset = swa_value - full_page * page_size
+        full_valid = swa_valid & (swa_value >= 0)
+        mapped_page = tl.load(
+            swa_full_to_swa_page_ptr + full_page,
+            mask=full_valid
+            & (full_page >= 0)
+            & (full_page < swa_full_to_swa_page_width),
+            other=-1,
+        )
+        mapped_loc = mapped_page * page_size + page_offset
+        dummy_loc = swa_dummy_page * page_size
+        swa_value = tl.where(
+            swa_value == swa_dummy_token_start,
+            dummy_loc,
+            tl.where(full_valid & (mapped_page >= 0), mapped_loc, -1),
+        )
     tl.store(
         dst_swa_page_indices_ptr + row * swa_width + offsets,
         tl.where(swa_valid, swa_value, -1),
         mask=swa_mask,
     )
+    if write_swa_out_loc:
+        swa_out_full_page = raw_out_loc // page_size
+        swa_out_page_offset = raw_out_loc - swa_out_full_page * page_size
+        swa_out_valid = raw_out_loc >= 0
+        swa_out_page = tl.load(
+            swa_full_to_swa_page_ptr + swa_out_full_page,
+            mask=swa_independent
+            & swa_out_valid
+            & (swa_out_full_page >= 0)
+            & (swa_out_full_page < swa_full_to_swa_page_width),
+            other=-1,
+        )
+        swa_out_loc = swa_out_page * page_size + swa_out_page_offset
+        if swa_independent:
+            swa_out_loc = tl.where(
+                raw_out_loc == swa_dummy_token_start,
+                swa_dummy_page * page_size,
+                tl.where(swa_out_valid & (swa_out_page >= 0), swa_out_loc, -1),
+            )
+        else:
+            swa_out_loc = tl.where(swa_out_valid, raw_out_loc, -1)
+        tl.store(dst_swa_out_loc_ptr + row, swa_out_loc)
 
     c4_mask = offsets < c4_width
     c4_valid = offsets < c4_sparse_len
@@ -4557,13 +4604,19 @@ def prep_decode_metadata_in_graph(
     dst_c4_out_loc: torch.Tensor,
     dst_c128_out_loc: torch.Tensor,
     dst_c4_indexer_out_loc: torch.Tensor,
+    swa_full_to_swa_page: torch.Tensor | None = None,
+    dst_swa_out_loc: torch.Tensor | None = None,
     *,
     page_size: int,
     window_size: int,
     index_topk: int,
+    swa_independent: bool = False,
+    swa_dummy_token_start: int = -1,
+    swa_dummy_page: int = -1,
+    write_swa_out_loc: bool = False,
 ) -> bool:
     rows = int(positions.numel())
-    tensors = (
+    tensors = [
         ctx_page_table,
         table_indices,
         positions,
@@ -4588,7 +4641,20 @@ def prep_decode_metadata_in_graph(
         dst_c4_out_loc,
         dst_c128_out_loc,
         dst_c4_indexer_out_loc,
-    )
+    ]
+    if swa_independent:
+        if (
+            swa_full_to_swa_page is None
+            or swa_full_to_swa_page.ndim != 1
+            or swa_dummy_token_start < 0
+            or swa_dummy_page < 0
+        ):
+            return False
+        tensors.append(swa_full_to_swa_page)
+    if write_swa_out_loc:
+        if dst_swa_out_loc is None or dst_swa_out_loc.ndim != 1:
+            return False
+        tensors.append(dst_swa_out_loc)
     if (
         rows <= 0
         or page_size <= 0
@@ -4614,7 +4680,7 @@ def prep_decode_metadata_in_graph(
         or c4_indexer_page_table.shape[0] < rows
         or any(t.numel() < rows for t in tensors[8:14])
         or any(t.ndim != 2 or t.shape[0] < rows for t in tensors[14:21])
-        or any(t.numel() < rows for t in tensors[21:])
+        or any(t.numel() < rows for t in tensors[21:24])
     ):
         return False
     swa_width = int(dst_swa_page_indices.shape[1])
@@ -4634,6 +4700,10 @@ def prep_decode_metadata_in_graph(
     block = triton.next_power_of_2(max_width)
     c4_component_page_size = max(int(page_size) // 4, 1)
     c128_component_page_size = max(int(page_size) // 128, 1)
+    dummy_swa_full_to_swa_page = (
+        swa_full_to_swa_page if swa_full_to_swa_page is not None else table_indices
+    )
+    dummy_swa_out_loc = dst_swa_out_loc if dst_swa_out_loc is not None else raw_out_loc
     _prep_decode_metadata_in_graph_kernel[(rows,)](
         ctx_page_table,
         table_indices,
@@ -4659,8 +4729,11 @@ def prep_decode_metadata_in_graph(
         dst_c4_out_loc,
         dst_c128_out_loc,
         dst_c4_indexer_out_loc,
+        dummy_swa_full_to_swa_page,
+        dummy_swa_out_loc,
         ctx_page_table_stride0=ctx_page_table.stride(0),
         ctx_page_table_width=ctx_page_table.shape[1],
+        swa_full_to_swa_page_width=dummy_swa_full_to_swa_page.shape[0],
         c4_page_table_width=c4_page_table.shape[1],
         c128_page_table_width=c128_page_table.shape[1],
         c4_indexer_page_table_width=c4_indexer_page_table.shape[1],
@@ -4670,6 +4743,10 @@ def prep_decode_metadata_in_graph(
         page_size=int(page_size),
         window_size=int(window_size),
         index_topk=int(index_topk),
+        swa_independent=bool(swa_independent),
+        swa_dummy_token_start=int(swa_dummy_token_start),
+        swa_dummy_page=int(swa_dummy_page),
+        write_swa_out_loc=bool(write_swa_out_loc),
         c4_component_page_size=c4_component_page_size,
         c128_component_page_size=c128_component_page_size,
         BLOCK=block,

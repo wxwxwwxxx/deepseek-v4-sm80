@@ -1076,6 +1076,39 @@ def test_dsv4_cuda_graph_replay_rejects_stale_swa_metadata_version():
         backend._copy_metadata_for_replay(backend.capture, batch.attn_metadata, 1)
 
 
+def test_dsv4_raw_graph_metadata_copy_uses_source_swa_version_for_guard():
+    cfg = _tiny_dsv4_config([4, 128])
+    page_size = 4
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0],
+        max_len=16,
+        enable_component_loc_ownership=True,
+        enable_swa_independent_lifecycle=True,
+    )
+    ctx.kv_cache.on_pages_allocated(torch.arange(0, 16, page_size, dtype=torch.int32), page_size)
+    backend = ctx.attn_backend
+    backend.init_capture_graph(max_seq_len=16, bs_list=[1])
+    assert backend.capture is not None
+    captured_version = backend.capture.core_metadata.swa_ownership_version
+
+    ctx.kv_cache._bump_swa_ownership_version()
+    current = ctx.kv_cache.swa_ownership_version
+    assert current > captured_version
+    req = _req(31, 0, 5, cached_len=4)
+    batch = _prepare_decode_batch([req])
+    raw = backend._build_raw_decode_graph_metadata(batch)
+    assert raw.swa_ownership_version == current
+
+    backend._copy_raw_decode_graph_metadata_for_replay(raw, rows=1)
+    assert backend.capture.core_metadata.swa_ownership_version == current
+
+    raw.swa_ownership_version = current - 1
+    with pytest.raises(RuntimeError, match="raw graph metadata ownership version is stale"):
+        backend._copy_raw_decode_graph_metadata_for_replay(raw, rows=1)
+
+
 def test_dsv4_cuda_graph_replay_rebuilds_stale_swa_metadata_version():
     ctx = _install_independent_swa_context(max_len=32)
     req = _req(0, 0, 16, cached_len=15)

@@ -404,6 +404,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._pending_prep_metadata_oracle: DSV4AttentionMetadata | None = None
         self._pending_prep_metadata_oracle_rows = 0
         self._prep_metadata_in_graph_oracle_replay_step = 0
+        self._materializing_prep_metadata_oracle = False
         dsv4_kernel.warmup_indexer_fp8_backend(self.device)
 
     @property
@@ -466,7 +467,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if not bool(getattr(self.kvcache, "component_loc_ownership_enabled", False)):
             return unsupported("component_loc_ownership_required")
         if bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)):
-            return unsupported("swa_independent_lifecycle_not_supported")
+            full_to_swa_page = getattr(self.kvcache, "_full_to_swa_page", None)
+            if full_to_swa_page is None:
+                return unsupported("missing_swa_full_to_swa_page")
+            if (
+                not isinstance(full_to_swa_page, torch.Tensor)
+                or not full_to_swa_page.is_cuda
+                or full_to_swa_page.dtype is not torch.int32
+                or not full_to_swa_page.is_contiguous()
+                or int(getattr(self.kvcache, "_dummy_token_start", -1)) < 0
+                or int(getattr(self.kvcache, "_swa_dummy_page", -1)) < 0
+            ):
+                return unsupported("invalid_swa_independent_mapping_surface")
         if (
             core.c4_page_table is None
             or core.c128_page_table is None
@@ -570,7 +582,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 )
             else:
                 component_tables = self._make_component_page_tables(reqs, max_seqlen_k)
-        oracle = self._build_metadata(batch) if self._prep_metadata_in_graph_oracle_enabled() else None
+        oracle = None
+        if self._prep_metadata_in_graph_oracle_enabled():
+            self._materializing_prep_metadata_oracle = True
+            try:
+                oracle = self._build_metadata(batch)
+            finally:
+                self._materializing_prep_metadata_oracle = False
         return DSV4RawDecodeGraphMetadata(
             raw_out_loc=raw_out_loc,
             positions=positions,
@@ -1168,10 +1186,15 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> None:
         assert self.capture is not None
         dst_core = self.capture.core_metadata
-        self._ensure_swa_metadata_current(
-            dst_core,
-            context="CUDA graph replay raw metadata destination",
-        )
+        if self._swa_version_guard_required():
+            current = self._current_swa_ownership_version()
+            if int(src.swa_ownership_version) != current:
+                raise RuntimeError(
+                    "DSV4 independent SWA raw graph metadata ownership version is stale: "
+                    f"context=CUDA graph replay raw metadata source, "
+                    f"metadata_version={int(src.swa_ownership_version)}, "
+                    f"current_version={current}"
+                )
         dst_core.component_loc_ownership = bool(src.component_loc_ownership)
         dst_core.swa_ownership_version = int(src.swa_ownership_version)
         dst_core.max_seqlen_q = int(src.max_seqlen_q)
@@ -1288,10 +1311,17 @@ class DSV4AttentionBackend(BaseAttnBackend):
             dst_c4_out_loc=core.c4_out_loc,
             dst_c128_out_loc=core.c128_out_loc,
             dst_c4_indexer_out_loc=core.c4_indexer_out_loc,
+            dst_swa_out_loc=core.swa_out_loc,
             rows=rows,
             page_size=self.page_size,
             window_size=self.window_size,
             index_topk=self.index_topk,
+            swa_full_to_swa_page=getattr(self.kvcache, "_full_to_swa_page", None),
+            swa_dummy_token_start=int(getattr(self.kvcache, "_dummy_token_start", -1)),
+            swa_dummy_page=int(getattr(self.kvcache, "_swa_dummy_page", -1)),
+            swa_independent=bool(
+                getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)
+            ),
         )
 
     def _prep_metadata_in_graph_dst_bytes(
@@ -1316,6 +1346,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             + _tensor_nbytes(core.c4_out_loc, rows)
             + _tensor_nbytes(core.c128_out_loc, rows)
             + _tensor_nbytes(core.c4_indexer_out_loc, rows)
+            + _tensor_nbytes(core.swa_out_loc, rows)
         )
 
     def validate_after_replay(self, batch: Batch) -> None:
@@ -1484,6 +1515,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         eq_component_write_loc("c4_out_loc", expected.c4_page_table, 4)
         eq_component_write_loc("c128_out_loc", expected.c128_page_table, 128)
         eq_component_write_loc("c4_indexer_out_loc", expected.c4_indexer_page_table, 4)
+        eq_1d("swa_out_loc")
         eq_2d_active("page_table")
         eq_2d_active("c4_page_table")
         eq_2d_active("c128_page_table")
@@ -1782,6 +1814,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )
             and group in _direct_graph_metadata_groups()
         ):
+            return False
+        if self._materializing_prep_metadata_oracle:
             return False
         if group == "swa" and bool(
             getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)

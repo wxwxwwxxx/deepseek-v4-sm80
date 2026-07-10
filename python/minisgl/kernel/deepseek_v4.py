@@ -4647,10 +4647,15 @@ def prep_decode_metadata_in_graph(
     dst_c4_out_loc: torch.Tensor | None,
     dst_c128_out_loc: torch.Tensor | None,
     dst_c4_indexer_out_loc: torch.Tensor | None,
+    dst_swa_out_loc: torch.Tensor | None = None,
     rows: int,
     page_size: int,
     window_size: int,
     index_topk: int,
+    swa_full_to_swa_page: torch.Tensor | None = None,
+    swa_dummy_token_start: int = -1,
+    swa_dummy_page: int = -1,
+    swa_independent: bool = False,
 ) -> bool:
     if not dsv4_env_flag(DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE):
         return False
@@ -4664,7 +4669,7 @@ def prep_decode_metadata_in_graph(
         return False
     if dst_c4_out_loc is None or dst_c128_out_loc is None or dst_c4_indexer_out_loc is None:
         return False
-    tensors = (
+    tensors = [
         ctx_page_table,
         table_indices,
         positions,
@@ -4689,7 +4694,17 @@ def prep_decode_metadata_in_graph(
         dst_c4_out_loc,
         dst_c128_out_loc,
         dst_c4_indexer_out_loc,
-    )
+    ]
+    if swa_independent:
+        if (
+            swa_full_to_swa_page is None
+            or swa_dummy_token_start < 0
+            or swa_dummy_page < 0
+        ):
+            return False
+        tensors.append(swa_full_to_swa_page)
+    if dst_swa_out_loc is not None:
+        tensors.append(dst_swa_out_loc)
     if not all(t.is_cuda and t.dtype is torch.int32 and t.is_contiguous() for t in tensors):
         return False
     if (
@@ -4716,9 +4731,21 @@ def prep_decode_metadata_in_graph(
         or c4_indexer_page_table.shape[0] < rows
         or any(t.numel() < rows for t in tensors[8:14])
         or any(t.shape[0] < rows for t in tensors[14:21])
-        or any(t.numel() < rows for t in tensors[21:])
+        or any(t.numel() < rows for t in tensors[21:24])
     ):
         return False
+    if swa_independent:
+        assert swa_full_to_swa_page is not None
+        if swa_full_to_swa_page.ndim != 1:
+            return False
+    if dst_swa_out_loc is not None and (
+        dst_swa_out_loc.ndim != 1 or dst_swa_out_loc.numel() < rows
+    ):
+        return False
+    dummy_swa_full_to_swa_page = (
+        swa_full_to_swa_page if swa_full_to_swa_page is not None else table_indices
+    )
+    dummy_swa_out_loc = dst_swa_out_loc if dst_swa_out_loc is not None else raw_out_loc
     try:
         return bool(
             _triton_dsv4_ops().prep_decode_metadata_in_graph(
@@ -4746,9 +4773,15 @@ def prep_decode_metadata_in_graph(
                 dst_c4_out_loc,
                 dst_c128_out_loc,
                 dst_c4_indexer_out_loc,
+                dummy_swa_full_to_swa_page,
+                dummy_swa_out_loc,
                 page_size=int(page_size),
                 window_size=int(window_size),
                 index_topk=int(index_topk),
+                swa_independent=bool(swa_independent),
+                swa_dummy_token_start=int(swa_dummy_token_start),
+                swa_dummy_page=int(swa_dummy_page),
+                write_swa_out_loc=dst_swa_out_loc is not None,
             )
         )
     except Exception:

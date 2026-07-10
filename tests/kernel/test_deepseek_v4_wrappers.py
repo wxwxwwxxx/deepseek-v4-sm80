@@ -1113,6 +1113,200 @@ def test_direct_decode_index_metadata_for_replay_swa_independent_matches_oracle(
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(monkeypatch):
+    device = torch.device("cuda")
+    rows = 3
+    page_size = 128
+    window_size = 8
+    index_topk = 5
+    max_seqlen_k = 512
+    num_pages = 64
+    dummy_token_start = num_pages * page_size
+    swa_dummy_page = num_pages - 1
+
+    ctx_page_table = torch.stack(
+        [
+            torch.arange(0, max_seqlen_k, dtype=torch.int32),
+            torch.arange(1024, 1024 + max_seqlen_k, dtype=torch.int32),
+            torch.arange(2048, 2048 + max_seqlen_k, dtype=torch.int32),
+        ]
+    ).to(device)
+    ctx_page_table[1, 125] = -1
+    ctx_page_table[2, 376] = dummy_token_start
+    table_indices = torch.arange(rows, dtype=torch.int32, device=device)
+    positions = torch.tensor([127, 130, 383], dtype=torch.int32, device=device)
+    raw_out_loc = torch.tensor([127, dummy_token_start, 2048 + 383], dtype=torch.int32, device=device)
+    materialized_seq_lens = positions + 1
+    c4_page_table = torch.tensor(
+        [[10, 11, 12, 13], [14, -1, 16, 17], [18, 19, 20, 21]],
+        dtype=torch.int32,
+        device=device,
+    )
+    c128_page_table = torch.tensor(
+        [[30, 31, 32, 33], [34, 35, -1, 37], [38, 39, 40, 41]],
+        dtype=torch.int32,
+        device=device,
+    )
+    c4_indexer_page_table = c4_page_table + 50
+    full_to_swa_page = torch.remainder(
+        torch.arange(num_pages, dtype=torch.int32, device=device) * 7 + 5,
+        num_pages - 1,
+    )
+    full_to_swa_page[::9] = -1
+
+    dst_seq_lens = torch.full((rows,), -11, dtype=torch.int32, device=device)
+    dst_swa_lengths = torch.full((rows,), -12, dtype=torch.int32, device=device)
+    dst_c4_raw_lens = torch.full((rows,), -13, dtype=torch.int32, device=device)
+    dst_c4_clamp_lens = torch.full((rows,), -14, dtype=torch.int32, device=device)
+    dst_c4_sparse_lens = torch.full((rows,), -15, dtype=torch.int32, device=device)
+    dst_c128_clamp_lens = torch.full((rows,), -16, dtype=torch.int32, device=device)
+    dst_swa = torch.full((rows, window_size), -21, dtype=torch.int32, device=device)
+    dst_c4_raw = torch.full((rows, 8), -22, dtype=torch.int32, device=device)
+    dst_c4_page = torch.full_like(dst_c4_raw, -23)
+    dst_c4_full = torch.full_like(dst_c4_raw, -24)
+    dst_c128_raw = torch.full((rows, 8), -25, dtype=torch.int32, device=device)
+    dst_c128_page = torch.full_like(dst_c128_raw, -26)
+    dst_c128_full = torch.full_like(dst_c128_raw, -27)
+    dst_c4_out = torch.full((rows,), -31, dtype=torch.int32, device=device)
+    dst_c128_out = torch.full((rows,), -32, dtype=torch.int32, device=device)
+    dst_c4_indexer_out = torch.full((rows,), -33, dtype=torch.int32, device=device)
+    dst_swa_out = torch.full((rows,), -34, dtype=torch.int32, device=device)
+
+    oracle_swa = torch.full_like(dst_swa, -41)
+    oracle_c4_raw = torch.full_like(dst_c4_raw, -42)
+    oracle_c4_page = torch.full_like(dst_c4_page, -43)
+    oracle_c4_full = torch.full_like(dst_c4_full, -44)
+    oracle_c128_raw = torch.full_like(dst_c128_raw, -45)
+    oracle_c128_page = torch.full_like(dst_c128_page, -46)
+    oracle_c128_full = torch.full_like(dst_c128_full, -47)
+
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE, "1")
+    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE, "1")
+    assert dsv4_kernel.direct_decode_index_metadata_for_replay(
+        ctx_page_table=ctx_page_table,
+        table_indices=table_indices,
+        positions=positions,
+        c4_page_table=c4_page_table,
+        c128_page_table=c128_page_table,
+        dst_swa_page_indices=oracle_swa,
+        dst_c4_sparse_raw_indices=oracle_c4_raw,
+        dst_c4_sparse_page_indices=oracle_c4_page,
+        dst_c4_sparse_full_indices=oracle_c4_full,
+        dst_c128_raw_indices=oracle_c128_raw,
+        dst_c128_page_indices=oracle_c128_page,
+        dst_c128_full_indices=oracle_c128_full,
+        rows=rows,
+        page_size=page_size,
+        window_size=window_size,
+        index_topk=index_topk,
+        direct_swa=True,
+        direct_c4=True,
+        direct_c128=True,
+        swa_full_to_swa_page=full_to_swa_page,
+        swa_dummy_token_start=dummy_token_start,
+        swa_dummy_page=swa_dummy_page,
+        swa_independent=True,
+    )
+    assert dsv4_kernel.prep_decode_metadata_in_graph(
+        ctx_page_table=ctx_page_table,
+        table_indices=table_indices,
+        positions=positions,
+        raw_out_loc=raw_out_loc,
+        materialized_seq_lens=materialized_seq_lens,
+        c4_page_table=c4_page_table,
+        c128_page_table=c128_page_table,
+        c4_indexer_page_table=c4_indexer_page_table,
+        dst_seq_lens=dst_seq_lens,
+        dst_swa_topk_lengths=dst_swa_lengths,
+        dst_c4_topk_lengths_raw=dst_c4_raw_lens,
+        dst_c4_topk_lengths_clamp1=dst_c4_clamp_lens,
+        dst_c4_sparse_topk_lengths=dst_c4_sparse_lens,
+        dst_c128_topk_lengths_clamp1=dst_c128_clamp_lens,
+        dst_swa_page_indices=dst_swa,
+        dst_c4_sparse_raw_indices=dst_c4_raw,
+        dst_c4_sparse_page_indices=dst_c4_page,
+        dst_c4_sparse_full_indices=dst_c4_full,
+        dst_c128_raw_indices=dst_c128_raw,
+        dst_c128_page_indices=dst_c128_page,
+        dst_c128_full_indices=dst_c128_full,
+        dst_c4_out_loc=dst_c4_out,
+        dst_c128_out_loc=dst_c128_out,
+        dst_c4_indexer_out_loc=dst_c4_indexer_out,
+        dst_swa_out_loc=dst_swa_out,
+        rows=rows,
+        page_size=page_size,
+        window_size=window_size,
+        index_topk=index_topk,
+        swa_full_to_swa_page=full_to_swa_page,
+        swa_dummy_token_start=dummy_token_start,
+        swa_dummy_page=swa_dummy_page,
+        swa_independent=True,
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(dst_swa, oracle_swa)
+    assert torch.equal(dst_c4_raw, oracle_c4_raw)
+    assert torch.equal(dst_c4_page, oracle_c4_page)
+    assert torch.equal(dst_c4_full, oracle_c4_full)
+    assert torch.equal(dst_c128_raw, oracle_c128_raw)
+    assert torch.equal(dst_c128_page, oracle_c128_page)
+    assert torch.equal(dst_c128_full, oracle_c128_full)
+
+    cpu_positions = positions.cpu()
+    seq_lens = cpu_positions + 1
+    assert dst_seq_lens.cpu().tolist() == seq_lens.tolist()
+    assert dst_swa_lengths.cpu().tolist() == [min(int(x), window_size) for x in seq_lens]
+    c4_raw_lens = [int(x) // 4 for x in seq_lens]
+    c128_raw_lens = [int(x) // 128 for x in seq_lens]
+    assert dst_c4_raw_lens.cpu().tolist() == c4_raw_lens
+    assert dst_c4_clamp_lens.cpu().tolist() == [max(x, 1) for x in c4_raw_lens]
+    assert dst_c4_sparse_lens.cpu().tolist() == [min(x, index_topk) for x in c4_raw_lens]
+    assert dst_c128_clamp_lens.cpu().tolist() == [max(x, 1) for x in c128_raw_lens]
+
+    def expected_component_out(table: torch.Tensor, pos: int, ratio: int) -> int:
+        seq_len = pos + 1
+        if seq_len % ratio != 0:
+            return -1
+        component_page_size = max(page_size // ratio, 1)
+        raw = seq_len // ratio - 1
+        logical_page = raw // component_page_size
+        offset = raw % component_page_size
+        page = int(table[logical_page].item())
+        return page * component_page_size + offset if page >= 0 else -1
+
+    cpu_c4 = c4_page_table.cpu()
+    cpu_c128 = c128_page_table.cpu()
+    cpu_c4_indexer = c4_indexer_page_table.cpu()
+    assert dst_c4_out.cpu().tolist() == [
+        expected_component_out(cpu_c4[row], int(pos), 4)
+        for row, pos in enumerate(cpu_positions.tolist())
+    ]
+    assert dst_c128_out.cpu().tolist() == [
+        expected_component_out(cpu_c128[row], int(pos), 128)
+        for row, pos in enumerate(cpu_positions.tolist())
+    ]
+    assert dst_c4_indexer_out.cpu().tolist() == [
+        expected_component_out(cpu_c4_indexer[row], int(pos), 4)
+        for row, pos in enumerate(cpu_positions.tolist())
+    ]
+
+    cpu_map = full_to_swa_page.cpu()
+    expected_swa_out = []
+    for full_loc in raw_out_loc.cpu().tolist():
+        if full_loc == dummy_token_start:
+            expected_swa_out.append(swa_dummy_page * page_size)
+            continue
+        full_page = full_loc // page_size
+        offset = full_loc % page_size
+        if full_loc < 0 or full_page < 0 or full_page >= num_pages:
+            expected_swa_out.append(-1)
+            continue
+        swa_page = int(cpu_map[full_page].item())
+        expected_swa_out.append(swa_page * page_size + offset if swa_page >= 0 else -1)
+    assert dst_swa_out.cpu().tolist() == expected_swa_out
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_decode_metadata_deforest_component_tables_match_oracle(monkeypatch):
     device = torch.device("cuda")
     rows = 3
