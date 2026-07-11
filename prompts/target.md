@@ -51,15 +51,18 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 | TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | paused for v0.0.0 and archived | `v0.0.0` remains MTP-free.  Early lifecycle bugs were real, while the late token flips are now strongly associated with deterministic BF16 row-shape non-invariance plus an incomplete flattened verify contract.  Any post-release restart must be a bounded, SGLang-aligned contract port from the current stable branch; the old branch is oracle/history only. |
 | TARGET 12 | `prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md` | active post-v0.0.0 long-context attribution | The tagged v0.0.0 release baseline has public graph64/128/256 and 512K/1M recipes, repeat-stable balanced graph256 performance, and exact 1M capability. TARGET 12.61 now uses a checkpointed 512K run and production-shape microbenches to rank indexer/C4/C128/cache owners against SGLang/vLLM before any kernel rewrite. |
+| TARGET misc release cleanup | `prompts/TARGET_misc_dsv4_release_cleanup.md` | planned final release cleanup | Reduce the active repository to DeepSeek V4 Flash support, one default optimized path, one opt-in fallback/oracle path, a clean DSV4 benchmark/README surface, and a final package/correctness/performance soak.  Run child targets misc 01-05 in order after committing the pre-cleanup state. |
 
 ## Current Milestones
 
 Current release baseline:
 
 ```text
-tag:     v0.0.0
-commit:  005f879e73fe9fe7a1e74f3adedf1c8eeceed41b
-record:  prompts/DSV4_SM80_V0.0.0_RELEASE_BASELINE.md
+performance tag:       v0.0.0
+performance commit:    005f879e73fe9fe7a1e74f3adedf1c8eeceed41b
+downstream package:    minisgl==0.1.0+dsv4.sm80
+recommended final tag: v0.1.0-dsv4-sm80
+record:                prompts/DSV4_SM80_V0.0.0_RELEASE_BASELINE.md
 ```
 
 This is the default non-MTP comparison point for future performance and

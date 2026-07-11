@@ -10,6 +10,19 @@ commit:      005f879e73fe9fe7a1e74f3adedf1c8eeceed41b
 date:        2026-07-11 CST
 ```
 
+This tag remains the immutable pre-cleanup performance baseline.  The
+downstream release identity selected later is:
+
+```text
+distribution:          minisgl
+package version:       0.1.0+dsv4.sm80
+recommended final tag: v0.1.0-dsv4-sm80
+```
+
+The final tag is reserved for the post-cleanup qualified commit.  It does not
+replace or move `v0.0.0`; performance comparisons continue to use the baseline
+recorded here.
+
 The measurements were collected by TARGET 12.606 while its implementation was
 still a target worktree and were then committed and tagged as `v0.0.0`. The
 repository was clean and the tag pointed at the commit above when this baseline

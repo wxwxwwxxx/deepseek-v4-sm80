@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minisgl"
-version = "0.1.0"
-description = "What is this?"
+version = "0.1.0+dsv4.sm80"
+description = "A Mini-SGLang derivative focused on DeepSeek V4 Flash serving on NVIDIA A100/sm80"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
