@@ -49,7 +49,7 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 08 | `prompts/TARGET_08_radix_prefix_dsv4.md` | closed prefix baseline plus SWA/metadata history | Built DSV4 radix prefix cache, Route-B ownership, SWA lifecycle work, and direct replay metadata cleanup; detailed child targets remain as history for prefix/SWA correctness and capacity work. |
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | deferred | Low-precision research is paused after the INT8 MoE feasibility pass did not show an obvious short win; keep the evidence for later INT8/FP8 work. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
-| TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | paused and archived | MTP speculative decoding was investigated and preserved on `dsv4-mtp-paused-reference`, but the current target-verify runtime failed the no-spec target decode equivalence contract.  Current release branch removes active MTP runtime/opt-ins and should establish a post-MTP-cleanup non-MTP baseline. |
+| TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | paused for v0.0.0 and archived | `v0.0.0` remains MTP-free.  Early lifecycle bugs were real, while the late token flips are now strongly associated with deterministic BF16 row-shape non-invariance plus an incomplete flattened verify contract.  Any post-release restart must be a bounded, SGLang-aligned contract port from the current stable branch; the old branch is oracle/history only. |
 | TARGET 12 | `prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md` | active post-v0.0.0 long-context attribution | The tagged v0.0.0 release baseline has public graph64/128/256 and 512K/1M recipes, repeat-stable balanced graph256 performance, and exact 1M capability. TARGET 12.61 now uses a checkpointed 512K run and production-shape microbenches to rank indexer/C4/C128/cache owners against SGLang/vLLM before any kernel rewrite. |
 
 ## Current Milestones
@@ -151,9 +151,12 @@ TARGET 09 low-precision work is now summarized in `prompts/TARGET_09_dsv4_sm80_l
 - Dense FP8 projection is currently a memory/capacity feature, not a throughput win.
 - TARGET 09 is deferred until a fresh profile or memory ledger makes
   low-precision work clearly valuable again.
-- TARGET 11 MTP is paused for release; its code/debug history is preserved on
-  `dsv4-mtp-paused-reference`, and fine-grained prompts are archived under
-  `prompts/archive/target11/`.
+- TARGET 11 MTP is explicitly not restarting in `v0.0.0`.  Its code/debug
+  history is preserved on `dsv4-mtp-paused-reference`, and fine-grained prompts
+  are archived under `prompts/archive/target11/`.  A future restart is only a
+  conditional post-release project: start from the current stable runtime,
+  port a dedicated SGLang-aligned target-verify contract, and classify
+  row-shape numerical differences before enabling commit or CUDA graph.
 
 TARGET 12 starting point:
 
