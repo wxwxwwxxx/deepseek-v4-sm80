@@ -97,19 +97,23 @@ Run these targets in order:
    - no broad deletion;
    - produce runtime, operator, env-toggle, model-dependency, and benchmark
      `KEEP/DELETE/REVIEW` manifests.
-2. `TARGET_misc_02_dsv4_two_path_runtime_cleanup.md`
+2. `TARGET_misc_01.5_dsv4_census_manifest_hardening.md`
+   - correct string-valued default and hard-coded unknown classifications;
+   - use actual release/oracle runtime coverage to authorize kernel retention;
+   - resolve wrapper/private Triton/JIT/native source ownership.
+3. `TARGET_misc_02_dsv4_two_path_runtime_cleanup.md`
    - establish one explicit runtime-mode contract;
    - make optimized direct/default and fallback explicit;
    - remove research paths, dead kernels, NVTX, and runtime debug machinery.
-3. `TARGET_misc_03_dsv4_only_repository_prune.md`
+4. `TARGET_misc_03_dsv4_only_repository_prune.md`
    - delete unsupported model implementations and code proven unreachable from
      DSV4 serving;
    - prune tests, registries, dependencies, and docs accordingly.
-4. `TARGET_misc_04_dsv4_benchmark_readme_surface.md`
+5. `TARGET_misc_04_dsv4_benchmark_readme_surface.md`
    - preserve the four requested generic benchmark entry files;
    - move DSV4 development/microbench scripts under `debug/`;
    - rewrite README and public examples for DSV4-only support.
-5. `TARGET_misc_05_dsv4_release_cleanup_soak.md`
+6. `TARGET_misc_05_dsv4_release_cleanup_soak.md`
    - validate package, Python/CLI/server/shell/benchmark entries, optimized and
      fallback modes, correctness, capacity, and performance.
 

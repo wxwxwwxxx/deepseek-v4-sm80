@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned after TARGET misc 01 produces a complete census.
+Planned after TARGET misc 01.5 produces a hardened, runtime-covered census.
 
 ## Goal
 
@@ -23,12 +23,16 @@ Required:
 ```text
 prompts/TARGET_misc_dsv4_release_cleanup.md
 prompts/TARGET_misc_01_dsv4_two_path_census.md
+prompts/TARGET_misc_01.5_dsv4_census_manifest_hardening.md
 performance_milestones/misc_release_two_path_census/README.md
-performance_milestones/misc_release_two_path_census/*_manifest.json
+performance_milestones/misc_release_census_manifest_hardening/README.md
+performance_milestones/misc_release_census_manifest_hardening/*_manifest.json
 ```
 
 The worktree must begin at the recorded cleanup base or a documented descendant.
-Do not proceed with unresolved `UNKNOWN_REVIEW` hot-path toggles.
+Do not proceed with unresolved `UNKNOWN_REVIEW` hot-path toggles or generic
+callable REVIEW entries.  Kernel deletion authority comes from the hardened
+release/oracle runtime coverage manifest, not the first AST census.
 
 ## Required Design
 
@@ -93,8 +97,10 @@ Do not support switching an already initialized optimized Engine to fallback.
 
 ### 4. Delete Non-Release Operator Paths
 
-Delete `DELETE` entries from the operator manifest, including associated Python,
-Triton, C++/CUDA, vendor, registration, export, and test code.
+Delete `DELETE_RESEARCH` and `DELETE_DEBUG` entries from the hardened operator
+manifest, including associated Python, Triton, C++/CUDA, vendor, registration,
+export, and test code.  Keep only kernels with `KEEP_RELEASE`, `KEEP_ORACLE`, or
+`KEEP_SHARED_BUILD` evidence.
 
 Likely candidates requiring manifest confirmation include:
 
@@ -106,6 +112,8 @@ Likely candidates requiring manifest confirmation include:
 - unused projection/GEMM experiments.
 
 Do not remove optimized shape dispatch or the actual fallback oracle.
+Do not retain a kernel only because it was historically benchmarked, exported,
+or compiled by a broad source glob.
 
 ### 5. Remove Development Runtime Code
 
