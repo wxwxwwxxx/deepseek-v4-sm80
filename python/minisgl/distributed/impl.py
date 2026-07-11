@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, List
 
 import torch
 import torch.distributed as dist
-from minisgl.utils import dsv4_owner_timing
+from minisgl.utils import dsv4_long_prefill_timing, dsv4_owner_timing
 
 if TYPE_CHECKING:
     from minisgl.distributed import DistributedInfo
@@ -67,32 +67,44 @@ class DistributedCommunicator:
 
     def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
         self._record("all_reduce", x, x.shape, label)
-        if not dsv4_owner_timing.enabled():
-            return self.plugins[-1].all_reduce(x)
-        with dsv4_owner_timing.maybe_cuda_range(
-            _owner_all_reduce_timing_label(label),
-            {
-                "comm_label": label or "unlabeled",
-                "tensor": dsv4_owner_timing.tensor_metadata(x),
-            },
-        ):
-            return self.plugins[-1].all_reduce(x)
+        long_metadata = {
+            "op": "all_reduce",
+            "comm_label": label or "unlabeled",
+            "bytes": int(x.numel() * x.element_size()),
+        }
+        with dsv4_long_prefill_timing.maybe_cuda_range("collectives", long_metadata):
+            if not dsv4_owner_timing.enabled():
+                return self.plugins[-1].all_reduce(x)
+            with dsv4_owner_timing.maybe_cuda_range(
+                _owner_all_reduce_timing_label(label),
+                {
+                    "comm_label": label or "unlabeled",
+                    "tensor": dsv4_owner_timing.tensor_metadata(x),
+                },
+            ):
+                return self.plugins[-1].all_reduce(x)
 
     def all_gather(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
         output_shape = list(x.shape)
         output_shape[0] *= _world_size()
         self._record("all_gather", x, output_shape, label)
-        if not dsv4_owner_timing.enabled():
-            return self.plugins[-1].all_gather(x)
-        with dsv4_owner_timing.maybe_cuda_range(
-            _owner_all_gather_timing_label(label),
-            {
-                "comm_label": label or "unlabeled",
-                "tensor": dsv4_owner_timing.tensor_metadata(x),
-                "output_shape": [int(dim) for dim in output_shape],
-            },
-        ):
-            return self.plugins[-1].all_gather(x)
+        long_metadata = {
+            "op": "all_gather",
+            "comm_label": label or "unlabeled",
+            "bytes": int(x.numel() * x.element_size() * _world_size()),
+        }
+        with dsv4_long_prefill_timing.maybe_cuda_range("collectives", long_metadata):
+            if not dsv4_owner_timing.enabled():
+                return self.plugins[-1].all_gather(x)
+            with dsv4_owner_timing.maybe_cuda_range(
+                _owner_all_gather_timing_label(label),
+                {
+                    "comm_label": label or "unlabeled",
+                    "tensor": dsv4_owner_timing.tensor_metadata(x),
+                    "output_shape": [int(dim) for dim in output_shape],
+                },
+            ):
+                return self.plugins[-1].all_gather(x)
 
     @classmethod
     def reset_stats(cls) -> None:

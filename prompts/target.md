@@ -50,9 +50,23 @@ mini-sglang 中的高性能推理，重点是 A100/sm80 适配。
 | TARGET 09 | `prompts/TARGET_09_dsv4_sm80_low_precision_research.md` | deferred | Low-precision research is paused after the INT8 MoE feasibility pass did not show an obvious short win; keep the evidence for later INT8/FP8 work. |
 | TARGET 10 | `prompts/TARGET_10_dsv4_sm80_optional_attention_comm_research.md` | closed communication baseline | Default-promoted PyNCCL threshold32m for the A100/sm80 DSV4 communication path; detailed prompts archived under `prompts/archive/target10/`. |
 | TARGET 11 | `prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md` | paused and archived | MTP speculative decoding was investigated and preserved on `dsv4-mtp-paused-reference`, but the current target-verify runtime failed the no-spec target decode equivalence contract.  Current release branch removes active MTP runtime/opt-ins and should establish a post-MTP-cleanup non-MTP baseline. |
-| TARGET 12 | `prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md` | active fallback census | Post-MTP-cleanup non-MTP performance follow-up: promoted the DSV4 A100/sm80 release bundle with SWA independent lifecycle, HC prenorm temporary elimination, and conservative 8192-token chunked prefill; current work is fallback/native-backend census after 12.56 showed larger chunks are limited by indexer fallback temporaries. |
+| TARGET 12 | `prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md` | active post-v0.0.0 long-context attribution | The tagged v0.0.0 release baseline has public graph64/128/256 and 512K/1M recipes, repeat-stable balanced graph256 performance, and exact 1M capability. TARGET 12.61 now uses a checkpointed 512K run and production-shape microbenches to rank indexer/C4/C128/cache owners against SGLang/vLLM before any kernel rewrite. |
 
 ## Current Milestones
+
+Current release baseline:
+
+```text
+tag:     v0.0.0
+commit:  005f879e73fe9fe7a1e74f3adedf1c8eeceed41b
+record:  prompts/DSV4_SM80_V0.0.0_RELEASE_BASELINE.md
+```
+
+This is the default non-MTP comparison point for future performance and
+correctness work. It promotes req256/graph256 as the no-env balanced recipe,
+keeps public graph64/graph128 capacity-oriented recipes, and proves bounded
+512K plus exact 1M capability. Publication-grade long-context performance is
+deferred until TARGET 12.61 finishes backend attribution.
 
 TARGET 07 non-prefix baseline:
 

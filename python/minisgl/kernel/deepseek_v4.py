@@ -19,7 +19,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from minisgl.kernel.utils import load_jit
-from minisgl.utils import div_ceil
+from minisgl.utils import div_ceil, dsv4_long_prefill_timing
 
 WeightKind = Literal["bf16", "fp8", "fp4"]
 KernelStatus = Literal["native", "fallback", "unsupported", "todo"]
@@ -2991,33 +2991,61 @@ def indexer_select_fp8_paged_fallback(
         for start in range(0, rows, max_chunk_rows):
             end = min(start + max_chunk_rows, rows)
             logits_backend: list[str] = []
-            chunk_logits = indexer_fp8_paged_logits_fallback(
-                q_values[start:end],
-                packed_cache,
-                seq_lens[start:end],
-                page_table[start:end],
-                page_size=page_size,
-                weights=weights[start:end],
-                _backend=logits_backend,
-                layer_id=layer_id,
-            )
-            chunk_topk = topk_transform_512_full_fallback(
-                chunk_logits,
-                seq_lens[start:end].to(device=chunk_logits.device, dtype=torch.int32),
-                page_table[start:end].to(device=chunk_logits.device, dtype=torch.int32),
-                page_size=page_size,
-                width=width,
-                ratio=ratio,
-            )
-            raw_indices[start:end].copy_(chunk_topk.raw_indices)
-            page_indices[start:end].copy_(chunk_topk.page_indices)
-            full_indices[start:end].copy_(chunk_topk.full_indices)
-            if chunk_topk.topk_lens is None:
-                topk_lens[start:end].copy_(
-                    seq_lens[start:end].clamp(min=0, max=width).to(torch.int32)
+            slice_metadata = {
+                "layer_id": int(layer_id) if layer_id is not None else -1,
+                "max_c4_seq_len": int(max_seq_len),
+                "slice_rows": int(end - start),
+                "logits_elements": int((end - start) * max_seq_len),
+                "logits_bytes": int((end - start) * max_seq_len * 4),
+                "topk_width": int(width),
+            }
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "indexer_logits", slice_metadata
+            ):
+                chunk_logits = indexer_fp8_paged_logits_fallback(
+                    q_values[start:end],
+                    packed_cache,
+                    seq_lens[start:end],
+                    page_table[start:end],
+                    page_size=page_size,
+                    weights=weights[start:end],
+                    _backend=logits_backend,
+                    layer_id=layer_id,
                 )
-            else:
-                topk_lens[start:end].copy_(chunk_topk.topk_lens)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "indexer_local_global_topk", slice_metadata
+            ):
+                chunk_topk = topk_transform_512_full_fallback(
+                    chunk_logits,
+                    seq_lens[start:end].to(
+                        device=chunk_logits.device, dtype=torch.int32
+                    ),
+                    page_table[start:end].to(
+                        device=chunk_logits.device, dtype=torch.int32
+                    ),
+                    page_size=page_size,
+                    width=width,
+                    ratio=ratio,
+                )
+                raw_indices[start:end].copy_(chunk_topk.raw_indices)
+                page_indices[start:end].copy_(chunk_topk.page_indices)
+                full_indices[start:end].copy_(chunk_topk.full_indices)
+                if chunk_topk.topk_lens is None:
+                    topk_lens[start:end].copy_(
+                        seq_lens[start:end].clamp(min=0, max=width).to(torch.int32)
+                    )
+                else:
+                    topk_lens[start:end].copy_(chunk_topk.topk_lens)
+            dsv4_long_prefill_timing.record_counter(
+                "indexer_slice",
+                {
+                    **slice_metadata,
+                    "backend": (
+                        logits_backend[0] if logits_backend else "torch_fp8_paged"
+                    ),
+                    "topk_backend": chunk_topk.backend,
+                },
+            )
             backend_names.add(logits_backend[0] if logits_backend else "torch_fp8_paged")
             backend_names.add(chunk_topk.backend)
             chunk_count += 1
@@ -3045,25 +3073,41 @@ def indexer_select_fp8_paged_fallback(
         )
 
     logits_backend: list[str] = []
-    logits = indexer_fp8_paged_logits_fallback(
-        q_values,
-        packed_cache,
-        seq_lens,
-        page_table,
-        page_size=page_size,
-        weights=weights,
-        _backend=logits_backend,
-        layer_id=layer_id,
-    )
-    topk = topk_transform_512_full_fallback(
-        logits,
-        seq_lens.to(device=logits.device, dtype=torch.int32),
-        page_table.to(device=logits.device, dtype=torch.int32),
-        page_size=page_size,
-        width=width,
-        ratio=ratio,
-    )
+    slice_metadata = {
+        "layer_id": int(layer_id) if layer_id is not None else -1,
+        "max_c4_seq_len": int(max_seq_len),
+        "slice_rows": int(rows),
+        "logits_elements": int(rows * max_seq_len),
+        "logits_bytes": int(rows * max_seq_len * 4),
+        "topk_width": int(width),
+    }
+    with dsv4_long_prefill_timing.maybe_cuda_range("indexer_logits", slice_metadata):
+        logits = indexer_fp8_paged_logits_fallback(
+            q_values,
+            packed_cache,
+            seq_lens,
+            page_table,
+            page_size=page_size,
+            weights=weights,
+            _backend=logits_backend,
+            layer_id=layer_id,
+        )
+    with dsv4_long_prefill_timing.maybe_cuda_range(
+        "indexer_local_global_topk", slice_metadata
+    ):
+        topk = topk_transform_512_full_fallback(
+            logits,
+            seq_lens.to(device=logits.device, dtype=torch.int32),
+            page_table.to(device=logits.device, dtype=torch.int32),
+            page_size=page_size,
+            width=width,
+            ratio=ratio,
+        )
     backend = logits_backend[0] if logits_backend else "torch_fp8_paged"
+    dsv4_long_prefill_timing.record_counter(
+        "indexer_slice",
+        {**slice_metadata, "backend": backend, "topk_backend": topk.backend},
+    )
     return DSV4IndexerSelectOutput(logits=logits, topk=topk, backend=f"{backend}+{topk.backend}")
 
 

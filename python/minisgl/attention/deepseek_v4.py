@@ -13,6 +13,7 @@ from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
 from minisgl.utils import (
     div_ceil,
     dsv4_direct_copy_nvtx,
+    dsv4_long_prefill_timing,
     dsv4_memory_debug,
     dsv4_owner_timing,
     dsv4_prefix_debug,
@@ -449,10 +450,57 @@ class DSV4AttentionBackend(BaseAttnBackend):
         return self.kvcache.get_layer_mapping(layer_id).compress_ratio
 
     def prepare_metadata(self, batch: Batch) -> None:
+        started = time.perf_counter()
         if self._should_prepare_raw_decode_metadata_in_graph(batch):
             batch.attn_metadata = self._build_raw_decode_graph_metadata(batch)
         else:
             batch.attn_metadata = self._build_metadata(batch)
+        if dsv4_long_prefill_timing.enabled() and batch.is_prefill:
+            committed_context = max(
+                (int(req.device_len) for req in batch.reqs), default=0
+            )
+            rows = int(sum(req.extend_len for req in batch.padded_reqs))
+            dsv4_long_prefill_timing.record_host(
+                "scheduler_chunk_metadata_prepare",
+                (time.perf_counter() - started) * 1000.0,
+                {
+                    "committed_context": committed_context,
+                    "rows": rows,
+                    "batch_size": int(batch.size),
+                    "padded_size": int(batch.padded_size),
+                },
+            )
+            metadata = batch.attn_metadata
+            if isinstance(metadata, DSV4AttentionMetadata):
+                core = metadata.core_metadata
+                fields = (
+                    core.page_table,
+                    core.c4_page_table,
+                    core.c128_page_table,
+                    core.c4_indexer_page_table,
+                    core.swa_page_indices,
+                    core.c4_sparse_page_indices,
+                    core.c128_page_indices,
+                )
+                dsv4_long_prefill_timing.record_counter(
+                    "metadata_checkpoint",
+                    {
+                        "committed_context": committed_context,
+                        "rows": rows,
+                        "metadata_bytes": int(
+                            sum(
+                                tensor.numel() * tensor.element_size()
+                                for tensor in fields
+                                if tensor is not None
+                            )
+                        ),
+                        "c4_key_count_max": min(committed_context // 4, self.index_topk),
+                        "c128_key_count_max": committed_context // 128,
+                        "c4_indices_shape": list(core.c4_sparse_page_indices.shape),
+                        "c128_indices_shape": list(core.c128_page_indices.shape),
+                        "page_table_shape": list(core.page_table.shape),
+                    },
+                )
 
     def _prep_metadata_in_graph_oracle_enabled(self) -> bool:
         return (
@@ -655,17 +703,30 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 )
             swa_out_loc = metadata.core_metadata.swa_out_loc
             rows = int(batch.out_loc.shape[0])
-            if swa_out_loc is not None and int(swa_out_loc.shape[0]) >= rows:
-                dsv4_kernel.store_swa_fallback(
-                    self.kvcache,
-                    layer_id,
-                    k,
-                    swa_out_loc[:rows],
-                    out_loc_is_swa=True,
-                )
-            else:
-                dsv4_kernel.store_swa_fallback(self.kvcache, layer_id, k, batch.out_loc)
-        return self._fallback_attention(q, layer_id, metadata.core_metadata, ratio, attn_sink)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "swa_and_cache_write",
+                {"layer_id": int(layer_id), "cache": "swa", "rows": int(rows)},
+            ):
+                if swa_out_loc is not None and int(swa_out_loc.shape[0]) >= rows:
+                    dsv4_kernel.store_swa_fallback(
+                        self.kvcache,
+                        layer_id,
+                        k,
+                        swa_out_loc[:rows],
+                        out_loc_is_swa=True,
+                    )
+                else:
+                    dsv4_kernel.store_swa_fallback(
+                        self.kvcache, layer_id, k, batch.out_loc
+                    )
+        owner = {0: "swa_attention", 4: "c4_attention", 128: "c128_attention"}[ratio]
+        with dsv4_long_prefill_timing.maybe_cuda_range(
+            owner,
+            {"layer_id": int(layer_id), "compress_ratio": int(ratio)},
+        ):
+            return self._fallback_attention(
+                q, layer_id, metadata.core_metadata, ratio, attn_sink
+            )
 
     def store_compressed(
         self,
@@ -708,22 +769,30 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 n = compressed_positions.numel()
         if n == 0:
             return
-        dsv4_kernel.compress_norm_rope_store_fallback(
-            self.kvcache,
-            layer_id,
-            kv[:n],
-            loc[:n],
-            positions=compressed_positions[:n],
-            norm_weight=norm_weight,
-            rms_norm_eps=rms_norm_eps,
-            rotary_dim=rotary_dim,
-            base=base,
-            original_seq_len=original_seq_len,
-            factor=factor,
-            beta_fast=beta_fast,
-            beta_slow=beta_slow,
-            cache_type="compressed",
-        )
+        with dsv4_long_prefill_timing.maybe_cuda_range(
+            "swa_and_cache_write",
+            {
+                "layer_id": int(layer_id),
+                "cache": f"c{int(compress_ratio)}",
+                "rows": int(n),
+            },
+        ):
+            dsv4_kernel.compress_norm_rope_store_fallback(
+                self.kvcache,
+                layer_id,
+                kv[:n],
+                loc[:n],
+                positions=compressed_positions[:n],
+                norm_weight=norm_weight,
+                rms_norm_eps=rms_norm_eps,
+                rotary_dim=rotary_dim,
+                base=base,
+                original_seq_len=original_seq_len,
+                factor=factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+                cache_type="compressed",
+            )
 
     def store_indexer(
         self,
@@ -762,23 +831,27 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 n = compressed_positions.numel()
         if n == 0:
             return
-        dsv4_kernel.compress_norm_rope_store_fallback(
-            self.kvcache,
-            layer_id,
-            kv[:n],
-            loc[:n],
-            positions=compressed_positions[:n],
-            norm_weight=norm_weight,
-            rms_norm_eps=rms_norm_eps,
-            rotary_dim=rotary_dim,
-            base=base,
-            original_seq_len=original_seq_len,
-            factor=factor,
-            beta_fast=beta_fast,
-            beta_slow=beta_slow,
-            cache_type="indexer",
-            apply_hadamard=apply_hadamard,
-        )
+        with dsv4_long_prefill_timing.maybe_cuda_range(
+            "indexer_cache_write_quantization",
+            {"layer_id": int(layer_id), "rows": int(n)},
+        ):
+            dsv4_kernel.compress_norm_rope_store_fallback(
+                self.kvcache,
+                layer_id,
+                kv[:n],
+                loc[:n],
+                positions=compressed_positions[:n],
+                norm_weight=norm_weight,
+                rms_norm_eps=rms_norm_eps,
+                rotary_dim=rotary_dim,
+                base=base,
+                original_seq_len=original_seq_len,
+                factor=factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+                cache_type="indexer",
+                apply_hadamard=apply_hadamard,
+            )
 
     def select_indexer(
         self,
@@ -818,18 +891,21 @@ class DSV4AttentionBackend(BaseAttnBackend):
         )
         self._capture_indexer_select_debug(layer_id, out, seq_lens, page_table)
         core = metadata.core_metadata
-        raw_indices, page_indices, full_indices = self._remap_indexer_topk_for_attention(
-            core,
-            out,
-        )
-        self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
-        self._merge_indexer_rows_in_place(core.c4_sparse_page_indices, page_indices)
-        self._merge_indexer_rows_in_place(core.c4_sparse_full_indices, full_indices)
-        if out.topk.topk_lens is not None:
-            self._merge_indexer_lengths_in_place(
-                core.c4_sparse_topk_lengths,
-                out.topk.topk_lens,
+        with dsv4_long_prefill_timing.maybe_cuda_range(
+            "indexer_topk_remap",
+            {"layer_id": int(layer_id), "rows": int(rows)},
+        ):
+            raw_indices, page_indices, full_indices = (
+                self._remap_indexer_topk_for_attention(core, out)
             )
+            self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
+            self._merge_indexer_rows_in_place(core.c4_sparse_page_indices, page_indices)
+            self._merge_indexer_rows_in_place(core.c4_sparse_full_indices, full_indices)
+            if out.topk.topk_lens is not None:
+                self._merge_indexer_lengths_in_place(
+                    core.c4_sparse_topk_lengths,
+                    out.topk.topk_lens,
+                )
         return out
 
     def select_indexer_fp8(
@@ -900,18 +976,21 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )
         self._capture_indexer_select_debug(layer_id, out, seq_lens, page_table)
         core = metadata.core_metadata
-        raw_indices, page_indices, full_indices = self._remap_indexer_topk_for_attention(
-            core,
-            out,
-        )
-        self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
-        self._merge_indexer_rows_in_place(core.c4_sparse_page_indices, page_indices)
-        self._merge_indexer_rows_in_place(core.c4_sparse_full_indices, full_indices)
-        if out.topk.topk_lens is not None:
-            self._merge_indexer_lengths_in_place(
-                core.c4_sparse_topk_lengths,
-                out.topk.topk_lens,
+        with dsv4_long_prefill_timing.maybe_cuda_range(
+            "indexer_topk_remap",
+            {"layer_id": int(layer_id), "rows": int(rows)},
+        ):
+            raw_indices, page_indices, full_indices = (
+                self._remap_indexer_topk_for_attention(core, out)
             )
+            self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
+            self._merge_indexer_rows_in_place(core.c4_sparse_page_indices, page_indices)
+            self._merge_indexer_rows_in_place(core.c4_sparse_full_indices, full_indices)
+            if out.topk.topk_lens is not None:
+                self._merge_indexer_lengths_in_place(
+                    core.c4_sparse_topk_lengths,
+                    out.topk.topk_lens,
+                )
         return out
 
     def _capture_indexer_select_debug(

@@ -2510,6 +2510,37 @@ def make_benchmark_llm_class():
                 )
             graph_before = copy.deepcopy(getattr(self.engine.graph_runner, "capture_status", {}))
             torch.cuda.synchronize(self.device)
+            long_prefill_timing = (
+                os.environ.get("MINISGL_DSV4_LONG_PREFILL_TIMING", "").strip().lower()
+                in {"1", "true", "yes", "on"}
+                and bool(batch.is_prefill)
+            )
+            chunk_memory_before = None
+            if long_prefill_timing:
+                free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
+                chunk_memory_before = {
+                    "allocated_bytes": int(torch.cuda.memory_allocated(self.device)),
+                    "reserved_bytes": int(torch.cuda.memory_reserved(self.device)),
+                    "free_bytes": int(free_bytes),
+                    "total_bytes": int(total_bytes),
+                }
+                torch.cuda.reset_peak_memory_stats(self.device)
+            profiler_checkpoint = False
+            raw_profiler_contexts = os.environ.get(
+                "MINISGL_DSV4_LONG_PREFILL_PROFILER_CHECKPOINTS", ""
+            ).strip()
+            if raw_profiler_contexts and batch.is_prefill:
+                profiler_contexts = {
+                    int(value.strip())
+                    for value in raw_profiler_contexts.split(",")
+                    if value.strip()
+                }
+                committed_context = max(
+                    (int(req.device_len) for req in batch.reqs), default=0
+                )
+                profiler_checkpoint = committed_context in profiler_contexts
+            if profiler_checkpoint:
+                torch.cuda.profiler.start()
             with torch.cuda.nvtx.range(range_name):
                 tic = time.perf_counter()
                 enqueue_tic = time.perf_counter()
@@ -2518,6 +2549,8 @@ def make_benchmark_llm_class():
                 enqueue_toc = time.perf_counter()
                 torch.cuda.synchronize(self.device)
                 toc = time.perf_counter()
+            if profiler_checkpoint:
+                torch.cuda.profiler.stop()
             graph_after = getattr(self.engine.graph_runner, "capture_status", {})
             info = self._bench_batch_info.pop(batch_id, {})
             replay_delta = int(graph_after.get("replay_count") or 0) - int(
@@ -2537,6 +2570,25 @@ def make_benchmark_llm_class():
                     "graph_eager_delta": eager_delta,
                 }
             )
+            if long_prefill_timing:
+                free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
+                allocated = int(torch.cuda.memory_allocated(self.device))
+                peak_allocated = int(torch.cuda.max_memory_allocated(self.device))
+                info["long_prefill_memory"] = {
+                    "before": chunk_memory_before,
+                    "after": {
+                        "allocated_bytes": allocated,
+                        "reserved_bytes": int(torch.cuda.memory_reserved(self.device)),
+                        "free_bytes": int(free_bytes),
+                        "total_bytes": int(total_bytes),
+                    },
+                    "peak_allocated_bytes": peak_allocated,
+                    "temporary_high_water_bytes": max(0, peak_allocated - allocated),
+                }
+            if self._active_generation_started_at is not None:
+                info["completed_since_generate_start_s"] = (
+                    toc - self._active_generation_started_at
+                )
             self.bench_batch_trace.append(info)
             if stderr_batch_trace:
                 print(
@@ -4350,10 +4402,11 @@ def run_case(
     variant_env = runtime_variant_env(dsv4_kernel, variant)
     llm.sync_all_ranks()
     from minisgl.distributed import reset_communication_stats, snapshot_communication_stats
-    from minisgl.utils import dsv4_owner_timing
+    from minisgl.utils import dsv4_long_prefill_timing, dsv4_owner_timing
 
     tracer.reset()
     dsv4_owner_timing.reset()
+    dsv4_long_prefill_timing.reset()
     reset_communication_stats()
     warmup = None
     repeats = []
@@ -4376,6 +4429,7 @@ def run_case(
         graph_status_after_warmup = _snapshot_graph_status(llm)
         case_boundary_debug.append(_case_boundary_debug_snapshot(llm, f"{case_name}:after_warmup"))
         dsv4_owner_timing.reset()
+        dsv4_long_prefill_timing.reset()
         for repeat_idx in range(scenario.repeats):
             case_boundary_debug.append(
                 _case_boundary_debug_snapshot(llm, f"{case_name}:before_repeat_{repeat_idx}")
@@ -4453,6 +4507,7 @@ def run_case(
         "owner_timing": dsv4_owner_timing.snapshot(
             captured_shape_filter=replayed_padded_sizes,
         ),
+        "long_prefill_timing": dsv4_long_prefill_timing.snapshot(),
         "c128_prefill_one_surface": _snapshot_c128_prefill_one_surface(llm),
         "graph_runner_before_case": graph_status_before,
         "graph_runner_after_warmup": graph_status_after_warmup,

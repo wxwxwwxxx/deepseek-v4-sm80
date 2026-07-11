@@ -19,6 +19,7 @@ from minisgl.utils import (
     div_ceil,
     div_even,
     dsv4_direct_copy_nvtx,
+    dsv4_long_prefill_timing,
     dsv4_memory_debug,
     dsv4_owner_timing,
     dsv4_prefix_debug,
@@ -3139,18 +3140,24 @@ class DSV4FusedMoERunner:
         num_token_non_padded = _moe_num_token_non_padded(flat)
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.route"):
-            weights, indices = self.route(
-                flat,
-                flat_input_ids,
-                hash_topk=hash_topk,
-                num_token_non_padded=num_token_non_padded,
-            )
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "moe_route", {"layer_id": int(self.layer_id)}
+            ):
+                weights, indices = self.route(
+                    flat,
+                    flat_input_ids,
+                    hash_topk=hash_topk,
+                    num_token_non_padded=num_token_non_padded,
+                )
             _capture_debug_activation(f"layer{self.layer_id}.moe.route_weights", weights)
             _capture_debug_activation(f"layer{self.layer_id}.moe.route_indices", indices)
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
         _record_warmup_memory("moe.route_plan", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.prepare"):
-            prepared = self.prepare(flat, weights, indices)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "moe_route_prepare", {"layer_id": int(self.layer_id)}
+            ):
+                prepared = self.prepare(flat, weights, indices)
             route_plan = prepared.moe_plan.route_plan
             _capture_debug_activation(
                 f"layer{self.layer_id}.moe.sorted_route_ids", route_plan.sorted_route_ids
@@ -3165,7 +3172,10 @@ class DSV4FusedMoERunner:
         _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
         _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.experts"):
-            routed = self.apply_experts(flat, prepared)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "moe_marlin_experts", {"layer_id": int(self.layer_id)}
+            ):
+                routed = self.apply_experts(flat, prepared)
         _record_warmup_memory("moe.routed_experts", "after", layer_id=self.layer_id)
         _record_warmup_memory("moe.finalize_routed", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.finalize"):
@@ -3173,19 +3183,25 @@ class DSV4FusedMoERunner:
         _record_warmup_memory("moe.finalize_routed", "after", layer_id=self.layer_id)
         _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.shared"):
-            shared = self.apply_shared(flat)
-            if shared is not None:
-                y = y + shared
-            y = dsv4_kernel.zero_moe_padded_rows(y, num_token_non_padded)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "moe_shared_expert", {"layer_id": int(self.layer_id)}
+            ):
+                shared = self.apply_shared(flat)
+                if shared is not None:
+                    y = y + shared
+                y = dsv4_kernel.zero_moe_padded_rows(y, num_token_non_padded)
         _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
         _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.reduce_once"):
-            y = self.maybe_reduce_final(
-                y,
-                comm=comm,
-                hidden_dtype=flat.dtype,
-                reduce_label=prepared.moe_plan.final_reduce_label,
-            )
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "moe_reduce", {"layer_id": int(self.layer_id)}
+            ):
+                y = self.maybe_reduce_final(
+                    y,
+                    comm=comm,
+                    hidden_dtype=flat.dtype,
+                    reduce_label=prepared.moe_plan.final_reduce_label,
+                )
         _record_warmup_memory("moe.reduce_once", "after", layer_id=self.layer_id)
         with dsv4_direct_copy_nvtx(
             f"moe_shared_expert_staging.runner_output_to_flat_dtype.layer{self.layer_id}",
@@ -3234,15 +3250,18 @@ class DSV4MoE(BaseOP):
         num_token_non_padded = _moe_num_token_non_padded(flat)
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.gate"):
-            weights, indices = self.gate.forward(
-                flat,
-                input_ids=input_ids.view(-1),
-                topk=self.topk_count,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                hash_topk=getattr(self, "topk", None),
-                num_token_non_padded=num_token_non_padded,
-            )
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "moe_route", {"layer_id": int(self.layer_id)}
+            ):
+                weights, indices = self.gate.forward(
+                    flat,
+                    input_ids=input_ids.view(-1),
+                    topk=self.topk_count,
+                    scoring_func=self.scoring_func,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                    hash_topk=getattr(self, "topk", None),
+                    num_token_non_padded=num_token_non_padded,
+                )
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
         moe_v2 = dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE)
         reduce_once = moe_v2 or dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
@@ -3274,33 +3293,48 @@ class DSV4MoE(BaseOP):
             _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
         _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.routed"):
-            if moe_plan is None:
-                y = self.experts.forward(flat, weights, indices, reduce=not reduce_once).float()
-            else:
-                y = self.experts.forward(
-                    flat,
-                    weights,
-                    indices,
-                    reduce=not reduce_once,
-                    moe_plan=moe_plan,
-                ).float()
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "moe_marlin_experts", {"layer_id": int(self.layer_id)}
+            ):
+                if moe_plan is None:
+                    y = self.experts.forward(
+                        flat, weights, indices, reduce=not reduce_once
+                    ).float()
+                else:
+                    y = self.experts.forward(
+                        flat,
+                        weights,
+                        indices,
+                        reduce=not reduce_once,
+                        moe_plan=moe_plan,
+                    ).float()
         _record_warmup_memory("moe.routed_experts", "after", layer_id=self.layer_id)
         if hasattr(self, "shared_experts"):
             _record_warmup_memory("moe.shared_experts", "before", layer_id=self.layer_id)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.shared"):
-                y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()
+                with dsv4_long_prefill_timing.maybe_cuda_range(
+                    "moe_shared_expert", {"layer_id": int(self.layer_id)}
+                ):
+                    y = y + self.shared_experts.forward(
+                        flat, reduce=not reduce_once
+                    ).float()
             _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
         y = dsv4_kernel.zero_moe_padded_rows(y, num_token_non_padded)
         if reduce_once and self._tp_size > 1:
             _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.reduce_once"):
-                y = _dsv4_moe_reduce_once_input(
-                    y,
-                    hidden_dtype=flat.dtype,
-                    layer_id=self.layer_id,
-                    path="non_runner_output",
-                )
-                y = self._comm.all_reduce(y, label="dsv4.v1_moe_reduce_once_all_reduce")
+                with dsv4_long_prefill_timing.maybe_cuda_range(
+                    "moe_reduce", {"layer_id": int(self.layer_id)}
+                ):
+                    y = _dsv4_moe_reduce_once_input(
+                        y,
+                        hidden_dtype=flat.dtype,
+                        layer_id=self.layer_id,
+                        path="non_runner_output",
+                    )
+                    y = self._comm.all_reduce(
+                        y, label="dsv4.v1_moe_reduce_once_all_reduce"
+                    )
             _record_warmup_memory("moe.reduce_once", "after", layer_id=self.layer_id)
         return y.to(flat.dtype).view_as(hidden_states)
 
@@ -3363,7 +3397,12 @@ class DeepseekV4DecoderLayer(BaseOP):
         attn_fn = _cached_hc_bf16_weight(self, "_hc_attn_fn_bf16", self.hc_attn_fn)
         _record_warmup_memory("layer.hc_attn_pre", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_pre"):
-            y, post, comb = self._hc_pre(x, attn_fn, self.hc_attn_scale, self.hc_attn_base)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "hc_projection", {"layer_id": int(layer_id), "stage": "attention_pre"}
+            ):
+                y, post, comb = self._hc_pre(
+                    x, attn_fn, self.hc_attn_scale, self.hc_attn_base
+                )
         _record_warmup_memory("layer.hc_attn_pre", "after", layer_id=layer_id)
         _record_warmup_memory("layer.attn_input_norm", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.attn_input_norm"):
@@ -3372,19 +3411,31 @@ class DeepseekV4DecoderLayer(BaseOP):
         _record_warmup_memory("layer.attn_input_norm", "after", layer_id=layer_id)
         _record_warmup_memory("layer.attention", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.attn"):
-            y = self.self_attn.forward(y)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "attention_total",
+                {"layer_id": int(layer_id), "compress_ratio": int(self.self_attn.compress_ratio)},
+            ):
+                y = self.self_attn.forward(y)
             _capture_debug_activation(f"layer{layer_id}.attention_output", y)
         _record_warmup_memory("layer.attention", "after", layer_id=layer_id)
         _record_warmup_memory("layer.hc_attn_post", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_attn_post"):
-            x = self._hc_post(y, residual, post, comb)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "hc_projection", {"layer_id": int(layer_id), "stage": "attention_post"}
+            ):
+                x = self._hc_post(y, residual, post, comb)
         _record_warmup_memory("layer.hc_attn_post", "after", layer_id=layer_id)
 
         residual = x
         ffn_fn = _cached_hc_bf16_weight(self, "_hc_ffn_fn_bf16", self.hc_ffn_fn)
         _record_warmup_memory("layer.hc_ffn_pre", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_ffn_pre"):
-            y, post, comb = self._hc_pre(x, ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "hc_projection", {"layer_id": int(layer_id), "stage": "ffn_pre"}
+            ):
+                y, post, comb = self._hc_pre(
+                    x, ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+                )
         _record_warmup_memory("layer.hc_ffn_pre", "after", layer_id=layer_id)
         _record_warmup_memory("layer.mlp_input_norm", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.mlp_input_norm"):
@@ -3393,12 +3444,19 @@ class DeepseekV4DecoderLayer(BaseOP):
         _record_warmup_memory("layer.mlp_input_norm", "after", layer_id=layer_id)
         _record_warmup_memory("layer.moe", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.mlp"):
-            y = self.mlp.forward(y, input_ids)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "moe_total",
+                {"layer_id": int(layer_id)},
+            ):
+                y = self.mlp.forward(y, input_ids)
             _capture_debug_activation(f"layer{layer_id}.moe_output", y)
         _record_warmup_memory("layer.moe", "after", layer_id=layer_id)
         _record_warmup_memory("layer.hc_ffn_post", "before", layer_id=layer_id)
         with _dsv4_capture_nvtx(f"layer{self.self_attn.layer_id}.hc_ffn_post"):
-            output = self._hc_post(y, residual, post, comb)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "hc_projection", {"layer_id": int(layer_id), "stage": "ffn_post"}
+            ):
+                output = self._hc_post(y, residual, post, comb)
         _record_warmup_memory("layer.hc_ffn_post", "after", layer_id=layer_id)
         _record_warmup_memory("layer.output", "after", layer_id=layer_id)
         return output
@@ -4179,7 +4237,11 @@ class DeepseekV4Model(BaseOP):
         for layer in self.layers.op_list:
             layer_id = int(getattr(layer.self_attn, "layer_id", -1))
             _record_warmup_memory("decoder_layer", "before", layer_id=layer_id)
-            x = layer.forward(x, input_ids)
+            with dsv4_long_prefill_timing.maybe_cuda_range(
+                "decoder_layer_total",
+                {"layer_id": int(layer_id)},
+            ):
+                x = layer.forward(x, input_ids)
             _record_warmup_memory("decoder_layer", "after", layer_id=layer_id)
         _record_warmup_memory("model.hc_head", "before")
         with _dsv4_capture_nvtx("model.hc_head"):
@@ -4223,17 +4285,21 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
 
     def forward(self):
         batch = get_global_ctx().batch
-        _record_warmup_memory("model", "before")
-        output = self.model.forward(batch.input_ids)
-        _record_warmup_memory("model", "after")
-        if batch.is_prefill:
-            output = output[batch.attn_metadata.get_last_indices(batch.size)].contiguous()
-        _record_warmup_memory("lm_head", "before")
-        with _dsv4_capture_nvtx("lm_head"):
-            logits = self.lm_head.linear(output)
-            _capture_debug_activation("lm_head_logits", logits)
-            _record_warmup_memory("lm_head", "after")
-            return logits
+        with dsv4_long_prefill_timing.batch_context(batch):
+            with dsv4_long_prefill_timing.maybe_cuda_range("prefill_model_total"):
+                _record_warmup_memory("model", "before")
+                output = self.model.forward(batch.input_ids)
+                _record_warmup_memory("model", "after")
+                if batch.is_prefill:
+                    output = output[
+                        batch.attn_metadata.get_last_indices(batch.size)
+                    ].contiguous()
+                _record_warmup_memory("lm_head", "before")
+                with _dsv4_capture_nvtx("lm_head"):
+                    logits = self.lm_head.linear(output)
+                    _capture_debug_activation("lm_head_logits", logits)
+                    _record_warmup_memory("lm_head", "after")
+                    return logits
 
 
 __all__ = ["DeepseekV4ForCausalLM", "DSV4FallbackAttentionMetadata", "DSV4AttentionMetadata"]

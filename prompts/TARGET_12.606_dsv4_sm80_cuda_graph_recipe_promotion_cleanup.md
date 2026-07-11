@@ -48,7 +48,7 @@ performance_milestones/target12_cuda_graph_bucket_reserve_contract_unification/R
 performance_milestones/target12_moe_padding_live_route_contract_fix/README.md
 performance_milestones/target12_release_max_seq_benchmark_parity/README.md
 prompts/TARGET_12.605_dsv4_sm80_cuda_graph_recipe_frontier_selection.md
-prompts/TARGET_12.61_dsv4_sm80_workload_backend_envelope_census.md
+prompts/TARGET_12.61_dsv4_sm80_long_context_ttft_owner_attribution.md
 ```
 
 ## Core Contracts
