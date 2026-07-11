@@ -325,9 +325,41 @@ carried SWA eviction state across `ChunkedReq` segments, preserved decode CUDA
 graph replay for captured buckets, and selected `8192` as the conservative
 DSV4 A100/sm80 release prefill chunk token budget.  `24576` was fastest at 65k
 but failed at 131k; `16384` passed 131k but failed at 262k; `8192` passed 262k
-with 32 eager prefill chunks and decode graph replay unchanged.  The next work
-is TARGET 12.57, focused on the indexer/fallback temporaries that limit larger
-chunk budgets.
+with 32 eager prefill chunks and decode graph replay unchanged. TARGET 12.57
+then adapted vLLM-style bounded FP8 indexer execution and removed the unbounded
+full-logits/remap allocation family. TARGET 12.58 promoted that path, passed a
+true-default 512k single-request smoke, and reached 729088 committed tokens in
+the 1M probe before an eager-prefill C128 metadata mapper attempted a 360 MiB
+int64 matrix.
+
+The active release-scale roadmap is now:
+
+```text
+TARGET 12.59 / 12.595:
+  completed the C128 one-surface contract and 1M-shaped integration gate
+TARGET 12.597:
+  completed model-default benchmark, scheduler, RoPE, and legal 1M
+  total-sequence parity
+TARGET 12.60:
+  design a vLLM/SGLang-aligned generated CUDA graph policy for the practical
+  M<=512 envelope; keep M=1024/2048 as isolated smoke points only
+TARGET 12.605:
+  integrate the measured practical bucket policy and graph/KV memory guards
+TARGET 12.61:
+  scan large-context, large-decode-batch, and large-M backend envelopes
+```
+
+The C128 raw/page/full metadata and max-sequence benchmark contracts are fixed.
+TARGET 12.60 must now separate serving `max_running_req`, active decode `M`,
+graph buckets, static request-table memory, and aggregate KV capacity before a
+larger graph policy is promoted. Optimization and bucket-boundary tests should
+focus on `M<=512`; `1024/2048` need only isolated capability smoke. A useful
+combination of 1M context and high concurrency is not required: preserve the
+single-request 1M gate and test practical short/medium-context concurrency
+separately.
+The first known long-context performance owner remains bounded FP8 indexer
+select, measured at about 48% of 512k TTFT, but its kernel work is deferred
+until the max-sequence and graph-bucket capability paths converge.
 
 ## Archive Policy
 

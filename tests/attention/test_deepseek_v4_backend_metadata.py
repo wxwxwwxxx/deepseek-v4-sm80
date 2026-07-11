@@ -7,7 +7,11 @@ import minisgl.distributed.info as dist_info
 import pytest
 import torch
 from minisgl.attention import create_attention_backend
-from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata, DSV4CoreAttentionMetadata
+from minisgl.attention.deepseek_v4 import (
+    DSV4AttentionBackend,
+    DSV4AttentionMetadata,
+    DSV4CoreAttentionMetadata,
+)
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
@@ -54,6 +58,10 @@ def _tiny_dsv4_config(compress_ratios: list[int]) -> ModelConfig:
         o_groups=1,
         n_hash_layers=0,
     )
+
+
+def _has_sm80_cuda() -> bool:
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
 
 
 @pytest.fixture(autouse=True)
@@ -565,6 +573,291 @@ def test_dsv4_component_loc_ownership_metadata_uses_direct_component_tables():
     assert meta.c128_page_indices[0, :2].tolist() == [0, 1]
     assert meta.c128_full_indices[0, :2].tolist() == [-1, 255]
     assert batch.attn_metadata.indexer_metadata.page_table[0, :3].tolist() == [0, 1, 2]
+
+
+def test_dsv4_release_eager_c128_dispatches_one_surface_with_ragged_prefix_rows(
+    monkeypatch,
+):
+    cfg = _tiny_dsv4_config([4, 128])
+    page_size = 256
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0, 4 * page_size],
+        max_len=2 * page_size,
+        enable_component_loc_ownership=True,
+    )
+    page_starts = torch.tensor(
+        [0, page_size, 4 * page_size, 5 * page_size],
+        dtype=torch.int32,
+    )
+    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
+    prefix_handles = ctx.kv_cache.make_component_page_handles(
+        ctx.page_table[0, :page_size],
+        page_size,
+    )
+    assert prefix_handles is not None
+
+    prefix_req = _req(0, 0, 258, cached_len=256)
+    prefix_req.cache_handle = SimpleNamespace(
+        get_dsv4_component_pages=lambda: prefix_handles
+    )
+    boundary_req = _req(1, 1, 129, cached_len=126)
+    batch = _prepare_batch([prefix_req, boundary_req])
+    backend = ctx.attn_backend
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
+
+    call: dict[str, object] = {}
+
+    def fake_one_surface(
+        c128_page_table,
+        c128_lengths_raw,
+        *,
+        max_seqlen_k,
+        rows,
+        phase,
+    ):
+        width = backend._aligned_c128_prefill_width(max_seqlen_k)
+        raw = torch.full((rows, width), -1, dtype=torch.int32)
+        for row, length in enumerate(c128_lengths_raw.tolist()):
+            raw[row, :length] = torch.arange(length, dtype=torch.int32)
+        expected = backend._compressed_raw_to_component_locs(
+            c128_page_table,
+            raw,
+            128,
+        ).to(torch.int32)
+        call.update(
+            page_table=c128_page_table.clone(),
+            lengths=c128_lengths_raw.clone(),
+            width=width,
+            rows=rows,
+            phase=phase,
+            expected=expected.clone(),
+        )
+        placeholder = torch.full((rows, 1), -1, dtype=torch.int32)
+        return placeholder, expected, placeholder.clone()
+
+    monkeypatch.setattr(backend, "_build_release_eager_c128_one_surface", fake_one_surface)
+    monkeypatch.setattr(
+        backend,
+        "_materialize_c128_raw_page_full_oracle",
+        lambda *args, **kwargs: pytest.fail("release eager path materialized raw/full"),
+    )
+
+    backend.prepare_metadata(batch)
+    meta = batch.attn_metadata.core_metadata
+
+    assert call["phase"] == "prefill"
+    assert call["rows"] == 5
+    assert call["width"] == 64
+    assert call["lengths"].tolist() == [2, 2, 0, 1, 1]
+    assert call["page_table"].shape == (5, 2)
+    assert torch.equal(meta.c128_page_indices, call["expected"])
+    assert meta.c128_page_indices.dtype is torch.int32
+    assert meta.c128_raw_indices.shape == (5, 1)
+    assert meta.c128_full_indices.shape == (5, 1)
+    assert torch.all(meta.c128_raw_indices == -1)
+    assert torch.all(meta.c128_full_indices == -1)
+    assert meta.c128_topk_lengths_clamp1.tolist() == [2, 2, 1, 1, 1]
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_release_eager_metadata_calls_native_c128_one_surface(monkeypatch):
+    cfg = _tiny_dsv4_config([128])
+    device = torch.device("cuda")
+    page_size = 256
+    ctx = Context(page_size=page_size)
+    ctx.kv_cache = create_kvcache_pool(
+        cfg,
+        num_pages=8,
+        page_size=page_size,
+        dtype=torch.float16,
+        device=device,
+        enable_dsv4_component_loc_ownership=True,
+    )
+    ctx.page_table = torch.arange(
+        2 * page_size,
+        dtype=torch.int32,
+        device=device,
+    ).reshape(1, -1)
+    core.set_global_ctx(ctx)
+    ctx.kv_cache.on_pages_allocated(
+        torch.tensor([0], dtype=torch.int32, device=device),
+        page_size,
+    )
+    ctx.attn_backend = create_attention_backend("dsv4", cfg)
+
+    req = _req(0, 0, 129, cached_len=126)
+    batch = Batch(reqs=[req], phase="prefill")
+    batch.padded_reqs = [req]
+    batch.positions = torch.arange(126, 129, dtype=torch.int32, device=device)
+    batch.out_loc = ctx.page_table[0, batch.positions.long()]
+    batch.input_ids = req.input_ids[126:]
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
+
+    original = dsv4_kernel.c128_prefill_page_indices_one_surface
+    calls: list[dict[str, object]] = []
+
+    def spy(*args, **kwargs):
+        result = original(*args, **kwargs)
+        calls.append(
+            {
+                "width": kwargs["width"],
+                "component_page_size": kwargs["component_page_size"],
+                "backend": list(kwargs["_backend"]),
+            }
+        )
+        return result
+
+    monkeypatch.setattr(dsv4_kernel, "c128_prefill_page_indices_one_surface", spy)
+
+    ctx.attn_backend.prepare_metadata(batch)
+    meta = batch.attn_metadata.core_metadata
+    expected = torch.full((3, 64), -1, dtype=torch.int32, device=device)
+    expected[1:, 0] = meta.c128_page_table[1:, 0] * 2
+
+    assert calls == [
+        {
+            "width": 64,
+            "component_page_size": 2,
+            "backend": ["triton_c128_prefill_one_surface"],
+        }
+    ]
+    assert torch.equal(meta.c128_page_indices, expected)
+    assert meta.c128_raw_indices.shape == (3, 1)
+    assert meta.c128_full_indices.shape == (3, 1)
+    assert torch.all(meta.c128_raw_indices == -1)
+    assert torch.all(meta.c128_full_indices == -1)
+    assert ctx.attn_backend.c128_prefill_one_surface_status() == {
+        "calls": 1,
+        "backend": "triton_c128_prefill_one_surface",
+        "last_rows": 3,
+        "last_width": 64,
+        "last_surface_bytes": 3 * 64 * 4,
+        "last_raw_placeholder_bytes": 3 * 4,
+        "last_full_placeholder_bytes": 3 * 4,
+        "max_width": 64,
+        "max_surface_bytes": 3 * 64 * 4,
+    }
+
+
+def test_dsv4_release_eager_c128_helper_unavailable_fails_closed(monkeypatch):
+    backend = object.__new__(DSV4AttentionBackend)
+    backend.device = torch.device("cuda")
+    backend.kvcache = SimpleNamespace(c128_component_page_size=2)
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "detect_dsv4_kernel_capabilities",
+        lambda: SimpleNamespace(
+            is_sm80=True,
+            triton_available=True,
+            cuda_capability=(8, 0),
+        ),
+    )
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "c128_prefill_page_indices_one_surface",
+        lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="rejected rows=2, width=64.*refusing legacy raw/page/full",
+    ):
+        backend._build_release_eager_c128_one_surface(
+            torch.zeros((2, 1), dtype=torch.int32),
+            torch.tensor([1, 2], dtype=torch.int32),
+            max_seqlen_k=129,
+            rows=2,
+            phase="prefill",
+        )
+
+
+def test_dsv4_explicit_c128_oracle_keeps_legacy_raw_full_materialization(monkeypatch):
+    cfg = _tiny_dsv4_config([128])
+    page_size = 256
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0],
+        max_len=2 * page_size,
+        enable_component_loc_ownership=True,
+    )
+    ctx.kv_cache.on_pages_allocated(
+        torch.tensor([0, page_size], dtype=torch.int32),
+        page_size,
+    )
+    batch = _prepare_batch([_req(0, 0, 258, cached_len=256)])
+    backend = ctx.attn_backend
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
+    monkeypatch.setattr(
+        backend,
+        "_explicit_c128_raw_full_oracle_requested",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        backend,
+        "_build_release_eager_c128_one_surface",
+        lambda *args, **kwargs: pytest.fail("explicit oracle used one-surface placeholders"),
+    )
+
+    backend.prepare_metadata(batch)
+    meta = batch.attn_metadata.core_metadata
+
+    assert meta.c128_raw_indices.shape == (2, 64)
+    assert meta.c128_full_indices.shape == (2, 64)
+    assert meta.c128_raw_indices[:, :2].tolist() == [[0, 1], [0, 1]]
+    assert meta.c128_full_indices[:, :2].tolist() == [[127, 255], [127, 255]]
+
+
+def test_dsv4_release_toggle_does_not_change_decode_graph_c128_contract(monkeypatch):
+    cfg = _tiny_dsv4_config([4, 128])
+    page_size = 256
+    ctx = _install_context(
+        cfg,
+        page_size=page_size,
+        table_bases=[0],
+        max_len=2 * page_size,
+        enable_component_loc_ownership=True,
+    )
+    ctx.kv_cache.on_pages_allocated(
+        torch.tensor([0, page_size], dtype=torch.int32),
+        page_size,
+    )
+    req = _req(0, 0, 256, cached_len=255)
+    batch = _prepare_decode_batch([req])
+    backend = ctx.attn_backend
+    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
+    monkeypatch.setattr(
+        backend,
+        "_build_release_eager_c128_one_surface",
+        lambda *args, **kwargs: pytest.fail("decode dispatched eager one-surface helper"),
+    )
+
+    backend.prepare_metadata(batch)
+    src = batch.attn_metadata.core_metadata
+    assert src.c128_raw_indices.shape == (1, 64)
+    assert src.c128_page_indices.shape == (1, 64)
+    assert src.c128_full_indices.shape == (1, 64)
+    assert src.c128_raw_indices[0, :2].tolist() == [0, 1]
+    assert src.c128_full_indices[0, :2].tolist() == [127, 255]
+
+    backend.init_capture_graph(max_seq_len=2 * page_size, bs_list=[1])
+    assert backend.capture is not None
+    capture = backend.capture.core_metadata
+    pointers = (
+        capture.c128_raw_indices.data_ptr(),
+        capture.c128_page_indices.data_ptr(),
+        capture.c128_full_indices.data_ptr(),
+    )
+    backend.prepare_for_replay(batch)
+    assert pointers == (
+        capture.c128_raw_indices.data_ptr(),
+        capture.c128_page_indices.data_ptr(),
+        capture.c128_full_indices.data_ptr(),
+    )
+    assert capture.c128_raw_indices[0, :2].tolist() == [0, 1]
+    assert capture.c128_full_indices[0, :2].tolist() == [127, 255]
 
 
 def test_dsv4_component_loc_ownership_capture_replay_copies_direct_component_metadata():

@@ -55,8 +55,16 @@ OOMed, with the owner moving to the full-prefill Marlin WNA16 MoE
 `route_out` workspace. TARGET 12.56 hardened the existing `ChunkedReq` /
 `max_extend_tokens` path, fixed SWA/component lifecycle issues, and selected
 `8192` as the conservative DSV4 A100/sm80 release prefill chunk token budget.
-TARGET 12.57 now audits remaining fallback/native-backend owners that block
-larger chunk budgets.
+TARGET 12.57 adapted vLLM-style bounded indexer execution and removed the
+unbounded full-logits/remap allocations. TARGET 12.58 promoted that path,
+passed 512k, and isolated the 1M blocker to eager-prefill C128 metadata after
+729088 committed tokens. TARGET 12.59 proved a one-surface C128 contract, and
+TARGET 12.595 integrated it and completed all 128 prefill chunks plus decode
+graph replay. TARGET 12.597 aligned benchmark and serving max-sequence
+semantics and passed the legal 1M total-sequence gate. TARGET 12.60 now designs
+the practical decode graph policy for `M<=512`; `M=1024/2048` are isolated
+smoke points only, and simultaneous 1M context plus high concurrency is not a
+release requirement.
 
 ## Goal
 
@@ -262,7 +270,14 @@ when executed, but this root TARGET 12 is the controlling roadmap.
 | TARGET 12.54 Post-HC Release Envelope Rerun | completed with 64k memory-headroom blocker | True no-env default injected the HC release pair, text sanity passed, and the previous `32768/16/1` OOM was fixed. The run stopped at `65536/8/1`: graph capture and KV planning succeeded, but first prefill OOMed on a 128 MiB `wo_a` BF16 BMM allocation with only about 45 MiB free. Report: `performance_milestones/target12_post_hc_release_envelope_rerun/README.md`. |
 | TARGET 12.55 Graph And Activation Memory Accounting | completed with chunked-prefill decision | Memory-ratio sweep showed the 64k blocker is not solved by a 1-3 GiB KV reserve. Reducing `memory_ratio` to `0.85` freed about `3.92 GiB` / `134k` tokens but still failed; the owner moved from `wo_a` to gate and then Marlin WNA16 `route_out`. Decision: `CHUNKED_PREFILL_REQUIRED`. Report: `performance_milestones/target12_graph_activation_memory_accounting/README.md`. |
 | TARGET 12.56 Chunked Prefill Long-Context Path | completed | Hardened the existing `ChunkedReq` / `max_extend_tokens` path, fixed DSV4 SWA/component capacity and chunk lifecycle issues, and selected `8192` as the conservative release prefill chunk budget after 65k/131k/262k ladder evidence. Report: `performance_milestones/target12_chunked_prefill_long_context/README.md`. |
-| TARGET 12.57 Release Fallback Census And Native Backend Gate | current | Audit remaining real torch/Python fallback under long-context and large-batch release shapes, then rank native backend work. Prompt: `prompts/TARGET_12.57_dsv4_sm80_release_fallback_census_native_backend_gate.md`. |
+| TARGET 12.57 Release Fallback Census And Native Backend Gate | completed | Adapted vLLM-style bounded query-row execution for the existing native FP8 paged indexer, added fused Triton Route-B component/full remap, removed the reproduced 2.25 GiB full-logits failures, and kept release `max_extend_tokens=8192`. The next manual 32768-token-chunk owner is a 1.50 GiB Marlin routed output, but it is not yet a release-default blocker. Report: `performance_milestones/target12_release_fallback_census_native_backend_gate/README.md`. |
+| TARGET 12.58 Post-Indexer Long-Context Release Envelope | completed with C128 metadata blocker | Promoted TARGET 12.57, passed the true-default 512k smoke, and reached 729088 committed tokens in the 1M probe before a 360 MiB int64 C128 component-mapping allocation failed. The bounded indexer is memory-safe but accounts for about 48% of 512k TTFT. Report: `performance_milestones/target12_post_indexer_long_context_envelope/README.md`. |
+| TARGET 12.59 C128 Prefill Metadata Contract And Native Micro | completed | Proved that release eager prefill consumes only final C128 component page indices plus lengths, implemented an exact one-launch Triton helper, and measured zero temporary bytes beyond its final int32 output. Report: `performance_milestones/target12_c128_prefill_metadata_contract_native_micro/README.md`. |
+| TARGET 12.595 C128 One-Surface 1M Promotion | completed with benchmark-contract follow-up | Integrated the one-surface helper, removed eager raw/full and int64 matrices, completed 128 chunks plus seven decode graph replays, and retained about 1.13 GiB physical free. The benchmark implicitly raised max sequence to prompt+decode, so serving-default max-sequence parity remains to be closed. Report: `performance_milestones/target12_c128_one_surface_1m_promotion/README.md`. |
+| TARGET 12.597 Release Max-Sequence And Benchmark Parity | completed | Separated model-default, explicit-override, and scenario-sized max-sequence modes; passed scheduler/RoPE bounds and the legal `1048568+8=1048576` total-sequence gate; exposed `max_running_req` as the remaining graph-baseline ambiguity. Report: `performance_milestones/target12_release_max_seq_benchmark_parity/README.md`. |
+| TARGET 12.60 CUDA Graph Bucket Policy Preflight | current | Derive a vLLM/SGLang-aligned generated policy, explicitly separate request capacity from active decode `M`, and measure the practical `M<=512` envelope. Probe `1024/2048` only as isolated smoke points; do not require simultaneous 1M context and high concurrency. Prompt: `prompts/TARGET_12.60_dsv4_sm80_cuda_graph_bucket_policy_preflight.md`. |
+| TARGET 12.605 Large Decode Graph Bucket Integration | planned | Integrate the measured generated policy, account graph-pool memory in KV planning, and promote the largest useful decode graph batch at or below 512. Retain `1024/2048` as optional capability smoke rather than tuned release buckets. Prompt: `prompts/TARGET_12.605_dsv4_sm80_large_decode_graph_bucket_integration.md`. |
+| TARGET 12.61 Workload Backend Envelope Census | planned | Scan context/batch/M regimes, compare actual mini dispatch with SGLang/vLLM, and rank focused kernel/backend adaptations. The known streaming-indexer candidate must be re-ranked after 1M and graph work. Prompt: `prompts/TARGET_12.61_dsv4_sm80_workload_backend_envelope_census.md`. |
 | TARGET 12.5 Direct/Fused Graph Metadata Writers | deferred | In-graph metadata prep is now promoted. Reopen only if a fresh profile shows residual `raw_graph_copy` or graph metadata kernels as a top release bottleneck. |
 | TARGET 12.6 Multi-Stream Latency-Hiding PoC | deferred | Not part of the current route. Reopen only if future evidence proves a material independent owner that cannot be removed, fused, or moved into graph capture. |
 | TARGET 12.7 Promotion Gate | todo | Run the final non-MTP release soak after the post-HC envelope, memory accounting, chunked-prefill decision, and fallback/native-backend census converge; promote only if correctness is clean and macro/capacity tradeoffs are repeat-stable. |

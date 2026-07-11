@@ -90,6 +90,21 @@ class ForwardOutput(NamedTuple):
     copy_done_event: torch.cuda.Event
 
 
+def _resolve_effective_max_seq_len(
+    *,
+    requested_max_seq_len: int,
+    kv_capacity_tokens: int,
+    model_rotary_max: int,
+    rope_is_on_the_fly: bool,
+) -> tuple[int, int, str]:
+    """Resolve admission and RoPE bounds before allocating max-width surfaces."""
+    rope_limit = requested_max_seq_len if rope_is_on_the_fly else model_rotary_max
+    effective_max = min(requested_max_seq_len, kv_capacity_tokens, rope_limit)
+    effective_rope_len = effective_max if rope_is_on_the_fly else model_rotary_max
+    rope_kind = "on_the_fly" if rope_is_on_the_fly else "materialized"
+    return effective_max, effective_rope_len, rope_kind
+
+
 class Engine:
     def __init__(self, config: EngineConfig):
         assert not torch.cuda.is_initialized()
@@ -164,7 +179,18 @@ class Engine:
 
         # ======================= Page table initialization ========================
         # NOTE: 1. aligned to 128 bytes; 2. store raw locations instead of pages
-        self.max_seq_len = min(config.max_seq_len, num_tokens)
+        model_rotary_max = int(config.model_config.rotary_config.max_position)
+        rope_is_on_the_fly = bool(config.model_config.is_deepseek_v4)
+        (
+            self.max_seq_len,
+            self.effective_rope_cache_len,
+            self.rope_cache_kind,
+        ) = _resolve_effective_max_seq_len(
+            requested_max_seq_len=config.max_seq_len,
+            kv_capacity_tokens=num_tokens,
+            model_rotary_max=model_rotary_max,
+            rope_is_on_the_fly=rope_is_on_the_fly,
+        )
         aligned_max_seq_len = _align_up(self.max_seq_len, max(32, config.page_size))
         self.ctx.page_table = self.page_table = torch.zeros(  # + 1 for dummy request
             (config.max_running_req + 1, aligned_max_seq_len),
@@ -179,6 +205,8 @@ class Engine:
             extra={
                 "max_seq_len": int(self.max_seq_len),
                 "aligned_max_seq_len": int(aligned_max_seq_len),
+                "effective_rope_cache_len": int(self.effective_rope_cache_len),
+                "rope_cache_kind": self.rope_cache_kind,
             },
         )
         self._check_marlin_wna16_release_guards("after_page_table_alloc")

@@ -4,6 +4,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,6 +53,10 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
     assert args.enable_dsv4_swa_independent_lifecycle is False
     assert args.max_extend_tokens is None
     assert args.use_serving_max_extend_tokens is False
+    assert args.max_seq_len is None
+    assert args.scenario_sized_max_seq_len is False
+    assert args.max_running_req is None
+    assert args.scenario_sized_max_running_req is False
     assert [variant.name for variant in variants] == ["fallback", "v0_bf16", "v1_moe"]
     assert {scenario.name for scenario in scenarios} >= {
         "long_prefill_bs1",
@@ -79,6 +84,119 @@ def test_target06_defaults_are_tp8_page256_baseline_policy():
     assert serving_prefill_args.use_serving_max_extend_tokens is True
 
 
+def test_max_sequence_modes_are_explicit_and_llm_kwargs_omit_model_default():
+    bench = _load_module()
+    scenario = bench.Scenario(
+        name="unit",
+        kind="random",
+        batch_size=1,
+        prompt_len=12,
+        decode_len=4,
+        description="unit",
+    )
+
+    default_args = bench.parse_args([])
+    assert bench._max_sequence_mode_config(default_args, [scenario]) == (
+        bench.MaxSequenceModeConfig("model_default", None, 16)
+    )
+    assert bench._max_sequence_llm_kwargs(default_args, [scenario]) == {}
+
+    explicit_args = bench.parse_args(["--max-seq-len", "32"])
+    assert bench._max_sequence_mode_config(explicit_args, [scenario]) == (
+        bench.MaxSequenceModeConfig("explicit_override", 32, 16)
+    )
+    assert bench._max_sequence_llm_kwargs(explicit_args, [scenario]) == {
+        "max_seq_len_override": 32
+    }
+
+    diagnostic_args = bench.parse_args(["--scenario-sized-max-seq-len"])
+    assert bench._max_sequence_mode_config(diagnostic_args, [scenario]) == (
+        bench.MaxSequenceModeConfig("scenario_sized_diagnostic", 16, 16)
+    )
+    assert bench._max_sequence_llm_kwargs(diagnostic_args, [scenario]) == {
+        "max_seq_len_override": 16
+    }
+
+    with pytest.raises(SystemExit):
+        bench.parse_args(
+            ["--max-seq-len", "32", "--scenario-sized-max-seq-len"]
+        )
+
+
+def test_max_running_req_modes_are_explicit_and_llm_kwargs_omit_serving_default():
+    bench = _load_module()
+    scenario = bench.Scenario(
+        name="unit",
+        kind="random",
+        batch_size=17,
+        prompt_len=12,
+        decode_len=4,
+        description="unit",
+    )
+
+    default_args = bench.parse_args([])
+    assert bench._max_running_req_mode_config(default_args, [scenario]) == (
+        bench.MaxRunningReqModeConfig("serving_model_default", None, 17)
+    )
+    assert bench._max_running_req_llm_kwargs(default_args, [scenario]) == {}
+
+    explicit_args = bench.parse_args(["--max-running-req", "512"])
+    assert bench._max_running_req_mode_config(explicit_args, [scenario]) == (
+        bench.MaxRunningReqModeConfig("explicit_override", 512, 17)
+    )
+    assert bench._max_running_req_llm_kwargs(explicit_args, [scenario]) == {
+        "max_running_req": 512
+    }
+
+    diagnostic_args = bench.parse_args(["--scenario-sized-max-running-req"])
+    assert bench._max_running_req_mode_config(diagnostic_args, [scenario]) == (
+        bench.MaxRunningReqModeConfig("scenario_sized_diagnostic", 17, 17)
+    )
+    assert bench._max_running_req_llm_kwargs(diagnostic_args, [scenario]) == {
+        "max_running_req": 17
+    }
+
+    with pytest.raises(SystemExit):
+        bench.parse_args(
+            ["--max-running-req", "512", "--scenario-sized-max-running-req"]
+        )
+
+    with pytest.raises(RuntimeError, match="require decode/request batch capacity 17"):
+        bench._validate_max_running_req(
+            {"effective": 16, "mode": "serving_model_default"}, [scenario]
+        )
+    bench._validate_max_running_req(
+        {"effective": 17, "mode": "explicit_override"}, [scenario]
+    )
+
+
+def test_scenario_preflight_rejects_effective_engine_or_rope_mismatch():
+    bench = _load_module()
+    scenario = bench.Scenario(
+        name="unit",
+        kind="random",
+        batch_size=1,
+        prompt_len=12,
+        decode_len=4,
+        description="unit",
+    )
+    report = {
+        "effective_engine_max_seq_len": 15,
+        "effective_rope_cache_len": 15,
+        "max_seq_len_mode": "model_default",
+    }
+    with pytest.raises(RuntimeError, match="requires total sequence length 16"):
+        bench._validate_selected_scenarios(report, [scenario])
+
+    report["effective_engine_max_seq_len"] = 16
+    report["effective_rope_cache_len"] = 14
+    with pytest.raises(RuntimeError, match="may schedule position 14"):
+        bench._validate_selected_scenarios(report, [scenario])
+
+    report["effective_rope_cache_len"] = 16
+    bench._validate_selected_scenarios(report, [scenario])
+
+
 def test_num_pages_zero_selects_auto_capacity():
     bench = _load_module()
 
@@ -87,6 +205,101 @@ def test_num_pages_zero_selects_auto_capacity():
 
     with pytest.raises(SystemExit):
         bench.parse_args(["--num-pages", "1"])
+
+
+def test_cuda_graph_padding_boundary_workload_steps_live_rows():
+    bench = _load_module()
+    scenario = next(
+        item
+        for item in bench.ALL_SCENARIOS
+        if item.name == "cuda_graph_padding_boundaries_257"
+    )
+
+    prompts, sampling_params = bench.build_workload(
+        scenario, vocab_size=1024, seed=0
+    )
+
+    assert len(prompts) == 257
+    assert [sum(sp.max_tokens >= step for sp in sampling_params) for step in (2, 4, 6, 8, 10)] == [
+        257,
+        129,
+        65,
+        33,
+        17,
+    ]
+
+
+def test_c128_one_surface_status_snapshot_is_recipe_free():
+    bench = _load_module()
+    status = {
+        "calls": 128,
+        "backend": "triton_c128_prefill_one_surface",
+        "max_width": 8192,
+        "max_surface_bytes": 256 * 1024 * 1024,
+    }
+    llm = SimpleNamespace(
+        engine=SimpleNamespace(
+            attn_backend=SimpleNamespace(
+                c128_prefill_one_surface_status=lambda: status,
+            )
+        )
+    )
+
+    snapshot = bench._snapshot_c128_prefill_one_surface(llm)
+
+    assert snapshot == status
+    assert snapshot is not status
+
+
+def test_kernel_tracer_profiles_paged_indexer_backend_without_owner_timing():
+    bench = _load_module()
+
+    class FakeTensor:
+        def __init__(self, shape):
+            self.shape = shape
+            self.is_cuda = False
+
+    class FakeOutput:
+        backend = (
+            "bounded_query_chunks[4;512MiB]+"
+            "local_cuda_global_topk_lens,triton_fp8_paged_vllm"
+        )
+
+    class FakeKernel:
+        DSV4_INDEXER_MAX_LOGITS_MB_ENV = "MINISGL_DSV4_INDEXER_MAX_LOGITS_MB"
+        DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT = 512
+
+        def indexer_select_fp8_paged_fallback(self, *args, **kwargs):
+            return FakeOutput()
+
+    kernel = FakeKernel()
+    tracer = bench.KernelCallTracer(kernel)
+    tracer.install()
+    output = kernel.indexer_select_fp8_paged_fallback(
+        FakeTensor((8192, 64, 128)),
+        FakeTensor((8192, 64)),
+        FakeTensor((1024, 8448)),
+        FakeTensor((8192,)),
+        FakeTensor((8192, 1024)),
+    )
+
+    profile = tracer.snapshot()["indexer_profile"]
+    assert output.backend.startswith("bounded_query_chunks[4;512MiB]")
+    assert profile["call_count"] == 1
+    assert profile["timed_count"] == 0
+    assert profile["configured_max_logits_mb"] == 512
+    assert profile["entries"] == [
+        {
+            "backend": output.backend,
+            "rows": 8192,
+            "page_table_shape": [8192, 1024],
+            "count": 1,
+            "timed_count": 0,
+            "total_ms": 0.0,
+            "max_ms": None,
+            "mean_ms": None,
+        }
+    ]
 
 
 def test_smoke_or_page_size_one_is_not_reported_as_baseline():

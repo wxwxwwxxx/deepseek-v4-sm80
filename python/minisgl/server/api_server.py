@@ -159,6 +159,8 @@ class FrontendManager:
 
     async def stream_chat_completions(self, uid: int):
         first_chunk = True
+        finish_reason = "stop"
+        finish_error = None
         async for ack in self.wait_for_ack(uid):
             delta = {}
             if first_chunk:
@@ -175,13 +177,21 @@ class FrontendManager:
             yield f"data: {json.dumps(chunk)}\n\n".encode()
 
             if ack.finished:
+                finish_reason = ack.finish_reason or "stop"
+                finish_error = ack.error
                 break
 
         # send final finish_reason
         end_chunk = {
             "id": f"cmpl-{uid}",
             "object": "text_completion.chunk",
-            "choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}],
+            "choices": [
+                {
+                    "delta": ({"error": finish_error} if finish_error else {}),
+                    "index": 0,
+                    "finish_reason": finish_reason,
+                }
+            ],
         }
         yield f"data: {json.dumps(end_chunk)}\n\n".encode()
         yield b"data: [DONE]\n\n"
@@ -285,9 +295,13 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
 
     # Non-streaming: collect all chunks and return a single JSON response
     full_content = ""
+    finish_reason = "stop"
+    finish_error = None
     async for ack in state.wait_for_ack(uid):
         full_content += ack.incremental_output
         if ack.finished:
+            finish_reason = ack.finish_reason or "stop"
+            finish_error = ack.error
             break
 
     return {
@@ -299,7 +313,8 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
             {
                 "index": 0,
                 "message": {"role": "assistant", "content": full_content},
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
+                **({"error": finish_error} if finish_error else {}),
             }
         ],
         "usage": {

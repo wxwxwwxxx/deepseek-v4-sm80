@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 import traceback
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -357,6 +357,20 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
             "Single-wave decode ladder. Sixteen requests start together and mixed "
             "output lengths naturally step active decode batch sizes through "
             "16, 8, 4, 2, and 1."
+        ),
+    ),
+    Scenario(
+        name="cuda_graph_padding_boundaries_257",
+        kind="cuda_graph_padding_boundaries",
+        batch_size=257,
+        prompt_len=16,
+        decode_len=10,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 12.60 single-wave boundary probe. Grouped output budgets make "
+            "active decode M step through 257, 129, 65, 33, and 17 so upward "
+            "CUDA-graph padding and live-row isolation can be checked in one engine."
         ),
     ),
     Scenario(
@@ -2172,6 +2186,24 @@ def build_workload(
                 )
             )
             output_lens.append(max(1, decode_len))
+    elif scenario.kind == "cuda_graph_padding_boundaries":
+        if scenario.batch_size != 257:
+            raise ValueError(
+                "cuda_graph_padding_boundaries currently requires batch_size=257"
+            )
+        # The prefill forward produces token one. These budgets then leave
+        # 257/129/65/33/17 live requests on successive decode plateaus.
+        boundary_output_lens = [2] * 128 + [4] * 64 + [6] * 32 + [8] * 16 + [10] * 17
+        for output_len in boundary_output_lens:
+            prompts.append(
+                _random_tokens(
+                    rng,
+                    scenario.prompt_len,
+                    vocab_size,
+                    token_id_range=token_id_range,
+                )
+            )
+            output_lens.append(output_len)
     elif scenario.kind in {"decode_ladder", "serving_mixed"}:
         request_count = scenario.total_requests or scenario.batch_size
         prompt_cycle = scenario.prompt_len_cycle or (scenario.prompt_len,)
@@ -2212,6 +2244,10 @@ class BenchRequestStatus:
     uid: int
     input_ids: list[int]
     output_ids: list[int]
+    requested_output_len: int
+    admitted_output_len: int | None = None
+    finish_reason: str | None = None
+    error: str | None = None
     started_at: float | None = None
     first_token_at: float | None = None
     finished_at: float | None = None
@@ -2264,6 +2300,7 @@ def make_benchmark_llm_class():
                         else list(tokens_or_prompt)
                     ),
                     output_ids=[],
+                    requested_output_len=sampling_params.max_tokens,
                     started_at=self._active_generation_started_at,
                 )
             self.counter += added
@@ -2279,6 +2316,8 @@ def make_benchmark_llm_class():
                     status.output_ids.append(msg.next_token)
                     status.record_token(timestamp)
                 if msg.finished:
+                    status.finish_reason = msg.finish_reason or "stop"
+                    status.error = msg.error
                     status.mark_finished(timestamp)
 
         def _prepare_batch(self, batch):
@@ -2399,6 +2438,10 @@ def make_benchmark_llm_class():
                         "input_tokens": len(status.input_ids),
                         "output_tokens": len(status.output_ids),
                         "output_token_ids": list(status.output_ids),
+                        "requested_output_len": status.requested_output_len,
+                        "admitted_output_len": status.admitted_output_len,
+                        "finish_reason": status.finish_reason,
+                        "error": status.error,
                         "ttft_s": (
                             None
                             if started_at is None or status.first_token_at is None
@@ -2434,12 +2477,16 @@ class KernelCallTracer:
         self.none_skip_counts: dict[str, int] = {}
         self.unsupported_counts: dict[str, int] = {}
         self.exception_counts: dict[str, int] = {}
+        self.indexer_samples: list[dict[str, Any]] = []
 
     def install(self) -> None:
         for name in sorted(FALLBACK_COUNTER_NAMES):
             value = getattr(self.module, name, None)
             if callable(value):
                 self._wrap(name, value)
+        indexer_select = getattr(self.module, "indexer_select_fp8_paged_fallback", None)
+        if callable(indexer_select):
+            self._wrap_indexer_select(indexer_select)
         unsupported = getattr(self.module, "unsupported_kernel", None)
         if callable(unsupported):
             self._wrap_unsupported(unsupported)
@@ -2449,6 +2496,7 @@ class KernelCallTracer:
         self.none_skip_counts.clear()
         self.unsupported_counts.clear()
         self.exception_counts.clear()
+        self.indexer_samples.clear()
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -2459,6 +2507,82 @@ class KernelCallTracer:
             "unsupported_kernel_skips_total": int(sum(self.unsupported_counts.values())),
             "unsupported_kernel_skips": dict(sorted(self.unsupported_counts.items())),
             "wrapper_exceptions": dict(sorted(self.exception_counts.items())),
+            "indexer_profile": self._indexer_profile_snapshot(),
+        }
+
+    def _indexer_profile_snapshot(self) -> dict[str, Any]:
+        by_backend_shape: dict[str, dict[str, Any]] = {}
+        total_ms = 0.0
+        timed_count = 0
+        for sample in self.indexer_samples:
+            elapsed_ms = None
+            start = sample.get("start")
+            end = sample.get("end")
+            if start is not None and end is not None:
+                try:
+                    elapsed_ms = float(start.elapsed_time(end))
+                except Exception:
+                    elapsed_ms = None
+            key = json.dumps(
+                {
+                    "backend": sample["backend"],
+                    "rows": sample["rows"],
+                    "page_table_shape": sample["page_table_shape"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            bucket = by_backend_shape.setdefault(
+                key,
+                {
+                    "backend": sample["backend"],
+                    "rows": sample["rows"],
+                    "page_table_shape": sample["page_table_shape"],
+                    "count": 0,
+                    "timed_count": 0,
+                    "total_ms": 0.0,
+                    "max_ms": None,
+                },
+            )
+            bucket["count"] += 1
+            if elapsed_ms is not None:
+                bucket["timed_count"] += 1
+                bucket["total_ms"] += elapsed_ms
+                bucket["max_ms"] = (
+                    elapsed_ms
+                    if bucket["max_ms"] is None
+                    else max(float(bucket["max_ms"]), elapsed_ms)
+                )
+                timed_count += 1
+                total_ms += elapsed_ms
+        entries = sorted(
+            by_backend_shape.values(),
+            key=lambda entry: (
+                entry["rows"],
+                entry["page_table_shape"],
+                entry["backend"],
+            ),
+        )
+        for entry in entries:
+            entry["mean_ms"] = (
+                None
+                if entry["timed_count"] == 0
+                else entry["total_ms"] / entry["timed_count"]
+            )
+        budget_env = getattr(
+            self.module,
+            "DSV4_INDEXER_MAX_LOGITS_MB_ENV",
+            "MINISGL_DSV4_INDEXER_MAX_LOGITS_MB",
+        )
+        default_budget = getattr(self.module, "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT", 512)
+        return {
+            "call_count": len(self.indexer_samples),
+            "timed_count": timed_count,
+            "total_ms": total_ms,
+            "configured_max_logits_mb": int(
+                os.environ.get(budget_env, str(default_budget))
+            ),
+            "entries": entries,
         }
 
     def _wrap(self, name: str, func: Callable[..., Any]) -> None:
@@ -2475,6 +2599,50 @@ class KernelCallTracer:
                 raise
             if result is None and name in OPTIONAL_NONE_MEANS_SKIP:
                 self.none_skip_counts[name] = self.none_skip_counts.get(name, 0) + 1
+            return result
+
+        setattr(self.module, name, wrapper)
+
+    def _wrap_indexer_select(self, func: Callable[..., Any]) -> None:
+        name = "indexer_select_fp8_paged_fallback"
+        if name in self.originals:
+            return
+        self.originals[name] = func
+
+        def wrapper(*args, **kwargs):
+            start = None
+            end = None
+            if args:
+                try:
+                    import torch
+
+                    if getattr(args[0], "is_cuda", False):
+                        start = torch.cuda.Event(enable_timing=True)
+                        end = torch.cuda.Event(enable_timing=True)
+                        start.record()
+                except Exception:
+                    start = None
+                    end = None
+            try:
+                result = func(*args, **kwargs)
+            except Exception:
+                self.exception_counts[name] = self.exception_counts.get(name, 0) + 1
+                raise
+            if end is not None:
+                try:
+                    end.record()
+                except Exception:
+                    start = None
+                    end = None
+            self.indexer_samples.append(
+                {
+                    "backend": str(getattr(result, "backend", "unknown")),
+                    "rows": int(args[0].shape[0]) if args else 0,
+                    "page_table_shape": list(args[4].shape) if len(args) > 4 else [],
+                    "start": start,
+                    "end": end,
+                }
+            )
             return result
 
         setattr(self.module, name, wrapper)
@@ -2660,12 +2828,104 @@ def _graph_init_variant(variants: Sequence[Variant]) -> Variant:
     return variants[0]
 
 
-def _max_running_req(scenarios: Sequence[Scenario]) -> int:
+def _scenario_max_running_req(scenarios: Sequence[Scenario]) -> int:
     return max((scenario.batch_size for scenario in scenarios), default=1)
+
+
+@dataclass(frozen=True)
+class MaxRunningReqModeConfig:
+    mode: str
+    requested_override: int | None
+    scenario_required_max_running_req: int
+
+
+def _max_running_req_mode_config(
+    args: argparse.Namespace, scenarios: Sequence[Scenario]
+) -> MaxRunningReqModeConfig:
+    scenario_required = _scenario_max_running_req(scenarios)
+    if args.max_running_req is not None:
+        return MaxRunningReqModeConfig(
+            mode="explicit_override",
+            requested_override=int(args.max_running_req),
+            scenario_required_max_running_req=scenario_required,
+        )
+    if args.scenario_sized_max_running_req:
+        return MaxRunningReqModeConfig(
+            mode="scenario_sized_diagnostic",
+            requested_override=scenario_required,
+            scenario_required_max_running_req=scenario_required,
+        )
+    return MaxRunningReqModeConfig(
+        mode="serving_model_default",
+        requested_override=None,
+        scenario_required_max_running_req=scenario_required,
+    )
+
+
+def _max_running_req_llm_kwargs(
+    args: argparse.Namespace, scenarios: Sequence[Scenario]
+) -> dict[str, int]:
+    mode = _max_running_req_mode_config(args, scenarios)
+    if mode.requested_override is None:
+        return {}
+    return {"max_running_req": mode.requested_override}
+
+
+def _validate_max_running_req(
+    report: dict[str, Any], scenarios: Sequence[Scenario]
+) -> None:
+    required = _scenario_max_running_req(scenarios)
+    effective = int(report["effective"])
+    if required > effective:
+        raise RuntimeError(
+            "Selected benchmark scenarios require decode/request batch capacity "
+            f"{required}, but effective max_running_req is {effective} in "
+            f"{report['mode']} mode. Use an explicit --max-running-req override; "
+            "do not relabel a scenario-sized diagnostic as a serving baseline."
+        )
 
 
 def _max_seq_len(scenarios: Sequence[Scenario]) -> int:
     return max((scenario.max_seq_len for scenario in scenarios), default=1)
+
+
+@dataclass(frozen=True)
+class MaxSequenceModeConfig:
+    mode: str
+    requested_override: int | None
+    scenario_required_total_seq_len: int
+
+
+def _max_sequence_mode_config(
+    args: argparse.Namespace, scenarios: Sequence[Scenario]
+) -> MaxSequenceModeConfig:
+    scenario_required = _max_seq_len(scenarios)
+    if args.max_seq_len is not None:
+        return MaxSequenceModeConfig(
+            mode="explicit_override",
+            requested_override=int(args.max_seq_len),
+            scenario_required_total_seq_len=scenario_required,
+        )
+    if args.scenario_sized_max_seq_len:
+        return MaxSequenceModeConfig(
+            mode="scenario_sized_diagnostic",
+            requested_override=scenario_required,
+            scenario_required_total_seq_len=scenario_required,
+        )
+    return MaxSequenceModeConfig(
+        mode="model_default",
+        requested_override=None,
+        scenario_required_total_seq_len=scenario_required,
+    )
+
+
+def _max_sequence_llm_kwargs(
+    args: argparse.Namespace, scenarios: Sequence[Scenario]
+) -> dict[str, int]:
+    mode = _max_sequence_mode_config(args, scenarios)
+    if mode.requested_override is None:
+        return {}
+    return {"max_seq_len_override": mode.requested_override}
 
 
 def _max_extend_tokens(scenarios: Sequence[Scenario]) -> int:
@@ -2734,6 +2994,198 @@ def _schedule_summary(repeats: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
 def _snapshot_graph_status(llm) -> dict[str, Any]:
     return copy.deepcopy(getattr(llm.engine.graph_runner, "capture_status", {}))
+
+
+def _snapshot_c128_prefill_one_surface(llm) -> dict[str, Any]:
+    snapshot = getattr(llm.engine.attn_backend, "c128_prefill_one_surface_status", None)
+    return copy.deepcopy(snapshot()) if callable(snapshot) else {}
+
+
+def _tensor_tree_report(value: Any, *, root: str) -> dict[str, Any]:
+    """Describe tensor-owned allocation surfaces without copying tensor contents."""
+    try:
+        import torch
+    except ImportError:
+        return {"total_bytes": 0, "tensors": []}
+
+    tensors: list[dict[str, Any]] = []
+    seen_objects: set[int] = set()
+    seen_storages: set[tuple[str, int]] = set()
+
+    def visit(current: Any, path: str, depth: int) -> None:
+        if depth > 12:
+            return
+        if isinstance(current, torch.Tensor):
+            storage_key = (str(current.device), int(current.untyped_storage().data_ptr()))
+            if storage_key in seen_storages:
+                return
+            seen_storages.add(storage_key)
+            tensors.append(
+                {
+                    "path": path,
+                    "shape": list(current.shape),
+                    "dtype": str(current.dtype).removeprefix("torch."),
+                    "device": str(current.device),
+                    "bytes": int(current.numel() * current.element_size()),
+                }
+            )
+            return
+        if current is None or isinstance(current, (str, bytes, int, float, bool)):
+            return
+        object_id = id(current)
+        if object_id in seen_objects:
+            return
+        seen_objects.add(object_id)
+        if is_dataclass(current) and not isinstance(current, type):
+            for field in fields(current):
+                visit(getattr(current, field.name), f"{path}.{field.name}", depth + 1)
+        elif isinstance(current, dict):
+            for key, item in current.items():
+                visit(item, f"{path}.{key}", depth + 1)
+        elif isinstance(current, (list, tuple)):
+            for index, item in enumerate(current):
+                visit(item, f"{path}[{index}]", depth + 1)
+        elif hasattr(current, "__dict__"):
+            for name, item in vars(current).items():
+                if name.startswith("__"):
+                    continue
+                visit(item, f"{path}.{name}", depth + 1)
+
+    visit(value, root, 0)
+    tensors.sort(key=lambda row: row["path"])
+    return {
+        "total_bytes": int(sum(row["bytes"] for row in tensors)),
+        "tensors": tensors,
+    }
+
+
+def _rope_tensor_report(model: Any) -> list[dict[str, Any]]:
+    import torch
+
+    tensors: list[dict[str, Any]] = []
+    seen_objects: set[int] = set()
+    seen_storages: set[tuple[str, int]] = set()
+
+    def visit(current: Any, path: str, depth: int) -> None:
+        if depth > 12 or current is None:
+            return
+        if isinstance(current, torch.Tensor):
+            if "cos_sin_cache" not in path and "rope_cache" not in path:
+                return
+            storage_key = (str(current.device), int(current.untyped_storage().data_ptr()))
+            if storage_key in seen_storages:
+                return
+            seen_storages.add(storage_key)
+            tensors.append(
+                {
+                    "path": path,
+                    "shape": list(current.shape),
+                    "dtype": str(current.dtype).removeprefix("torch."),
+                    "device": str(current.device),
+                    "bytes": int(current.numel() * current.element_size()),
+                }
+            )
+            return
+        if isinstance(current, (str, bytes, int, float, bool)):
+            return
+        object_id = id(current)
+        if object_id in seen_objects:
+            return
+        seen_objects.add(object_id)
+        if isinstance(current, dict):
+            iterator = current.items()
+        elif isinstance(current, (list, tuple)):
+            iterator = enumerate(current)
+        elif hasattr(current, "__dict__"):
+            iterator = vars(current).items()
+        else:
+            return
+        for name, item in iterator:
+            visit(item, f"{path}.{name}", depth + 1)
+
+    visit(model, "model", 0)
+    return sorted(tensors, key=lambda row: row["path"])
+
+
+def _max_sequence_runtime_report(
+    llm, *, args: argparse.Namespace, scenarios: Sequence[Scenario]
+) -> dict[str, Any]:
+    mode = _max_sequence_mode_config(args, scenarios)
+    engine = llm.engine
+    model_config = engine.attn_backend.config
+    model_config_max = int(model_config.rotary_config.max_position)
+    effective_max = int(engine.max_seq_len)
+    rope_kind = str(getattr(engine, "rope_cache_kind", "materialized"))
+    rope_tensors = _rope_tensor_report(engine.model)
+    rope_bytes = int(sum(row["bytes"] for row in rope_tensors))
+    physical_rope_lengths = [
+        int(row["shape"][0]) for row in rope_tensors if row.get("shape")
+    ]
+    effective_rope_cache_len = int(
+        getattr(
+            engine,
+            "effective_rope_cache_len",
+            min(physical_rope_lengths) if physical_rope_lengths else effective_max,
+        )
+    )
+    page_table = engine.page_table
+    capture = getattr(engine.attn_backend, "capture", None)
+    capture_report = _tensor_tree_report(capture, root="attention_capture")
+    return {
+        "model_config_max_seq_len": model_config_max,
+        "max_seq_len_mode": mode.mode,
+        "requested_max_seq_len_override": mode.requested_override,
+        "scenario_required_total_seq_len": mode.scenario_required_total_seq_len,
+        "effective_engine_max_seq_len": effective_max,
+        "effective_rope_cache_len": effective_rope_cache_len,
+        "rope_cache_kind": rope_kind,
+        "rope_cache_bytes": rope_bytes,
+        "rope_cache_tensors": rope_tensors,
+        "prompt_len_requested_max": max(
+            (scenario.max_input_len for scenario in scenarios), default=0
+        ),
+        "decode_len_requested_max": max(
+            (
+                max(scenario.decode_len_cycle)
+                if scenario.decode_len_cycle
+                else scenario.decode_len
+                for scenario in scenarios
+            ),
+            default=0,
+        ),
+        "scenario_fits_effective_engine": (
+            mode.scenario_required_total_seq_len <= effective_max
+        ),
+        "context_page_table": {
+            "shape": list(page_table.shape),
+            "bytes": int(page_table.numel() * page_table.element_size()),
+        },
+        "attention_graph_capture": capture_report,
+    }
+
+
+def _validate_selected_scenarios(
+    report: dict[str, Any], scenarios: Sequence[Scenario]
+) -> None:
+    effective_max = int(report["effective_engine_max_seq_len"])
+    rope_len = int(report["effective_rope_cache_len"])
+    for scenario in scenarios:
+        if scenario.max_seq_len > effective_max:
+            raise RuntimeError(
+                "benchmark max-sequence configuration error: scenario "
+                f"{scenario.name!r} requires total sequence length {scenario.max_seq_len}, "
+                f"but effective engine max is {effective_max} in "
+                f"{report['max_seq_len_mode']} mode"
+            )
+        max_model_position = scenario.max_seq_len - 2
+        if scenario.decode_len <= 0:
+            max_model_position = scenario.max_input_len - 1
+        if max_model_position >= rope_len:
+            raise RuntimeError(
+                "benchmark RoPE configuration error: scenario "
+                f"{scenario.name!r} may schedule position {max_model_position}, but effective "
+                f"RoPE cache length is {rope_len}"
+            )
 
 
 def _case_boundary_debug_enabled() -> bool:
@@ -2964,11 +3416,14 @@ def _bucket_coverage_table(
 
 
 def _rank_memory_report(torch, llm) -> dict[str, int]:
+    free_memory, total_memory = torch.cuda.mem_get_info(llm.device)
     return {
         "memory_allocated_bytes": int(torch.cuda.memory_allocated(llm.device)),
         "memory_reserved_bytes": int(torch.cuda.memory_reserved(llm.device)),
         "max_memory_allocated_bytes": int(torch.cuda.max_memory_allocated(llm.device)),
         "max_memory_reserved_bytes": int(torch.cuda.max_memory_reserved(llm.device)),
+        "free_memory_bytes": int(free_memory),
+        "total_memory_bytes": int(total_memory),
     }
 
 
@@ -3073,11 +3528,44 @@ def _run_one_repeat(
     prefix_metrics_after = llm.cache_manager.prefix_metrics_snapshot()
     _case_boundary_debug_snapshot(llm, f"{nvtx_name or scenario.name}:after_prefix_metrics_after")
     output_lens = [len(output["token_ids"]) for output in outputs]
+    request_errors = [request for request in request_metrics if request.get("error")]
+    if request_errors:
+        raise RuntimeError(
+            "offline benchmark request rejected by scheduler: "
+            + "; ".join(str(request["error"]) for request in request_errors)
+        )
+    admitted_output_tokens = int(
+        sum(int(request.get("admitted_output_len") or 0) for request in request_metrics)
+    )
+    actual_output_tokens = int(sum(output_lens))
+    if actual_output_tokens != admitted_output_tokens:
+        raise RuntimeError(
+            "offline benchmark completion mismatch: "
+            f"admitted_output_tokens={admitted_output_tokens}, "
+            f"actual_output_tokens={actual_output_tokens}"
+        )
+    observed_max_position = max(
+        (int(row.get("max_device_len", 0)) - 1 for row in trace), default=-1
+    )
+    effective_rope_cache_len = int(
+        getattr(llm.engine, "effective_rope_cache_len", llm.engine.max_seq_len)
+    )
     return {
         "elapsed_s": elapsed_s,
         "prompt_tokens": prompt_tokens,
         "target_output_tokens": target_output_tokens,
-        "actual_output_tokens": int(sum(output_lens)),
+        "actual_output_tokens": actual_output_tokens,
+        "admitted_output_tokens": admitted_output_tokens,
+        "admitted_decode_lens": [
+            int(request.get("admitted_output_len") or 0) for request in request_metrics
+        ],
+        "observed_max_position": observed_max_position,
+        "observed_max_position_within_effective_engine": (
+            observed_max_position < int(llm.engine.max_seq_len)
+        ),
+        "observed_max_position_within_rope_cache": (
+            observed_max_position < effective_rope_cache_len
+        ),
         "output_lens": output_lens,
         "sample_output_token_ids": [output["token_ids"][:16] for output in outputs[:2]],
         "all_output_token_ids": [output["token_ids"] for output in outputs],
@@ -3439,9 +3927,26 @@ def _aggregate_case_report(
         "unsupported_kernel_skips_total": int(sum(aggregate_unsupported.values())),
         "unsupported_kernel_skips": dict(sorted(aggregate_unsupported.items())),
         "rank0": rank0.get("kernel_counters", {}),
+        "indexer_profile_per_rank": [
+            {
+                "rank": int(payload.get("rank", -1)),
+                **payload.get("kernel_counters", {}).get("indexer_profile", {}),
+            }
+            for payload in rank_payloads
+        ],
     }
     communication_counters = _aggregate_communication_counters(rank_payloads)
     owner_timing = _aggregate_owner_timing(rank_payloads)
+    c128_prefill_one_surface = {
+        "rank0": rank0.get("c128_prefill_one_surface", {}),
+        "per_rank": [
+            {
+                "rank": int(payload.get("rank", -1)),
+                **payload.get("c128_prefill_one_surface", {}),
+            }
+            for payload in rank_payloads
+        ],
+    }
     peak_allocated = max(
         repeat["memory"]["max_memory_allocated_bytes"]
         for payload in rank_payloads
@@ -3467,6 +3972,13 @@ def _aggregate_case_report(
         "prompt_tokens": prompt_tokens,
         "actual_output_tokens": actual_output_tokens,
         "target_output_tokens": target_output_tokens,
+        "admitted_output_tokens": int(
+            sum(repeat.get("admitted_output_tokens", 0) for repeat in repeats0)
+        ),
+        "observed_max_position": max(
+            (int(repeat.get("observed_max_position", -1)) for repeat in repeats0),
+            default=-1,
+        ),
         "ttft_s_mean": _safe_mean(ttft_values),
         "ttft_s_median": _safe_median(ttft_values),
         "topt_s_mean": _safe_mean(topt_values),
@@ -3504,15 +4016,36 @@ def _aggregate_case_report(
         or base.get("config", {}).get("graph_runner", {})
         or {}
     )
+    max_sequence = copy.deepcopy(base.get("config", {}).get("max_sequence", {}))
+    max_sequence.update(
+        {
+            "prompt_len_requested": base.get("scenario", {}).get("max_input_len"),
+            "decode_len_requested": base.get("scenario", {}).get("decode_len"),
+            "admitted_decode_lens": [
+                int(request.get("admitted_output_len") or 0) for request in all_requests
+            ],
+            "observed_max_position": metrics["observed_max_position"],
+            "observed_max_position_within_effective_engine": all(
+                bool(repeat.get("observed_max_position_within_effective_engine", False))
+                for repeat in repeats0
+            ),
+            "observed_max_position_within_rope_cache": all(
+                bool(repeat.get("observed_max_position_within_rope_cache", False))
+                for repeat in repeats0
+            ),
+        }
+    )
     report = {
         **base,
         "status": "pass",
+        "max_sequence": max_sequence,
         "metrics": metrics,
         "schedule_summary": _schedule_summary(repeats0),
         "bucket_coverage": _bucket_coverage_table(repeats0, graph_status_case),
         "kernel_counters": kernel_counters,
         "communication_counters": communication_counters,
         "owner_timing": owner_timing,
+        "c128_prefill_one_surface": c128_prefill_one_surface,
         "bottlenecks": _label_bottlenecks(metrics=metrics, counters=kernel_counters),
         "requests": all_requests,
         "repeats": repeats0,
@@ -3531,6 +4064,8 @@ def _summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "variant": report.get("variant", {}).get("name"),
         "scenario": report.get("scenario", {}).get("name"),
         "report_path": report.get("report_path"),
+        "max_sequence": report.get("max_sequence")
+        or report.get("config", {}).get("max_sequence", {}),
         "elapsed_s": metrics.get("elapsed_s"),
         "ttft_s_mean": metrics.get("ttft_s_mean"),
         "prefill_tokens_per_s": metrics.get("prefill_tokens_per_s"),
@@ -3551,6 +4086,7 @@ def _summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "communication_total_count": report.get("communication_counters", {}).get("total_count"),
         "communication_total_bytes": report.get("communication_counters", {}).get("total_bytes"),
         "communication_by_label": report.get("communication_counters", {}).get("by_label", {}),
+        "c128_prefill_one_surface": report.get("c128_prefill_one_surface", {}).get("rank0", {}),
         "graph_runner": config.get("graph_runner_case") or config.get("graph_runner", {}),
         "graph_runner_cumulative": config.get("graph_runner", {}),
         "bucket_coverage": report.get("bucket_coverage", []),
@@ -3709,6 +4245,7 @@ def run_case(
         "owner_timing": dsv4_owner_timing.snapshot(
             captured_shape_filter=replayed_padded_sizes,
         ),
+        "c128_prefill_one_surface": _snapshot_c128_prefill_one_surface(llm),
         "graph_runner_before_case": graph_status_before,
         "graph_runner_after_warmup": graph_status_after_warmup,
         "graph_runner_after_case": graph_status_after,
@@ -3719,6 +4256,14 @@ def run_case(
         "memory_after_case": _rank_memory_report(torch, llm),
         "kv_cache_memory_bytes": kv_cache_memory_bytes,
         "runtime_environment": runtime_environment,
+        "max_sequence": next(
+            (
+                row
+                for row in load_init.get("max_sequence_per_rank", [])
+                if int(row.get("rank", -1)) == rank
+            ),
+            load_init.get("max_sequence_rank0", {}),
+        ),
         "error": error,
     }
     _write_json(rank_path, rank_payload)
@@ -3740,6 +4285,8 @@ def run_case(
         },
         "scenario": {
             **asdict(scenario),
+            "max_input_len": scenario.max_input_len,
+            "scenario_required_total_seq_len": scenario.max_seq_len,
             "scheduler_supports_interleaved_arrivals": False,
             "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
             "swa_tail_retention_v1_requested": bool(args.enable_dsv4_swa_tail_retention_v1),
@@ -3755,6 +4302,7 @@ def run_case(
             page_size=args.page_size,
             smoke=args.smoke,
         ),
+        "max_sequence": load_init.get("max_sequence_rank0", {}),
         "config": {
             "tensor_parallel_size": tp_size,
             "rank_count": tp_size,
@@ -3772,12 +4320,13 @@ def run_case(
             "memory_ratio": args.memory_ratio,
             "dtype": args.dtype,
             "max_seq_len": args.max_seq_len,
+            "max_sequence": load_init.get("max_sequence_rank0", {}),
             "max_extend_tokens": (
                 int(llm.prefill_budget) if llm.prefill_budget is not None else None
             ),
             "requested_max_extend_tokens": args.max_extend_tokens,
             "use_serving_max_extend_tokens": args.use_serving_max_extend_tokens,
-            "max_running_req": args.max_running_req,
+            "max_running_req": load_init.get("max_running_req_rank0", {}),
             "token_id_range": args.token_id_range,
             "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
             "enable_dsv4_swa_tail_retention_v1": args.enable_dsv4_swa_tail_retention_v1,
@@ -3824,24 +4373,22 @@ def _init_llm(
 
     BenchmarkLLM = make_benchmark_llm_class()
     dtype = _dtype_from_name(args.dtype)
-    max_seq_len = args.max_seq_len or _max_seq_len(scenarios)
     max_extend_tokens = args.max_extend_tokens
     if max_extend_tokens is None and not args.use_serving_max_extend_tokens:
         max_extend_tokens = _max_extend_tokens(scenarios)
-    max_running_req = args.max_running_req or _max_running_req(scenarios)
     kwargs: dict[str, Any] = {}
     if distributed_init_method is not None:
         kwargs["distributed_init_method"] = distributed_init_method
     if max_extend_tokens is not None:
         kwargs["max_extend_tokens"] = max_extend_tokens
         kwargs["max_extend_tokens_explicit"] = True
+    kwargs.update(_max_sequence_llm_kwargs(args, scenarios))
+    kwargs.update(_max_running_req_llm_kwargs(args, scenarios))
     tic = time.perf_counter()
     llm = BenchmarkLLM(
         args.model_path,
         dtype=dtype,
         tp_info=DistributedInfo(rank, tp_size),
-        max_running_req=max_running_req,
-        max_seq_len_override=max_seq_len,
         num_page_override=args.num_pages,
         page_size=args.page_size,
         memory_ratio=args.memory_ratio,
@@ -3861,6 +4408,24 @@ def _init_llm(
     )
     torch.cuda.synchronize(llm.device)
     load_init_s = time.perf_counter() - tic
+    max_sequence = _max_sequence_runtime_report(llm, args=args, scenarios=scenarios)
+    max_running_req_mode = _max_running_req_mode_config(args, scenarios)
+    max_running_req = {
+        "mode": max_running_req_mode.mode,
+        "requested_override": max_running_req_mode.requested_override,
+        "scenario_required_max_running_req": (
+            max_running_req_mode.scenario_required_max_running_req
+        ),
+        # The Scheduler intentionally does not retain the config object. The
+        # engine request table has one extra dummy row, so its materialized
+        # row count is the authoritative effective request-slot capacity.
+        "effective": int(llm.engine.page_table.shape[0] - 1),
+        "request_table_shape": list(llm.engine.page_table.shape),
+        "request_table_dtype": str(llm.engine.page_table.dtype).removeprefix("torch."),
+        "request_table_bytes": int(
+            llm.engine.page_table.numel() * llm.engine.page_table.element_size()
+        ),
+    }
     return (
         llm,
         torch,
@@ -3871,6 +4436,8 @@ def _init_llm(
             "memory": _rank_memory_report(torch, llm),
             "model_prepare_report": getattr(llm.engine, "model_prepare_report", {}),
             "owner_timing": dsv4_owner_timing.snapshot(resolve_cuda=False),
+            "max_sequence": max_sequence,
+            "max_running_req": max_running_req,
         },
     )
 
@@ -3915,6 +4482,8 @@ def run_matrix(args: argparse.Namespace) -> int:
             distributed_init_method=distributed_init_method,
             runtime_options=runtime_options,
         )
+        _validate_selected_scenarios(local_load_init["max_sequence"], scenarios)
+        _validate_max_running_req(local_load_init["max_running_req"], scenarios)
         gathered_load_init = _gather_payloads(torch, llm, local_load_init)
         runtime_environment = collect_runtime_environment(torch, dsv4_kernel, rank=rank)
         communication_backend = (
@@ -3925,6 +4494,22 @@ def run_matrix(args: argparse.Namespace) -> int:
         load_init = {
             "seconds_max": max(float(payload["seconds"]) for payload in gathered_load_init),
             "seconds_per_rank": gathered_load_init,
+            "max_sequence_rank0": gathered_load_init[0]["max_sequence"],
+            "max_sequence_per_rank": [
+                {
+                    "rank": int(payload["rank"]),
+                    **payload["max_sequence"],
+                }
+                for payload in gathered_load_init
+            ],
+            "max_running_req_rank0": gathered_load_init[0]["max_running_req"],
+            "max_running_req_per_rank": [
+                {
+                    "rank": int(payload["rank"]),
+                    **payload["max_running_req"],
+                }
+                for payload in gathered_load_init
+            ],
         }
         git = git_info()
         if rank == 0:
@@ -3948,6 +4533,8 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
                         "page_size": args.page_size,
                         "num_pages": args.num_pages,
+                        "max_sequence": load_init["max_sequence_rank0"],
+                        "max_running_req": load_init["max_running_req_rank0"],
                         "max_extend_tokens": (
                             int(llm.prefill_budget) if llm.prefill_budget is not None else None
                         ),
@@ -4048,7 +4635,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--page-size", type=int, default=256)
     parser.add_argument("--num-pages", type=int, default=None)
     parser.add_argument("--memory-ratio", type=float, default=0.9)
-    parser.add_argument("--max-seq-len", type=int, default=None)
+    max_seq_group = parser.add_mutually_exclusive_group()
+    max_seq_group.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=None,
+        help=(
+            "Explicit non-default maximum total sequence length override. Omit this "
+            "option for the model/serving default."
+        ),
+    )
+    max_seq_group.add_argument(
+        "--scenario-sized-max-seq-len",
+        action="store_true",
+        help=(
+            "Diagnostic only: size the engine to the largest selected prompt plus "
+            "decode length. This is not a serving/release-default result."
+        ),
+    )
     parser.add_argument("--max-extend-tokens", type=int, default=None)
     parser.add_argument(
         "--use-serving-max-extend-tokens",
@@ -4058,7 +4662,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "the largest selected scenario input."
         ),
     )
-    parser.add_argument("--max-running-req", type=int, default=None)
+    max_running_req_group = parser.add_mutually_exclusive_group()
+    max_running_req_group.add_argument(
+        "--max-running-req",
+        type=int,
+        default=None,
+        help=(
+            "Explicit non-default maximum concurrent request-slot override. Omit "
+            "this option for the serving/model default."
+        ),
+    )
+    max_running_req_group.add_argument(
+        "--scenario-sized-max-running-req",
+        action="store_true",
+        help=(
+            "Diagnostic only: size request slots to the largest selected scenario "
+            "batch. This is not a serving/release-default result."
+        ),
+    )
     parser.add_argument(
         "--use-pynccl",
         action="store_true",
@@ -4148,6 +4769,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--warmup-repeats must be non-negative")
     if args.memory_ratio <= 0:
         parser.error("--memory-ratio must be positive")
+    if args.max_seq_len is not None and args.max_seq_len <= 0:
+        parser.error("--max-seq-len must be positive")
+    if args.max_running_req is not None and args.max_running_req <= 0:
+        parser.error("--max-running-req must be positive")
     if args.token_id_range <= 0:
         parser.error("--token-id-range must be positive")
     if args.num_pages == 0:

@@ -2507,6 +2507,38 @@ def _remap_indexer_topk_locs_kernel(
 
 
 @triton.jit
+def _c128_prefill_page_indices_kernel(
+    component_page_table_ptr,
+    c128_lengths_ptr,
+    output_ptr,
+    width: tl.constexpr,
+    component_table_width: tl.constexpr,
+    component_page_size: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    """Write the final C128 component-location surface directly.
+
+    The eager-prefill contract intentionally has no raw/full matrix input or
+    output. All index arithmetic stays in int32 at the tensor boundary.
+    """
+    row = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    in_width = cols < width
+    length = tl.load(c128_lengths_ptr + row).to(tl.int32)
+    logical_page = cols // component_page_size
+    page_in_table = logical_page < component_table_width
+    page = tl.load(
+        component_page_table_ptr + row * component_table_width + logical_page,
+        mask=in_width & page_in_table,
+        other=-1,
+    ).to(tl.int32)
+    offset = cols - logical_page * component_page_size
+    valid = in_width & (cols < length) & page_in_table & (page >= 0)
+    loc = page * component_page_size + offset
+    tl.store(output_ptr + row * width + cols, tl.where(valid, loc, -1), mask=in_width)
+
+
+@triton.jit
 def _quantized_linear_fp8_kernel(
     x_ptr,
     weight_ptr,
@@ -5576,6 +5608,59 @@ def remap_indexer_topk_locs(
         num_warps=4,
     )
     return component_locs, full_locs
+
+
+def c128_prefill_page_indices_one_surface(
+    component_page_table: torch.Tensor,
+    c128_lengths: torch.Tensor,
+    *,
+    width: int,
+    component_page_size: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor | None:
+    """Build final int32 C128 locations without a full-matrix temporary."""
+    rows = int(c128_lengths.numel())
+    width = int(width)
+    if (
+        component_page_table.ndim != 2
+        or c128_lengths.ndim != 1
+        or component_page_table.shape[0] != rows
+        or not component_page_table.is_cuda
+        or not c128_lengths.is_cuda
+        or component_page_table.device != c128_lengths.device
+        or component_page_table.dtype != torch.int32
+        or c128_lengths.dtype != torch.int32
+        or not component_page_table.is_contiguous()
+        or not c128_lengths.is_contiguous()
+        or width <= 0
+        or component_page_size <= 0
+    ):
+        return None
+    if out is None:
+        output = torch.empty((rows, width), dtype=torch.int32, device=c128_lengths.device)
+    else:
+        if (
+            out.shape != (rows, width)
+            or out.dtype != torch.int32
+            or out.device != c128_lengths.device
+            or not out.is_contiguous()
+        ):
+            return None
+        output = out
+    if output.numel() == 0:
+        return output
+    block = 256
+    _c128_prefill_page_indices_kernel[(rows, triton.cdiv(width, block))](
+        component_page_table,
+        c128_lengths,
+        output,
+        width=width,
+        component_table_width=component_page_table.shape[1],
+        component_page_size=int(component_page_size),
+        BLOCK=block,
+        num_warps=4,
+    )
+    return output
 
 
 def hc_split_pre(

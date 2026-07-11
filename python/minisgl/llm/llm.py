@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 from minisgl.core import SamplingParams
@@ -12,6 +12,7 @@ from minisgl.message import (
     UserMsg,
 )
 from minisgl.scheduler import Scheduler, SchedulerConfig
+from minisgl.scheduler.scheduler import MaxSequenceAdmission
 
 
 class RequestAllFinished(Exception):
@@ -23,6 +24,10 @@ class RequestStatus:
     uid: int
     input_ids: List[int]
     output_ids: List[int]
+    requested_output_len: int
+    admitted_output_len: int | None = None
+    finish_reason: str | None = None
+    error: str | None = None
 
 
 class LLM(Scheduler):
@@ -70,6 +75,7 @@ class LLM(Scheduler):
                     input_ids.tolist() if isinstance(tokens_or_prompt, str) else tokens_or_prompt
                 ),
                 output_ids=[],
+                requested_output_len=sampling_params.max_tokens,
             )
         self.counter += added
         self.pending_requests = self.pending_requests[added:]
@@ -80,12 +86,24 @@ class LLM(Scheduler):
             status = self.status_map[msg.uid]
             if not (msg.finished and msg.next_token == self.eos_token_id):
                 status.output_ids.append(msg.next_token)
+            if msg.finished:
+                status.finish_reason = msg.finish_reason or "stop"
+                status.error = msg.error
+
+    def _record_max_sequence_admission(
+        self, uid: int, admission: MaxSequenceAdmission
+    ) -> None:
+        status = self.status_map[uid]
+        status.admitted_output_len = admission.admitted_output_len
+        if not admission.accepted:
+            status.finish_reason = "length_rejected"
+            status.error = admission.rejection_reason
 
     def generate(
         self,
         prompts: List[str] | List[List[int]],
         sampling_params: List[SamplingParams] | SamplingParams,
-    ) -> List[Dict[str, str | List[int]]]:
+    ) -> List[Dict[str, Any]]:
         self.pending_requests = []
         self.status_map = {}
         self.counter = 0
@@ -97,9 +115,18 @@ class LLM(Scheduler):
             self.run_forever()
         except RequestAllFinished:
             pass
-        results: List[Dict[str, str | List[int]]] = []
+        results: List[Dict[str, Any]] = []
         for i in range(len(prompts)):
             status = self.status_map[i]
             output_text = self.tokenizer.decode(status.output_ids)
-            results.append({"text": output_text, "token_ids": status.output_ids})
+            results.append(
+                {
+                    "text": output_text,
+                    "token_ids": status.output_ids,
+                    "finish_reason": status.finish_reason,
+                    "error": status.error,
+                    "requested_output_len": status.requested_output_len,
+                    "admitted_output_len": status.admitted_output_len,
+                }
+            )
         return results

@@ -76,6 +76,8 @@ def tokenize_worker(
                             uid=msg.uid,
                             incremental_output=reply,
                             finished=msg.finished,
+                            finish_reason=msg.finish_reason,
+                            error=msg.error,
                         )
                         for msg, reply in zip(detokenize_msg, replies, strict=True)
                     ]

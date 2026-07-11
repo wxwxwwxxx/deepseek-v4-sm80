@@ -405,6 +405,17 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._pending_prep_metadata_oracle_rows = 0
         self._prep_metadata_in_graph_oracle_replay_step = 0
         self._materializing_prep_metadata_oracle = False
+        self._c128_prefill_one_surface_status: dict[str, int | str] = {
+            "calls": 0,
+            "backend": "not_run",
+            "last_rows": 0,
+            "last_width": 0,
+            "last_surface_bytes": 0,
+            "last_raw_placeholder_bytes": 0,
+            "last_full_placeholder_bytes": 0,
+            "max_width": 0,
+            "max_surface_bytes": 0,
+        }
         dsv4_kernel.warmup_indexer_fp8_backend(self.device)
 
     @property
@@ -430,6 +441,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
     @property
     def prep_metadata_in_graph_unsupported_reason(self) -> str | None:
         return self._prep_metadata_in_graph_unsupported_reason
+
+    def c128_prefill_one_surface_status(self) -> dict[str, int | str]:
+        return dict(self._c128_prefill_one_surface_status)
 
     def get_layer_compress_ratio(self, layer_id: int) -> DSV4CompressRatio:
         return self.kvcache.get_layer_mapping(layer_id).compress_ratio
@@ -1881,6 +1895,114 @@ class DSV4AttentionBackend(BaseAttnBackend):
     def _empty_index_source_placeholder(self, rows: int) -> torch.Tensor:
         return torch.full((int(rows), 1), -1, dtype=torch.int32, device=self.device)
 
+    def _explicit_c128_raw_full_oracle_requested(self) -> bool:
+        """Return whether this metadata build explicitly needs C128 raw/full.
+
+        Prefix-debug snapshots serialize the complete metadata family, and the
+        decode graph oracle compares it. Both are explicit diagnostic modes;
+        ordinary release eager prefill must keep raw/full lazy.
+        """
+        return self._materializing_prep_metadata_oracle or (
+            dsv4_prefix_debug.get_dsv4_prefix_debug_recorder() is not None
+        )
+
+    def _release_eager_c128_one_surface_configured(
+        self,
+        batch: Batch,
+        *,
+        has_c128: bool,
+        component_ownership: bool,
+    ) -> bool:
+        """Identify the release eager path whose ABI is page indices + lengths."""
+        return bool(
+            not batch.is_decode
+            and has_c128
+            and component_ownership
+            and self.page_size == 256
+            and dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16")
+            and not self._explicit_c128_raw_full_oracle_requested()
+        )
+
+    @staticmethod
+    def _aligned_c128_prefill_width(max_seqlen_k: int) -> int:
+        raw_width = max(int(max_seqlen_k) // 128, 1)
+        return div_ceil(raw_width, _PAGE_INDEX_ALIGNMENT) * _PAGE_INDEX_ALIGNMENT
+
+    def _build_release_eager_c128_one_surface(
+        self,
+        c128_page_table: torch.Tensor | None,
+        c128_lengths_raw: torch.Tensor,
+        *,
+        max_seqlen_k: int,
+        rows: int,
+        phase: str,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build the mandatory release eager C128 surface or fail closed."""
+        failure_prefix = (
+            "DSV4 release eager-prefill C128 one-surface metadata is mandatory"
+        )
+        if c128_page_table is None:
+            raise RuntimeError(
+                f"{failure_prefix}, but the Route-B c128_page_table is missing; "
+                "refusing legacy raw/page/full materialization."
+            )
+        cap = dsv4_kernel.detect_dsv4_kernel_capabilities()
+        if self.device.type != "cuda" or not (cap.is_sm80 and cap.triton_available):
+            raise RuntimeError(
+                f"{failure_prefix}, but CUDA sm80/Triton is unavailable "
+                f"(device={self.device}, capability={cap.cuda_capability}, "
+                f"triton={cap.triton_available}); refusing legacy raw/page/full "
+                "materialization."
+            )
+        width = self._aligned_c128_prefill_width(max_seqlen_k)
+        backend: list[str] = []
+        page_indices = dsv4_kernel.c128_prefill_page_indices_one_surface(
+            c128_page_table,
+            c128_lengths_raw,
+            width=width,
+            component_page_size=self.kvcache.c128_component_page_size,
+            _backend=backend,
+        )
+        if page_indices is None:
+            raise RuntimeError(
+                f"{failure_prefix}, but c128_prefill_page_indices_one_surface "
+                f"rejected rows={rows}, width={width}, "
+                f"page_table_shape={tuple(c128_page_table.shape)}; refusing legacy "
+                "raw/page/full materialization."
+            )
+        marker = backend[0] if backend else "triton_c128_prefill_one_surface"
+        raw_placeholder = self._empty_index_source_placeholder(rows)
+        full_placeholder = self._empty_index_source_placeholder(rows)
+        surface_bytes = _tensor_nbytes(page_indices)
+        raw_placeholder_bytes = _tensor_nbytes(raw_placeholder)
+        full_placeholder_bytes = _tensor_nbytes(full_placeholder)
+        status = self._c128_prefill_one_surface_status
+        status.update(
+            calls=int(status["calls"]) + 1,
+            backend=marker,
+            last_rows=int(rows),
+            last_width=int(width),
+            last_surface_bytes=surface_bytes,
+            last_raw_placeholder_bytes=raw_placeholder_bytes,
+            last_full_placeholder_bytes=full_placeholder_bytes,
+            max_width=max(int(status["max_width"]), int(width)),
+            max_surface_bytes=max(int(status["max_surface_bytes"]), surface_bytes),
+        )
+        dsv4_owner_timing.record_counter(
+            "dsv4.c128_prefill.metadata_backend",
+            {
+                "phase": phase,
+                "backend": marker,
+                "rows": int(rows),
+                "width": int(width),
+                "surface_bytes": surface_bytes,
+                "raw_placeholder_bytes": raw_placeholder_bytes,
+                "full_placeholder_bytes": full_placeholder_bytes,
+                "kernel_launches": 1,
+            },
+        )
+        return raw_placeholder, page_indices, full_placeholder
+
     def _build_metadata(self, batch: Batch) -> DSV4AttentionMetadata:
         reqs = batch.padded_reqs
         if not reqs:
@@ -2181,6 +2303,30 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     c128_raw_indices = self._empty_index_source_placeholder(rows)
                     c128_page_indices = self._empty_index_source_placeholder(rows)
                     c128_full_indices = self._empty_index_source_placeholder(rows)
+            elif self._release_eager_c128_one_surface_configured(
+                batch,
+                has_c128=has_c128,
+                component_ownership=component_ownership,
+            ):
+                with dsv4_owner_timing.maybe_host_range(
+                    f"dsv4.metadata.{batch.phase}.c128_one_surface_source",
+                    {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
+                ):
+                    with dsv4_owner_timing.maybe_cuda_range(
+                        "dsv4.metadata.prefill.make_c128_one_surface",
+                        {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
+                    ):
+                        (
+                            c128_raw_indices,
+                            c128_page_indices,
+                            c128_full_indices,
+                        ) = self._build_release_eager_c128_one_surface(
+                            c128_page_table,
+                            c128_lengths_raw,
+                            max_seqlen_k=max_seqlen_k,
+                            rows=rows,
+                            phase=batch.phase,
+                        )
             else:
                 with dsv4_owner_timing.maybe_host_range(
                     f"dsv4.metadata.{batch.phase}.c128_indices_source",
@@ -2191,10 +2337,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
                         {**timing_base, "max_seqlen_k": int(max_seqlen_k)},
                     ):
                         c128_raw_indices, c128_page_indices, c128_full_indices = (
-                            self._make_all_compressed_indices(
+                            self._materialize_c128_raw_page_full_oracle(
                                 table_indices,
                                 c128_lengths_raw,
-                                128,
                                 component_page_table=c128_page_table,
                             )
                         )
@@ -3156,6 +3301,21 @@ class DSV4AttentionBackend(BaseAttnBackend):
             _pad_last_dim(full.to(torch.int32), value=-1),
         )
 
+    def _materialize_c128_raw_page_full_oracle(
+        self,
+        table_indices: torch.Tensor,
+        lengths: torch.Tensor,
+        *,
+        component_page_table: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Explicit legacy/debug materialization; never a release eager fallback."""
+        return self._make_all_compressed_indices(
+            table_indices,
+            lengths,
+            128,
+            component_page_table=component_page_table,
+        )
+
     def _compressed_raw_to_component_locs(
         self,
         component_page_table: torch.Tensor,
@@ -3290,9 +3450,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
             "c4_sparse_page_indices": "per-token",
             "c4_sparse_full_indices": "per-token",
             "c128_topk_lengths_clamp1": "per-token",
-            "c128_raw_indices": "per-prefix-hit",
-            "c128_page_indices": "per-prefix-hit",
-            "c128_full_indices": "per-prefix-hit",
+            "c128_raw_indices": "per-metadata-object;lazy-eager-or-decode",
+            "c128_page_indices": "per-metadata-object",
+            "c128_full_indices": "per-metadata-object;lazy-eager-or-decode",
             "swa_out_loc": "per-token",
             "c4_page_table": "per-request",
             "c128_page_table": "per-request",

@@ -3367,6 +3367,7 @@ def test_dsv4_sparse_attention_backend_compressed_boundary_fast_path(monkeypatch
     )
     c128_lengths = torch.tensor([1, 2], device=device, dtype=torch.int32)
     empty = torch.empty(0, device=device, dtype=torch.int32)
+    c128_placeholder = torch.full((2, 1), -1, device=device, dtype=torch.int32)
 
     meta = dsv4_attention.DSV4CoreAttentionMetadata(
         raw_out_loc=empty,
@@ -3391,9 +3392,9 @@ def test_dsv4_sparse_attention_backend_compressed_boundary_fast_path(monkeypatch
         c4_sparse_page_indices=c4_indices,
         c4_sparse_full_indices=empty.reshape(0, 0),
         c128_topk_lengths_clamp1=c128_lengths,
-        c128_raw_indices=empty.reshape(0, 0),
+        c128_raw_indices=c128_placeholder,
         c128_page_indices=c128_indices,
-        c128_full_indices=empty.reshape(0, 0),
+        c128_full_indices=c128_placeholder.clone(),
     )
 
     class FakeKVCache:
@@ -3500,6 +3501,10 @@ def test_dsv4_sparse_attention_backend_compressed_boundary_fast_path(monkeypatch
     assert torch.allclose(actual_c128, expected_c128, atol=6e-2, rtol=6e-2)
     assert not torch.allclose(actual_c4, recomputed_c4, atol=6e-2, rtol=6e-2)
     assert not torch.allclose(actual_c128, recomputed_c128, atol=6e-2, rtol=6e-2)
+    assert meta.c128_raw_indices.shape == (2, 1)
+    assert meta.c128_full_indices.shape == (2, 1)
+    assert torch.all(meta.c128_raw_indices == -1)
+    assert torch.all(meta.c128_full_indices == -1)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")

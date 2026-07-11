@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
 
 import torch
@@ -43,6 +44,64 @@ class ForwardInput(NamedTuple):
 
 
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
+
+
+@dataclass(frozen=True)
+class MaxSequenceAdmission:
+    input_len: int
+    requested_output_len: int
+    admitted_output_len: int
+    max_seq_len: int
+    accepted: bool
+    rejection_reason: str | None = None
+
+
+def decide_max_sequence_admission(
+    *, input_len: int, requested_output_len: int, max_seq_len: int
+) -> MaxSequenceAdmission:
+    """Apply the maximum-total-sequence contract without model or GPU state."""
+    if max_seq_len <= 0:
+        raise ValueError("max_seq_len must be positive")
+    if input_len < 0 or requested_output_len < 0:
+        raise ValueError("input and requested output lengths must be non-negative")
+    if input_len > max_seq_len:
+        reason = (
+            f"input sequence length {input_len} exceeds effective max sequence length "
+            f"{max_seq_len}"
+        )
+        return MaxSequenceAdmission(
+            input_len, requested_output_len, 0, max_seq_len, False, reason
+        )
+    available_output_len = max_seq_len - input_len
+    if requested_output_len > 0 and available_output_len == 0:
+        reason = (
+            f"input sequence length {input_len} equals effective max sequence length "
+            f"{max_seq_len}; no model position remains for generation"
+        )
+        return MaxSequenceAdmission(
+            input_len, requested_output_len, 0, max_seq_len, False, reason
+        )
+    admitted_output_len = min(requested_output_len, available_output_len)
+    return MaxSequenceAdmission(
+        input_len,
+        requested_output_len,
+        admitted_output_len,
+        max_seq_len,
+        True,
+    )
+
+
+def validate_model_position_bound(*, max_device_len: int, rope_cache_len: int) -> int:
+    """Return the largest model position, raising before an out-of-range forward."""
+    if rope_cache_len <= 0:
+        raise ValueError("rope_cache_len must be positive")
+    observed_max_position = max_device_len - 1
+    if observed_max_position >= rope_cache_len:
+        raise RuntimeError(
+            "model position exceeds the effective RoPE range: "
+            f"position={observed_max_position}, rope_cache_len={rope_cache_len}"
+        )
+    return observed_max_position
 
 
 def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
@@ -260,18 +319,38 @@ class Scheduler(SchedulerIOMixin):
             raise KeyboardInterrupt
         elif isinstance(msg, UserMsg):
             logger.debug_rank0("Received user msg: %s", msg)
-            input_len, max_seq_len = len(msg.input_ids), self.engine.max_seq_len
-            max_output_len = max_seq_len - input_len
-            if max_output_len <= 0:
-                return logger.warning_rank0(
-                    f"Input sequence length {input_len} exceeds {max_seq_len}, "
-                    f"request {msg.uid} is dropped."
-                )
-            if msg.sampling_params.max_tokens > max_output_len:
-                msg.sampling_params.max_tokens = max_output_len
+            admission = decide_max_sequence_admission(
+                input_len=len(msg.input_ids),
+                requested_output_len=msg.sampling_params.max_tokens,
+                max_seq_len=self.engine.max_seq_len,
+            )
+            if not admission.accepted:
+                reason = admission.rejection_reason or "request rejected by max-sequence policy"
                 logger.warning_rank0(
-                    f"Adjust max_tokens to {max_output_len} for request {msg.uid}."
+                    f"Request {msg.uid} rejected: {reason}."
                 )
+                self._record_max_sequence_admission(msg.uid, admission)
+                self.send_result(
+                    [
+                        DetokenizeMsg(
+                            uid=msg.uid,
+                            next_token=self.eos_token_id,
+                            finished=True,
+                            finish_reason="length_rejected",
+                            error=reason,
+                        )
+                    ]
+                )
+                return
+            if admission.admitted_output_len != admission.requested_output_len:
+                msg.sampling_params.max_tokens = admission.admitted_output_len
+                logger.warning_rank0(
+                    f"Adjust max_tokens to {admission.admitted_output_len} for request "
+                    f"{msg.uid}; requested total sequence length was "
+                    f"{admission.input_len + admission.requested_output_len}, effective max is "
+                    f"{admission.max_seq_len}."
+                )
+            self._record_max_sequence_admission(msg.uid, admission)
             self.prefill_manager.add_one_req(msg)
         elif isinstance(msg, AbortBackendMsg):
             logger.debug_rank0("Aborting request %d", msg.uid)
@@ -282,6 +361,12 @@ class Scheduler(SchedulerIOMixin):
         else:
             logger.error(f"Unknown message type: {type(msg)}")
             raise NotImplementedError
+
+    def _record_max_sequence_admission(
+        self, uid: int, admission: MaxSequenceAdmission
+    ) -> None:
+        """Offline frontends override this to make clamps/rejections observable."""
+        del uid, admission
 
     def _free_req_resources(self, req: Req) -> None:
         self.table_manager.free(req.table_idx)
@@ -321,6 +406,12 @@ class Scheduler(SchedulerIOMixin):
                 f"batch_forward_bridge.prepare_positions.{batch.phase}.bs{batch.size}"
             ):
                 batch.positions = _make_positions(batch, self.device)
+            validate_model_position_bound(
+                max_device_len=max((req.device_len for req in batch.reqs), default=0),
+                rope_cache_len=int(
+                    getattr(self.engine, "effective_rope_cache_len", self.engine.max_seq_len)
+                ),
+            )
             self._debug_sync_prepare("positions", batch, positions=tuple(batch.positions.shape))
             with dsv4_direct_copy_nvtx(
                 f"batch_forward_bridge.prepare_input_tuple.{batch.phase}.bs{batch.size}",
@@ -391,6 +482,12 @@ class Scheduler(SchedulerIOMixin):
                 timing_metadata,
             ):
                 batch.positions = _make_positions(batch, self.device)
+        validate_model_position_bound(
+            max_device_len=max((req.device_len for req in batch.reqs), default=0),
+            rope_cache_len=int(
+                getattr(self.engine, "effective_rope_cache_len", self.engine.max_seq_len)
+            ),
+        )
         self._debug_sync_prepare("positions", batch, positions=tuple(batch.positions.shape))
         with dsv4_direct_copy_nvtx(
             f"batch_forward_bridge.prepare_input_tuple.{batch.phase}.bs{batch.size}",

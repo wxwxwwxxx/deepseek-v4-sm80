@@ -3076,6 +3076,43 @@ def remap_indexer_topk_locs(
         return None
 
 
+def c128_prefill_page_indices_one_surface(
+    component_page_table: torch.Tensor,
+    c128_lengths: torch.Tensor,
+    *,
+    width: int,
+    component_page_size: int,
+    out: torch.Tensor | None = None,
+    _backend: list[str] | None = None,
+) -> torch.Tensor | None:
+    """Build the release eager-prefill C128 final-location surface.
+
+    This native micro boundary consumes only the Route-B component page table
+    and raw C128 lengths, writes int32 component locations, and writes ``-1``
+    for invalid tails/pages. It deliberately cannot materialize raw/full
+    matrices or full-size int64 intermediates. TARGET 12.595 owns integration
+    into attention metadata construction; decode graph contracts are unchanged.
+    """
+    cap = detect_dsv4_kernel_capabilities()
+    if not (cap.is_sm80 and cap.triton_available):
+        return None
+    try:
+        result = _triton_dsv4_ops().c128_prefill_page_indices_one_surface(
+            component_page_table,
+            c128_lengths,
+            width=int(width),
+            component_page_size=int(component_page_size),
+            out=out,
+        )
+    except Exception:
+        if _cuda_graph_capture_active(component_page_table.device):
+            raise
+        return None
+    if result is not None and _backend is not None:
+        _backend.append("triton_c128_prefill_one_surface")
+    return result
+
+
 def indexer_select_fp8_fallback(
     q_values: torch.Tensor,
     weights: torch.Tensor,
