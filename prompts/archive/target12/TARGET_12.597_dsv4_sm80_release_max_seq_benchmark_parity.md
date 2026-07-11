@@ -96,8 +96,8 @@ Evidence:
 ```text
 performance_milestones/target12_c128_one_surface_1m_promotion/README.md
 performance_milestones/target12_c128_prefill_metadata_contract_native_micro/README.md
-prompts/TARGET_12.595_dsv4_sm80_c128_one_surface_1m_promotion.md
-prompts/TARGET_12.60_dsv4_sm80_cuda_graph_bucket_policy_preflight.md
+prompts/archive/target12/TARGET_12.595_dsv4_sm80_c128_one_surface_1m_promotion.md
+prompts/archive/target12/TARGET_12.60_dsv4_sm80_cuda_graph_bucket_policy_preflight.md
 ```
 
 Mini source:
@@ -362,4 +362,3 @@ Required report sections:
 - legal 1M-total promotion result;
 - C128/component/SWA/decode-graph regression status;
 - exact next recommendation.
-

@@ -87,8 +87,8 @@ Read:
 ```text
 prompts/target.md
 prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md
-prompts/TARGET_12.45_dsv4_sm80_ingraph_metadata_promotion_soak.md
-prompts/TARGET_12.46_dsv4_sm80_ingraph_metadata_c4_sparse_oracle_contract.md
+prompts/archive/target12/TARGET_12.45_dsv4_sm80_ingraph_metadata_promotion_soak.md
+prompts/archive/target12/TARGET_12.46_dsv4_sm80_ingraph_metadata_c4_sparse_oracle_contract.md
 performance_milestones/target12_c4_sparse_oracle_contract/README.md
 performance_milestones/target12_ingraph_metadata_promotion_soak/README.md
 ```
@@ -364,4 +364,3 @@ The README must include:
 - residual owner snapshot if run;
 - final recommendation: default-promotion cleanup, keep opt-in and fix boundary,
   move to TARGET 12.5, or no-go.
-

@@ -171,6 +171,6 @@ lifecycle, and padded-row/live-route correctness.
 ```text
 performance_milestones/target12_cuda_graph_recipe_promotion_cleanup/README.md
 performance_milestones/target12_cuda_graph_recipe_frontier_selection/README.md
-prompts/TARGET_12.606_dsv4_sm80_cuda_graph_recipe_promotion_cleanup.md
-prompts/TARGET_12.61_dsv4_sm80_long_context_ttft_owner_attribution.md
+prompts/archive/target12/TARGET_12.606_dsv4_sm80_cuda_graph_recipe_promotion_cleanup.md
+prompts/archive/target12/TARGET_12.61_dsv4_sm80_long_context_ttft_owner_attribution.md
 ```

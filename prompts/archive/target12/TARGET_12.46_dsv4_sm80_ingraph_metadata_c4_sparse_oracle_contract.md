@@ -106,8 +106,8 @@ Read:
 ```text
 prompts/target.md
 prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md
-prompts/TARGET_12.4_dsv4_sm80_sglang_in_graph_metadata_prep.md
-prompts/TARGET_12.45_dsv4_sm80_ingraph_metadata_promotion_soak.md
+prompts/archive/target12/TARGET_12.4_dsv4_sm80_sglang_in_graph_metadata_prep.md
+prompts/archive/target12/TARGET_12.45_dsv4_sm80_ingraph_metadata_promotion_soak.md
 performance_milestones/target12_ingraph_metadata_promotion_soak/README.md
 performance_milestones/target12_sglang_in_graph_metadata_prep/README.md
 ```
@@ -387,4 +387,3 @@ The README must include:
 - short non-oracle performance sanity if runtime behavior changed;
 - recommendation: return to TARGET 12.45 promotion subset, proceed to TARGET
   12.5, keep opt-in with narrowed support, or no-go.
-

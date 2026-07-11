@@ -72,7 +72,7 @@ Evidence:
 ```text
 performance_milestones/target12_post_indexer_long_context_envelope/README.md
 performance_milestones/target12_release_fallback_census_native_backend_gate/README.md
-prompts/TARGET_12.58_dsv4_sm80_post_indexer_long_context_envelope.md
+prompts/archive/target12/TARGET_12.58_dsv4_sm80_post_indexer_long_context_envelope.md
 ```
 
 Mini source:
@@ -386,4 +386,3 @@ Required sections:
 - microbench correctness/performance/memory table;
 - 1M final-surface memory ledger;
 - explicit TARGET 12.595 recommendation.
-

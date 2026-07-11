@@ -81,8 +81,8 @@ Evidence and plans:
 performance_milestones/target12_release_fallback_census_native_backend_gate/README.md
 performance_milestones/target12_chunked_prefill_long_context/README.md
 performance_milestones/target12_graph_activation_memory_accounting/README.md
-prompts/TARGET_12.56_dsv4_sm80_chunked_prefill_long_context.md
-prompts/TARGET_12.57_dsv4_sm80_release_fallback_census_native_backend_gate.md
+prompts/archive/target12/TARGET_12.56_dsv4_sm80_chunked_prefill_long_context.md
+prompts/archive/target12/TARGET_12.57_dsv4_sm80_release_fallback_census_native_backend_gate.md
 ```
 
 Mini implementation:

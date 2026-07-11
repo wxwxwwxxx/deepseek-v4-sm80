@@ -315,4 +315,3 @@ The README must contain:
 - differential-probe table;
 - correctness gate results;
 - clear next-target recommendation with rationale.
-

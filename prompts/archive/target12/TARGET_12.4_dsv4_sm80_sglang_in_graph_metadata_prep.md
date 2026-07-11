@@ -465,4 +465,3 @@ The README must include:
 - graph capture/private-pool memory impact;
 - clear recommendation: promote, continue with a smaller in-graph subset, move
   to TARGET 12.5 direct/fused writers, or no-go.
-

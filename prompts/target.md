@@ -183,7 +183,7 @@ TARGET 12 should first compare mini's replay boundary with SGLang and vLLM:
 Current TARGET 12 child:
 
 ```text
-prompts/TARGET_12.57_dsv4_sm80_release_fallback_census_native_backend_gate.md
+prompts/archive/target12/TARGET_12.57_dsv4_sm80_release_fallback_census_native_backend_gate.md
 ```
 
 TARGET 12.4 implemented an opt-in SGLang-style in-graph metadata prep PoC with

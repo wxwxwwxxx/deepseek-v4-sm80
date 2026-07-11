@@ -100,7 +100,7 @@ Read:
 ```text
 prompts/target.md
 prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md
-prompts/TARGET_12.4_dsv4_sm80_sglang_in_graph_metadata_prep.md
+prompts/archive/target12/TARGET_12.4_dsv4_sm80_sglang_in_graph_metadata_prep.md
 performance_milestones/target12_sglang_in_graph_metadata_prep/README.md
 performance_milestones/target12_safe_timing_kernel_census/README.md
 ```
@@ -364,4 +364,3 @@ The README must include:
 - instrumentation/diagnostic overhead decision;
 - recommendation: promote cleanup, keep opt-in and fix boundary, move to TARGET
   12.5, or no-go.
-

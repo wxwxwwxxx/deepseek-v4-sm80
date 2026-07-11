@@ -50,7 +50,7 @@ performance_milestones/target12_cuda_graph_bucket_policy_preflight/README.md
 performance_milestones/target12_moe_padding_live_route_contract_fix/README.md
 performance_milestones/target12_cuda_graph_memory_reserve_planner/README.md
 performance_milestones/target12_cuda_graph_bucket_reserve_contract_unification/README.md
-prompts/TARGET_12.604_dsv4_sm80_cuda_graph_bucket_reserve_contract_unification.md
+prompts/archive/target12/TARGET_12.604_dsv4_sm80_cuda_graph_bucket_reserve_contract_unification.md
 ```
 
 Use max-only configuration so the TARGET 12.604 resolver/generator is exercised

@@ -80,7 +80,7 @@ Current evidence:
 
 ```text
 performance_milestones/target12_chunked_prefill_long_context/README.md
-prompts/TARGET_12.56_dsv4_sm80_chunked_prefill_long_context.md
+prompts/archive/target12/TARGET_12.56_dsv4_sm80_chunked_prefill_long_context.md
 prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md
 ```
 
