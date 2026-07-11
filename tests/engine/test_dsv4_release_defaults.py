@@ -4,7 +4,6 @@ import os
 from types import SimpleNamespace
 
 import pytest
-
 from minisgl.engine import engine as engine_module
 
 
@@ -73,6 +72,8 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
     assert config.allow_dsv4_cuda_graph is True
     assert config.cuda_graph_bs == [1, 2, 4, 8, 16]
     assert config.cuda_graph_max_bs == 16
+    assert config.cuda_graph_policy.source_mode == "release_default"
+    assert config.cuda_graph_policy.resolved_bs == (1, 2, 4, 8, 16)
     assert config.cuda_graph_capture_fail_open is True
     assert config.moe_backend == "fused"
 
@@ -113,6 +114,8 @@ def test_deepseek_v4_release_defaults_can_be_disabled_for_fallback(monkeypatch):
     assert config.allow_dsv4_cuda_graph is False
     assert config.cuda_graph_bs == []
     assert config.cuda_graph_max_bs == 0
+    assert config.cuda_graph_policy.source_mode == "disabled"
+    assert config.cuda_graph_policy.resolved_bs == ()
     for name in engine_module._DSV4_SM80_RELEASE_DEFAULT_ENV:
         assert name not in os.environ
 

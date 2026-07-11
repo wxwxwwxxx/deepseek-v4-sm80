@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, List
 
@@ -9,6 +9,7 @@ from minisgl.distributed import DistributedInfo
 from minisgl.utils import cached_load_hf_config
 
 if TYPE_CHECKING:
+    from minisgl.engine.graph_policy import ResolvedCudaGraphBucketPolicy
     from minisgl.models import ModelConfig
 
 
@@ -22,6 +23,10 @@ class EngineConfig:
     moe_backend: str = "auto"
     cuda_graph_bs: List[int] | None = None
     cuda_graph_max_bs: int | None = None
+    disable_cuda_graph: bool = False
+    cuda_graph_policy: ResolvedCudaGraphBucketPolicy | None = field(
+        default=None, init=False, repr=False
+    )
     allow_dsv4_cuda_graph: bool = False
     cuda_graph_capture_fail_open: bool = False
     cuda_graph_capture_greedy_sample: bool = False

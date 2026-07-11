@@ -353,11 +353,13 @@ TARGET 12.603:
   completed safe automatic pre-KV graph reservation with a validated
   DSV4/sm80 conservative estimator; full temporary profiling remains deferred
 TARGET 12.604:
-  current: unify bucket resolution so planner, GraphRunner, benchmark, and
+  completed one bucket resolver so planner, GraphRunner, benchmark, and
   telemetry consume exactly one generated/explicit policy
 TARGET 12.605:
-  integrate generated buckets and fairly select max64/max128 under the new
-  correctness and graph/KV memory contracts
+  current: measure balanced req256, high-concurrency req512, and long-context
+  low-request-capacity graph/KV recipe frontiers
+TARGET 12.606:
+  promote the selected no-env default and named recipes, then run release soak
 TARGET 12.61:
   scan exact/padded M<=512 backend envelopes and open only evidence-backed
   kernel optimization targets
@@ -374,9 +376,10 @@ remained clean. TARGET 12.6025 fixed it by masking padded routes and making one
 live route plan authoritative for Marlin; poison invariance now passes and E2E
 performance is neutral. TARGET 12.603 added a safe conservative graph reserve
 before KV planning and validated max16/64/128, while correctly deferring unsafe
-temporary full-model profiling. TARGET 12.604 now unifies the bucket resolver
-and reserve input before 12.605 selects max64/max128 from serving utility and
-KV opportunity cost.
+temporary full-model profiling. TARGET 12.604 unified bucket resolution and
+reserve input. TARGET 12.605 now selects balanced, high-concurrency, and
+long-context recipe contracts from serving utility and KV opportunity cost;
+TARGET 12.606 performs promotion and cleanup before backend census.
 Optimization and bucket-boundary tests remain focused on `M<=512`;
 `1024/2048` are isolated capability smoke only. A useful combination of 1M
 context and high concurrency is not required: preserve the single-request 1M

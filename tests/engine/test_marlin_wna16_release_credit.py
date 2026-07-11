@@ -3,8 +3,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import torch
-
 from minisgl.engine import engine as engine_module
+from minisgl.engine.graph_memory import empty_graph_memory_estimate
+from minisgl.engine.graph_policy import resolve_cuda_graph_bucket_policy
 
 
 def _fake_config(*, num_page_override=None):
@@ -14,6 +15,8 @@ def _fake_config(*, num_page_override=None):
         tp_info=SimpleNamespace(size=8),
         memory_ratio=1.0,
         num_page_override=num_page_override,
+        max_seq_len=0,
+        max_running_req=0,
     )
 
 
@@ -26,6 +29,12 @@ def _fake_engine(*, source_bytes: int):
         },
     }
     engine._sync_get_memory = lambda: (4_000, 4_000)
+    engine.graph_memory_estimate = empty_graph_memory_estimate()
+    engine.cuda_graph_policy = resolve_cuda_graph_bucket_policy(
+        cuda_graph_bs=[],
+        cuda_graph_max_bs=None,
+        effective_max_running_req=1,
+    )
     return engine
 
 

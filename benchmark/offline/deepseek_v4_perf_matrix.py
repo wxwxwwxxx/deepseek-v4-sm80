@@ -2822,8 +2822,6 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
 
     allow_dsv4_cuda_graph = bool(args.allow_dsv4_cuda_graph or variant_graph)
     cuda_graph_bs = args.cuda_graph_bs
-    if allow_dsv4_cuda_graph and cuda_graph_bs is None:
-        cuda_graph_bs = [1, 2, 4, 8, 16]
     if args.cuda_graph_capture_greedy_sample is None:
         cuda_graph_capture_greedy_sample = variant_graph_greedy_sample
     else:
@@ -2868,6 +2866,7 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
         "use_pynccl": bool(args.use_pynccl or variant_pynccl),
         "allow_dsv4_cuda_graph": allow_dsv4_cuda_graph,
         "cuda_graph_bs": cuda_graph_bs,
+        "cuda_graph_max_bs": args.cuda_graph_max_bs,
         "cuda_graph_capture_greedy_sample": cuda_graph_capture_greedy_sample,
         "enable_dsv4_radix_prefix_cache": enable_dsv4_radix_prefix_cache,
         "enable_dsv4_component_loc_ownership": enable_dsv4_component_loc_ownership,
@@ -4370,6 +4369,10 @@ def run_case(
             "use_pynccl": runtime_options["use_pynccl"],
             "allow_dsv4_cuda_graph": runtime_options["allow_dsv4_cuda_graph"],
             "cuda_graph_bs": runtime_options["cuda_graph_bs"],
+            "cuda_graph_max_bs": runtime_options["cuda_graph_max_bs"],
+            "cuda_graph_bucket_policy": getattr(
+                llm.engine, "cuda_graph_policy", None
+            ).to_report(),
             "cuda_graph_capture_greedy_sample": runtime_options["cuda_graph_capture_greedy_sample"],
             "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
             "graph_runner_case": graph_status_case,
@@ -4454,6 +4457,7 @@ def _init_llm(
         use_pynccl=runtime_options["use_pynccl"],
         allow_dsv4_cuda_graph=runtime_options["allow_dsv4_cuda_graph"],
         cuda_graph_bs=runtime_options["cuda_graph_bs"],
+        cuda_graph_max_bs=runtime_options["cuda_graph_max_bs"],
         cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
         enable_dsv4_radix_prefix_cache=runtime_options["enable_dsv4_radix_prefix_cache"],
         enable_dsv4_swa_tail_retention_v1=args.enable_dsv4_swa_tail_retention_v1,
@@ -4586,6 +4590,8 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "use_pynccl": runtime_options["use_pynccl"],
                         "allow_dsv4_cuda_graph": runtime_options["allow_dsv4_cuda_graph"],
                         "cuda_graph_bs": runtime_options["cuda_graph_bs"],
+                        "cuda_graph_max_bs": runtime_options["cuda_graph_max_bs"],
+                        "cuda_graph_bucket_policy": llm.engine.cuda_graph_policy.to_report(),
                         "cuda_graph_capture_greedy_sample": runtime_options[
                             "cuda_graph_capture_greedy_sample"
                         ],
@@ -4788,6 +4794,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Explicit CUDA graph decode batch sizes for opt-in graph runs.",
     )
     parser.add_argument(
+        "--cuda-graph-max-bs",
+        type=int,
+        default=None,
+        help="Generate the authoritative CUDA graph bucket policy through this maximum.",
+    )
+    parser.add_argument(
         "--cuda-graph-capture-greedy-sample",
         dest="cuda_graph_capture_greedy_sample",
         action="store_true",
@@ -4842,6 +4854,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         if any(value <= 0 for value in args.cuda_graph_bs):
             parser.error("--cuda-graph-bs values must be positive")
         args.cuda_graph_bs = sorted(set(args.cuda_graph_bs))
+    if args.cuda_graph_max_bs is not None and args.cuda_graph_max_bs < 0:
+        parser.error("--cuda-graph-max-bs must be non-negative")
     return args
 
 

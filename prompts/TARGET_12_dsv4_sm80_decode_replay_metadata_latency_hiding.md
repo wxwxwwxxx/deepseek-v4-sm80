@@ -68,9 +68,10 @@ dummy-route dependency to layer-0 MoE route planning/grouped execution. TARGET
 12.6025 aligned the live-route contract with SGLang. TARGET 12.603 installed a
 safe conservative pre-KV graph reserve for max16/64/128. TARGET 12.604 now
 unifies bucket resolution so planner and GraphRunner cannot observe different
-lists; TARGET 12.605 then chooses between practical max64/max128 policies.
-`M=1024/2048` remain isolated smoke points, and simultaneous 1M context plus
-high concurrency is not required.
+lists. TARGET 12.605 now measures a recipe frontier across balanced req256,
+high-concurrency req512, and long-context low-request-capacity configurations;
+TARGET 12.606 promotes the selected recipes. `M=1024/2048` remain isolated
+smoke points, and simultaneous 1M context plus high concurrency is not required.
 
 ## Goal
 
@@ -285,9 +286,10 @@ when executed, but this root TARGET 12 is the controlling roadmap.
 | TARGET 12.602 CUDA Graph Padding Live-Row Classification | completed with MoE blocker | Used actual max64 candidate boundaries, valid dummy poison, selected layer-0 boundaries, repeat stability, and natural-language smoke. Dummy routes deterministically changed global route planning and the first live MoE output; text sanity remained clean. Report: `performance_milestones/target12_cuda_graph_padding_live_row_classification/README.md`. |
 | TARGET 12.6025 MoE Padding Live-Route Contract Fix | completed | Added graph-visible live-row count, masked padded top-k IDs/weights following SGLang, made one masked route plan authoritative for Marlin, and proved poison-invariant live plans/logits/tokens with neutral E2E performance. Report: `performance_milestones/target12_moe_padding_live_route_contract_fix/README.md`. |
 | TARGET 12.603 CUDA Graph Memory Reserve Planner | completed with conservative estimator | Added an automatic DSV4/sm80 graph estimate plus 512 MiB margin before KV planning, validated stable max16/64/128 actual-versus-estimated ledgers, and deferred unsafe temporary full-model profiling until mini has a complete KV/backend detach primitive. Report: `performance_milestones/target12_cuda_graph_memory_reserve_planner/README.md`. |
-| TARGET 12.604 CUDA Graph Bucket And Reserve Contract Unification | current | Resolve omitted, explicit-list, max-only, and disabled policies once before KV planning; feed the same tuple to estimator and GraphRunner and fail fast on mismatch without changing the current max16 default. Prompt: `prompts/TARGET_12.604_dsv4_sm80_cuda_graph_bucket_reserve_contract_unification.md`. |
-| TARGET 12.605 Large Decode Graph Bucket Integration | planned | After 12.604, compare max16/64/128 under the safe reserve using realistic active-M serving waves and KV opportunity cost, then promote a fixed or memory-aware practical policy. Retain `1024/2048` as smoke only. Prompt: `prompts/TARGET_12.605_dsv4_sm80_large_decode_graph_bucket_integration.md`. |
-| TARGET 12.61 Workload And Large-M Backend Envelope Census | planned | Profile exact/padded M through 512, compare mini dispatch/subgraphs with SGLang/vLLM, and open kernel rewrites only for measured material owners. Prompt: `prompts/TARGET_12.61_dsv4_sm80_workload_backend_envelope_census.md`. |
+| TARGET 12.604 CUDA Graph Bucket And Reserve Contract Unification | completed | Added one pure resolver/generator before KV planning, unified estimator/runner/benchmark tuples, preserved no-env max16 and disabled/override behavior, and passed a max-only max64 TP8 smoke. Report: `performance_milestones/target12_cuda_graph_bucket_reserve_contract_unification/README.md`. |
+| TARGET 12.605 CUDA Graph Recipe Frontier And Selection | current | Compare req256 graph128/256, staged req512 graph256/384/512, and low-request-capacity 512k/1M capability recipes; price graph coverage against KV/context capacity and select exact promotion contracts. Prompt: `prompts/TARGET_12.605_dsv4_sm80_cuda_graph_recipe_frontier_selection.md`. |
+| TARGET 12.606 CUDA Graph Recipe Promotion And Cleanup | planned | Wire the selected balanced default and named high-concurrency/long-context presets, clean stale diagnostics, and run the final correctness/performance/capacity soak. Prompt: `prompts/TARGET_12.606_dsv4_sm80_cuda_graph_recipe_promotion_cleanup.md`. |
+| TARGET 12.61 Workload And Large-M Backend Envelope Census | planned | After recipe promotion, profile exact/padded M through the supported envelopes, compare mini subgraphs with SGLang/vLLM, and open kernel rewrites only for measured material owners. Prompt: `prompts/TARGET_12.61_dsv4_sm80_workload_backend_envelope_census.md`. |
 | TARGET 12.5 Direct/Fused Graph Metadata Writers | deferred | In-graph metadata prep is now promoted. Reopen only if a fresh profile shows residual `raw_graph_copy` or graph metadata kernels as a top release bottleneck. |
 | TARGET 12.6 Multi-Stream Latency-Hiding PoC | deferred | Not part of the current route. Reopen only if future evidence proves a material independent owner that cannot be removed, fused, or moved into graph capture. |
 | TARGET 12.7 Promotion Gate | todo | Run the final non-MTP release soak after the post-HC envelope, memory accounting, chunked-prefill decision, and fallback/native-backend census converge; promote only if correctness is clean and macro/capacity tradeoffs are repeat-stable. |

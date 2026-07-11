@@ -6,7 +6,7 @@ import os
 import time
 import traceback
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict
 
 import torch
 from minisgl.core import Batch, Req, get_global_ctx
@@ -149,27 +149,6 @@ class GraphCaptureBuffer:
             + self.out_loc.element_size()
             + self.positions.element_size()
         ) + self.num_token_non_padded.element_size()
-
-
-def _determine_cuda_graph_bs(
-    cuda_graph_bs: List[int] | None,
-    cuda_graph_max_bs: int | None,
-    free_memory: int,
-) -> List[int]:
-    if cuda_graph_bs is not None:
-        return cuda_graph_bs
-
-    free_memory_gb = free_memory / (1 << 30)
-    if cuda_graph_max_bs is None:
-        if free_memory_gb > 80:  # H200
-            cuda_graph_max_bs = 256
-        else:
-            cuda_graph_max_bs = 160
-
-    if cuda_graph_max_bs < 1:
-        return []
-
-    return [1, 2, 4] + list(range(8, cuda_graph_max_bs + 1, 8))
 
 
 def mem_GB(size: int) -> str:
@@ -324,20 +303,15 @@ class GraphRunner:
         device: torch.device,
         model: BaseLLMModel,
         attn_backend: BaseAttnBackend,
-        cuda_graph_bs: List[int] | None,
-        cuda_graph_max_bs: int | None,
-        free_memory: int,
+        resolved_graph_bs: tuple[int, ...],
+        graph_policy_report: dict[str, object],
         max_seq_len: int,
         vocab_size: int,
         dummy_req: Req,
         capture_fail_open: bool = False,
         capture_greedy_sample: bool = False,
     ) -> None:
-        cuda_graph_bs = _determine_cuda_graph_bs(
-            cuda_graph_bs=cuda_graph_bs,
-            cuda_graph_max_bs=cuda_graph_max_bs,
-            free_memory=free_memory,
-        )
+        cuda_graph_bs = resolved_graph_bs
         self.attn_backend = attn_backend
         self.model = model
         self.max_graph_bs = max(cuda_graph_bs) if cuda_graph_bs else 0
@@ -358,6 +332,7 @@ class GraphRunner:
         )
         self.capture_status = {
             "enabled": bool(cuda_graph_bs),
+            "bucket_policy": graph_policy_report,
             "exact_bs_only": bool(self.exact_bs_only),
             "requested_bs": list(self.graph_bs_list),
             "captured_bs": [],

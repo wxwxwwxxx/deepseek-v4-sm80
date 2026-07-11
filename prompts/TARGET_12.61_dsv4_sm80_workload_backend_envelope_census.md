@@ -2,8 +2,8 @@
 
 ## Status
 
-Planned after TARGET 12.605 selects the release graph policy. Review and split
-implementation targets only after measured owners are ranked.
+Planned after TARGET 12.606 promotes the selected graph recipes. Review and
+split implementation targets only after measured owners are ranked.
 
 ## Purpose
 
@@ -21,11 +21,11 @@ requires rewritten kernels.
 decode/backend M = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512
 ```
 
-Use exact-M and selected-policy padded-M rows where applicable. Treat the
-TARGET 12.605 policy as the primary release envelope. Values above it and
-through 512 are explicit research shapes and justify kernel work only when a
-supported high-throughput mode has credible serving demand. Keep 1024/2048 as
-isolated capability smoke only.
+Use exact-M and selected-recipe padded-M rows where applicable. Treat the
+TARGET 12.605/12.606 balanced and optional high-concurrency recipes as the
+release envelopes. Values above the promoted recipe and through 512 justify
+kernel work only when a supported named high-throughput recipe has credible
+serving demand. Keep 1024/2048 as isolated capability smoke only.
 
 ## Required Work
 
@@ -61,6 +61,9 @@ metadata and cache writes
 8. Use TARGET 12.604 resolved-policy telemetry so exact/padded/eager rows cannot
    be mislabeled. Separate true kernel scaling from expected padded work, eager
    launch overhead, and graph-memory capacity tradeoffs.
+9. Keep balanced, high-concurrency, and long-context profiles separate. A
+   kernel material only in an unpromoted graph512 research shape must not outrank
+   a smaller release-recipe owner.
 
 ## Kernel-Target Rule
 

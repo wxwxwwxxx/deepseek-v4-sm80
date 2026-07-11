@@ -32,6 +32,10 @@ from .graph_memory import (
     estimate_dsv4_sm80_graph_memory,
     select_num_pages,
 )
+from .graph_policy import (
+    ResolvedCudaGraphBucketPolicy,
+    resolve_cuda_graph_bucket_policy,
+)
 from .sample import BatchSamplingArgs, Sampler
 
 logger = init_logger(__name__)
@@ -114,6 +118,31 @@ def _resolve_effective_max_seq_len(
     return effective_max, effective_rope_len, rope_kind
 
 
+def validate_graph_bucket_contract(
+    *,
+    resolved_bs: tuple[int, ...],
+    estimated_bs: tuple[int, ...],
+    runner_requested_bs: list[int],
+    runner_captured_bs: list[int],
+    capture_error: object | None,
+) -> None:
+    """Fail fast when planner and runner observe different graph policies."""
+
+    requested = tuple(sorted(int(value) for value in runner_requested_bs))
+    captured = tuple(sorted(int(value) for value in runner_captured_bs))
+    if resolved_bs != estimated_bs or resolved_bs != requested:
+        raise RuntimeError(
+            "Programming error: CUDA graph bucket policy mismatch before/at capture: "
+            f"resolved={list(resolved_bs)}, estimated={list(estimated_bs)}, "
+            f"runner_requested={list(requested)}."
+        )
+    if capture_error is None and resolved_bs != captured:
+        raise RuntimeError(
+            "Programming error: CUDA graph captured bucket policy mismatch: "
+            f"resolved={list(resolved_bs)}, runner_captured={list(captured)}."
+        )
+
+
 class Engine:
     def __init__(self, config: EngineConfig):
         assert not torch.cuda.is_initialized()
@@ -133,6 +162,9 @@ class Engine:
 
         self.tp_cpu_group = self._init_communication(config)
         init_free_memory = self._sync_get_memory()[1]
+        self.cuda_graph_policy = _resolve_cuda_graph_policy(
+            config, free_memory=init_free_memory
+        )
         logger.info_rank0(f"Free memory before loading model: {mem_GB(init_free_memory)}")
 
         # ======================= Model initialization ========================
@@ -202,6 +234,7 @@ class Engine:
             rope_is_on_the_fly=rope_is_on_the_fly,
         )
         aligned_max_seq_len = _align_up(self.max_seq_len, max(32, config.page_size))
+        self.kv_capacity_plan_report["effective_sequence_width"] = int(aligned_max_seq_len)
         self.ctx.page_table = self.page_table = torch.zeros(  # + 1 for dummy request
             (config.max_running_req + 1, aligned_max_seq_len),
             dtype=torch.int32,
@@ -272,9 +305,8 @@ class Engine:
             device=self.device,
             model=self.model,
             attn_backend=self.attn_backend,
-            cuda_graph_bs=config.cuda_graph_bs,
-            cuda_graph_max_bs=config.cuda_graph_max_bs,
-            free_memory=init_free_memory,
+            resolved_graph_bs=self.cuda_graph_policy.resolved_bs,
+            graph_policy_report=self.cuda_graph_policy.to_report(),
             max_seq_len=aligned_max_seq_len,
             vocab_size=config.model_config.vocab_size,
             dummy_req=self.dummy_req,
@@ -531,6 +563,7 @@ class Engine:
                 old_free_memory - requested_device_budget
             ),
             "graph_memory": self.graph_memory_estimate.to_report(),
+            "cuda_graph_bucket_policy": self.cuda_graph_policy.to_report(),
             "graph_memory_estimate_elapsed_s": float(
                 getattr(self, "graph_memory_estimate_elapsed_s", 0.0)
             ),
@@ -554,7 +587,7 @@ class Engine:
 
     def _estimate_graph_memory(self, config: EngineConfig) -> GraphMemoryEstimate:
         started = time.perf_counter()
-        graph_bs = tuple(config.cuda_graph_bs or ())
+        graph_bs = self.cuda_graph_policy.resolved_bs
         if not graph_bs or not config.model_config.is_deepseek_v4:
             estimate = empty_graph_memory_estimate(graph_bs)
             self.graph_memory_estimate_elapsed_s = time.perf_counter() - started
@@ -603,6 +636,13 @@ class Engine:
 
     def _finalize_graph_memory_ledger(self) -> None:
         status = getattr(self.graph_runner, "capture_status", {})
+        validate_graph_bucket_contract(
+            resolved_bs=self.cuda_graph_policy.resolved_bs,
+            estimated_bs=self.graph_memory_estimate.graph_bs,
+            runner_requested_bs=list(status.get("requested_bs", [])),
+            runner_captured_bs=list(status.get("captured_bs", [])),
+            capture_error=status.get("error"),
+        )
         actual_local = int(status.get("capture_memory_delta_bytes") or 0)
         actual = self._sync_max_int(actual_local)
         estimate = int(self.graph_memory_estimate.estimate_bytes)
@@ -1032,6 +1072,44 @@ def _dsv4_release_defaults_enabled() -> bool:
     return not _has_explicit_dsv4_sm80_runtime_env()
 
 
+def _resolve_cuda_graph_policy(
+    config: EngineConfig, *, free_memory: int | None = None
+) -> ResolvedCudaGraphBucketPolicy:
+    existing = getattr(config, "cuda_graph_policy", None)
+    if existing is not None:
+        return existing
+    is_dsv4 = bool(config.model_config.is_deepseek_v4)
+    disabled = bool(getattr(config, "disable_cuda_graph", False)) or (
+        is_dsv4 and not bool(config.allow_dsv4_cuda_graph)
+    )
+    legacy_default_max = None
+    if not is_dsv4 and config.cuda_graph_bs is None and config.cuda_graph_max_bs is None:
+        if free_memory is None:
+            raise RuntimeError("generic CUDA graph auto policy requires the free-memory snapshot")
+        legacy_default_max = 256 if free_memory / (1 << 30) > 80 else 160
+    policy = resolve_cuda_graph_bucket_policy(
+        cuda_graph_bs=config.cuda_graph_bs,
+        cuda_graph_max_bs=config.cuda_graph_max_bs,
+        effective_max_running_req=int(getattr(config, "max_running_req", 256)),
+        graph_disabled=disabled,
+        release_default_bs=(
+            _DSV4_SM80_DEFAULT_CUDA_GRAPH_BS
+            if is_dsv4 and bool(config.allow_dsv4_cuda_graph)
+            else None
+        ),
+        legacy_default_max_bs=legacy_default_max,
+    )
+    object.__setattr__(config, "cuda_graph_policy", policy)
+    object.__setattr__(config, "cuda_graph_bs", list(policy.resolved_bs))
+    object.__setattr__(config, "cuda_graph_max_bs", policy.resolved_max_bs)
+    logger.info_rank0(
+        "Resolved CUDA graph bucket policy before KV planning: "
+        f"mode={policy.source_mode}, buckets={list(policy.resolved_bs)}, "
+        f"reason={policy.validation_or_cap_reason}."
+    )
+    return policy
+
+
 def _adjust_config(config: EngineConfig):
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)
@@ -1065,7 +1143,11 @@ def _adjust_config(config: EngineConfig):
                 and not max_extend_tokens_explicit
             ):
                 override("max_extend_tokens", _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS)
-            graph_explicitly_disabled = config.cuda_graph_bs == [] or config.cuda_graph_max_bs == 0
+            graph_explicitly_disabled = (
+                bool(getattr(config, "disable_cuda_graph", False))
+                or config.cuda_graph_bs == []
+                or config.cuda_graph_max_bs == 0
+            )
             if not graph_explicitly_disabled and not config.allow_dsv4_cuda_graph:
                 override("allow_dsv4_cuda_graph", True)
             logger.info_rank0(
@@ -1082,14 +1164,7 @@ def _adjust_config(config: EngineConfig):
         if config.attention_backend != "dsv4":
             override("attention_backend", "dsv4")
             logger.info_rank0("Using DSV4 attention backend for DeepSeek V4")
-        if not config.allow_dsv4_cuda_graph:
-            override("cuda_graph_bs", [])
-            override("cuda_graph_max_bs", 0)
-        else:
-            if config.cuda_graph_bs is None:
-                override("cuda_graph_bs", list(_DSV4_SM80_DEFAULT_CUDA_GRAPH_BS))
-            if config.cuda_graph_max_bs is None:
-                override("cuda_graph_max_bs", max(config.cuda_graph_bs or [0]))
+        if config.allow_dsv4_cuda_graph:
             override("cuda_graph_capture_fail_open", True)
             if getattr(config, "enable_dsv4_component_loc_ownership", False):
                 logger.info_rank0(
@@ -1100,6 +1175,7 @@ def _adjust_config(config: EngineConfig):
             logger.info_rank0(
                 f"Opting in to DeepSeek V4 decode CUDA graph sizes: {config.cuda_graph_bs}"
             )
+        _resolve_cuda_graph_policy(config)
     elif config.attention_backend == "auto":
         backend = "trtllm" if is_sm100_supported() else ("fa,fi" if is_sm90_supported() else "fi")
         override("attention_backend", backend)
