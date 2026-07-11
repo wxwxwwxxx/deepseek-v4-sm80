@@ -1,46 +1,82 @@
-# TARGET 12.61: DSV4 SM80 Workload Backend Envelope Census
+# TARGET 12.61: DSV4 SM80 Workload And Large-M Backend Envelope Census
 
 ## Status
 
-Planned after the 1M and large-decode-graph routes converge. Review and split
-into implementation targets after the census identifies measured owners.
+Planned after TARGET 12.605 selects the release graph policy. Review and split
+implementation targets only after measured owners are ranked.
 
 ## Purpose
 
-Scan the release engine across context length, prefill token count, decode
-batch size, and backend `M` regimes. Find kernels or fallback paths whose
-dispatch, temporary memory, arithmetic intensity, or scaling is unsuitable for
-their workload, then rank focused backend adaptations.
+Measure how the release engine and major backends scale across context length,
+prefill chunk M, and decode M. Determine whether a kernel, communication path,
+fallback, temporary, or dispatch choice becomes materially unsuitable at
+larger practical batches.
 
-## Initial Matrix
+This target produces evidence for kernel work; it does not assume larger M
+requires rewritten kernels.
 
-Include representative regimes rather than a Cartesian explosion:
+## Primary Range
 
 ```text
-short/medium/long prefill with chunk M up to the release maximum
-decode bs 1 through the promoted cuda_graph_max_bs
-short and long cached context
-prefix-hit and no-prefix cases
-C4A, C128A, indexer, HC, MoE, projection, sampler, and communication owners
+decode/backend M = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512
 ```
 
-Start with no-weight/one-layer microbench and actual backend census. Use full
-macro only after one owner is implicated. Compare mini against SGLang/vLLM
-dispatch and mature kernels before implementing a new backend.
+Use exact-M and selected-policy padded-M rows where applicable. Treat the
+TARGET 12.605 policy as the primary release envelope. Values above it and
+through 512 are explicit research shapes and justify kernel work only when a
+supported high-throughput mode has credible serving demand. Keep 1024/2048 as
+isolated capability smoke only.
 
-The first known long-context performance candidate is bounded FP8 paged
-indexer select: TARGET 12.58 measured it at about 48% of 512k TTFT. Evaluate a
-streaming/fused logits+top-k backend against the current bounded Triton+CUDA
-oracle, but do not assume it remains the top owner after C128 and graph changes.
+## Required Work
 
-For each owner record compute/memory intensity, temporary bytes, launch count,
-backend guard, A100 roofline context, and expected macro upside. Open focused
-implementation targets only for material owners; stop polishing when the
-remaining delta is small or another subsystem dominates.
+1. Build no-weight, one-layer, or subgraph microbenches before full macros. Use
+   production kernels and shapes rather than synthetic GEMMs that omit routing,
+   metadata, graph padding, or communication.
+2. For each representative M, record per-step latency, aggregate token
+   throughput, padded-work efficiency, launch count, temporary bytes, selected
+   backend, graph/eager mode, resolved bucket, graph reserve, and effective KV
+   capacity.
+3. Attribute GPU time to:
+
+```text
+C4A / C128A / indexer
+HC and dense projections
+MoE routing, Marlin expert GEMMs, shared expert, and reductions
+PyNCCL/NCCL collectives
+lm_head, logits, sampler, and output gathering
+metadata and cache writes
+```
+
+4. Compare actual mini dispatch and representative subgraph performance with
+   SGLang and vLLM on DSV4 sm80. Adapt mature implementations before designing
+   a new backend.
+5. Report arithmetic intensity, effective bandwidth or tensor-core use where
+   measurable, A100 roofline context, scaling slope, and expected macro upside
+   for each material owner.
+6. Include short and long cached contexts, prefix hit/no-hit, and chunked
+   prefill without creating a Cartesian workload explosion.
+7. Re-rank the bounded FP8 indexer, previously about 48% of 512k TTFT, after
+   graph/C128 changes. Evaluate streaming/fused logits+top-k only if it remains
+   material.
+8. Use TARGET 12.604 resolved-policy telemetry so exact/padded/eager rows cannot
+   be mislabeled. Separate true kernel scaling from expected padded work, eager
+   launch overhead, and graph-memory capacity tradeoffs.
+
+## Kernel-Target Rule
+
+Open a focused optimization target only when all are true:
+
+- the owner is material in a release-relevant workload;
+- scaling or backend parity shows credible headroom;
+- expected E2E gain exceeds measurement noise and integration cost;
+- the work is not merely for M>512 or an unsupported research-only policy;
+- SGLang/vLLM does not already provide an adaptable solution.
+
+If throughput rises normally with M and no owner is anomalous, conclude that no
+large-M kernel rewrite is currently justified.
 
 ## Output
 
 ```text
 performance_milestones/target12_workload_backend_envelope_census/README.md
 ```
-

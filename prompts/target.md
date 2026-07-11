@@ -341,22 +341,46 @@ TARGET 12.597:
   completed model-default benchmark, scheduler, RoPE, and legal 1M
   total-sequence parity
 TARGET 12.60:
-  design a vLLM/SGLang-aligned generated CUDA graph policy for the practical
-  M<=512 envelope; keep M=1024/2048 as isolated smoke points only
+  completed CUDA graph bucket/memory preflight; exposed padded live-row drift
+  and missing graph-memory reservation before KV planning
+TARGET 12.602:
+  completed padding classification; valid dummy routes alter layer-0 MoE route
+  planning and live output despite clean natural-language sanity
+TARGET 12.6025:
+  completed SGLang-style num_token_non_padded and authoritative Marlin plan;
+  dummy routes are now semantically inert with neutral E2E performance
+TARGET 12.603:
+  completed safe automatic pre-KV graph reservation with a validated
+  DSV4/sm80 conservative estimator; full temporary profiling remains deferred
+TARGET 12.604:
+  current: unify bucket resolution so planner, GraphRunner, benchmark, and
+  telemetry consume exactly one generated/explicit policy
 TARGET 12.605:
-  integrate the measured practical bucket policy and graph/KV memory guards
+  integrate generated buckets and fairly select max64/max128 under the new
+  correctness and graph/KV memory contracts
 TARGET 12.61:
-  scan large-context, large-decode-batch, and large-M backend envelopes
+  scan exact/padded M<=512 backend envelopes and open only evidence-backed
+  kernel optimization targets
 ```
 
 The C128 raw/page/full metadata and max-sequence benchmark contracts are fixed.
-TARGET 12.60 must now separate serving `max_running_req`, active decode `M`,
-graph buckets, static request-table memory, and aggregate KV capacity before a
-larger graph policy is promoted. Optimization and bucket-boundary tests should
-focus on `M<=512`; `1024/2048` need only isolated capability smoke. A useful
-combination of 1M context and high concurrency is not required: preserve the
-single-request 1M gate and test practical short/medium-context concurrency
-separately.
+TARGET 12.60 separated serving `max_running_req`, active decode `M`, graph
+buckets, request-table memory, and aggregate KV capacity. It showed that
+backend shapes can capture through the smoke range, but automatic KV planning
+does not reserve graph-pool memory and upward padding changes some live token
+IDs. TARGET 12.602 proved a deterministic dummy-route dependency at the first
+layer-0 MoE route-plan/grouped-expert boundary, while natural-language sanity
+remained clean. TARGET 12.6025 fixed it by masking padded routes and making one
+live route plan authoritative for Marlin; poison invariance now passes and E2E
+performance is neutral. TARGET 12.603 added a safe conservative graph reserve
+before KV planning and validated max16/64/128, while correctly deferring unsafe
+temporary full-model profiling. TARGET 12.604 now unifies the bucket resolver
+and reserve input before 12.605 selects max64/max128 from serving utility and
+KV opportunity cost.
+Optimization and bucket-boundary tests remain focused on `M<=512`;
+`1024/2048` are isolated capability smoke only. A useful combination of 1M
+context and high concurrency is not required: preserve the single-request 1M
+gate and test practical short/medium-context concurrency separately.
 The first known long-context performance owner remains bounded FP8 indexer
 select, measured at about 48% of 512k TTFT, but its kernel work is deferred
 until the max-sequence and graph-bucket capability paths converge.

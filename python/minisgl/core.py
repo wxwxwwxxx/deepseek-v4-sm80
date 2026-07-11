@@ -79,6 +79,10 @@ class Batch:
     positions: torch.Tensor = field(init=False)
     out_loc: torch.Tensor = field(init=False)
     padded_reqs: List[Req] = field(init=False)
+    # Graph-visible scalar containing the number of semantic (non-padding)
+    # token rows.  CUDA graph replay binds this to a stable capture-buffer
+    # address; eager execution materializes an exact-sized scalar.
+    num_token_non_padded: torch.Tensor = field(init=False)
     # this field should be set by attention backend
     attn_metadata: BaseAttnMetadata = field(init=False)
 

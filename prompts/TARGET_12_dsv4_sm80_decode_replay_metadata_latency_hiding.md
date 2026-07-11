@@ -61,10 +61,16 @@ passed 512k, and isolated the 1M blocker to eager-prefill C128 metadata after
 729088 committed tokens. TARGET 12.59 proved a one-surface C128 contract, and
 TARGET 12.595 integrated it and completed all 128 prefill chunks plus decode
 graph replay. TARGET 12.597 aligned benchmark and serving max-sequence
-semantics and passed the legal 1M total-sequence gate. TARGET 12.60 now designs
-the practical decode graph policy for `M<=512`; `M=1024/2048` are isolated
-smoke points only, and simultaneous 1M context plus high concurrency is not a
-release requirement.
+semantics and passed the legal 1M total-sequence gate. TARGET 12.60 measured the
+practical decode graph envelope, exposed missing pre-KV graph-memory accounting,
+and found padded/live-row token drift. TARGET 12.602 localized a blocking
+dummy-route dependency to layer-0 MoE route planning/grouped execution. TARGET
+12.6025 aligned the live-route contract with SGLang. TARGET 12.603 installed a
+safe conservative pre-KV graph reserve for max16/64/128. TARGET 12.604 now
+unifies bucket resolution so planner and GraphRunner cannot observe different
+lists; TARGET 12.605 then chooses between practical max64/max128 policies.
+`M=1024/2048` remain isolated smoke points, and simultaneous 1M context plus
+high concurrency is not required.
 
 ## Goal
 
@@ -275,9 +281,13 @@ when executed, but this root TARGET 12 is the controlling roadmap.
 | TARGET 12.59 C128 Prefill Metadata Contract And Native Micro | completed | Proved that release eager prefill consumes only final C128 component page indices plus lengths, implemented an exact one-launch Triton helper, and measured zero temporary bytes beyond its final int32 output. Report: `performance_milestones/target12_c128_prefill_metadata_contract_native_micro/README.md`. |
 | TARGET 12.595 C128 One-Surface 1M Promotion | completed with benchmark-contract follow-up | Integrated the one-surface helper, removed eager raw/full and int64 matrices, completed 128 chunks plus seven decode graph replays, and retained about 1.13 GiB physical free. The benchmark implicitly raised max sequence to prompt+decode, so serving-default max-sequence parity remains to be closed. Report: `performance_milestones/target12_c128_one_surface_1m_promotion/README.md`. |
 | TARGET 12.597 Release Max-Sequence And Benchmark Parity | completed | Separated model-default, explicit-override, and scenario-sized max-sequence modes; passed scheduler/RoPE bounds and the legal `1048568+8=1048576` total-sequence gate; exposed `max_running_req` as the remaining graph-baseline ambiguity. Report: `performance_milestones/target12_release_max_seq_benchmark_parity/README.md`. |
-| TARGET 12.60 CUDA Graph Bucket Policy Preflight | current | Derive a vLLM/SGLang-aligned generated policy, explicitly separate request capacity from active decode `M`, and measure the practical `M<=512` envelope. Probe `1024/2048` only as isolated smoke points; do not require simultaneous 1M context and high concurrency. Prompt: `prompts/TARGET_12.60_dsv4_sm80_cuda_graph_bucket_policy_preflight.md`. |
-| TARGET 12.605 Large Decode Graph Bucket Integration | planned | Integrate the measured generated policy, account graph-pool memory in KV planning, and promote the largest useful decode graph batch at or below 512. Retain `1024/2048` as optional capability smoke rather than tuned release buckets. Prompt: `prompts/TARGET_12.605_dsv4_sm80_large_decode_graph_bucket_integration.md`. |
-| TARGET 12.61 Workload Backend Envelope Census | planned | Scan context/batch/M regimes, compare actual mini dispatch with SGLang/vLLM, and rank focused kernel/backend adaptations. The known streaming-indexer candidate must be re-ranked after 1M and graph work. Prompt: `prompts/TARGET_12.61_dsv4_sm80_workload_backend_envelope_census.md`. |
+| TARGET 12.60 CUDA Graph Bucket Policy Preflight | completed with two follow-ups | Established the true serving baseline, measured cumulative graph memory through max160 and isolated shape feasibility through 2048, proposed max64 as a conservative candidate, and exposed both missing graph reserve and padded/live-row token drift. Report: `performance_milestones/target12_cuda_graph_bucket_policy_preflight/README.md`. |
+| TARGET 12.602 CUDA Graph Padding Live-Row Classification | completed with MoE blocker | Used actual max64 candidate boundaries, valid dummy poison, selected layer-0 boundaries, repeat stability, and natural-language smoke. Dummy routes deterministically changed global route planning and the first live MoE output; text sanity remained clean. Report: `performance_milestones/target12_cuda_graph_padding_live_row_classification/README.md`. |
+| TARGET 12.6025 MoE Padding Live-Route Contract Fix | completed | Added graph-visible live-row count, masked padded top-k IDs/weights following SGLang, made one masked route plan authoritative for Marlin, and proved poison-invariant live plans/logits/tokens with neutral E2E performance. Report: `performance_milestones/target12_moe_padding_live_route_contract_fix/README.md`. |
+| TARGET 12.603 CUDA Graph Memory Reserve Planner | completed with conservative estimator | Added an automatic DSV4/sm80 graph estimate plus 512 MiB margin before KV planning, validated stable max16/64/128 actual-versus-estimated ledgers, and deferred unsafe temporary full-model profiling until mini has a complete KV/backend detach primitive. Report: `performance_milestones/target12_cuda_graph_memory_reserve_planner/README.md`. |
+| TARGET 12.604 CUDA Graph Bucket And Reserve Contract Unification | current | Resolve omitted, explicit-list, max-only, and disabled policies once before KV planning; feed the same tuple to estimator and GraphRunner and fail fast on mismatch without changing the current max16 default. Prompt: `prompts/TARGET_12.604_dsv4_sm80_cuda_graph_bucket_reserve_contract_unification.md`. |
+| TARGET 12.605 Large Decode Graph Bucket Integration | planned | After 12.604, compare max16/64/128 under the safe reserve using realistic active-M serving waves and KV opportunity cost, then promote a fixed or memory-aware practical policy. Retain `1024/2048` as smoke only. Prompt: `prompts/TARGET_12.605_dsv4_sm80_large_decode_graph_bucket_integration.md`. |
+| TARGET 12.61 Workload And Large-M Backend Envelope Census | planned | Profile exact/padded M through 512, compare mini dispatch/subgraphs with SGLang/vLLM, and open kernel rewrites only for measured material owners. Prompt: `prompts/TARGET_12.61_dsv4_sm80_workload_backend_envelope_census.md`. |
 | TARGET 12.5 Direct/Fused Graph Metadata Writers | deferred | In-graph metadata prep is now promoted. Reopen only if a fresh profile shows residual `raw_graph_copy` or graph metadata kernels as a top release bottleneck. |
 | TARGET 12.6 Multi-Stream Latency-Hiding PoC | deferred | Not part of the current route. Reopen only if future evidence proves a material independent owner that cannot be removed, fused, or moved into graph capture. |
 | TARGET 12.7 Promotion Gate | todo | Run the final non-MTP release soak after the post-HC envelope, memory accounting, chunked-prefill decision, and fallback/native-backend census converge; promote only if correctness is clean and macro/capacity tradeoffs are repeat-stable. |

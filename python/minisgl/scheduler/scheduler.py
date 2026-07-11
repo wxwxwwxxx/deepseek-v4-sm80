@@ -190,6 +190,12 @@ class Scheduler(SchedulerIOMixin):
 
         # initialize other managers
         self.table_manager = TableManager(config.max_running_req, self.engine.page_table)
+        # The final row is reserved for CUDA-graph padding.  Mirror the Engine's
+        # explicitly selected diagnostic token without changing any live row.
+        dummy_req = getattr(self.engine, "dummy_req", None)
+        if dummy_req is not None:
+            dummy_token = int(dummy_req.input_ids[-1].item())
+            self.table_manager.token_pool[dummy_req.table_idx].fill_(dummy_token)
         self.cache_manager = CacheManager(
             self.engine.num_pages,
             config.page_size,

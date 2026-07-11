@@ -1053,6 +1053,7 @@ def moe_route_dispatch_bf16_marlin_wna16(
     swiglu_limit: float = 0.0,
     cache=None,
     owner_label: str | None = None,
+    moe_plan: DSV4MoEExecutionPlan | None = None,
 ) -> tuple[torch.Tensor, object]:
     if hidden_states.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError(f"Marlin WNA16 expects fp16/bf16 hidden states, got {hidden_states.dtype}")
@@ -1092,6 +1093,7 @@ def moe_route_dispatch_bf16_marlin_wna16(
         indices,
         cache,
         swiglu_limit=swiglu_limit,
+        moe_plan=moe_plan,
     )
     return output, cache
 
@@ -1103,6 +1105,7 @@ def moe_route_dispatch_bf16_marlin_wna16_prepacked(
     cache,
     *,
     swiglu_limit: float = 0.0,
+    moe_plan: DSV4MoEExecutionPlan | None = None,
 ) -> torch.Tensor:
     return _run_moe_bf16_marlin_wna16_prepacked(
         hidden_states,
@@ -1110,6 +1113,7 @@ def moe_route_dispatch_bf16_marlin_wna16_prepacked(
         indices,
         cache,
         swiglu_limit=swiglu_limit,
+        moe_plan=moe_plan,
     )
 
 
@@ -1120,6 +1124,7 @@ def _run_moe_bf16_marlin_wna16_prepacked(
     cache,
     *,
     swiglu_limit: float,
+    moe_plan: DSV4MoEExecutionPlan | None,
 ) -> torch.Tensor:
     if hidden_states.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError(f"Marlin WNA16 expects fp16/bf16 hidden states, got {hidden_states.dtype}")
@@ -1137,20 +1142,33 @@ def _run_moe_bf16_marlin_wna16_prepacked(
     from minisgl.kernel import marlin_wna16
 
     experts = cache.w13.shape[0]
-    block_size_m = marlin_wna16.choose_block_size(
-        tokens=hidden_states.shape[0],
-        topk=indices.shape[1],
-        experts=experts,
-        input_dtype=None,
-    )
-    route_plan = build_moe_route_plan(
-        indices,
-        num_experts=experts,
-        block_size_m=block_size_m,
-    )
+    if moe_plan is None:
+        block_size_m = marlin_wna16.choose_block_size(
+            tokens=hidden_states.shape[0],
+            topk=indices.shape[1],
+            experts=experts,
+            input_dtype=None,
+        )
+        route_plan = build_moe_route_plan(
+            indices,
+            num_experts=experts,
+            block_size_m=block_size_m,
+        )
+        topk_weights = weights
+    else:
+        if (
+            moe_plan.tokens != hidden_states.shape[0]
+            or moe_plan.hidden != hidden_states.shape[1]
+            or moe_plan.num_experts != experts
+            or moe_plan.route_plan.route_count != indices.numel()
+            or moe_plan.route_plan.topk != indices.shape[1]
+        ):
+            raise ValueError("Marlin WNA16 received an incompatible DSV4 MoE execution plan")
+        route_plan = moe_plan.route_plan
+        topk_weights = moe_plan.route_weights.view(hidden_states.shape[0], indices.shape[1])
     output = marlin_wna16.run_moe(
         hidden_states,
-        weights,
+        topk_weights,
         cache,
         sorted_token_ids=route_plan.sorted_route_ids,
         expert_ids=route_plan.expert_ids,
@@ -3559,6 +3577,81 @@ def build_moe_v2_execution_plan(
     )
 
 
+def moe_execution_block_size(*, tokens: int, topk: int, num_experts: int) -> int:
+    """Use the production backend's route blocking for the authoritative plan."""
+    if dsv4_moe_expert_backend() == DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16:
+        from minisgl.kernel import marlin_wna16
+
+        return marlin_wna16.choose_block_size(
+            tokens=tokens,
+            topk=topk,
+            experts=num_experts,
+            input_dtype=None,
+        )
+    return 16
+
+
+def mask_moe_routes_live_rows(
+    weights: torch.Tensor,
+    indices: torch.Tensor,
+    num_token_non_padded: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply the shared live-route contract before any route planning."""
+    if num_token_non_padded is None:
+        return weights, indices
+    if weights.ndim != 2 or indices.shape != weights.shape:
+        raise ValueError(
+            "DSV4 live-route masking expects matching weights/indices [tokens, topk]"
+        )
+    if num_token_non_padded.numel() != 1:
+        raise ValueError("num_token_non_padded must contain exactly one element")
+    if num_token_non_padded.dtype != torch.int32:
+        raise TypeError("num_token_non_padded must use torch.int32")
+    if num_token_non_padded.device != weights.device or indices.device != weights.device:
+        raise ValueError("live count, route weights, and route IDs must share a device")
+    if weights.is_cuda:
+        try:
+            if _triton_dsv4_ops().mask_moe_routes_live_rows(
+                weights, indices, num_token_non_padded
+            ):
+                return weights, indices
+        except Exception:
+            pass
+    rows = torch.arange(weights.shape[0], device=weights.device)
+    live = (rows < num_token_non_padded).unsqueeze(1)
+    return (
+        torch.where(live, weights, torch.zeros_like(weights)),
+        torch.where(live, indices, torch.full_like(indices, -1)),
+    )
+
+
+def zero_moe_padded_rows(
+    output: torch.Tensor,
+    num_token_non_padded: torch.Tensor | None,
+) -> torch.Tensor:
+    """Finalize excluded MoE rows without clearing the maximum workspace."""
+    if num_token_non_padded is None:
+        return output
+    if output.ndim != 2:
+        raise ValueError("DSV4 MoE padded-row finalize expects [tokens, hidden]")
+    if num_token_non_padded.numel() != 1 or num_token_non_padded.dtype != torch.int32:
+        raise ValueError("num_token_non_padded must be a one-element int32 tensor")
+    if num_token_non_padded.device != output.device:
+        raise ValueError("live count and MoE output must share a device")
+    if output.is_cuda:
+        try:
+            if _triton_dsv4_ops().zero_moe_padded_rows(output, num_token_non_padded):
+                return output
+        except Exception:
+            pass
+    rows = torch.arange(output.shape[0], device=output.device)
+    return torch.where(
+        (rows < num_token_non_padded).unsqueeze(1),
+        output,
+        torch.zeros_like(output),
+    )
+
+
 def moe_gate_fallback(
     hidden_states: torch.Tensor,
     weight: torch.Tensor,
@@ -3569,6 +3662,7 @@ def moe_gate_fallback(
     routed_scaling_factor: float,
     correction_bias: torch.Tensor | None = None,
     hash_topk=None,
+    num_token_non_padded: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     scores = F.linear(hidden_states.float(), weight.float())
     if scoring_func == "softmax":
@@ -3591,7 +3685,8 @@ def moe_gate_fallback(
     weights = original_scores.gather(1, indices)
     if scoring_func != "softmax":
         weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
-    return weights * routed_scaling_factor, indices
+    weights = weights * routed_scaling_factor
+    return mask_moe_routes_live_rows(weights, indices, num_token_non_padded)
 
 
 def silu_and_mul_clamp_fallback(

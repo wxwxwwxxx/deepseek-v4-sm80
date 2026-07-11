@@ -229,6 +229,23 @@ def test_cuda_graph_padding_boundary_workload_steps_live_rows():
     ]
 
 
+def test_cuda_graph_candidate_padding_workload_steps_live_rows():
+    bench = _load_module()
+    scenario = next(
+        item for item in bench.ALL_SCENARIOS if item.name == "cuda_graph_padding_live_rows_64"
+    )
+
+    prompts, sampling_params = bench.build_workload(scenario, vocab_size=1024, seed=0)
+
+    assert len(prompts) == 64
+    assert [sum(sp.max_tokens >= step for sp in sampling_params) for step in (2, 4, 6, 8)] == [
+        64,
+        57,
+        33,
+        17,
+    ]
+
+
 def test_c128_one_surface_status_snapshot_is_recipe_free():
     bench = _load_module()
     status = {

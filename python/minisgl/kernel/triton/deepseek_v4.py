@@ -2790,6 +2790,39 @@ def _moe_route_count_kernel(
 
 
 @triton.jit
+def _mask_moe_routes_live_rows_kernel(
+    weights_ptr,
+    indices_ptr,
+    num_token_non_padded_ptr,
+    route_count,
+    topk: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < route_count
+    live_rows = tl.load(num_token_non_padded_ptr)
+    padded = (offsets // topk) >= live_rows
+    write_mask = mask & padded
+    tl.store(indices_ptr + offsets, -1, mask=write_mask)
+    tl.store(weights_ptr + offsets, 0.0, mask=write_mask)
+
+
+@triton.jit
+def _zero_moe_padded_rows_kernel(
+    output_ptr,
+    num_token_non_padded_ptr,
+    n_elements,
+    hidden: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n_elements
+    live_rows = tl.load(num_token_non_padded_ptr)
+    padded = (offsets // hidden) >= live_rows
+    tl.store(output_ptr + offsets, 0.0, mask=mask & padded)
+
+
+@triton.jit
 def _moe_route_offsets_kernel(
     counts_ptr,
     padded_offsets_ptr,
@@ -6097,6 +6130,70 @@ def build_moe_route_plan(
     return sorted_route_ids, expert_ids, num_tokens_post_padded
 
 
+def mask_moe_routes_live_rows(
+    weights: torch.Tensor,
+    indices: torch.Tensor,
+    num_token_non_padded: torch.Tensor,
+) -> bool:
+    """In-place graph-safe route masking before histogram/sort/align."""
+    if (
+        weights.ndim != 2
+        or indices.shape != weights.shape
+        or not weights.is_cuda
+        or not indices.is_cuda
+        or not num_token_non_padded.is_cuda
+        or num_token_non_padded.numel() != 1
+        or num_token_non_padded.dtype != torch.int32
+        or weights.device != indices.device
+        or weights.device != num_token_non_padded.device
+        or not weights.is_contiguous()
+        or not indices.is_contiguous()
+    ):
+        return False
+    route_count = weights.numel()
+    if route_count == 0:
+        return True
+    block = 256
+    _mask_moe_routes_live_rows_kernel[(triton.cdiv(route_count, block),)](
+        weights,
+        indices,
+        num_token_non_padded,
+        route_count,
+        topk=int(weights.shape[1]),
+        BLOCK=block,
+    )
+    return True
+
+
+def zero_moe_padded_rows(
+    output: torch.Tensor,
+    num_token_non_padded: torch.Tensor,
+) -> bool:
+    """Zero only excluded MoE output rows, leaving live rows untouched."""
+    if (
+        output.ndim != 2
+        or not output.is_cuda
+        or not output.is_contiguous()
+        or not num_token_non_padded.is_cuda
+        or num_token_non_padded.numel() != 1
+        or num_token_non_padded.dtype != torch.int32
+        or output.device != num_token_non_padded.device
+    ):
+        return False
+    n_elements = output.numel()
+    if n_elements == 0:
+        return True
+    block = 256
+    _zero_moe_padded_rows_kernel[(triton.cdiv(n_elements, block),)](
+        output,
+        num_token_non_padded,
+        n_elements,
+        hidden=int(output.shape[1]),
+        BLOCK=block,
+    )
+    return True
+
+
 def quantized_linear_fp4(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -6577,6 +6674,8 @@ __all__ = [
     "direct_c4_sparse_metadata_for_replay",
     "compress_norm_rope_store_bf16",
     "build_moe_route_plan",
+    "mask_moe_routes_live_rows",
+    "zero_moe_padded_rows",
     "grouped_fp4_moe",
     "grouped_fp4_moe_fused_compute",
     "hc_prenorm_head",

@@ -39,6 +39,7 @@ class GraphCaptureBuffer:
     input_ids: torch.Tensor
     out_loc: torch.Tensor
     positions: torch.Tensor
+    num_token_non_padded: torch.Tensor
     logits: torch.Tensor
     next_tokens: torch.Tensor | None
 
@@ -55,6 +56,7 @@ class GraphCaptureBuffer:
             input_ids=torch.zeros(bs, dtype=torch.int32, device=device),
             out_loc=torch.zeros(bs, dtype=torch.int32, device=device),
             positions=torch.zeros(bs, dtype=torch.int32, device=device),
+            num_token_non_padded=torch.zeros(1, dtype=torch.int32, device=device),
             logits=torch.empty(bs, vocab_size, dtype=torch.float32, device=device),
             next_tokens=(
                 torch.empty(bs, dtype=torch.int32, device=device)
@@ -68,12 +70,16 @@ class GraphCaptureBuffer:
         batch.input_ids = self.input_ids[_slice]
         batch.out_loc = self.out_loc[_slice]
         batch.positions = self.positions[_slice]
+        self.num_token_non_padded.fill_(batch.size)
+        batch.num_token_non_padded = self.num_token_non_padded
 
     def nbytes(self) -> int:
         total = (
             self.input_ids.numel() * self.input_ids.element_size()
             + self.out_loc.numel() * self.out_loc.element_size()
             + self.positions.numel() * self.positions.element_size()
+            + self.num_token_non_padded.numel()
+            * self.num_token_non_padded.element_size()
             + self.logits.numel() * self.logits.element_size()
         )
         if self.next_tokens is not None:
@@ -88,6 +94,7 @@ class GraphCaptureBuffer:
                 "input_ids": self.input_ids,
                 "out_loc": self.out_loc,
                 "positions": self.positions,
+                "num_token_non_padded": self.num_token_non_padded,
                 "logits": self.logits,
                 "next_tokens": self.next_tokens,
             },
@@ -102,6 +109,10 @@ class GraphCaptureBuffer:
             "rows": int(batch.padded_size),
         }
         with dsv4_owner_timing.maybe_host_range("graph.copy_from.total", timing_base):
+            # One graph input write per replay.  The captured kernels only see
+            # this stable device address and never read the value back on CPU.
+            self.num_token_non_padded.fill_(batch.size)
+            batch.num_token_non_padded = self.num_token_non_padded
             with dsv4_direct_copy_nvtx(
                 f"graph_input_staging.input_ids.bs{batch.size}.padded{batch.padded_size}",
                 dst=self.input_ids[_slice],
@@ -137,7 +148,7 @@ class GraphCaptureBuffer:
             self.input_ids.element_size()
             + self.out_loc.element_size()
             + self.positions.element_size()
-        )
+        ) + self.num_token_non_padded.element_size()
 
 
 def _determine_cuda_graph_bs(
@@ -928,6 +939,11 @@ class GraphRunner:
         validate_after_replay = getattr(self.attn_backend, "validate_after_replay", None)
         if validate_after_replay is not None:
             validate_after_replay(batch)
+        dump_padding_debug_boundaries = getattr(
+            self.model, "dump_padding_debug_boundaries", None
+        )
+        if callable(dump_padding_debug_boundaries):
+            dump_padding_debug_boundaries(batch)
         self.capture_status["replay_count"] = int(self.capture_status["replay_count"]) + 1
         self.capture_status["replay_input_copy_bytes"] = int(
             self.capture_status["replay_input_copy_bytes"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import timedelta
 from typing import Any, Dict, NamedTuple, Tuple
 
@@ -24,6 +25,13 @@ from minisgl.utils import (
 
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory, mem_GB
+from .graph_memory import (
+    GraphMemoryEstimate,
+    compare_graph_capture,
+    empty_graph_memory_estimate,
+    estimate_dsv4_sm80_graph_memory,
+    select_num_pages,
+)
 from .sample import BatchSamplingArgs, Sampler
 
 logger = init_logger(__name__)
@@ -32,6 +40,7 @@ _PYNCCL_MAX_BUFFER_SIZE_ENV = "MINISGL_PYNCCL_MAX_BUFFER_SIZE"
 _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES = 32 * 1024 * 1024
 _DSV4_DISABLE_RELEASE_DEFAULTS_ENV = "MINISGL_DSV4_DISABLE_RELEASE_DEFAULTS"
 _DSV4_SM80_DEFAULT_CUDA_GRAPH_BS = [1, 2, 4, 8, 16]
+DSV4_PADDING_DUMMY_POISON_PROFILE_ENV = "MINISGL_DSV4_PADDING_DUMMY_POISON_PROFILE"
 _GENERIC_DEFAULT_MAX_EXTEND_TOKENS = 8192
 _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS = 8192
 _DSV4_SM80_RELEASE_DEFAULT_ENV = {
@@ -141,6 +150,7 @@ class Engine:
         self._check_marlin_wna16_release_guards("after_model_prepare")
 
         # ======================= KV cache initialization ========================
+        self.graph_memory_estimate = self._estimate_graph_memory(config)
         self.num_pages = self._determine_num_pages(init_free_memory, config)
         self._audit_marlin_wna16_cache_integrity("after_kv_capacity_empty_cache")
         self._maybe_release_marlin_wna16_for_timing(
@@ -230,10 +240,27 @@ class Engine:
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
 
         # ======================= Graph capture initialization ========================
+        dummy_profile = os.environ.get(
+            DSV4_PADDING_DUMMY_POISON_PROFILE_ENV, "baseline"
+        ).strip().lower()
+        if dummy_profile not in {"", "baseline", "alternate"}:
+            raise ValueError(
+                f"Unsupported {DSV4_PADDING_DUMMY_POISON_PROFILE_ENV}={dummy_profile!r}; "
+                "expected baseline or alternate."
+            )
+        dummy_position = 2 if dummy_profile == "alternate" else 0
+        dummy_token_id = 127 if dummy_profile == "alternate" else 0
+        if dummy_token_id >= config.model_config.vocab_size:
+            raise ValueError(
+                f"Dummy poison token {dummy_token_id} is outside vocab_size="
+                f"{config.model_config.vocab_size}."
+            )
+        dummy_input_ids = torch.zeros(dummy_position + 1, dtype=torch.int32, device="cpu")
+        dummy_input_ids[-1] = dummy_token_id
         self.dummy_req = Req(
-            input_ids=torch.tensor([0], dtype=torch.int32, device="cpu"),
+            input_ids=dummy_input_ids,
             table_idx=config.max_running_req,
-            cached_len=0,
+            cached_len=dummy_position,
             output_len=1,
             uid=-1,
             sampling_params=None,  # type: ignore
@@ -254,6 +281,11 @@ class Engine:
             capture_fail_open=config.cuda_graph_capture_fail_open,
             capture_greedy_sample=config.cuda_graph_capture_greedy_sample,
         )
+        self._finalize_graph_memory_ledger()
+        if dummy_profile == "alternate":
+            poison_dummy_cache = getattr(self.kv_cache, "poison_isolated_dummy_cache", None)
+            if callable(poison_dummy_cache):
+                poison_dummy_cache(0.25)
         self._record_marlin_wna16_owner_allocations("after_graph_runner_init")
         self._maybe_release_marlin_wna16_for_timing(
             timing="after_graph_capture",
@@ -431,13 +463,49 @@ class Engine:
             config=config,
             cache_per_page=cache_per_page,
         )
-        if num_pages is None:
-            model_memory = old_free_memory - new_free_memory
-            available_memory = int(config.memory_ratio * old_free_memory) - model_memory
-            credit_bytes = int(credit_report.get("net_release_credit_bytes", 0) or 0)
-            if bool(credit_report.get("applied_to_num_pages", False)):
-                available_memory += credit_bytes
-            num_pages = (available_memory - fixed_swa_cache_bytes) // cache_per_page
+        model_memory = old_free_memory - new_free_memory
+        requested_device_budget = int(config.memory_ratio * old_free_memory)
+        credit_bytes = int(credit_report.get("net_release_credit_bytes", 0) or 0)
+        applied_credit_bytes = (
+            credit_bytes if bool(credit_report.get("eligible", False)) else 0
+        )
+        requested_width = _align_up(config.max_seq_len, max(32, config.page_size))
+        request_table_bytes = int(
+            (int(config.max_running_req) + 1) * requested_width * torch.int32.itemsize
+        )
+        graph_estimate_bytes = int(self.graph_memory_estimate.estimate_bytes)
+        graph_margin_bytes = int(self.graph_memory_estimate.safety_margin_bytes)
+        non_graph_activation_allowance_bytes = 0
+        variable_kv_budget = (
+            requested_device_budget
+            - model_memory
+            + applied_credit_bytes
+            - fixed_swa_cache_bytes
+            - request_table_bytes
+            - non_graph_activation_allowance_bytes
+            - graph_estimate_bytes
+            - graph_margin_bytes
+        )
+        baseline_variable_kv_budget = (
+            requested_device_budget
+            - model_memory
+            + applied_credit_bytes
+            - fixed_swa_cache_bytes
+            - request_table_bytes
+            - non_graph_activation_allowance_bytes
+        )
+        try:
+            num_pages, baseline_pages, lost_pages = select_num_pages(
+                variable_kv_budget_bytes=variable_kv_budget,
+                baseline_variable_kv_budget_bytes=baseline_variable_kv_budget,
+                cache_per_page_bytes=cache_per_page,
+                num_page_override=num_pages,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{exc} graph_estimate_bytes={graph_estimate_bytes}, "
+                f"graph_safety_margin_bytes={graph_margin_bytes}."
+            ) from exc
 
         assert num_pages > 1, "Not enough memory for KV cache, try reducing --num-pages"
         num_tokens = num_pages * config.page_size
@@ -452,6 +520,26 @@ class Engine:
             "cache_per_page_bytes": int(cache_per_page),
             "legacy_cache_per_page_bytes": int(legacy_cache_per_page),
             "fixed_swa_cache_bytes": int(fixed_swa_cache_bytes),
+            "requested_device_budget_bytes": int(requested_device_budget),
+            "weights_and_transformed_cache_bytes": int(model_memory),
+            "request_page_table_bytes": int(request_table_bytes),
+            "request_page_table_width": int(requested_width),
+            "non_graph_activation_allowance_bytes": int(
+                non_graph_activation_allowance_bytes
+            ),
+            "unrequested_device_headroom_bytes": int(
+                old_free_memory - requested_device_budget
+            ),
+            "graph_memory": self.graph_memory_estimate.to_report(),
+            "graph_memory_estimate_elapsed_s": float(
+                getattr(self, "graph_memory_estimate_elapsed_s", 0.0)
+            ),
+            "variable_kv_budget_bytes": int(variable_kv_budget),
+            "baseline_pages_without_graph_reserve": int(baseline_pages),
+            "lost_pages_to_graph_reserve": int(lost_pages),
+            "lost_tokens_to_graph_reserve": int(lost_pages * config.page_size),
+            "final_num_pages": int(num_pages),
+            "final_num_tokens": int(num_tokens),
             "num_page_override": config.num_page_override,
             "release_credit": credit_report,
         }
@@ -463,6 +551,76 @@ class Engine:
             )
         logger.info(f"Allocating {num_tokens} tokens for KV cache, K + V = {mem_GB(real_kv_size)}")
         return num_pages
+
+    def _estimate_graph_memory(self, config: EngineConfig) -> GraphMemoryEstimate:
+        started = time.perf_counter()
+        graph_bs = tuple(config.cuda_graph_bs or ())
+        if not graph_bs or not config.model_config.is_deepseek_v4:
+            estimate = empty_graph_memory_estimate(graph_bs)
+            self.graph_memory_estimate_elapsed_s = time.perf_counter() - started
+            return estimate
+        capability = tuple(int(part) for part in torch.cuda.get_device_capability(self.device))
+        if capability != (8, 0):
+            estimate = empty_graph_memory_estimate(graph_bs)
+            self.graph_memory_estimate_elapsed_s = time.perf_counter() - started
+            return estimate
+        estimate = estimate_dsv4_sm80_graph_memory(
+            graph_bs,
+            metadata_width=int(config.max_seq_len),
+            page_size=int(config.page_size),
+            capture_greedy_sample=bool(config.cuda_graph_capture_greedy_sample),
+        )
+        estimate_bytes = self._sync_max_int(estimate.estimate_bytes)
+        margin_bytes = self._sync_max_int(estimate.safety_margin_bytes)
+        if estimate_bytes != estimate.estimate_bytes or margin_bytes != estimate.safety_margin_bytes:
+            estimate = GraphMemoryEstimate(
+                **{
+                    **estimate.__dict__,
+                    "estimate_bytes": estimate_bytes,
+                    "safety_margin_bytes": margin_bytes,
+                }
+            )
+        logger.info_rank0(
+            "Reserving CUDA graph memory before KV planning: "
+            f"estimate={mem_GB(estimate.estimate_bytes)}, "
+            f"safety_margin={mem_GB(estimate.safety_margin_bytes)}, "
+            f"buckets={list(estimate.graph_bs)}, metadata_width={estimate.metadata_width}"
+        )
+        self.graph_memory_estimate_elapsed_s = time.perf_counter() - started
+        return estimate
+
+    def _sync_max_int(self, value: int) -> int:
+        # Capacity coordination is control-plane work.  Use the existing CPU
+        # group so querying a scalar cannot initialize/resize PyNCCL device
+        # buffers before the authoritative physical-memory snapshot.
+        tensor = torch.tensor([int(value)], dtype=torch.int64, device="cpu")
+        torch.distributed.all_reduce(
+            tensor,
+            op=torch.distributed.ReduceOp.MAX,
+            group=self.tp_cpu_group,
+        )
+        return int(tensor.item())
+
+    def _finalize_graph_memory_ledger(self) -> None:
+        status = getattr(self.graph_runner, "capture_status", {})
+        actual_local = int(status.get("capture_memory_delta_bytes") or 0)
+        actual = self._sync_max_int(actual_local)
+        estimate = int(self.graph_memory_estimate.estimate_bytes)
+        margin = int(self.graph_memory_estimate.safety_margin_bytes)
+        post_capture_free = self._sync_get_memory()[0]
+        graph_report = self.kv_capacity_plan_report.setdefault("graph_memory", {})
+        try:
+            comparison = compare_graph_capture(
+                estimate_bytes=estimate,
+                safety_margin_bytes=margin,
+                actual_physical_bytes=actual,
+            )
+        except RuntimeError:
+            self.graph_runner.destroy_cuda_graphs()
+            raise
+        graph_report.update(comparison)
+        graph_report["post_capture_free_bytes"] = int(post_capture_free)
+        status["graph_memory_plan"] = dict(graph_report)
 
     def _dsv4_swa_independent_enabled(self, config: EngineConfig) -> bool:
         return bool(getattr(config, "enable_dsv4_swa_independent_lifecycle", False)) or (
@@ -648,6 +806,14 @@ class Engine:
         next_tokens_gpu: torch.Tensor | None = None
         logits: torch.Tensor | None = None
         forward_source = "unknown"
+        if not self.graph_runner.can_use_cuda_graph(batch):
+            # Eager and prefill use the same semantic contract as graph replay.
+            # Their input tensors are exact-sized, so no row masking occurs.
+            batch.num_token_non_padded = torch.tensor(
+                [batch.input_ids.numel()],
+                dtype=torch.int32,
+                device=batch.input_ids.device,
+            )
         with self.ctx.forward_batch(batch):
             if batch.is_decode:
                 self._marlin_wna16_decode_guard_checks += 1

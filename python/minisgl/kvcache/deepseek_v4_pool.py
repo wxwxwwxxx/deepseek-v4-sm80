@@ -1074,6 +1074,31 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             self._c4_indexer_fp8_scales[mapping.indexer_layer_id],
         )
 
+    def poison_isolated_dummy_cache(self, value: float) -> None:
+        """Fill only the reserved dummy cache locations for padding diagnostics."""
+        with torch.no_grad():
+            swa_start = self._swa_dummy_page * self._page_size
+            swa_end = swa_start + self._page_size
+            self._swa_buffer.view(self._num_layers, self._swa_num_tokens, self._head_dim)[
+                :, swa_start:swa_end
+            ].fill_(value)
+
+            dummy_full_page = self._dummy_token_start // self._page_size
+            for mapping, buffer, component_page_size in (
+                (self._full_to_c4_page, self._c4_buffer, self._c4_component_page_size),
+                (self._full_to_c128_page, self._c128_buffer, self._c128_component_page_size),
+                (
+                    self._full_to_c4_indexer_page,
+                    self._c4_indexer_buffer,
+                    self._c4_component_page_size,
+                ),
+            ):
+                component_page = int(mapping[dummy_full_page].item())
+                if component_page < 0 or buffer.numel() == 0:
+                    continue
+                start = component_page * component_page_size
+                buffer[:, start : start + component_page_size].fill_(value)
+
     def attention_compress_state(self, layer_id: int) -> DSV4CompressStatePool:
         pool = self._compress_state_pools[layer_id]
         assert pool is not None, f"Layer {layer_id} has no attention compress state."

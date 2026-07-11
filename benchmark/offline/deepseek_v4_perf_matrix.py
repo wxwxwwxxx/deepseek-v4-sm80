@@ -374,6 +374,49 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
         ),
     ),
     Scenario(
+        name="cuda_graph_padding_live_rows_64",
+        kind="cuda_graph_padding_live_rows",
+        batch_size=64,
+        prompt_len=16,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 12.602 candidate-bucket probe. Grouped output budgets make active "
+            "decode M step through 64, 57, 33, and 17 for 57->64, 33->40, and 17->24."
+        ),
+    ),
+    Scenario(
+        name="cuda_graph_shape_census_17",
+        kind="random",
+        batch_size=17,
+        prompt_len=16,
+        decode_len=2,
+        repeats=1,
+        warmup_repeats=0,
+        description="TARGET 12.6025 isolated exact-M versus padded-M census at M=17.",
+    ),
+    Scenario(
+        name="cuda_graph_shape_census_33",
+        kind="random",
+        batch_size=33,
+        prompt_len=16,
+        decode_len=2,
+        repeats=1,
+        warmup_repeats=0,
+        description="TARGET 12.6025 isolated exact-M versus padded-M census at M=33.",
+    ),
+    Scenario(
+        name="cuda_graph_shape_census_57",
+        kind="random",
+        batch_size=57,
+        prompt_len=16,
+        decode_len=2,
+        repeats=1,
+        warmup_repeats=0,
+        description="TARGET 12.6025 isolated exact-M versus padded-M census at M=57.",
+    ),
+    Scenario(
         name="serving_mixed_112req_wave16",
         kind="serving_mixed",
         batch_size=16,
@@ -2194,6 +2237,22 @@ def build_workload(
         # The prefill forward produces token one. These budgets then leave
         # 257/129/65/33/17 live requests on successive decode plateaus.
         boundary_output_lens = [2] * 128 + [4] * 64 + [6] * 32 + [8] * 16 + [10] * 17
+        for output_len in boundary_output_lens:
+            prompts.append(
+                _random_tokens(
+                    rng,
+                    scenario.prompt_len,
+                    vocab_size,
+                    token_id_range=token_id_range,
+                )
+            )
+            output_lens.append(output_len)
+    elif scenario.kind == "cuda_graph_padding_live_rows":
+        if scenario.batch_size != 64:
+            raise ValueError("cuda_graph_padding_live_rows currently requires batch_size=64")
+        # Prefill produces token one. Successive decode plateaus have exactly
+        # 64, 57, 33, and 17 live rows.
+        boundary_output_lens = [2] * 7 + [4] * 24 + [6] * 16 + [8] * 17
         for output_len in boundary_output_lens:
             prompts.append(
                 _random_tokens(

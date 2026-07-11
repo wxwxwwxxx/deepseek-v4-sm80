@@ -2991,6 +2991,74 @@ def test_dsv4_moe_route_plan_triton_matches_torch_fallback(monkeypatch):
     )
 
 
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_moe_live_route_mask_is_poison_invariant(monkeypatch):
+    _clear_dsv4_sm80_env(monkeypatch)
+    device = torch.device("cuda")
+    live_rows, padded_rows, topk, experts = 17, 24, 3, 8
+    live_ids = (torch.arange(live_rows * topk).view(live_rows, topk) % experts).to(
+        torch.int64
+    )
+    live_weights = torch.arange(
+        1, live_rows * topk + 1, dtype=torch.float32
+    ).view(live_rows, topk)
+    ids_a = torch.cat(
+        [live_ids, torch.zeros(padded_rows - live_rows, topk, dtype=torch.int64)]
+    ).to(device)
+    ids_b = torch.cat(
+        [live_ids, torch.full((padded_rows - live_rows, topk), experts - 1)]
+    ).to(device)
+    weights_a = torch.cat(
+        [live_weights, torch.ones(padded_rows - live_rows, topk)]
+    ).to(device)
+    weights_b = torch.cat(
+        [live_weights, torch.full((padded_rows - live_rows, topk), 17.0)]
+    ).to(device)
+    live_count = torch.tensor([live_rows], dtype=torch.int32, device=device)
+
+    masked_weights_a, masked_ids_a = dsv4_kernel.mask_moe_routes_live_rows(
+        weights_a, ids_a, live_count
+    )
+    masked_weights_b, masked_ids_b = dsv4_kernel.mask_moe_routes_live_rows(
+        weights_b, ids_b, live_count
+    )
+    plan_a = dsv4_kernel.build_moe_route_plan(
+        masked_ids_a, num_experts=experts, block_size_m=4
+    )
+    plan_b = dsv4_kernel.build_moe_route_plan(
+        masked_ids_b, num_experts=experts, block_size_m=4
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(masked_ids_a[:live_rows].cpu(), live_ids)
+    assert torch.equal(masked_weights_a[:live_rows].cpu(), live_weights)
+    assert torch.all(masked_ids_a[live_rows:] == -1)
+    assert torch.all(masked_weights_a[live_rows:] == 0)
+    assert torch.equal(masked_ids_a, masked_ids_b)
+    assert torch.equal(masked_weights_a, masked_weights_b)
+    assert torch.equal(plan_a.num_tokens_post_padded, plan_b.num_tokens_post_padded)
+    active = int(plan_a.num_tokens_post_padded.item())
+    assert torch.equal(plan_a.sorted_route_ids[:active], plan_b.sorted_route_ids[:active])
+    assert torch.equal(
+        plan_a.expert_ids[: active // plan_a.block_size_m],
+        plan_b.expert_ids[: active // plan_b.block_size_m],
+    )
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_dsv4_moe_padded_finalize_preserves_live_rows():
+    device = torch.device("cuda")
+    output = torch.arange(24 * 11, dtype=torch.float32, device=device).view(24, 11)
+    expected_live = output[:17].clone()
+    live_count = torch.tensor([17], dtype=torch.int32, device=device)
+
+    actual = dsv4_kernel.zero_moe_padded_rows(output, live_count)
+    torch.cuda.synchronize()
+
+    assert torch.equal(actual[:17], expected_live)
+    assert torch.count_nonzero(actual[17:]) == 0
+
+
 def test_dsv4_model_and_attention_do_not_import_optional_kernels_directly():
     model_source = inspect.getsource(dsv4_model)
     attention_source = inspect.getsource(dsv4_attention)

@@ -4,6 +4,7 @@ import os
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -73,6 +74,9 @@ _MARLIN_WNA16_CACHE_INTEGRITY_LAYERS_ENV = (
 _MARLIN_WNA16_CACHE_INTEGRITY_MAX_FORWARD_LOGS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_CACHE_INTEGRITY_MAX_FORWARD_LOGS"
 )
+_PADDING_BOUNDARY_DEBUG_DIR_ENV = "MINISGL_DSV4_PADDING_BOUNDARY_DEBUG_DIR"
+_PADDING_BOUNDARY_DEBUG_BUFFERS: dict[tuple[str, int], torch.Tensor] = {}
+_PADDING_BOUNDARY_DEBUG_REPLAY = 0
 
 
 def _dsv4_capture_nvtx(name: str):
@@ -211,6 +215,7 @@ def _capture_debug_activation(
     tensor: torch.Tensor,
     row_indices: torch.Tensor | None = None,
 ) -> None:
+    _capture_padding_boundary(name, tensor)
     try:
         batch = get_global_ctx().batch
     except Exception:
@@ -235,6 +240,81 @@ def _capture_debug_activation(
             extra={"activation_name": name},
         )
     dsv4_prefix_debug.capture_dsv4_activation(name, tensor, batch, row_indices=row_indices)
+
+
+def _capture_padding_boundary(name: str, tensor: torch.Tensor) -> None:
+    if not os.environ.get(_PADDING_BOUNDARY_DEBUG_DIR_ENV):
+        return
+    selected = {
+        "embedding",
+        "layer0.input",
+        "layer0.attention_output",
+        "layer0.moe_input",
+        "layer0.moe.route_weights",
+        "layer0.moe.route_indices",
+        "layer0.moe.sorted_route_ids",
+        "layer0.moe.expert_ids",
+        "layer0.moe.num_tokens_post_padded",
+        "layer0.moe_output",
+    }
+    if name not in selected:
+        return
+    try:
+        batch = get_global_ctx().batch
+    except Exception:
+        return
+    if not batch.is_decode:
+        return
+    padded = int(getattr(batch, "padded_size", batch.size))
+    key = (name, padded)
+    buffer = _PADDING_BOUNDARY_DEBUG_BUFFERS.get(key)
+    if buffer is None:
+        if _cuda_graph_capture_active():
+            raise RuntimeError(f"Padding boundary buffer was not staged before capture: {key}")
+        buffer = torch.empty_like(tensor)
+        _PADDING_BOUNDARY_DEBUG_BUFFERS[key] = buffer
+    if buffer.shape != tensor.shape or buffer.dtype != tensor.dtype:
+        raise RuntimeError(
+            f"Padding boundary shape changed for {key}: {tuple(buffer.shape)} vs "
+            f"{tuple(tensor.shape)}"
+        )
+    buffer.copy_(tensor)
+
+
+def _dump_padding_boundaries(batch: Batch) -> None:
+    global _PADDING_BOUNDARY_DEBUG_REPLAY
+    root = os.environ.get(_PADDING_BOUNDARY_DEBUG_DIR_ENV)
+    if not root or not batch.is_decode:
+        return
+    try:
+        if not get_tp_info().is_primary():
+            return
+    except Exception:
+        return
+    padded = int(getattr(batch, "padded_size", batch.size))
+    live = int(batch.size)
+    payload: dict[str, object] = {
+        "batch_size": live,
+        "padded_size": padded,
+        "boundaries": {},
+    }
+    boundaries = payload["boundaries"]
+    assert isinstance(boundaries, dict)
+    for (name, shape), tensor in _PADDING_BOUNDARY_DEBUG_BUFFERS.items():
+        if shape != padded:
+            continue
+        value = tensor.detach()
+        if value.ndim > 0 and value.shape[0] == padded:
+            value = value[:live]
+        boundaries[name] = value.cpu()
+    output_dir = Path(root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        payload,
+        output_dir
+        / f"replay{_PADDING_BOUNDARY_DEBUG_REPLAY:04d}.bs{live}.padded{padded}.pt",
+    )
+    _PADDING_BOUNDARY_DEBUG_REPLAY += 1
 
 
 def _debug_can_materialize_tensor(tensor: torch.Tensor) -> bool:
@@ -2093,6 +2173,7 @@ class DSV4MoEGate(BaseOP):
         scoring_func: str,
         routed_scaling_factor: float,
         hash_topk: DSV4TopK | None = None,
+        num_token_non_padded: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         weight = _cached_gate_fp32_weight(self, "_cached_gate_weight_fp32", self.weight)
         return dsv4_kernel.moe_gate_fallback(
@@ -2104,6 +2185,7 @@ class DSV4MoEGate(BaseOP):
             routed_scaling_factor=routed_scaling_factor,
             correction_bias=getattr(self, "e_score_correction_bias", None),
             hash_topk=hash_topk,
+            num_token_non_padded=num_token_non_padded,
         )
 
 
@@ -2642,6 +2724,7 @@ class DSV4FusedRoutedExperts(BaseOP):
                     indices,
                     self._marlin_wna16_weights,
                     swiglu_limit=self.swiglu_limit,
+                    moe_plan=moe_plan,
                 )
                 if self._marlin_wna16_integrity_forward_logs < max_forward_logs:
                     self._audit_marlin_wna16_cache_integrity("after_forward_prepacked")
@@ -2660,6 +2743,7 @@ class DSV4FusedRoutedExperts(BaseOP):
                         swiglu_limit=self.swiglu_limit,
                         cache=self._marlin_wna16_weights,
                         owner_label=self._marlin_owner_label,
+                        moe_plan=moe_plan,
                     )
                 )
             self._record_moe_owner_tensors(
@@ -2896,6 +2980,18 @@ def _dsv4_moe_reduce_once_input(
     return output
 
 
+def _moe_num_token_non_padded(flat: torch.Tensor) -> torch.Tensor:
+    """Return the graph-bound live-row scalar, or an exact eager scalar."""
+    try:
+        batch = get_global_ctx().batch
+        value = getattr(batch, "num_token_non_padded", None)
+    except AssertionError:
+        value = None
+    if value is not None:
+        return value
+    return torch.tensor([flat.shape[0]], dtype=torch.int32, device=flat.device)
+
+
 @dataclass(frozen=True)
 class DSV4FusedMoERunnerPrepareResult:
     weights: torch.Tensor
@@ -2933,6 +3029,7 @@ class DSV4FusedMoERunner:
         input_ids: torch.Tensor,
         *,
         hash_topk: DSV4TopK | None,
+        num_token_non_padded: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.gate.forward(
             flat,
@@ -2941,6 +3038,7 @@ class DSV4FusedMoERunner:
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             hash_topk=hash_topk,
+            num_token_non_padded=num_token_non_padded,
         )
 
     def prepare(
@@ -2964,7 +3062,11 @@ class DSV4FusedMoERunner:
             weights,
             indices,
             num_experts=num_experts,
-            block_size_m=16,
+            block_size_m=dsv4_kernel.moe_execution_block_size(
+                tokens=flat.shape[0],
+                topk=indices.shape[1],
+                num_experts=num_experts,
+            ),
             reduce_once=True,
         )
         return DSV4FusedMoERunnerPrepareResult(
@@ -3034,13 +3136,32 @@ class DSV4FusedMoERunner:
     ) -> torch.Tensor:
         flat = hidden_states.view(-1, hidden_states.shape[-1])
         flat_input_ids = input_ids.view(-1)
+        num_token_non_padded = _moe_num_token_non_padded(flat)
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.route"):
-            weights, indices = self.route(flat, flat_input_ids, hash_topk=hash_topk)
+            weights, indices = self.route(
+                flat,
+                flat_input_ids,
+                hash_topk=hash_topk,
+                num_token_non_padded=num_token_non_padded,
+            )
+            _capture_debug_activation(f"layer{self.layer_id}.moe.route_weights", weights)
+            _capture_debug_activation(f"layer{self.layer_id}.moe.route_indices", indices)
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
         _record_warmup_memory("moe.route_plan", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.prepare"):
             prepared = self.prepare(flat, weights, indices)
+            route_plan = prepared.moe_plan.route_plan
+            _capture_debug_activation(
+                f"layer{self.layer_id}.moe.sorted_route_ids", route_plan.sorted_route_ids
+            )
+            _capture_debug_activation(
+                f"layer{self.layer_id}.moe.expert_ids", route_plan.expert_ids
+            )
+            _capture_debug_activation(
+                f"layer{self.layer_id}.moe.num_tokens_post_padded",
+                route_plan.num_tokens_post_padded,
+            )
         _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
         _record_warmup_memory("moe.routed_experts", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.experts"):
@@ -3055,6 +3176,7 @@ class DSV4FusedMoERunner:
             shared = self.apply_shared(flat)
             if shared is not None:
                 y = y + shared
+            y = dsv4_kernel.zero_moe_padded_rows(y, num_token_non_padded)
         _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
         _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.runner.reduce_once"):
@@ -3109,6 +3231,7 @@ class DSV4MoE(BaseOP):
             )
 
         flat = hidden_states.view(-1, hidden_states.shape[-1])
+        num_token_non_padded = _moe_num_token_non_padded(flat)
         _record_warmup_memory("moe.gate", "before", layer_id=self.layer_id)
         with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.gate"):
             weights, indices = self.gate.forward(
@@ -3118,6 +3241,7 @@ class DSV4MoE(BaseOP):
                 scoring_func=self.scoring_func,
                 routed_scaling_factor=self.routed_scaling_factor,
                 hash_topk=getattr(self, "topk", None),
+                num_token_non_padded=num_token_non_padded,
             )
         _record_warmup_memory("moe.gate", "after", layer_id=self.layer_id)
         moe_v2 = dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE)
@@ -3140,7 +3264,11 @@ class DSV4MoE(BaseOP):
                 weights,
                 indices,
                 num_experts=num_experts,
-                block_size_m=16,
+                block_size_m=dsv4_kernel.moe_execution_block_size(
+                    tokens=flat.shape[0],
+                    topk=indices.shape[1],
+                    num_experts=num_experts,
+                ),
                 reduce_once=reduce_once,
             )
             _record_warmup_memory("moe.route_plan", "after", layer_id=self.layer_id)
@@ -3162,6 +3290,7 @@ class DSV4MoE(BaseOP):
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.shared"):
                 y = y + self.shared_experts.forward(flat, reduce=not reduce_once).float()
             _record_warmup_memory("moe.shared_experts", "after", layer_id=self.layer_id)
+        y = dsv4_kernel.zero_moe_padded_rows(y, num_token_non_padded)
         if reduce_once and self._tp_size > 1:
             _record_warmup_memory("moe.reduce_once", "before", layer_id=self.layer_id)
             with _dsv4_capture_nvtx(f"layer{self.layer_id}.mlp.reduce_once"):
@@ -4088,6 +4217,9 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
 
     def record_marlin_wna16_owner_allocations(self, stage: str) -> None:
         return self.model.record_marlin_wna16_owner_allocations(stage)
+
+    def dump_padding_debug_boundaries(self, batch: Batch) -> None:
+        _dump_padding_boundaries(batch)
 
     def forward(self):
         batch = get_global_ctx().batch
