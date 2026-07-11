@@ -48,6 +48,7 @@ def test_text_smoke_defaults_match_target06_baseline_shape():
     assert args.page_size == 256
     assert args.variants is None
     assert args.max_tokens == 64
+    assert args.max_running_req is None
     assert args.fail_on_warning is False
     assert args.enable_dsv4_radix_prefix_cache is False
     assert args.enable_dsv4_swa_tail_retention_v1 is False
@@ -65,6 +66,9 @@ def test_text_smoke_defaults_match_target06_baseline_shape():
 
     swa_args = smoke.parse_args(["--enable-dsv4-swa-independent-lifecycle"])
     assert swa_args.enable_dsv4_swa_independent_lifecycle is True
+
+    capacity_args = smoke.parse_args(["--max-running-req", "256"])
+    assert capacity_args.max_running_req == 256
 
 
 def test_text_sanity_accepts_readable_text_and_flags_garbage():

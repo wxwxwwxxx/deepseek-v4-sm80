@@ -22,7 +22,7 @@ def _resolve(**kwargs):
     return resolve_cuda_graph_bucket_policy(**defaults)
 
 
-def test_omitted_dsv4_release_policy_stays_max16() -> None:
+def test_resolver_accepts_an_explicit_release_default_tuple() -> None:
     policy = _resolve()
     assert policy.enabled
     assert policy.source_mode == "release_default"

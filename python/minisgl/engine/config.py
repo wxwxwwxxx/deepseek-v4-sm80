@@ -19,6 +19,8 @@ class EngineConfig:
     tp_info: DistributedInfo
     dtype: torch.dtype
     max_running_req: int = 256
+    max_running_req_explicit: bool = False
+    dsv4_sm80_recipe: str | None = None
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     cuda_graph_bs: List[int] | None = None

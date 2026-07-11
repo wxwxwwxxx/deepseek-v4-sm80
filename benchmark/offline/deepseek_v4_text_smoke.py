@@ -1734,6 +1734,7 @@ def run_variant(
             "top_p": args.top_p,
             "max_tokens": args.max_tokens,
             "max_seq_len": args.max_seq_len,
+            "max_running_req": args.max_running_req,
             "max_extend_tokens": args.max_extend_tokens,
             "thinking_mode": args.thinking_mode,
         },
@@ -1776,7 +1777,12 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             args.model_path,
             dtype=torch.bfloat16,
             tp_info=DistributedInfo(rank, tp_size),
-            max_running_req=max(len(prompts), 1),
+            dsv4_sm80_recipe=args.dsv4_sm80_recipe,
+            max_running_req=(
+                int(args.max_running_req)
+                if args.max_running_req is not None
+                else max(len(prompts), 1)
+            ),
             max_seq_len_override=args.max_seq_len,
             max_extend_tokens=args.max_extend_tokens,
             num_page_override=args.num_pages,
@@ -1866,6 +1872,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 "distributed_init_method": distributed_init_method,
                 "memory_ratio": args.memory_ratio,
                 "max_seq_len": args.max_seq_len,
+                "max_running_req": args.max_running_req,
                 "max_extend_tokens": args.max_extend_tokens,
                 "max_tokens": args.max_tokens,
             },
@@ -1883,6 +1890,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="DeepSeek V4 text correctness smoke for human-readable output checks."
     )
     parser.add_argument("--model-path", default="/models/DeepSeek-V4-Flash")
+    parser.add_argument(
+        "--dsv4-sm80-recipe",
+        choices=(
+            "dsv4_sm80_low_m64",
+            "dsv4_sm80_mid_m128",
+            "dsv4_sm80_balanced",
+            "dsv4_sm80_long_context_512k",
+            "dsv4_sm80_1m_smoke",
+        ),
+        default=None,
+        help="Select a public DSV4 A100/sm80 recipe; omitted uses the no-env default.",
+    )
     parser.add_argument("--variants", nargs="*", choices=tuple(_variant_map()))
     parser.add_argument("--prompt", action="append", help="Prompt to run. May be repeated.")
     parser.add_argument("--output", default="/tmp/dsv4_text_smoke.json")
@@ -1901,6 +1920,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-pages", type=int, default=64, help="Use 0 for automatic capacity planning.")
     parser.add_argument("--memory-ratio", type=float, default=0.9)
     parser.add_argument("--max-seq-len", type=int, default=1024)
+    parser.add_argument(
+        "--max-running-req",
+        type=int,
+        default=None,
+        help=(
+            "Explicit request-slot capacity. By default the diagnostic harness "
+            "uses the number of prompts."
+        ),
+    )
     parser.add_argument("--max-extend-tokens", type=int, default=4096)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument(
@@ -1991,6 +2019,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--num-pages must be greater than 1, or 0 for automatic planning")
     if args.max_seq_len <= 0 or args.max_extend_tokens <= 0 or args.max_tokens <= 0:
         parser.error("--max-seq-len, --max-extend-tokens and --max-tokens must be positive")
+    if args.max_running_req is not None and args.max_running_req <= 0:
+        parser.error("--max-running-req must be positive")
     if args.memory_ratio <= 0:
         parser.error("--memory-ratio must be positive")
     if args.cuda_graph_bs is not None:

@@ -39,6 +39,7 @@ class LLM(Scheduler):
         **kwargs,
     ):
         kwargs.setdefault("max_extend_tokens_explicit", "max_extend_tokens" in kwargs)
+        kwargs.setdefault("max_running_req_explicit", "max_running_req" in kwargs)
         config = SchedulerConfig(
             model_path=model_path,
             tp_info=tp_info or DistributedInfo(0, 1),

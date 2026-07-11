@@ -43,7 +43,15 @@ logger = init_logger(__name__)
 _PYNCCL_MAX_BUFFER_SIZE_ENV = "MINISGL_PYNCCL_MAX_BUFFER_SIZE"
 _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES = 32 * 1024 * 1024
 _DSV4_DISABLE_RELEASE_DEFAULTS_ENV = "MINISGL_DSV4_DISABLE_RELEASE_DEFAULTS"
-_DSV4_SM80_DEFAULT_CUDA_GRAPH_BS = [1, 2, 4, 8, 16]
+_DSV4_SM80_DEFAULT_RECIPE = "dsv4_sm80_balanced"
+_DSV4_SM80_FALLBACK_CUDA_GRAPH_BS = (1, 2, 4, 8, 16)
+_DSV4_SM80_RECIPES = {
+    "dsv4_sm80_low_m64": (256, 64, None),
+    "dsv4_sm80_mid_m128": (256, 128, None),
+    "dsv4_sm80_balanced": (256, 256, None),
+    "dsv4_sm80_long_context_512k": (4, 4, 524_288),
+    "dsv4_sm80_1m_smoke": (1, 1, 1_048_576),
+}
 DSV4_PADDING_DUMMY_POISON_PROFILE_ENV = "MINISGL_DSV4_PADDING_DUMMY_POISON_PROFILE"
 _GENERIC_DEFAULT_MAX_EXTEND_TOKENS = 8192
 _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS = 8192
@@ -546,6 +554,7 @@ class Engine:
         credit_report["planned_num_tokens"] = int(num_tokens)
         credit_report["planned_kv_bytes"] = int(real_kv_size)
         self.kv_capacity_plan_report = {
+            "dsv4_sm80_recipe": getattr(config, "dsv4_sm80_recipe", None),
             "old_free_memory_bytes": int(old_free_memory),
             "new_free_memory_bytes": int(new_free_memory),
             "memory_ratio": float(config.memory_ratio),
@@ -1093,8 +1102,10 @@ def _resolve_cuda_graph_policy(
         effective_max_running_req=int(getattr(config, "max_running_req", 256)),
         graph_disabled=disabled,
         release_default_bs=(
-            _DSV4_SM80_DEFAULT_CUDA_GRAPH_BS
-            if is_dsv4 and bool(config.allow_dsv4_cuda_graph)
+            _DSV4_SM80_FALLBACK_CUDA_GRAPH_BS
+            if is_dsv4
+            and bool(config.allow_dsv4_cuda_graph)
+            and getattr(config, "dsv4_sm80_recipe", None) is None
             else None
         ),
         legacy_default_max_bs=legacy_default_max,
@@ -1115,7 +1126,36 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(config, attr, value)
 
     if config.model_config.is_deepseek_v4:
-        if _dsv4_release_defaults_enabled():
+        requested_recipe = getattr(config, "dsv4_sm80_recipe", None)
+        if requested_recipe is not None and requested_recipe not in _DSV4_SM80_RECIPES:
+            raise ValueError(
+                f"Unknown dsv4_sm80_recipe={requested_recipe!r}; supported recipes are "
+                f"{sorted(_DSV4_SM80_RECIPES)}."
+            )
+        release_defaults_enabled = _dsv4_release_defaults_enabled()
+        recipe_name = requested_recipe or (
+            _DSV4_SM80_DEFAULT_RECIPE if release_defaults_enabled else None
+        )
+        if recipe_name is not None and _env_truthy(_DSV4_DISABLE_RELEASE_DEFAULTS_ENV):
+            raise ValueError(
+                f"dsv4_sm80_recipe={recipe_name!r} conflicts with "
+                f"{_DSV4_DISABLE_RELEASE_DEFAULTS_ENV}=1."
+            )
+        if recipe_name is not None:
+            recipe_max_req, recipe_graph_max, recipe_max_seq = _DSV4_SM80_RECIPES[
+                recipe_name
+            ]
+            override("dsv4_sm80_recipe", recipe_name)
+            if not bool(getattr(config, "max_running_req_explicit", False)):
+                override("max_running_req", recipe_max_req)
+            if config.cuda_graph_bs is None and config.cuda_graph_max_bs is None:
+                override("cuda_graph_max_bs", min(recipe_graph_max, config.max_running_req))
+            if (
+                recipe_max_seq is not None
+                and getattr(config, "max_seq_len_override", None) is None
+            ):
+                override("max_seq_len_override", recipe_max_seq)
+        if recipe_name is not None:
             for name, value in _DSV4_SM80_RELEASE_DEFAULT_ENV.items():
                 os.environ.setdefault(name, value)
             if config.page_size == 1:
@@ -1158,7 +1198,9 @@ def _adjust_config(config: EngineConfig):
                 "HC prenorm graph cleanup plus BF16/FP32 HC linear, "
                 "Marlin WNA16 prebuild/release/capacity credit, PyNCCL "
                 f"threshold32m, prefill chunk budget {_DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS}, "
-                f"and CUDA graph buckets {_DSV4_SM80_DEFAULT_CUDA_GRAPH_BS}. "
+                f"and public recipe {recipe_name} "
+                f"(max_running_req={config.max_running_req}, "
+                f"cuda_graph_max_bs={config.cuda_graph_max_bs}). "
                 f"Set {_DSV4_DISABLE_RELEASE_DEFAULTS_ENV}=1 for fallback/oracle runs."
             )
         if config.attention_backend != "dsv4":

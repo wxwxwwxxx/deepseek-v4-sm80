@@ -10,6 +10,9 @@ from minisgl.engine import engine as engine_module
 def _fake_config(**overrides):
     config = SimpleNamespace(
         model_config=SimpleNamespace(is_deepseek_v4=True, is_moe=True),
+        dsv4_sm80_recipe=None,
+        max_running_req=256,
+        max_running_req_explicit=False,
         attention_backend="auto",
         moe_backend="auto",
         allow_dsv4_cuda_graph=False,
@@ -20,6 +23,7 @@ def _fake_config(**overrides):
         page_size=1,
         max_extend_tokens=8192,
         max_extend_tokens_explicit=False,
+        max_seq_len_override=None,
         cache_type="radix",
         enable_dsv4_radix_prefix_cache=False,
         enable_dsv4_component_loc_ownership=False,
@@ -70,10 +74,11 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
     assert config.enable_dsv4_swa_independent_lifecycle is True
     assert config.max_extend_tokens == 8192
     assert config.allow_dsv4_cuda_graph is True
-    assert config.cuda_graph_bs == [1, 2, 4, 8, 16]
-    assert config.cuda_graph_max_bs == 16
-    assert config.cuda_graph_policy.source_mode == "release_default"
-    assert config.cuda_graph_policy.resolved_bs == (1, 2, 4, 8, 16)
+    assert config.dsv4_sm80_recipe == "dsv4_sm80_balanced"
+    assert config.max_running_req == 256
+    assert config.cuda_graph_max_bs == 256
+    assert config.cuda_graph_policy.source_mode == "explicit_max"
+    assert config.cuda_graph_policy.resolved_bs[-1] == 256
     assert config.cuda_graph_capture_fail_open is True
     assert config.moe_backend == "fused"
 
@@ -139,6 +144,19 @@ def test_deepseek_v4_release_defaults_honor_explicit_sm80_env(monkeypatch):
     assert "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE" not in os.environ
 
 
+def test_explicit_env_research_path_retains_legacy_graph_fallback(monkeypatch):
+    _clear_dsv4_env(monkeypatch)
+    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
+    monkeypatch.setenv("MINISGL_DSV4_SM80_V0_BF16", "1")
+    config = _fake_config(allow_dsv4_cuda_graph=True)
+
+    engine_module._adjust_config(config)
+
+    assert config.dsv4_sm80_recipe is None
+    assert config.cuda_graph_policy.resolved_bs == (1, 2, 4, 8, 16)
+
+
 def test_deepseek_v4_release_defaults_allow_hc_cleanup_addon_env(monkeypatch):
     _clear_dsv4_env(monkeypatch)
     monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
@@ -184,3 +202,60 @@ def test_deepseek_v4_release_defaults_honor_explicit_generic_max_extend_tokens(m
     assert config.max_extend_tokens == 8192
     assert config.page_size == 256
     assert config.enable_dsv4_swa_independent_lifecycle is True
+
+
+@pytest.mark.parametrize(
+    "recipe,max_req,graph_max,max_seq",
+    [
+        ("dsv4_sm80_low_m64", 256, 64, None),
+        ("dsv4_sm80_mid_m128", 256, 128, None),
+        ("dsv4_sm80_balanced", 256, 256, None),
+        ("dsv4_sm80_long_context_512k", 4, 4, 524_288),
+        ("dsv4_sm80_1m_smoke", 1, 1, 1_048_576),
+    ],
+)
+def test_public_dsv4_sm80_recipes_resolve_through_one_graph_policy(
+    monkeypatch, recipe, max_req, graph_max, max_seq
+):
+    _clear_dsv4_env(monkeypatch)
+    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
+    config = _fake_config(dsv4_sm80_recipe=recipe)
+
+    engine_module._adjust_config(config)
+
+    assert config.max_running_req == max_req
+    assert config.cuda_graph_policy.source_mode == "explicit_max"
+    assert config.cuda_graph_policy.resolved_max_bs == graph_max
+    assert config.max_seq_len_override == max_seq
+
+
+def test_recipe_preserves_explicit_request_graph_and_sequence_overrides(monkeypatch):
+    _clear_dsv4_env(monkeypatch)
+    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
+    config = _fake_config(
+        dsv4_sm80_recipe="dsv4_sm80_long_context_512k",
+        max_running_req=8,
+        max_running_req_explicit=True,
+        cuda_graph_max_bs=2,
+        max_seq_len_override=262_144,
+    )
+
+    engine_module._adjust_config(config)
+
+    assert config.max_running_req == 8
+    assert config.cuda_graph_policy.resolved_max_bs == 2
+    assert config.max_seq_len_override == 262_144
+
+
+def test_default_recipe_caps_graph_to_explicit_request_capacity(monkeypatch):
+    _clear_dsv4_env(monkeypatch)
+    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
+    config = _fake_config(max_running_req=32, max_running_req_explicit=True)
+
+    engine_module._adjust_config(config)
+
+    assert config.max_running_req == 32
+    assert config.cuda_graph_policy.resolved_max_bs == 32

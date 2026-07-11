@@ -6,6 +6,7 @@ import copy
 import importlib
 import importlib.metadata
 import json
+import math
 import os
 import random
 import statistics
@@ -384,6 +385,40 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
         description=(
             "TARGET 12.602 candidate-bucket probe. Grouped output budgets make active "
             "decode M step through 64, 57, 33, and 17 for 57->64, 33->40, and 17->24."
+        ),
+    ),
+    Scenario(
+        name="cuda_graph_recipe_balanced_wave256",
+        kind="cuda_graph_recipe_balanced_wave",
+        batch_size=256,
+        prompt_len=512,
+        decode_len=40,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=512,
+        wave_size=256,
+        prompt_len_cycle=(64, 128, 256, 512),
+        description=(
+            "TARGET 12.605 balanced recipe workload: two real waves of 256 mixed "
+            "short/medium prompts. Completion groups hold decode at active M "
+            "256, 192, 128, 16, and 1 before each wave drains."
+        ),
+    ),
+    Scenario(
+        name="cuda_graph_recipe_high_concurrency_wave512",
+        kind="cuda_graph_recipe_high_concurrency_wave",
+        batch_size=512,
+        prompt_len=256,
+        decode_len=20,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=512,
+        wave_size=512,
+        prompt_len_cycle=(32, 64, 128, 256),
+        description=(
+            "TARGET 12.605 high-concurrency recipe workload: one real wave of 512 "
+            "mixed short/medium prompts. Completion groups hold decode at active M "
+            "512, 384, 256, 128, and 1 before the wave drains."
         ),
     ),
     Scenario(
@@ -2263,6 +2298,44 @@ def build_workload(
                 )
             )
             output_lens.append(output_len)
+    elif scenario.kind == "cuda_graph_recipe_balanced_wave":
+        if scenario.batch_size != 256 or (scenario.total_requests or 0) % 256:
+            raise ValueError(
+                "cuda_graph_recipe_balanced_wave requires 256-request whole waves"
+            )
+        # Prefill emits token one. Each wave then spends eight decode steps at
+        # M=256/192/128/16/1 before draining.
+        output_cycle = [8] * 64 + [16] * 64 + [24] * 112 + [32] * 15 + [40]
+        prompt_cycle = scenario.prompt_len_cycle or (scenario.prompt_len,)
+        for idx in range(scenario.total_requests or scenario.batch_size):
+            prompts.append(
+                _random_tokens(
+                    rng,
+                    int(prompt_cycle[idx % len(prompt_cycle)]),
+                    vocab_size,
+                    token_id_range=token_id_range,
+                )
+            )
+            output_lens.append(output_cycle[idx % 256])
+    elif scenario.kind == "cuda_graph_recipe_high_concurrency_wave":
+        if scenario.batch_size != 512 or (scenario.total_requests or 0) % 512:
+            raise ValueError(
+                "cuda_graph_recipe_high_concurrency_wave requires 512-request whole waves"
+            )
+        # Prefill emits token one. The wave spends four decode steps at each
+        # M=512/384/256/128/1 before draining.
+        output_cycle = [4] * 128 + [8] * 128 + [12] * 128 + [16] * 127 + [20]
+        prompt_cycle = scenario.prompt_len_cycle or (scenario.prompt_len,)
+        for idx in range(scenario.total_requests or scenario.batch_size):
+            prompts.append(
+                _random_tokens(
+                    rng,
+                    int(prompt_cycle[idx % len(prompt_cycle)]),
+                    vocab_size,
+                    token_id_range=token_id_range,
+                )
+            )
+            output_lens.append(output_cycle[idx % 512])
     elif scenario.kind in {"decode_ladder", "serving_mixed"}:
         request_count = scenario.total_requests or scenario.batch_size
         prompt_cycle = scenario.prompt_len_cycle or (scenario.prompt_len,)
@@ -2335,6 +2408,7 @@ def make_benchmark_llm_class():
             self._bench_batch_info: dict[int, dict[str, Any]] = {}
             self._active_generation_started_at: float | None = None
             self._active_generation_finished_at: float | None = None
+            self.bench_admit_all_at_once = False
             super().__init__(*args, **kwargs)
 
         def offline_receive_msg(self, blocking: bool = False) -> list[BaseBackendMsg]:
@@ -2343,7 +2417,7 @@ def make_benchmark_llm_class():
             results: list[BaseBackendMsg] = []
             added, sum_input_len = 0, 0
             for tokens_or_prompt, sampling_params in self.pending_requests:
-                if sum_input_len >= self.prefill_budget:
+                if not self.bench_admit_all_at_once and sum_input_len >= self.prefill_budget:
                     break
                 input_ids = self._tokenize_one(tokens_or_prompt)
                 sum_input_len += len(input_ids)
@@ -3004,6 +3078,68 @@ def _safe_median(values: Sequence[float]) -> float | None:
     return float(statistics.median(filtered))
 
 
+def _percentile(values: Sequence[float], percentile: float) -> float | None:
+    filtered = sorted(float(value) for value in values if value is not None)
+    if not filtered:
+        return None
+    if len(filtered) == 1:
+        return filtered[0]
+    rank = (len(filtered) - 1) * float(percentile) / 100.0
+    lower = int(math.floor(rank))
+    upper = int(math.ceil(rank))
+    if lower == upper:
+        return filtered[lower]
+    weight = rank - lower
+    return filtered[lower] * (1.0 - weight) + filtered[upper] * weight
+
+
+def _latency_percentiles(values: Sequence[float]) -> dict[str, float | None]:
+    return {
+        f"p{percentile}": _percentile(values, percentile)
+        for percentile in (50, 90, 95, 99)
+    }
+
+
+def _decode_m_range(value: int) -> str:
+    for low, high in ((1, 16), (17, 128), (129, 256), (257, 384), (385, 512)):
+        if low <= value <= high:
+            return f"{low}-{high}"
+    return "above-512" if value > 512 else "zero"
+
+
+def _decode_m_time_distribution(repeats: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    active: dict[str, dict[str, float | int]] = {}
+    padded: dict[str, dict[str, float | int]] = {}
+    dispatch: dict[str, dict[str, float | int]] = {}
+
+    def add(target, key: str, *, elapsed: float) -> None:
+        bucket = target.setdefault(key, {"count": 0, "forward_s": 0.0})
+        bucket["count"] = int(bucket["count"]) + 1
+        bucket["forward_s"] = float(bucket["forward_s"]) + elapsed
+
+    for repeat in repeats:
+        for row in repeat.get("schedule_trace", []):
+            if row.get("phase") != "decode":
+                continue
+            elapsed = float(row.get("forward_s") or 0.0)
+            active_m = int(row.get("batch_size") or 0)
+            padded_m = int(row.get("padded_size") or active_m)
+            active_range = _decode_m_range(active_m)
+            add(active, str(active_m), elapsed=elapsed)
+            add(padded, str(padded_m), elapsed=elapsed)
+            mode = "replay" if row.get("graph_replay") else "eager"
+            add(dispatch, f"{active_range}:{mode}", elapsed=elapsed)
+
+    def sorted_m(mapping: dict[str, Any]) -> dict[str, Any]:
+        return dict(sorted(mapping.items(), key=lambda item: int(item[0])))
+
+    return {
+        "active_m": sorted_m(active),
+        "resolved_or_padded_m": sorted_m(padded),
+        "dispatch_by_active_m_range": dict(sorted(dispatch.items())),
+    }
+
+
 def _sum_phase(trace: Sequence[dict[str, Any]], phase: str, key: str) -> float:
     return float(sum(float(row.get(key, 0.0)) for row in trace if row.get("phase") == phase))
 
@@ -3524,6 +3660,8 @@ def _generation_parts(
         scenario.kind
         in {
             "serving_mixed",
+            "cuda_graph_recipe_balanced_wave",
+            "cuda_graph_recipe_high_concurrency_wave",
             "prefix_multi_sustained",
             "prefix_eviction_pressure",
         }
@@ -3678,7 +3816,11 @@ def _run_warmups(
         torch.cuda.synchronize(llm.device)
         with torch.cuda.nvtx.range(f"warmup:{scenario.name}:{idx}"):
             tic = time.perf_counter()
-            llm.generate(prompts, sampling_params)
+            for part_prompts, part_sampling_params in _generation_parts(
+                scenario, prompts, sampling_params
+            ):
+                if part_prompts:
+                    llm.generate(part_prompts, part_sampling_params)
             torch.cuda.synchronize(llm.device)
             elapsed.append(time.perf_counter() - tic)
         llm.sync_all_ranks()
@@ -4027,6 +4169,8 @@ def _aggregate_case_report(
                 prefix_delta_rank0[key] = float(prefix_delta_rank0.get(key, 0.0)) + value
     metrics = {
         "elapsed_s": elapsed_s,
+        "completed_requests": len(all_requests),
+        "requests_per_s": None if elapsed_s <= 0 else len(all_requests) / elapsed_s,
         "prompt_tokens": prompt_tokens,
         "actual_output_tokens": actual_output_tokens,
         "target_output_tokens": target_output_tokens,
@@ -4039,8 +4183,11 @@ def _aggregate_case_report(
         ),
         "ttft_s_mean": _safe_mean(ttft_values),
         "ttft_s_median": _safe_median(ttft_values),
+        "ttft_s_percentiles": _latency_percentiles(ttft_values),
         "topt_s_mean": _safe_mean(topt_values),
+        "tpot_s_percentiles": _latency_percentiles(topt_values),
         "request_latency_s_mean": _safe_mean(latency_values),
+        "request_latency_s_percentiles": _latency_percentiles(latency_values),
         "prefill_tokens_per_s": (
             None
             if prefill_forward_s <= 0
@@ -4099,6 +4246,7 @@ def _aggregate_case_report(
         "max_sequence": max_sequence,
         "metrics": metrics,
         "schedule_summary": _schedule_summary(repeats0),
+        "decode_m_time_distribution": _decode_m_time_distribution(repeats0),
         "bucket_coverage": _bucket_coverage_table(repeats0, graph_status_case),
         "kernel_counters": kernel_counters,
         "communication_counters": communication_counters,
@@ -4125,6 +4273,7 @@ def _summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "max_sequence": report.get("max_sequence")
         or report.get("config", {}).get("max_sequence", {}),
         "elapsed_s": metrics.get("elapsed_s"),
+        "requests_per_s": metrics.get("requests_per_s"),
         "ttft_s_mean": metrics.get("ttft_s_mean"),
         "prefill_tokens_per_s": metrics.get("prefill_tokens_per_s"),
         "decode_tokens_per_s": metrics.get("decode_tokens_per_s"),
@@ -4149,6 +4298,7 @@ def _summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "graph_runner_cumulative": config.get("graph_runner", {}),
         "bucket_coverage": report.get("bucket_coverage", []),
         "schedule_summary": report.get("schedule_summary", {}),
+        "decode_m_time_distribution": report.get("decode_m_time_distribution", {}),
         "bottleneck_labels": [row["label"] for row in report.get("bottlenecks", [])],
     }
 
@@ -4324,7 +4474,8 @@ def run_case(
         ),
         "error": error,
     }
-    _write_json(rank_path, rank_payload)
+    if args.retain_full_rank_payloads:
+        _write_json(rank_path, rank_payload)
     gathered = _gather_payloads(torch, llm, rank_payload)
 
     if rank != 0:
@@ -4415,6 +4566,11 @@ def run_case(
         }
     else:
         report = _aggregate_case_report(base=base, rank_payloads=gathered)
+        if not args.retain_full_rank_payloads:
+            report.pop("requests", None)
+            report.pop("repeats", None)
+            report.pop("per_rank", None)
+            report["full_rank_payloads_retained"] = False
     _write_json(report_path, report)
     _append_jsonl(output_dir / "matrix.jsonl", _summary_row(report))
     return report
@@ -4451,6 +4607,7 @@ def _init_llm(
         args.model_path,
         dtype=dtype,
         tp_info=DistributedInfo(rank, tp_size),
+        dsv4_sm80_recipe=args.dsv4_sm80_recipe,
         num_page_override=args.num_pages,
         page_size=args.page_size,
         memory_ratio=args.memory_ratio,
@@ -4469,6 +4626,7 @@ def _init_llm(
         ],
         **kwargs,
     )
+    llm.bench_admit_all_at_once = bool(args.admit_all_at_once)
     torch.cuda.synchronize(llm.device)
     load_init_s = time.perf_counter() - tic
     max_sequence = _max_sequence_runtime_report(llm, args=args, scenarios=scenarios)
@@ -4592,6 +4750,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "cuda_graph_bs": runtime_options["cuda_graph_bs"],
                         "cuda_graph_max_bs": runtime_options["cuda_graph_max_bs"],
                         "cuda_graph_bucket_policy": llm.engine.cuda_graph_policy.to_report(),
+                        "dsv4_sm80_recipe": getattr(
+                            llm.engine, "kv_capacity_plan_report", {}
+                        ).get("dsv4_sm80_recipe"),
                         "cuda_graph_capture_greedy_sample": runtime_options[
                             "cuda_graph_capture_greedy_sample"
                         ],
@@ -4690,6 +4851,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="Torchrun-native DeepSeek V4 TP8 sm80 baseline benchmark matrix."
     )
     parser.add_argument("--model-path", default="/models/DeepSeek-V4-Flash")
+    parser.add_argument(
+        "--dsv4-sm80-recipe",
+        choices=(
+            "dsv4_sm80_low_m64",
+            "dsv4_sm80_mid_m128",
+            "dsv4_sm80_balanced",
+            "dsv4_sm80_long_context_512k",
+            "dsv4_sm80_1m_smoke",
+        ),
+        default=None,
+        help="Select a public DSV4 A100/sm80 recipe; omitted uses the no-env default.",
+    )
     parser.add_argument("--variants", nargs="*", choices=tuple(_variant_map()))
     parser.add_argument("--scenarios", nargs="*", choices=tuple(_scenario_map()))
     parser.add_argument("--output-dir", default="/tmp/dsv4_sm80_target06_tp8")
@@ -4827,6 +5000,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--keep-going", action="store_true")
+    parser.add_argument(
+        "--retain-full-rank-payloads",
+        action="store_true",
+        help=(
+            "Opt in to very large per-rank request/token/schedule payload files. "
+            "Compact aggregate telemetry is the release-benchmark default."
+        ),
+    )
+    parser.add_argument(
+        "--admit-all-at-once",
+        action="store_true",
+        help=(
+            "Benchmark contract: submit every selected request to the scheduler in "
+            "one receive cycle while retaining the configured 8192-token chunk budget."
+        ),
+    )
     parser.add_argument("--list-scenarios", action="store_true")
     parser.add_argument("--list-variants", action="store_true")
     args = parser.parse_args(argv)

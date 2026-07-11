@@ -67,6 +67,10 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         or arg.startswith("--max-extend-length=")
         for arg in args
     )
+    max_running_req_explicit = any(
+        arg == "--max-running-requests" or arg.startswith("--max-running-requests=")
+        for arg in args
+    )
     from minisgl.attention import validate_attn_backend
     from minisgl.kvcache import SUPPORTED_CACHE_MANAGER
     from minisgl.moe import SUPPORTED_MOE_BACKENDS
@@ -103,6 +107,19 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         dest="max_running_req",
         default=ServerArgs.max_running_req,
         help="The maximum number of running requests.",
+    )
+
+    parser.add_argument(
+        "--dsv4-sm80-recipe",
+        default=ServerArgs.dsv4_sm80_recipe,
+        choices=[
+            "dsv4_sm80_low_m64",
+            "dsv4_sm80_mid_m128",
+            "dsv4_sm80_balanced",
+            "dsv4_sm80_long_context_512k",
+            "dsv4_sm80_1m_smoke",
+        ],
+        help="Select a public DeepSeek V4 A100/sm80 request/graph/context recipe.",
     )
 
     parser.add_argument(
@@ -273,12 +290,14 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
     kwargs["max_extend_tokens_explicit"] = max_extend_tokens_explicit
+    kwargs["max_running_req_explicit"] = max_running_req_explicit
 
     # resolve some arguments
     run_shell |= kwargs.pop("shell_mode")
     if run_shell:
         kwargs["cuda_graph_max_bs"] = 1
         kwargs["max_running_req"] = 1
+        kwargs["max_running_req_explicit"] = True
         kwargs["silent_output"] = True
 
     if kwargs["model_path"].startswith("~"):
