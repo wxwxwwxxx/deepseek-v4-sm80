@@ -141,6 +141,8 @@ class GraphRunner:
             "capture_buffer_bytes": None,
             "capture_graph_pool_reuse_enabled": False,
             "capture_graph_pool_reuse_anchor_bs": None,
+            "post_kv_model_cache_prepare_stage": None,
+            "post_kv_model_cache_prepare_report": {},
             "capture_by_batch_size": {},
             "replay_count": 0,
             "replay_count_by_batch_size": {},
@@ -174,6 +176,7 @@ class GraphRunner:
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
         if self.max_graph_bs == 0:
+            self._prepare_post_kv_model_caches(model, stage="post_kv_allocation_graph_disabled")
             return logger.info_rank0("CUDA graph is disabled.")
 
         self.attn_backend.init_capture_graph(max_seq_len=max_seq_len, bs_list=self.graph_bs_list)
@@ -197,6 +200,11 @@ class GraphRunner:
             torch.cuda.memory_reserved(self.device)
         )
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
+
+        self._prepare_post_kv_model_caches(
+            model,
+            stage="post_kv_allocation_pre_graph_warmup",
+        )
 
         self.buffer = GraphCaptureBuffer.init(
             self.max_graph_bs,
@@ -321,6 +329,12 @@ class GraphRunner:
             torch.cuda.max_memory_reserved(self.device)
         )
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
+
+    def _prepare_post_kv_model_caches(self, model: BaseLLMModel, *, stage: str) -> None:
+        prepare = getattr(model, "prepare_fused_wqa_wkv_bf16_weight_cache", None)
+        report = prepare() if callable(prepare) else {}
+        self.capture_status["post_kv_model_cache_prepare_stage"] = stage
+        self.capture_status["post_kv_model_cache_prepare_report"] = report
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
         if not batch.is_decode or batch.size > self.max_graph_bs:

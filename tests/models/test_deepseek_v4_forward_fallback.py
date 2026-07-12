@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import minisgl.core as core
 import minisgl.distributed.info as dist_info
+import minisgl.models.deepseek_v4 as dsv4_model
 import pytest
 import torch
 import torch.nn.functional as F
@@ -100,6 +101,45 @@ def test_fallback_fp8_linear_preserves_loaded_scale(monkeypatch):
     linear.forward(torch.zeros(1, 128, dtype=torch.bfloat16))
 
     assert captured["scale"] is linear.weight_scale_inv
+
+
+def test_cached_bf16_small_gemm_uses_linear(monkeypatch):
+    x = torch.randn(4, 8, dtype=torch.bfloat16)
+    weight = torch.randn(6, 8, dtype=torch.bfloat16)
+    expected = torch.randn(4, 6, dtype=torch.bfloat16)
+    calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def fake_linear(actual_x, actual_weight):
+        calls.append((actual_x, actual_weight))
+        return expected
+
+    monkeypatch.setattr(dsv4_model.F, "linear", fake_linear)
+
+    actual = dsv4_model._linear_cached_bf16_weight(x, weight)
+
+    assert actual is expected
+    assert calls == [(x, weight)]
+
+
+def test_optimized_bf16_weight_cache_has_no_pretransposed_copy():
+    configure_dsv4_runtime("optimized")
+    _reset_globals()
+    linear = DSV4Linear(
+        128,
+        128,
+        weight_dtype=dsv4_kernel.fp8_dtype(),
+        scale_dtype=dsv4_kernel.e8m0_dtype(),
+    )
+
+    report = linear.prepare_fp8_bf16_weight_cache(
+        "_cached_test_bf16_weight",
+        owner_label="test.projection",
+    )
+
+    assert hasattr(linear, "_cached_test_bf16_weight")
+    assert report["bytes"] == 128 * 128 * torch.bfloat16.itemsize
+    assert all("pretranspos" not in key for key in report)
+    assert all("pretranspos" not in name for name in vars(linear))
 
 
 @pytest.fixture(autouse=True)
@@ -474,6 +514,11 @@ def test_deepseek_v4_prepare_defers_release_until_before_kv_alloc():
     calls: list[tuple[str, int]] = []
 
     for idx, layer in enumerate(model.layers.op_list):
+        def fail_fused_prepare(idx=idx):
+            raise AssertionError(f"fused cache prepared before KV planning for layer {idx}")
+
+        layer.self_attn.prepare_fused_wqa_wkv_bf16_weight_cache = fail_fused_prepare
+
         def fake_prepare(*, release_original=False, idx=idx):
             assert release_original is False
             calls.append(("prebuild", idx))
@@ -503,6 +548,52 @@ def test_deepseek_v4_prepare_defers_release_until_before_kv_alloc():
     assert moe_report["total_source_bytes"] == 66
     assert moe_report["total_released_original_bytes"] == 0
     assert moe_report["release_timing"] == "before_kv_alloc"
+    assert "fused_wqa_wkv_bf16_weight_cache" not in report
+
+
+def test_deepseek_v4_fused_cache_prepare_is_separate_and_idempotent():
+    configure_dsv4_runtime("optimized")
+    _reset_globals()
+    model = DeepseekV4Model(replace(_tiny_dsv4_config(), num_layers=3))
+    cached_entries = []
+    calls: list[int] = []
+
+    for idx, layer in enumerate(model.layers.op_list):
+        entry = {
+            "owner": f"layer{idx}.attn.q_proj",
+            "shape": [6, 8],
+            "dtype": "torch.bfloat16",
+            "device": "cuda:0",
+            "bytes": 96,
+        }
+        cached_entries.append(entry)
+
+        def fake_prepare(idx=idx, entry=entry):
+            calls.append(idx)
+            return entry
+
+        layer.self_attn.prepare_fused_wqa_wkv_bf16_weight_cache = fake_prepare
+
+    first = model.prepare_fused_wqa_wkv_bf16_weight_cache()
+    second = model.prepare_fused_wqa_wkv_bf16_weight_cache()
+
+    assert calls == [0, 1, 2, 0, 1, 2]
+    assert first == second
+    assert first == {
+        "enabled": True,
+        "layers_cached": 3,
+        "total_bytes": 288,
+        "entries": cached_entries,
+    }
+
+
+def test_fallback_does_not_prepare_fused_wqa_wkv_cache():
+    configure_dsv4_runtime("fallback")
+    _reset_globals()
+    attention = DSV4Attention(_tiny_dsv4_config(), layer_id=0)
+
+    assert attention.prepare_fused_wqa_wkv_bf16_weight_cache() is None
+    assert not hasattr(attention, "_cached_fused_wqa_wkv_bf16_weight")
 
 
 def test_deepseek_v4_prepare_does_not_release_after_prebuild_failure():

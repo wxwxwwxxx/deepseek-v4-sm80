@@ -190,97 +190,11 @@ def _cached_fp8_bf16_weight(
 
 
 
-def _cached_bf16_pretransposed_weight(
-    owner: object,
-    cache_name: str,
-    weight: torch.Tensor,
-    *,
-    allow_build: bool,
-    owner_label: str,
-) -> torch.Tensor:
-    if weight.dtype != torch.bfloat16 or weight.ndim != 2:
-        raise RuntimeError(
-            f"{owner_label} pretransposed BF16 cache requires a 2D BF16 weight, "
-            f"got shape={tuple(weight.shape)} dtype={weight.dtype}."
-        )
-    meta_name = f"{cache_name}_meta"
-    meta = _tensor_cache_meta(weight)
-    cached = getattr(owner, cache_name, None)
-    if cached is not None and getattr(owner, meta_name, None) == meta:
-        return cached
-    if not allow_build:
-        raise RuntimeError(
-            f"{owner_label} pretransposed BF16 weight is missing or stale. "
-            "Call prepare_for_cuda_graph_capture() after weights are loaded and before "
-            "decode CUDA graph capture/replay; rebuilding inside forward is disabled."
-        )
-    cached = weight.t().contiguous()
-    setattr(owner, cache_name, cached)
-    setattr(owner, meta_name, meta)
-    return cached
-
-
 def _linear_cached_bf16_weight(
     x: torch.Tensor,
     weight: torch.Tensor,
-    *,
-    owner: object,
-    cache_name: str,
-    owner_label: str,
 ) -> torch.Tensor:
-    if not dsv4_kernel.dsv4_optimized_enabled():
-        return F.linear(x, weight)
-    rows = x.numel() // x.shape[-1]
-    if rows > 16:
-        return F.linear(x, weight)
-    weight_t = _cached_bf16_pretransposed_weight(
-        owner,
-        f"{cache_name}_pretransposed",
-        weight,
-        allow_build=False,
-        owner_label=owner_label,
-    )
-    x_2d = x.reshape(rows, x.shape[-1])
-    y = torch.mm(x_2d, weight_t)
-    return y.reshape(*x.shape[:-1], weight_t.shape[-1])
-
-    if not dsv4_kernel.dsv4_optimized_enabled():
-        return F.linear(x, weight)
-    rows = x.numel() // x.shape[-1]
-    if rows > 16:
-        return F.linear(x, weight)
-    weight_t = _cached_bf16_pretransposed_weight(
-        owner,
-        f"{cache_name}_pretransposed",
-        weight,
-        allow_build=False,
-        owner_label=owner_label,
-    )
-    x_2d = x.reshape(rows, x.shape[-1])
-    y = torch.mm(x_2d, weight_t)
-    return y.reshape(*x.shape[:-1], weight_t.shape[-1])
-
-
-def _prepare_bf16_pretransposed_report(
-    owner: object,
-    cache_name: str,
-    weight: torch.Tensor,
-    *,
-    owner_label: str,
-) -> dict[str, object]:
-    cached = _cached_bf16_pretransposed_weight(
-        owner,
-        f"{cache_name}_pretransposed",
-        weight,
-        allow_build=True,
-        owner_label=owner_label,
-    )
-    return {
-        "shape": list(cached.shape),
-        "dtype": str(cached.dtype),
-        "device": str(cached.device),
-        "bytes": int(cached.numel() * cached.element_size()),
-    }
+    return F.linear(x, weight)
 
 
 def _wo_a_bf16_bmm_weight_cache_meta(
@@ -424,6 +338,7 @@ def _cached_fused_wqa_wkv_fp8_weight(
     scale_kv: torch.Tensor | None,
     *,
     out_dtype: torch.dtype,
+    allow_build: bool,
 ) -> torch.Tensor | None:
     if not (
         dsv4_kernel.dsv4_optimized_enabled()
@@ -465,6 +380,12 @@ def _cached_fused_wqa_wkv_fp8_weight(
     )
     cached = getattr(owner, cache_name, None)
     if cached is None or getattr(owner, meta_name, None) != meta:
+        if not allow_build:
+            raise RuntimeError(
+                "Fused WQA/WKV cached BF16 weight is missing or stale. Call "
+                "prepare_fused_wqa_wkv_bf16_weight_cache() after KV allocation and "
+                "before CUDA graph warmup/capture; rebuilding inside forward is disabled."
+            )
         q = dsv4_kernel.dequant_fp8_weight(weight_q, scale_q, out_dtype=out_dtype)
         kv = dsv4_kernel.dequant_fp8_weight(weight_kv, scale_kv, out_dtype=out_dtype)
         cached = torch.cat((q, kv), dim=0).contiguous()
@@ -595,24 +516,12 @@ class DSV4Linear(BaseOP):
             allow_build=True,
             owner_label=owner_label,
         )
-        pretransposed_report = None
-        if dsv4_kernel.dsv4_optimized_enabled():
-            pretransposed_report = _prepare_bf16_pretransposed_report(
-                self,
-                cache_name,
-                cached,
-                owner_label=owner_label,
-            )
         return {
             "owner": owner_label,
             "shape": list(cached.shape),
             "dtype": str(cached.dtype),
             "device": str(cached.device),
             "bytes": int(cached.numel() * cached.element_size()),
-            "pretransposed": pretransposed_report,
-            "pretransposed_bytes": (
-                0 if pretransposed_report is None else int(pretransposed_report["bytes"])
-            ),
         }
 
 
@@ -640,23 +549,6 @@ class DSV4Linear(BaseOP):
         y = _linear_cached_bf16_weight(
             x_quant,
             cached_weight,
-            owner=self,
-            cache_name=cache_name,
-            owner_label=owner_label,
-        )
-        if reduce and self.row_parallel and self._tp_size > 1:
-            y = self._comm.all_reduce(
-                y,
-                label=reduce_label or "dsv4.row_parallel_projection_all_reduce",
-            )
-        return y
-        x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
-        y = _linear_cached_bf16_weight(
-            x_quant,
-            cached_weight,
-            owner=self,
-            cache_name=cache_name,
-            owner_label=owner_label,
         )
         if reduce and self.row_parallel and self._tp_size > 1:
             y = self._comm.all_reduce(
@@ -986,7 +878,7 @@ class DSV4Attention(BaseOP):
             return None
         return self.indexer.prepare_wq_b_bf16_weight_cache()
 
-    def prepare_fused_wqa_wkv_pretranspose_cache(self) -> dict[str, object] | None:
+    def prepare_fused_wqa_wkv_bf16_weight_cache(self) -> dict[str, object] | None:
         if not dsv4_kernel.dsv4_optimized_enabled():
             return None
         cached = _cached_fused_wqa_wkv_fp8_weight(
@@ -997,24 +889,17 @@ class DSV4Attention(BaseOP):
             self.wkv.weight,
             getattr(self.wkv, "weight_scale_inv", None),
             out_dtype=torch.bfloat16,
+            allow_build=True,
         )
         if cached is None:
             return None
         owner_label = f"layer{self.layer_id}.attn.q_proj"
-        pretransposed_report = _prepare_bf16_pretransposed_report(
-            self,
-            "_cached_fused_wqa_wkv_bf16_weight",
-            cached,
-            owner_label=owner_label,
-        )
         return {
             "owner": owner_label,
             "shape": list(cached.shape),
             "dtype": str(cached.dtype),
             "device": str(cached.device),
             "bytes": int(cached.numel() * cached.element_size()),
-            "pretransposed": pretransposed_report,
-            "pretransposed_bytes": int(pretransposed_report["bytes"]),
         }
 
     def _sequence_spans(self, batch: Batch, total_tokens: int) -> list[tuple[int, int]]:
@@ -1072,15 +957,13 @@ class DSV4Attention(BaseOP):
                 self.wkv.weight,
                 getattr(self.wkv, "weight_scale_inv", None),
                 out_dtype=x.dtype,
+                allow_build=False,
             )
             if cached_fused_weight is not None:
                 x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
                 qkv = _linear_cached_bf16_weight(
                     x_quant,
                     cached_fused_weight,
-                    owner=self,
-                    cache_name="_cached_fused_wqa_wkv_bf16_weight",
-                    owner_label=f"layer{self.layer_id}.attn.q_proj",
                 )
                 q_lora_raw, kv_from_shared_wqa_wkv = qkv.split(
                     [self.q_norm.weight.shape[0], self.head_dim],
@@ -2326,12 +2209,6 @@ class DeepseekV4Model(BaseOP):
         self._hc_head_fn_bf16_meta: tuple | None = None
 
     def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
-        fused_wqa_wkv_reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_optimized_enabled():
-            for layer in self.layers.op_list:
-                report = layer.self_attn.prepare_fused_wqa_wkv_pretranspose_cache()
-                if report is not None:
-                    fused_wqa_wkv_reports.append(report)
         q_wqb_reports: list[dict[str, object]] = []
         if dsv4_kernel.dsv4_optimized_enabled():
             for layer in self.layers.op_list:
@@ -2426,13 +2303,6 @@ class DeepseekV4Model(BaseOP):
         total_moe_marlin_wna16_released_bytes = int(
             sum(int(report["released_original_bytes"]) for report in moe_marlin_wna16_reports)
         )
-        total_pretransposed_bytes = int(
-            sum(int(report.get("pretransposed_bytes", 0)) for report in fused_wqa_wkv_reports)
-            + sum(int(report.get("pretransposed_bytes", 0)) for report in q_wqb_reports)
-            + sum(int(report.get("pretransposed_bytes", 0)) for report in wo_b_reports)
-            + sum(int(report.get("pretransposed_bytes", 0)) for report in indexer_wq_b_reports)
-            + sum(int(report.get("pretransposed_bytes", 0)) for report in shared_expert_reports)
-        )
         projection_cache_owners = []
         if q_wqb_reports:
             projection_cache_owners.append("attn.q_wqb")
@@ -2442,8 +2312,6 @@ class DeepseekV4Model(BaseOP):
             projection_cache_owners.append("indexer.wq_b")
         if wo_a_reports:
             projection_cache_owners.append("attn.wo_a")
-        if fused_wqa_wkv_reports:
-            projection_cache_owners.append("attention WQA/WKV/compress")
         if shared_expert_reports:
             if any(
                 str(report["owner"]).endswith("gate_up_proj") for report in shared_expert_reports
@@ -2452,34 +2320,16 @@ class DeepseekV4Model(BaseOP):
             if any(str(report["owner"]).endswith("down_proj") for report in shared_expert_reports):
                 projection_cache_owners.append("shared_experts.down_proj")
         return {
-            "fused_wqa_wkv_bf16_pretranspose_cache": {
-                "enabled": bool(fused_wqa_wkv_reports),
-                "layers_cached": len(fused_wqa_wkv_reports),
-                "total_bytes": int(sum(int(report["bytes"]) for report in fused_wqa_wkv_reports)),
-                "total_pretransposed_bytes": int(
-                    sum(
-                        int(report.get("pretransposed_bytes", 0))
-                        for report in fused_wqa_wkv_reports
-                    )
-                ),
-                "entries": fused_wqa_wkv_reports,
-            },
             "q_wqb_bf16_weight_cache": {
                 "enabled": bool(q_wqb_reports),
                 "layers_cached": len(q_wqb_reports),
                 "total_bytes": total_q_wqb_bytes,
-                "total_pretransposed_bytes": int(
-                    sum(int(report.get("pretransposed_bytes", 0)) for report in q_wqb_reports)
-                ),
                 "entries": q_wqb_reports,
             },
             "wo_b_bf16_weight_cache": {
                 "enabled": bool(wo_b_reports),
                 "layers_cached": len(wo_b_reports),
                 "total_bytes": total_wo_b_bytes,
-                "total_pretransposed_bytes": int(
-                    sum(int(report.get("pretransposed_bytes", 0)) for report in wo_b_reports)
-                ),
                 "entries": wo_b_reports,
             },
             "wo_a_bf16_bmm_cache": {
@@ -2492,11 +2342,6 @@ class DeepseekV4Model(BaseOP):
                 "enabled": bool(indexer_wq_b_reports),
                 "layers_cached": len(indexer_wq_b_reports),
                 "total_bytes": total_indexer_wq_b_bytes,
-                "total_pretransposed_bytes": int(
-                    sum(
-                        int(report.get("pretransposed_bytes", 0)) for report in indexer_wq_b_reports
-                    )
-                ),
                 "entries": indexer_wq_b_reports,
             },
             "shared_expert_bf16_weight_cache": {
@@ -2514,12 +2359,6 @@ class DeepseekV4Model(BaseOP):
                     ),
                 ),
                 "total_bytes": total_shared_expert_bytes,
-                "total_pretransposed_bytes": int(
-                    sum(
-                        int(report.get("pretransposed_bytes", 0))
-                        for report in shared_expert_reports
-                    )
-                ),
                 "entries": shared_expert_reports,
             },
             "projection_bf16_weight_cache_total": {
@@ -2561,18 +2400,20 @@ class DeepseekV4Model(BaseOP):
                 "release_entries": moe_marlin_wna16_release_reports,
                 "entries": moe_marlin_wna16_reports,
             },
-            "bf16_small_gemm_pretranspose_cache_total": {
-                "enabled": total_pretransposed_bytes > 0,
-                "total_pretransposed_bytes": total_pretransposed_bytes,
-                "owners": [
-                    "attention WQA/WKV/compress",
-                    "attn.q_wqb",
-                    "attn.wo_b",
-                    "indexer.wq_b",
-                    "shared_experts.gate_up_proj",
-                    "shared_experts.down_proj",
-                ],
-            },
+        }
+
+    def prepare_fused_wqa_wkv_bf16_weight_cache(self) -> dict[str, object]:
+        reports: list[dict[str, object]] = []
+        if dsv4_kernel.dsv4_optimized_enabled():
+            for layer in self.layers.op_list:
+                report = layer.self_attn.prepare_fused_wqa_wkv_bf16_weight_cache()
+                if report is not None:
+                    reports.append(report)
+        return {
+            "enabled": bool(reports),
+            "layers_cached": len(reports),
+            "total_bytes": int(sum(int(report["bytes"]) for report in reports)),
+            "entries": reports,
         }
 
     def release_marlin_wna16_original_expert_weights(
@@ -2645,6 +2486,9 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
 
     def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
         return self.model.prepare_for_cuda_graph_capture()
+
+    def prepare_fused_wqa_wkv_bf16_weight_cache(self) -> dict[str, object]:
+        return self.model.prepare_fused_wqa_wkv_bf16_weight_cache()
 
     def release_marlin_wna16_original_expert_weights(
         self,

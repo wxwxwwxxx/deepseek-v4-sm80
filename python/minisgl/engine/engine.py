@@ -224,6 +224,13 @@ class Engine:
             capture_fail_open=config.cuda_graph_capture_fail_open,
             capture_greedy_sample=config.cuda_graph_capture_greedy_sample,
         )
+        post_kv_prepare_report = self.graph_runner.capture_status.get(
+            "post_kv_model_cache_prepare_report", {}
+        )
+        if post_kv_prepare_report:
+            self.model_prepare_report["fused_wqa_wkv_bf16_weight_cache"] = (
+                post_kv_prepare_report
+            )
         self._finalize_graph_memory_ledger()
         self._maybe_release_marlin_wna16_for_timing(
             timing="after_graph_capture",
@@ -460,6 +467,12 @@ class Engine:
         margin = int(self.graph_memory_estimate.safety_margin_bytes)
         post_capture_free = self._sync_get_memory()[0]
         graph_report = self.kv_capacity_plan_report.setdefault("graph_memory", {})
+        post_kv_cache_report = status.get("post_kv_model_cache_prepare_report", {})
+        post_kv_cache_bytes = (
+            int(post_kv_cache_report.get("total_bytes", 0))
+            if isinstance(post_kv_cache_report, dict)
+            else 0
+        )
         try:
             comparison = compare_graph_capture(
                 estimate_bytes=estimate,
@@ -470,6 +483,10 @@ class Engine:
             self.graph_runner.destroy_cuda_graphs()
             raise
         graph_report.update(comparison)
+        graph_report["post_kv_persistent_cache_bytes"] = post_kv_cache_bytes
+        graph_report["actual_physical_bytes_includes_post_kv_model_cache"] = bool(
+            self.cuda_graph_policy.resolved_bs and post_kv_cache_bytes
+        )
         graph_report["post_capture_free_bytes"] = int(post_capture_free)
         status["graph_memory_plan"] = dict(graph_report)
 

@@ -30,3 +30,26 @@ def test_cuda_graph_exact_bs_only_accepts_captured_exact_batch() -> None:
     batch = _decode_batch(size=4, padded_size=4)
 
     assert _runner(exact_bs_only=True).can_use_cuda_graph(batch)
+
+
+def test_post_kv_model_cache_prepare_has_explicit_single_lifecycle_entry() -> None:
+    runner = object.__new__(GraphRunner)
+    runner.capture_status = {}
+    calls: list[str] = []
+
+    class Model:
+        def prepare_fused_wqa_wkv_bf16_weight_cache(self):
+            calls.append("prepare")
+            return {"enabled": True, "layers_cached": 2, "total_bytes": 64}
+
+    runner._prepare_post_kv_model_caches(
+        Model(),
+        stage="post_kv_allocation_pre_graph_warmup",
+    )
+
+    assert calls == ["prepare"]
+    assert (
+        runner.capture_status["post_kv_model_cache_prepare_stage"]
+        == "post_kv_allocation_pre_graph_warmup"
+    )
+    assert runner.capture_status["post_kv_model_cache_prepare_report"]["total_bytes"] == 64

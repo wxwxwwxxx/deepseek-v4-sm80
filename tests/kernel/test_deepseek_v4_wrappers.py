@@ -1580,6 +1580,7 @@ def test_fused_wqa_wkv_cached_weight_matches_shared_activation(monkeypatch):
         weight_b,
         scale_b,
         out_dtype=x.dtype,
+        allow_build=True,
     )
     assert cached is not None
     qkv = F.linear(dsv4_kernel.quantize_fp8_activation_ref(x), cached)
@@ -1596,9 +1597,23 @@ def test_fused_wqa_wkv_cached_weight_matches_shared_activation(monkeypatch):
             weight_b,
             scale_b,
             out_dtype=x.dtype,
+            allow_build=False,
         )
         is cached
     )
+
+    replacement_weight_a = weight_a.clone()
+    with pytest.raises(RuntimeError, match="missing or stale"):
+        dsv4_model._cached_fused_wqa_wkv_fp8_weight(
+            owner,
+            "_cached_test_weight",
+            replacement_weight_a,
+            scale_a,
+            weight_b,
+            scale_b,
+            out_dtype=x.dtype,
+            allow_build=False,
+        )
 
 
 def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
