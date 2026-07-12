@@ -400,9 +400,7 @@ def _direct_decode_index_metadata_for_replay_kernel(
             full_valid = swa_valid & (swa_value >= 0)
             mapped_page = tl.load(
                 swa_full_to_swa_page_ptr + full_page,
-                mask=full_valid
-                & (full_page >= 0)
-                & (full_page < swa_full_to_swa_page_width),
+                mask=full_valid & (full_page >= 0) & (full_page < swa_full_to_swa_page_width),
                 other=-1,
             )
             mapped_loc = mapped_page * page_size + page_offset
@@ -666,9 +664,7 @@ def _prep_decode_metadata_in_graph_kernel(
         full_valid = swa_valid & (swa_value >= 0)
         mapped_page = tl.load(
             swa_full_to_swa_page_ptr + full_page,
-            mask=full_valid
-            & (full_page >= 0)
-            & (full_page < swa_full_to_swa_page_width),
+            mask=full_valid & (full_page >= 0) & (full_page < swa_full_to_swa_page_width),
             other=-1,
         )
         mapped_loc = mapped_page * page_size + page_offset
@@ -755,9 +751,7 @@ def _prep_decode_metadata_in_graph_kernel(
     c128_offset = c128_raw - c128_logical_page * c128_component_page_size
     c128_component_page = tl.load(
         c128_page_table_ptr + row * c128_page_table_width + c128_logical_page,
-        mask=c128_valid
-        & (c128_logical_page >= 0)
-        & (c128_logical_page < c128_page_table_width),
+        mask=c128_valid & (c128_logical_page >= 0) & (c128_logical_page < c128_page_table_width),
         other=-1,
     )
     c128_component_loc = c128_component_page * c128_component_page_size + c128_offset
@@ -792,9 +786,7 @@ def _prep_decode_metadata_in_graph_kernel(
     c4_write_loc = tl.where(c4_boundary & (c4_write_component_page >= 0), c4_write_loc, -1)
 
     c4_indexer_component_page = tl.load(
-        c4_indexer_page_table_ptr
-        + row * c4_indexer_page_table_width
-        + c4_write_logical_page,
+        c4_indexer_page_table_ptr + row * c4_indexer_page_table_width + c4_write_logical_page,
         mask=c4_boundary
         & (c4_write_logical_page >= 0)
         & (c4_write_logical_page < c4_indexer_page_table_width),
@@ -1093,9 +1085,7 @@ def _hc_split_pre_kernel(
         mixes_ptr + mix_base + post_start + hc_offsets, mask=hc_mask, other=0.0
     ).to(tl.float32) * scale1 + tl.load(
         base_ptr + post_start + hc_offsets, mask=hc_mask, other=0.0
-    ).to(
-        tl.float32
-    )
+    ).to(tl.float32)
     post = 2.0 * tl.sigmoid(post_logits)
     post = tl.where(hc_mask, post, 0.0)
 
@@ -1239,9 +1229,7 @@ def _hc_prenorm_split_pre_kernel(
         mixes_ptr + mix_base + post_start + hc_offsets, mask=hc_mask, other=0.0
     ).to(tl.float32) * rsqrt * scale1 + tl.load(
         base_ptr + post_start + hc_offsets, mask=hc_mask, other=0.0
-    ).to(
-        tl.float32
-    )
+    ).to(tl.float32)
     post = 2.0 * tl.sigmoid(post_logits)
     post = tl.where(hc_mask, post, 0.0)
     tl.store(post_ptr + token * hc_mult + hc_offsets, post, mask=hc_mask)
@@ -1738,9 +1726,7 @@ def _remap_indexer_topk_locs_kernel(
         & (component_logical_page < component_table_width)
     )
     component_page = tl.load(
-        component_page_table_ptr
-        + rows * component_table_width
-        + component_logical_page,
+        component_page_table_ptr + rows * component_table_width + component_logical_page,
         mask=component_valid,
         other=-1,
     ).to(tl.int64)
@@ -1755,10 +1741,7 @@ def _remap_indexer_topk_locs_kernel(
     full_logical_page = full_position // full_page_size
     full_offset = full_position - full_logical_page * full_page_size
     full_valid = (
-        active
-        & (raw >= 0)
-        & (full_logical_page >= 0)
-        & (full_logical_page < full_table_width)
+        active & (raw >= 0) & (full_logical_page >= 0) & (full_logical_page < full_table_width)
     )
     full_page = tl.load(
         full_page_table_ptr + rows * full_table_width + full_logical_page,
@@ -2766,8 +2749,6 @@ def rms_norm_bf16(
     return out.reshape_as(x)
 
 
-
-
 def _workspace_tensor(
     workspace,
     name: str,
@@ -2930,10 +2911,6 @@ def apply_rotary_tail(
     return True
 
 
-
-
-
-
 def q_kv_norm_rope_cache_bf16(
     q: torch.Tensor,
     kv: torch.Tensor,
@@ -3092,14 +3069,6 @@ def compress_norm_rope_store_bf16(
     return True
 
 
-
-
-
-
-
-
-
-
 def direct_decode_index_metadata_for_replay(
     ctx_page_table: torch.Tensor,
     table_indices: torch.Tensor,
@@ -3167,11 +3136,15 @@ def direct_decode_index_metadata_for_replay(
         or index_topk <= 0
     ):
         return False
-    if direct_swa and swa_independent and (
-        swa_full_to_swa_page is None
-        or swa_full_to_swa_page.ndim != 1
-        or swa_dummy_token_start < 0
-        or swa_dummy_page < 0
+    if (
+        direct_swa
+        and swa_independent
+        and (
+            swa_full_to_swa_page is None
+            or swa_full_to_swa_page.ndim != 1
+            or swa_dummy_token_start < 0
+            or swa_dummy_page < 0
+        )
     ):
         return False
     if direct_swa and (dst_swa_page_indices.ndim != 2 or dst_swa_page_indices.shape[0] < rows):
@@ -3671,8 +3644,6 @@ def copy_decode_metadata_for_replay(
     return True
 
 
-
-
 def paged_mqa_attention_bf16(
     q: torch.Tensor,
     cache: torch.Tensor,
@@ -3739,12 +3710,6 @@ def paged_mqa_attention_bf16(
         num_warps=4,
     )
     return out
-
-
-
-
-
-
 
 
 def indexer_fp8_quantize_fold(
@@ -3864,8 +3829,6 @@ def fp8_activation_quantize(
         num_warps=4,
     )
     return out.view_as(x_c).reshape_as(x)
-
-
 
 
 def indexer_fp8_paged_logits(
@@ -4324,12 +4287,6 @@ def hc_post(
     return out
 
 
-
-
-
-
-
-
 def build_moe_route_plan(
     indices: torch.Tensor,
     *,
@@ -4451,8 +4408,6 @@ def zero_moe_padded_rows(
         BLOCK=block,
     )
     return True
-
-
 
 
 def _grouped_fp4_w13(
@@ -4883,10 +4838,7 @@ def grouped_fp4_moe(
 
 __all__ = [
     "apply_rotary_tail",
-    "build_decode_metadata_indices",
-    "build_decode_metadata_indices_component",
     "direct_decode_index_metadata_for_replay",
-    "direct_c4_sparse_metadata_for_replay",
     "compress_norm_rope_store_bf16",
     "build_moe_route_plan",
     "mask_moe_routes_live_rows",
@@ -4897,30 +4849,18 @@ __all__ = [
     "hc_prenorm_split_pre",
     "hc_post",
     "hc_split_pre",
-    "indexer_bf16_logits",
-    "indexer_fp8_logits",
     "indexer_fp8_paged_logits",
     "indexer_fp8_paged_quant_store",
-    "indexer_fp8_quantize",
     "indexer_fp8_quantize_fold",
-    "indexer_fp8_quant_store",
     "remap_indexer_topk_locs",
-    "k_norm_rope_cache_bf16",
     "copy_masked_compressed_locs",
     "copy_component_write_locs_for_replay",
     "copy_decode_metadata_for_replay",
     "prep_decode_metadata_in_graph",
     "paged_mqa_attention_bf16",
-    "q_norm_rope",
     "fp8_activation_quantize",
-    "quantized_linear_fp4",
-    "quantized_linear_fp8",
     "q_kv_norm_rope_cache_bf16",
     "rms_norm_bf16",
-    "rms_norm_pair_bf16",
     "silu_and_mul_clamp",
     "silu_and_mul_clamp_bf16",
-    "store_cache",
-    "topk_transform_512",
-    "wo_a_grouped_projection_fp8",
 ]

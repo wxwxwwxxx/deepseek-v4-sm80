@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib.util
 import math
-import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
@@ -29,9 +28,6 @@ DSV4KernelMode = Literal["fallback", "bf16_direct", "fp8_act", "fp4_act"]
 DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4 = "grouped_fp4"
 DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
 DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT = 512
-
-
-
 
 
 DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR = (
@@ -192,10 +188,6 @@ def detect_dsv4_kernel_capabilities() -> DSV4KernelCapability:
     )
 
 
-
-
-
-
 def dsv4_optimized_enabled() -> bool:
     return get_dsv4_runtime_config().optimized
 
@@ -205,8 +197,6 @@ def dsv4_optimized_triton_enabled() -> bool:
         return False
     cap = detect_dsv4_kernel_capabilities()
     return bool(cap.is_sm80 and cap.triton_available)
-
-
 
 
 def warmup_indexer_fp8_backend(device: torch.device) -> None:
@@ -377,8 +367,6 @@ def dsv4_optimized_cuda_enabled() -> bool:
 
 def linear_bf16_fp32_upstream_enabled() -> bool:
     return dsv4_optimized_cuda_enabled()
-
-
 
 
 def _triton_dsv4_ops():
@@ -747,8 +735,6 @@ def rms_norm_fallback(x: torch.Tensor, weight: torch.Tensor, *, eps: float) -> t
     return (y * weight.float()).to(dtype)
 
 
-
-
 def _compress_forward_vectorized(
     x: torch.Tensor,
     positions: torch.Tensor,
@@ -1055,12 +1041,6 @@ def q_kv_norm_rope_cache_fallback(
         return False
 
 
-
-
-
-
-
-
 def compress_forward_fallback(
     x: torch.Tensor,
     positions: torch.Tensor | None,
@@ -1129,10 +1109,6 @@ def compress_forward_fallback(
     if not rows:
         return x.new_empty((0, head_dim))
     return torch.cat(rows, dim=0)
-
-
-
-
 
 
 def get_paged_mqa_logits_metadata_fallback(
@@ -1217,10 +1193,7 @@ def dsv4_sparse_attention_two_source_bf16(
     softmax_scale: float,
     attn_sink: torch.Tensor | None,
 ) -> torch.Tensor | None:
-    if not (
-        dsv4_optimized_enabled()
-        and detect_dsv4_kernel_capabilities().is_sm80
-    ):
+    if not (dsv4_optimized_enabled() and detect_dsv4_kernel_capabilities().is_sm80):
         return None
     if (
         q.ndim != 3
@@ -1341,9 +1314,7 @@ def dsv4_sparse_attention_two_source_splitk_bf16(
             attn_sink=attn_sink,
         )
     except Exception as exc:
-        raise RuntimeError(
-            "Optimized DSV4 exact bf16 sparse split-K decode failed."
-        ) from exc
+        raise RuntimeError("Optimized DSV4 exact bf16 sparse split-K decode failed.") from exc
     if out is None:
         raise RuntimeError(
             "DSV4 exact bf16 sparse split-K decode does not support this "
@@ -1355,8 +1326,7 @@ def dsv4_sparse_attention_two_source_splitk_bf16(
 def hadamard_transform_ref(x: torch.Tensor) -> torch.Tensor:
     if x.shape[-1] <= 0 or x.shape[-1] & (x.shape[-1] - 1):
         raise ValueError(
-            "DSV4 Hadamard transform requires a positive power-of-two last dim, "
-            f"got {x.shape[-1]}"
+            f"DSV4 Hadamard transform requires a positive power-of-two last dim, got {x.shape[-1]}"
         )
     dtype = x.dtype
     y = x.float()
@@ -1453,8 +1423,8 @@ def _indexer_capture_static_max_seq_len(
     seq_len_aligned = _seq_len_aligned_width_for_capture(int(page_size))
     if seq_len_aligned is None:
         raise RuntimeError(
-            f"{DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV}=seq_len_aligned requires "
-            f"{DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV}; reading CUDA seq_lens "
+            "The seq_len_aligned indexer capture width mode requires an explicit "
+            "capture sequence length; reading CUDA seq_lens "
             "with .item() during graph capture would break capture."
         )
     return seq_len_aligned, mode, "uses_env_seq_len_override"
@@ -1479,13 +1449,9 @@ def _indexer_width_candidates(
         for name, width in widths.items()
     }
     seq_lens_status = (
-        "not_read_during_cuda_graph_capture"
-        if seq_len_aligned is None
-        else "seq_len_override_env"
+        "not_read_during_cuda_graph_capture" if seq_len_aligned is None else "seq_len_override_env"
     )
     return widths, bytes_by_candidate, seq_lens_status
-
-
 
 
 def indexer_bf16_logits_fallback(
@@ -1555,7 +1521,9 @@ def indexer_bf16_logits_fallback(
     max_seq_len = (
         int(static_max_seq_len)
         if static_max_seq_len is not None
-        else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
+        else int(seq_lens.clamp_min(0).max().item())
+        if seq_lens.numel()
+        else 0
     )
     logits = torch.full(
         (rows, max(max_seq_len, 1)), float("-inf"), dtype=torch.float32, device=q.device
@@ -1596,8 +1564,6 @@ def indexer_bf16_logits_fallback(
     if _backend is not None:
         _backend.append("torch")
     return logits
-
-
 
 
 def indexer_fp8_paged_logits_fallback(
@@ -1680,7 +1646,9 @@ def indexer_fp8_paged_logits_fallback(
     max_seq_len = (
         int(static_max_seq_len)
         if static_max_seq_len is not None
-        else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
+        else int(seq_lens.clamp_min(0).max().item())
+        if seq_lens.numel()
+        else 0
     )
     logits = torch.full(
         (rows, max(max_seq_len, 1)), float("-inf"), dtype=torch.float32, device=q_values.device
@@ -1742,9 +1710,7 @@ def indexer_select_fp8_paged_fallback(
     rows = int(q_values.shape[0])
     capture_active = _cuda_graph_capture_active(q_values.device)
     max_seq_len = (
-        0
-        if capture_active
-        else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
+        0 if capture_active else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
     )
     max_logits_mb = DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT
     max_logits_bytes = max_logits_mb * 1024 * 1024
@@ -1754,12 +1720,7 @@ def indexer_select_fp8_paged_fallback(
     # dimension.  Preserve the existing mini Triton logits and native top-k
     # kernels, but never require their full [all query rows, max_seq_len]
     # product when it exceeds the configured workspace budget.
-    if (
-        not capture_active
-        and rows > 0
-        and max_seq_len > 0
-        and full_logits_bytes > max_logits_bytes
-    ):
+    if not capture_active and rows > 0 and max_seq_len > 0 and full_logits_bytes > max_logits_bytes:
         max_chunk_rows = max(
             1,
             max_logits_bytes // (max_seq_len * torch.float32.itemsize),
@@ -1793,12 +1754,8 @@ def indexer_select_fp8_paged_fallback(
             )
             chunk_topk = topk_transform_512_full_fallback(
                 chunk_logits,
-                seq_lens[start:end].to(
-                    device=chunk_logits.device, dtype=torch.int32
-                ),
-                page_table[start:end].to(
-                    device=chunk_logits.device, dtype=torch.int32
-                ),
+                seq_lens[start:end].to(device=chunk_logits.device, dtype=torch.int32),
+                page_table[start:end].to(device=chunk_logits.device, dtype=torch.int32),
                 page_size=page_size,
                 width=width,
                 ratio=ratio,
@@ -1832,10 +1789,7 @@ def indexer_select_fp8_paged_fallback(
         return DSV4IndexerSelectOutput(
             logits=logits,
             topk=topk,
-            backend=(
-                f"bounded_query_chunks[{chunk_count};{max_logits_mb}MiB]"
-                f"+{backends}"
-            ),
+            backend=(f"bounded_query_chunks[{chunk_count};{max_logits_mb}MiB]+{backends}"),
         )
 
     logits_backend: list[str] = []
@@ -1931,8 +1885,6 @@ def c128_prefill_page_indices_one_surface(
     if result is not None and _backend is not None:
         _backend.append("triton_c128_prefill_one_surface")
     return result
-
-
 
 
 def indexer_select_bf16_fallback(
@@ -2350,9 +2302,7 @@ def mask_moe_routes_live_rows(
     if num_token_non_padded is None:
         return weights, indices
     if weights.ndim != 2 or indices.shape != weights.shape:
-        raise ValueError(
-            "DSV4 live-route masking expects matching weights/indices [tokens, topk]"
-        )
+        raise ValueError("DSV4 live-route masking expects matching weights/indices [tokens, topk]")
     if num_token_non_padded.numel() != 1:
         raise ValueError("num_token_non_padded must contain exactly one element")
     if num_token_non_padded.dtype != torch.int32:
@@ -2361,9 +2311,7 @@ def mask_moe_routes_live_rows(
         raise ValueError("live count, route weights, and route IDs must share a device")
     if weights.is_cuda:
         try:
-            if _triton_dsv4_ops().mask_moe_routes_live_rows(
-                weights, indices, num_token_non_padded
-            ):
+            if _triton_dsv4_ops().mask_moe_routes_live_rows(weights, indices, num_token_non_padded):
                 return weights, indices
         except Exception:
             pass
@@ -2467,8 +2415,6 @@ def silu_and_mul_clamp_fallback(
     if weights is not None:
         out = out * weights
     return out
-
-
 
 
 def moe_route_dispatch_bf16_grouped(
@@ -2759,9 +2705,7 @@ def topk_transform_512_full_fallback(
             "local_cuda_global_topk_lens",
             topk_lens,
         )
-    if dsv4_optimized_enabled() and _cuda_graph_capture_active(
-        scores.device
-    ):
+    if dsv4_optimized_enabled() and _cuda_graph_capture_active(scores.device):
         raise RuntimeError(
             "Optimized DSV4 CUDA graph capture requires the global topk/lens JIT path."
         )
@@ -2790,14 +2734,6 @@ def topk_transform_512_full_fallback(
         width=int(width),
         ratio=int(ratio),
     )
-
-
-
-
-
-
-
-
 
 
 def store_swa_fallback(
@@ -2964,8 +2900,6 @@ def store_indexer_fp8_cache_fallback(
     return True
 
 
-
-
 def copy_masked_compressed_locs(
     raw_out_loc: torch.Tensor,
     positions: torch.Tensor,
@@ -2973,11 +2907,7 @@ def copy_masked_compressed_locs(
     c128_out_loc: torch.Tensor | None,
     rows: int,
 ) -> None:
-    if (
-        c4_out_loc is not None
-        and c128_out_loc is not None
-        and dsv4_optimized_triton_enabled()
-    ):
+    if c4_out_loc is not None and c128_out_loc is not None and dsv4_optimized_triton_enabled():
         try:
             if _triton_dsv4_ops().copy_masked_compressed_locs(
                 raw_out_loc,
@@ -2991,8 +2921,6 @@ def copy_masked_compressed_locs(
             pass
     _copy_masked_compressed_locs_fallback(c4_out_loc, raw_out_loc, positions, rows, ratio=4)
     _copy_masked_compressed_locs_fallback(c128_out_loc, raw_out_loc, positions, rows, ratio=128)
-
-
 
 
 def direct_decode_index_metadata_for_replay(
@@ -3421,11 +3349,7 @@ def prep_decode_metadata_in_graph(
         dst_c4_indexer_out_loc,
     ]
     if swa_independent:
-        if (
-            swa_full_to_swa_page is None
-            or swa_dummy_token_start < 0
-            or swa_dummy_page < 0
-        ):
+        if swa_full_to_swa_page is None or swa_dummy_token_start < 0 or swa_dummy_page < 0:
             return False
         tensors.append(swa_full_to_swa_page)
     if dst_swa_out_loc is not None:
@@ -3666,20 +3590,8 @@ def compress_norm_rope_store_fallback(
         cache[loc_flat[valid].to(device=cache.device)] = flat[valid].to(cache.dtype)
 
 
-
-
-
-
-
-
-
-
-
-
 __all__ = [
-    "DSV4_KERNEL_INVENTORY",
     "DSV4KernelCapability",
-    "DSV4KernelInventoryEntry",
     "DSV4KernelMode",
     "DSV4IndexerFP8Query",
     "DSV4IndexerSelectOutput",
@@ -3689,7 +3601,6 @@ __all__ = [
     "DSV4_SM80_MOE_EXPERT_BACKENDS",
     "DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR",
     "DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES",
-    "DSV4DecodeMetadataDeforestOutput",
     "DSV4MoEExecutionPlan",
     "DSV4MoERoutePlan",
     "DSV4MoEWorkspace",
@@ -3704,14 +3615,9 @@ __all__ = [
     "copy_component_write_locs_for_replay",
     "prep_decode_metadata_in_graph",
     "direct_decode_index_metadata_for_replay",
-    "direct_c4_sparse_metadata_for_replay",
-    "decode_metadata_deforest_fallback",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
-    "compressor_plan_fallback",
     "get_paged_mqa_logits_metadata_fallback",
-    "make_name",
-    "triton_create_paged_compress_data",
     "dequant_fp4_weight",
     "dequant_fp8_weight",
     "dequantize_indexer_fp8_cache_ref",
@@ -3721,14 +3627,10 @@ __all__ = [
     "dsv4_optimized_cuda_enabled",
     "dsv4_optimized_enabled",
     "dsv4_optimized_triton_enabled",
-    "dsv4_kernel_inventory_by_wrapper",
     "dsv4_sparse_attention_two_source_bf16",
     "dsv4_sparse_attention_two_source_splitk_bf16",
     "e8m0_dtype",
     "fp8_dtype",
-    "fused_q_indexer_rope_first_quant",
-    "fused_q_indexer_rope_hadamard_fp4_quant",
-    "fused_q_indexer_rope_hadamard_quant",
     "hash_topk_fallback",
     "hadamard_transform_ref",
     "hc_head_fallback",
@@ -3736,25 +3638,21 @@ __all__ = [
     "hc_pre_fallback",
     "hc_split_sinkhorn_ref",
     "indexer_bf16_logits_fallback",
-    "indexer_fp8_logits_fallback",
     "indexer_fp8_paged_logits_fallback",
     "indexer_kv_hadamard_fallback",
     "indexer_q_rope_fp8_fallback",
     "indexer_q_rope_hadamard_bf16_fallback",
     "indexer_select_bf16_fallback",
-    "indexer_select_fp8_fallback",
     "indexer_select_fp8_paged_fallback",
     "k_norm_rope_cache_fallback",
     "linear_bf16_fp32_fallback",
     "linear_bf16_fp32_upstream_enabled",
-    "mega_moe_pre_dispatch_fallback",
     "moe_gate_fallback",
     "moe_route_dispatch_bf16_grouped",
     "moe_route_dispatch_bf16_marlin_wna16",
     "moe_route_dispatch_bf16_marlin_wna16_prepacked",
     "norm_rope_inplace_fallback",
     "paged_mqa_attention_fallback",
-    "plan_topk_v2_fallback",
     "q_norm_rope_fallback",
     "q_kv_norm_rope_cache_fallback",
     "pack_indexer_fp8_paged_cache_ref",
@@ -3765,19 +3663,13 @@ __all__ = [
     "quantized_linear_ref",
     "remap_indexer_topk_locs",
     "require_supported_moe_expert_backend",
-    "rms_norm_pair_fallback",
     "scale_dim",
     "sequence_mqa_attention_fallback",
     "silu_and_mul_clamp_fallback",
-    "silu_and_mul_contig_post_quant",
-    "silu_and_mul_masked_post_quant",
     "store_compressed_fallback",
     "store_indexer_fp8_cache_fallback",
     "store_indexer_fallback",
     "store_swa_fallback",
-    "topk_transform_512_fallback",
     "topk_transform_512_full_fallback",
-    "topk_transform_512_v2_fallback",
-    "unsupported_kernel",
     "wo_a_grouped_projection_fallback",
 ]

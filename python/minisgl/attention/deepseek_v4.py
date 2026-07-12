@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Literal
 
@@ -37,8 +36,6 @@ def _swa_direct_token_metadata_enabled() -> bool:
     return dsv4_kernel.dsv4_optimized_enabled()
 
 
-
-
 def _swa_direct_replay_metadata_fused_enabled() -> bool:
     return dsv4_kernel.dsv4_optimized_enabled()
 
@@ -66,14 +63,6 @@ def _to_int32(x: torch.Tensor, device: torch.device) -> torch.Tensor:
     return x.to(device=device, dtype=torch.int32)
 
 
-
-
-
-
-
-
-
-
 def _cuda_graph_capture_active() -> bool:
     if not torch.cuda.is_available():
         return False
@@ -81,18 +70,6 @@ def _cuda_graph_capture_active() -> bool:
         return bool(torch.cuda.is_current_stream_capturing())
     except Exception:
         return False
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @dataclass
@@ -285,7 +262,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         else:
             batch.attn_metadata = self._build_metadata(batch)
 
-
     def _compute_prep_metadata_in_graph_supported(
         self,
         core: DSV4CoreAttentionMetadata,
@@ -457,13 +433,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     out_loc_is_swa=True,
                 )
             else:
-                dsv4_kernel.store_swa_fallback(
-                    self.kvcache, layer_id, k, batch.out_loc
-                )
+                dsv4_kernel.store_swa_fallback(self.kvcache, layer_id, k, batch.out_loc)
         {0: "swa_attention", 4: "c4_attention", 128: "c128_attention"}[ratio]
-        return self._fallback_attention(
-            q, layer_id, metadata.core_metadata, ratio, attn_sink
-        )
+        return self._fallback_attention(q, layer_id, metadata.core_metadata, ratio, attn_sink)
 
     def store_compressed(
         self,
@@ -615,9 +587,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             layer_id=layer_id,
         )
         core = metadata.core_metadata
-        raw_indices, page_indices, full_indices = (
-            self._remap_indexer_topk_for_attention(core, out)
-        )
+        raw_indices, page_indices, full_indices = self._remap_indexer_topk_for_attention(core, out)
         self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
         self._merge_indexer_rows_in_place(core.c4_sparse_page_indices, page_indices)
         self._merge_indexer_rows_in_place(core.c4_sparse_full_indices, full_indices)
@@ -681,11 +651,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 width=max(self.index_topk, 1),
                 ratio=4,
                 layer_id=layer_id,
-        )
+            )
         core = metadata.core_metadata
-        raw_indices, page_indices, full_indices = (
-            self._remap_indexer_topk_for_attention(core, out)
-        )
+        raw_indices, page_indices, full_indices = self._remap_indexer_topk_for_attention(core, out)
         self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
         self._merge_indexer_rows_in_place(core.c4_sparse_page_indices, page_indices)
         self._merge_indexer_rows_in_place(core.c4_sparse_full_indices, full_indices)
@@ -695,7 +663,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 out.topk.topk_lens,
             )
         return out
-
 
     def _remap_indexer_topk_for_attention(
         self,
@@ -996,11 +963,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
             swa_full_to_swa_page=getattr(self.kvcache, "_full_to_swa_page", None),
             swa_dummy_token_start=int(getattr(self.kvcache, "_dummy_token_start", -1)),
             swa_dummy_page=int(getattr(self.kvcache, "_swa_dummy_page", -1)),
-            swa_independent=bool(
-                getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)
-            ),
+            swa_independent=bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)),
         )
-
 
     def validate_after_replay(self, batch: Batch) -> None:
         oracle = self._pending_prep_metadata_oracle
@@ -1013,8 +977,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         rows = max(0, min(int(rows), int(batch.padded_size)))
         if rows <= 0:
             return
-
-
 
     def _clamp_graph_replay_compressed_read_metadata(
         self,
@@ -1177,9 +1139,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
             return False
         if self._materializing_prep_metadata_oracle:
             return False
-        if group == "swa" and bool(
-            getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)
-        ) and not _swa_direct_replay_metadata_fused_enabled():
+        if (
+            group == "swa"
+            and bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
+            and not _swa_direct_replay_metadata_fused_enabled()
+        ):
             return False
         padded_size = int(getattr(batch, "padded_size", batch.size))
         if padded_size <= 0 or padded_size not in self.capture_bs:
@@ -1230,9 +1194,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         phase: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the mandatory release eager C128 surface or fail closed."""
-        failure_prefix = (
-            "DSV4 release eager-prefill C128 one-surface metadata is mandatory"
-        )
+        failure_prefix = "DSV4 release eager-prefill C128 one-surface metadata is mandatory"
         if c128_page_table is None:
             raise RuntimeError(
                 f"{failure_prefix}, but the Route-B c128_page_table is missing; "
@@ -1310,12 +1272,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
         extend_lens = torch.tensor(extend_lens_list, dtype=torch.int32, device=device)
         req_seq_lens = torch.tensor(req_seq_lens_list, dtype=torch.int32, device=device)
         cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0, dtype=torch.int32), (1, 0))
-        component_ownership = bool(
-            getattr(self.kvcache, "component_loc_ownership_enabled", False)
-        )
-        swa_independent = bool(
-            getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)
-        )
+        component_ownership = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
+        swa_independent = bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
         swa_direct_token_metadata = bool(
             swa_independent and batch.is_decode and _swa_direct_token_metadata_enabled()
         )
@@ -1332,8 +1290,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 reqs,
                 max_seqlen_k,
                 table_indices=table_indices,
-                use_cache=batch.is_decode
-                and _swa_metadata_page_table_cache_enabled(),
+                use_cache=batch.is_decode and _swa_metadata_page_table_cache_enabled(),
                 timing_base=timing_base,
             )
             if swa_independent and not swa_direct_token_metadata
@@ -1397,9 +1354,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                         positions,
                     )
                 else:
-                    swa_page_indices = self._make_swa_indices(
-                        table_indices, positions
-                    )
+                    swa_page_indices = self._make_swa_indices(table_indices, positions)
             swa_topk_lengths = torch.clamp(seq_lens, max=self.window_size)
 
             c4_topk_lengths_raw = torch.div(seq_lens, 4, rounding_mode="floor")
@@ -1643,9 +1598,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         has_c128: bool,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         c4_table = (
-            torch.full((table_len,), -1, dtype=torch.int32, device=self.device)
-            if has_c4
-            else None
+            torch.full((table_len,), -1, dtype=torch.int32, device=self.device) if has_c4 else None
         )
         c128_table = (
             torch.full((table_len,), -1, dtype=torch.int32, device=self.device)
@@ -1653,9 +1606,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             else None
         )
         indexer_table = (
-            torch.full((table_len,), -1, dtype=torch.int32, device=self.device)
-            if has_c4
-            else None
+            torch.full((table_len,), -1, dtype=torch.int32, device=self.device) if has_c4 else None
         )
 
         handle_getter = getattr(req.cache_handle, "get_dsv4_component_pages", None)
@@ -1673,15 +1624,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     dtype=torch.int32,
                 )
             if indexer_table is not None and handle_pages.c4_indexer_pages is not None:
-                indexer_table[:prefix_pages] = handle_pages.c4_indexer_pages[
-                    :prefix_pages
-                ].to(device=self.device, dtype=torch.int32)
+                indexer_table[:prefix_pages] = handle_pages.c4_indexer_pages[:prefix_pages].to(
+                    device=self.device, dtype=torch.int32
+                )
 
         logical_pages = min(div_ceil(req.device_len, self.page_size), table_len)
         if logical_pages > 0:
             page_offsets = (
-                torch.arange(logical_pages, dtype=torch.long, device=self.device)
-                * self.page_size
+                torch.arange(logical_pages, dtype=torch.long, device=self.device) * self.page_size
             )
             full_page_starts = get_global_ctx().page_table[req.table_idx, page_offsets]
             active_c4, active_c128, active_indexer = (
@@ -1759,7 +1709,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             _select(self._component_page_table_cache_indexer, has_c4),
         )
 
-
         return result
 
     def _ensure_component_page_table_cache(
@@ -1776,16 +1725,15 @@ class DSV4AttentionBackend(BaseAttnBackend):
             div_ceil(max(int(ctx_page_table.shape[1]), 1), self.page_size),
         )
         needs_alloc = (
-            self._component_page_table_cache_c4 is None and has_c4
-        ) or (
-            self._component_page_table_cache_c128 is None and has_c128
-        ) or (
-            self._component_page_table_cache_indexer is None and has_c4
-        ) or (
-            self._component_page_table_cache_rows != rows
-            or self._component_page_table_cache_width < width
-            or self._component_page_table_cache_has_c4 != has_c4
-            or self._component_page_table_cache_has_c128 != has_c128
+            (self._component_page_table_cache_c4 is None and has_c4)
+            or (self._component_page_table_cache_c128 is None and has_c128)
+            or (self._component_page_table_cache_indexer is None and has_c4)
+            or (
+                self._component_page_table_cache_rows != rows
+                or self._component_page_table_cache_width < width
+                or self._component_page_table_cache_has_c4 != has_c4
+                or self._component_page_table_cache_has_c128 != has_c128
+            )
         )
         if not needs_alloc:
             return
@@ -1794,9 +1742,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._component_page_table_cache_has_c4 = has_c4
         self._component_page_table_cache_has_c128 = has_c128
         self._component_page_table_cache_c4 = (
-            torch.full((rows, width), -1, dtype=torch.int32, device=self.device)
-            if has_c4
-            else None
+            torch.full((rows, width), -1, dtype=torch.int32, device=self.device) if has_c4 else None
         )
         self._component_page_table_cache_c128 = (
             torch.full((rows, width), -1, dtype=torch.int32, device=self.device)
@@ -1804,9 +1750,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             else None
         )
         self._component_page_table_cache_indexer = (
-            torch.full((rows, width), -1, dtype=torch.int32, device=self.device)
-            if has_c4
-            else None
+            torch.full((rows, width), -1, dtype=torch.int32, device=self.device) if has_c4 else None
         )
         self._component_page_table_cache_signatures.clear()
 
@@ -1931,10 +1875,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
             )
         else:
             assert self._swa_page_table_cache is not None
-            table = (
-                self._swa_page_table_cache.index_select(0, row_indices)[:, :table_len]
-                .contiguous()
-            )
+            table = self._swa_page_table_cache.index_select(0, row_indices)[
+                :, :table_len
+            ].contiguous()
 
         return table
 
@@ -2028,8 +1971,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if logical_pages <= 0:
             return table
         page_offsets = (
-            torch.arange(logical_pages, dtype=torch.long, device=self.device)
-            * self.page_size
+            torch.arange(logical_pages, dtype=torch.long, device=self.device) * self.page_size
         )
         full_page_starts = get_global_ctx().page_table[req.table_idx, page_offsets]
         active_swa = self.kvcache.swa_pages_from_full_page_starts(
@@ -2058,7 +2000,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         table_view[mask] = active_swa[:n][mask].to(device=table.device, dtype=table.dtype)
         return table
 
-
     def _make_swa_indices(
         self,
         table_indices: torch.Tensor,
@@ -2082,7 +2023,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         translate = getattr(self.kvcache, "translate_full_locs_to_swa_locs", None)
         if not callable(translate):
             raise RuntimeError(
-                f"{DSV4_SWA_DIRECT_TOKEN_METADATA_ENV}=1 requires "
+                "DSV4 direct SWA token metadata requires "
                 "DeepSeekV4KVCache.translate_full_locs_to_swa_locs."
             )
         rows = int(positions.numel())
@@ -2326,14 +2267,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         out = ctx_page_table[rows, clamped].to(torch.int32)
         return torch.where(valid, out, torch.full_like(out, -1))
 
-
-
-
-
-
-
-
-
     def _fallback_attention(
         self,
         q: torch.Tensor,
@@ -2413,18 +2346,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 attn = exp_scores / denom[:, None]
             out[row] = torch.einsum("ht,td->hd", attn, candidates).to(q.dtype)
         return out
-
-
-
-
-
-
-
-
-
-
-
-
 
     def _sparse_attention_two_source(
         self,
@@ -2885,9 +2806,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         rows: int,
     ) -> tuple[bool, bool, bool]:
         if not (
-            rows > 0
-            and src_core.component_loc_ownership
-            and dsv4_kernel.dsv4_optimized_enabled()
+            rows > 0 and src_core.component_loc_ownership and dsv4_kernel.dsv4_optimized_enabled()
         ):
             return False, False, False
         if self.device.type != "cuda" or not dsv4_kernel.dsv4_optimized_triton_enabled():
@@ -2925,21 +2844,25 @@ class DSV4AttentionBackend(BaseAttnBackend):
         direct_c4: bool,
         direct_c128: bool,
     ) -> bool:
-        approx_bytes = rows * 4 * (
-            (dst_core.swa_page_indices.shape[1] if direct_swa else 0)
-            + (
-                dst_core.c4_sparse_raw_indices.shape[1]
-                + dst_core.c4_sparse_page_indices.shape[1]
-                + dst_core.c4_sparse_full_indices.shape[1]
-                if direct_c4
-                else 0
-            )
-            + (
-                dst_core.c128_raw_indices.shape[1]
-                + dst_core.c128_page_indices.shape[1]
-                + dst_core.c128_full_indices.shape[1]
-                if direct_c128
-                else 0
+        approx_bytes = (
+            rows
+            * 4
+            * (
+                (dst_core.swa_page_indices.shape[1] if direct_swa else 0)
+                + (
+                    dst_core.c4_sparse_raw_indices.shape[1]
+                    + dst_core.c4_sparse_page_indices.shape[1]
+                    + dst_core.c4_sparse_full_indices.shape[1]
+                    if direct_c4
+                    else 0
+                )
+                + (
+                    dst_core.c128_raw_indices.shape[1]
+                    + dst_core.c128_page_indices.shape[1]
+                    + dst_core.c128_full_indices.shape[1]
+                    if direct_c128
+                    else 0
+                )
             )
         )
         {
@@ -2971,13 +2894,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
             direct_c4=direct_c4,
             direct_c128=direct_c128,
             swa_full_to_swa_page=getattr(self.kvcache, "_full_to_swa_page", None),
-            swa_dummy_token_start=int(
-                getattr(self.kvcache, "_dummy_token_start", -1)
-            ),
+            swa_dummy_token_start=int(getattr(self.kvcache, "_dummy_token_start", -1)),
             swa_dummy_page=int(getattr(self.kvcache, "_swa_dummy_page", -1)),
-            swa_independent=bool(
-                getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)
-            ),
+            swa_independent=bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)),
         )
         return ok
 

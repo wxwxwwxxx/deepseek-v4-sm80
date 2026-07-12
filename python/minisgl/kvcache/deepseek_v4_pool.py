@@ -11,6 +11,8 @@ from minisgl.utils import div_ceil
 from .base import BaseKVCachePool
 
 DSV4CacheLayout = Literal["bf16_flat", "flashmla_fp8_packed"]
+
+
 def _indexer_fp8_cache_enabled() -> bool:
     return get_dsv4_runtime_config().optimized
 
@@ -92,13 +94,13 @@ class DSV4AllocationCounts:
     @property
     def any_allocated(self) -> bool:
         return any(
-                (
-                    self.full_slots,
-                    self.swa_slots,
-                    self.swa_pages,
-                    self.c4_slots,
-                    self.c128_slots,
-                    self.c4_indexer_slots,
+            (
+                self.full_slots,
+                self.swa_slots,
+                self.swa_pages,
+                self.c4_slots,
+                self.c128_slots,
+                self.c4_indexer_slots,
                 self.c4_state_slots,
                 self.c128_state_slots,
                 self.c4_indexer_state_slots,
@@ -141,8 +143,7 @@ class DSV4SWAPageHandles:
         end = int(end)
         if start < 0 or end < start or end > self.length:
             raise ValueError(
-                "Invalid DSV4 SWA handle slice: "
-                f"start={start}, end={end}, length={self.length}"
+                f"Invalid DSV4 SWA handle slice: start={start}, end={end}, length={self.length}"
             )
         if start % self.page_size != 0 or end % self.page_size != 0:
             raise ValueError(
@@ -158,7 +159,9 @@ class DSV4SWAPageHandles:
             swa_pages=pages,
         )
 
-    def tombstone_tokens(self, start: int, end: int) -> tuple[DSV4SWAPageHandles, DSV4SWAPageHandles]:
+    def tombstone_tokens(
+        self, start: int, end: int
+    ) -> tuple[DSV4SWAPageHandles, DSV4SWAPageHandles]:
         released = self.slice_tokens(start, end)
         if self.swa_pages is None or released.num_pages == 0:
             return self, released
@@ -245,10 +248,7 @@ class DSV4ComponentPageHandles:
         return (
             (self.c4_pages is None or self.c4_state_pages is not None)
             and (self.c128_pages is None or self.c128_state_pages is not None)
-            and (
-                self.c4_indexer_pages is None
-                or self.c4_indexer_state_pages is not None
-            )
+            and (self.c4_indexer_pages is None or self.c4_indexer_state_pages is not None)
         )
 
     def slice_tokens(self, start: int, end: int) -> DSV4ComponentPageHandles:
@@ -441,9 +441,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
         self._window_size = int(getattr(model_config, "window_size", 128) or 128)
         self._component_loc_ownership_enabled = bool(enable_component_loc_ownership)
-        self._swa_independent_lifecycle_enabled = bool(
-            enable_swa_independent_lifecycle
-        )
+        self._swa_independent_lifecycle_enabled = bool(enable_swa_independent_lifecycle)
         if self._swa_independent_lifecycle_enabled and not self._component_loc_ownership_enabled:
             raise ValueError(
                 "DSV4 SWA independent lifecycle requires Route B component loc ownership."
@@ -649,14 +647,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                     page_size=page_size,
                 )
 
-
-
-
-
-
-
-
-
     @property
     def indexer_fp8_page_size(self) -> int:
         return self._c4_indexer_fp8_page_size
@@ -780,7 +770,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         if self._c4_indexer_fp8_paged_cache is None:
             raise RuntimeError(
                 f"DSV4 paged FP8 indexer cache was requested for layer {layer_id}, "
-                f"but {DSV4_INDEXER_FP8_CACHE_ENV}=1 was not active at cache allocation."
+                "but the paged FP8 indexer cache was not enabled at cache allocation."
             )
         return self._c4_indexer_fp8_paged_cache[mapping.indexer_layer_id]
 
@@ -796,8 +786,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             self._c4_indexer_fp8_values[mapping.indexer_layer_id],
             self._c4_indexer_fp8_scales[mapping.indexer_layer_id],
         )
-
-
 
     def attention_compress_state(self, layer_id: int) -> DSV4CompressStatePool:
         pool = self._compress_state_pools[layer_id]
@@ -859,9 +847,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         valid = swa_loc >= 0
         if not bool(torch.all(valid)):
             raise RuntimeError("DSV4 SWA write requested for full loc without live SWA mapping")
-        self.swa_cache(layer_id)[swa_loc.long()] = kv.reshape(-1, self._head_dim).to(
-            self._dtype
-        )
+        self.swa_cache(layer_id)[swa_loc.long()] = kv.reshape(-1, self._head_dim).to(self._dtype)
 
     def store_compressed(
         self,
@@ -954,8 +940,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         locs = torch.unique(locs.to(device=self.device, dtype=torch.long))
         return locs[(locs >= 0) & (locs < int(upper_bound))]
 
-
-
     def on_pages_allocated(self, page_starts: torch.Tensor, page_size: int) -> None:
         full_locs = self._expand_page_starts(page_starts, page_size)
         if full_locs.numel() == 0:
@@ -1047,13 +1031,9 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         if self._c4_layer_count:
             c4_locs = torch.unique(full_locs // 4)
             self._decrement_refcount(self._c4_refcount, c4_locs, "C4")
-            self._decrement_refcount(
-                self._c4_indexer_refcount, c4_locs, "C4 indexer"
-            )
+            self._decrement_refcount(self._c4_indexer_refcount, c4_locs, "C4 indexer")
         if self._c128_layer_count:
-            self._decrement_refcount(
-                self._c128_refcount, torch.unique(full_locs // 128), "C128"
-            )
+            self._decrement_refcount(self._c128_refcount, torch.unique(full_locs // 128), "C128")
 
     def check_allocation_integrity(self, allocated_pages: int, page_size: int) -> None:
         expected_full_slots = allocated_pages * page_size
@@ -1176,11 +1156,16 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         current_pages = (
             int(torch.count_nonzero(self._swa_page_refcount > 0).item())
             if self._swa_independent_lifecycle_enabled
-            else int(torch.count_nonzero(self._full_refcount.view(self._num_pages, self._page_size).sum(dim=1) > 0).item())
+            else int(
+                torch.count_nonzero(
+                    self._full_refcount.view(self._num_pages, self._page_size).sum(dim=1) > 0
+                ).item()
+            )
         )
-        if self._swa_independent_lifecycle_enabled and self._swa_page_refcount[
-            self._swa_dummy_page
-        ] > 0:
+        if (
+            self._swa_independent_lifecycle_enabled
+            and self._swa_page_refcount[self._swa_dummy_page] > 0
+        ):
             current_tail_pages = max(current_pages - 1, 0)
         else:
             current_tail_pages = current_pages
@@ -1216,19 +1201,31 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             raise RuntimeError(f"DSV4 SWA lifecycle debug found unpinned dummy page at {stage}")
         if free_pages.numel() > 0:
             if torch.any(free_pages < 0) or torch.any(free_pages >= self._swa_dummy_page):
-                raise RuntimeError(f"DSV4 SWA lifecycle debug found out-of-range free page at {stage}")
+                raise RuntimeError(
+                    f"DSV4 SWA lifecycle debug found out-of-range free page at {stage}"
+                )
             if torch.unique(free_pages).numel() != free_pages.numel():
-                raise RuntimeError(f"DSV4 SWA lifecycle debug found duplicate free pages at {stage}")
+                raise RuntimeError(
+                    f"DSV4 SWA lifecycle debug found duplicate free pages at {stage}"
+                )
             if torch.any(refcount[free_pages] != 0):
-                raise RuntimeError(f"DSV4 SWA lifecycle debug found live refcount on free page at {stage}")
+                raise RuntimeError(
+                    f"DSV4 SWA lifecycle debug found live refcount on free page at {stage}"
+                )
         mapped = self._full_to_swa_page[self._full_to_swa_page >= 0].to(torch.long)
         if mapped.numel() > 0:
             if torch.any(mapped >= self._swa_dummy_page):
-                raise RuntimeError(f"DSV4 SWA lifecycle debug found dummy/out-of-range mapping at {stage}")
+                raise RuntimeError(
+                    f"DSV4 SWA lifecycle debug found dummy/out-of-range mapping at {stage}"
+                )
             if torch.any(refcount[mapped] <= 0):
-                raise RuntimeError(f"DSV4 SWA lifecycle debug found zero-refcount mapping at {stage}")
+                raise RuntimeError(
+                    f"DSV4 SWA lifecycle debug found zero-refcount mapping at {stage}"
+                )
             if free_pages.numel() > 0 and torch.any(torch.isin(mapped, free_pages)):
-                raise RuntimeError(f"DSV4 SWA lifecycle debug found mapping to free page at {stage}")
+                raise RuntimeError(
+                    f"DSV4 SWA lifecycle debug found mapping to free page at {stage}"
+                )
         return {
             **self.runtime_swa_counters(),
             "stage": stage,
@@ -1642,12 +1639,13 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         count = int(full_pages.numel())
         if torch.any(full_pages < 0) or torch.any(full_pages >= self._num_pages):
             raise RuntimeError("DSV4 component allocation received out-of-range full pages")
-        if torch.any(self._full_to_c4_page[full_pages] >= 0) or torch.any(
-            self._full_to_c128_page[full_pages] >= 0
-        ) or torch.any(self._full_to_c4_indexer_page[full_pages] >= 0) or torch.any(
-            self._full_to_c4_state_page[full_pages] >= 0
-        ) or torch.any(self._full_to_c128_state_page[full_pages] >= 0) or torch.any(
-            self._full_to_c4_indexer_state_page[full_pages] >= 0
+        if (
+            torch.any(self._full_to_c4_page[full_pages] >= 0)
+            or torch.any(self._full_to_c128_page[full_pages] >= 0)
+            or torch.any(self._full_to_c4_indexer_page[full_pages] >= 0)
+            or torch.any(self._full_to_c4_state_page[full_pages] >= 0)
+            or torch.any(self._full_to_c128_state_page[full_pages] >= 0)
+            or torch.any(self._full_to_c4_indexer_state_page[full_pages] >= 0)
         ):
             raise RuntimeError("DSV4 component allocation found stale full-to-component mapping")
 
@@ -1749,9 +1747,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                     length=int(full_pages.numel()) * page_size,
                     page_size=page_size,
                     c4_pages=(
-                        self._full_to_c4_page[full_pages].clone()
-                        if self._c4_layer_count
-                        else None
+                        self._full_to_c4_page[full_pages].clone() if self._c4_layer_count else None
                     ),
                     c128_pages=(
                         self._full_to_c128_page[full_pages].clone()
@@ -1867,9 +1863,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         if ratio == 4:
             component_page_size = self._c4_component_page_size
             mapping = (
-                self._full_to_c4_indexer_page
-                if component == "indexer"
-                else self._full_to_c4_page
+                self._full_to_c4_indexer_page if component == "indexer" else self._full_to_c4_page
             )
         else:
             component_page_size = self._c128_component_page_size
@@ -1883,8 +1877,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             component_pages = mapping[full_pages[valid]]
             if torch.any(component_pages < 0):
                 raise RuntimeError(
-                    "DSV4 component loc requested for full locs without active "
-                    f"{component} mapping"
+                    f"DSV4 component loc requested for full locs without active {component} mapping"
                 )
             out[valid] = component_pages.to(torch.long) * component_page_size + offsets[valid]
         return out
@@ -2082,7 +2075,6 @@ __all__ = [
     "DSV4CacheLayoutPolicy",
     "DSV4ComponentPageHandles",
     "DSV4CompressStatePool",
-    "DSV4_INDEXER_FP8_CACHE_ENV",
     "DSV4KVAndScore",
     "DSV4LayerCacheMapping",
     "DSV4SWAPageHandles",
