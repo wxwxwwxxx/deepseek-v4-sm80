@@ -1,4 +1,4 @@
-# DSV4 on SM80, based on Mini-SGLang
+# DeepSeek V4 Flash serving on NVIDIA A100/SM80, based on Mini-SGLang
 
 High-performance **DeepSeek V4 Flash** serving for NVIDIA A100 and other sm80 GPUs,
 built as a specialized downstream release of
