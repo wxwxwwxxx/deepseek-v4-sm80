@@ -106,7 +106,7 @@ def validate_model_position_bound(*, max_device_len: int, rope_cache_len: int) -
 def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
     cache_type = config.cache_type
     if not config.model_config.is_deepseek_v4:
-        return cache_type
+        raise ValueError("This release supports DeepSeek V4 Flash only.")
 
     if config.enable_dsv4_swa_tail_retention_v1:
         raise RuntimeError(

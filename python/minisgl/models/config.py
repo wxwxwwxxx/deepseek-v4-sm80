@@ -82,12 +82,31 @@ class ModelConfig:
         if hasattr(config, "text_config") and config.text_config is not None:
             top = config
             config = config.text_config
-            for attr in ("architectures", "rope_theta", "rope_scaling"):
+            for attr in ("architectures", "model_type", "rope_theta", "rope_scaling"):
                 if not getattr(config, attr, None) and getattr(top, attr, None):
                     setattr(config, attr, getattr(top, attr))
 
-        model_type = getattr(config, "model_type", "llama")
-        is_deepseek_v4 = model_type == "deepseek_v4"
+        architectures = getattr(config, "architectures", None)
+        if not architectures:
+            raise ValueError(
+                "Model config is missing architectures; this release supports "
+                "DeepSeek V4 Flash only (DeepseekV4ForCausalLM)."
+            )
+        if not isinstance(architectures, (list, tuple)) or architectures[0] != (
+            "DeepseekV4ForCausalLM"
+        ):
+            raise ValueError(
+                f"Model architecture {architectures!r} is not supported; this release "
+                "supports DeepSeek V4 Flash only (DeepseekV4ForCausalLM)."
+            )
+
+        model_type = getattr(config, "model_type", None)
+        if model_type != "deepseek_v4":
+            raise ValueError(
+                f"Model type {model_type!r} is not supported; this release supports "
+                "DeepSeek V4 Flash only (model_type='deepseek_v4')."
+            )
+        is_deepseek_v4 = True
         num_kv_heads = getattr(config, "num_key_value_heads", config.num_attention_heads)
         head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
         tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
@@ -100,11 +119,6 @@ class ModelConfig:
         num_experts_per_tok = getattr(config, "num_experts_per_tok", 0)
         moe_intermediate_size = getattr(config, "moe_intermediate_size", 0)
         norm_topk_prob = getattr(config, "norm_topk_prob", False)
-        architectures = getattr(config, "architectures", ["LlamaForCausalLM"])
-        if architectures is None:
-            architectures = ["DeepseekV4ForCausalLM" if is_deepseek_v4 else "LlamaForCausalLM"]
-
-        # Llama/Qwen: rope_theta is a direct attr; Mistral: it can live inside rope_scaling.
         rope_scaling = getattr(config, "rope_scaling", None)
         rope_theta = getattr(config, "rope_theta", None)
         if rope_theta is None and isinstance(rope_scaling, dict):
@@ -146,7 +160,7 @@ class ModelConfig:
             tie_word_embeddings=tie_word_embeddings,
             rotary_config=RotaryConfig(
                 head_dim=head_dim,
-                rotary_dim=qk_rope_head_dim if is_deepseek_v4 else head_dim,
+                rotary_dim=qk_rope_head_dim,
                 max_position=config.max_position_embeddings,
                 base=rope_theta,
                 scaling=rope_scaling,

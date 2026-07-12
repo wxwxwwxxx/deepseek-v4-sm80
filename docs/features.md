@@ -11,7 +11,7 @@ For demonstration and testing purposes, an interactive shell mode is available. 
 Example:
 
 ```bash
-python -m minisgl --model "Qwen/Qwen3-0.6B" --shell
+python -m minisgl --model "/models/DeepSeek-V4-Flash" --tp-size 8 --shell
 ```
 
 ## Distributed Serving
@@ -20,11 +20,8 @@ To scale performance across multiple GPUs, Mini-SGLang supports Tensor Paralleli
 
 ## Supported Models
 
-Our framework currently supports the following dense model architectures:
-
-- [`Llama-3`](https://huggingface.co/collections/meta-llama/llama-31) series
-- [`Qwen-3`](https://huggingface.co/collections/Qwen/qwen3) series (including MoE)
-- [`Qwen-2.5`](https://huggingface.co/collections/Qwen/qwen25) series
+This release supports DeepSeek V4 Flash (`DeepseekV4ForCausalLM`) only, with
+the NVIDIA A100/sm80 TP8 configuration as its validated deployment target.
 
 ## Chunked Prefill
 
@@ -36,9 +33,9 @@ You can specify the page size of the system using the `--page-size` argument.
 
 ## Attention Backends
 
-Mini-SGLang integrates high-performance attention kernels, including [`FlashAttention`](https://github.com/Dao-AILab/flash-attention) (`fa`), [`FlashInfer`](https://github.com/flashinfer-ai/flashinfer) (`fi`) and [`TensorRT-LLM fmha`](https://github.com/NVIDIA/TensorRT-LLM) (`trtllm`). It supports using different backends for the prefill and decode phases to maximize efficiency. For example, on NVIDIA Hopper GPUs, `FlashAttention 3` is used for prefill and `FlashInfer` for decode by default.
-
-You can specify the backend using the `--attn` argument. If two values are provided (e.g., `--attn fa,fi`), the first specifies the prefill backend and the second the decode backend. Note that some attention backend might override the user-provided page size (e.g. `trtllm` only supports page size 16,32,64).
+Mini-SGLang exposes only the DeepSeek V4 attention backend (`dsv4`). The
+optimized and fallback runtime modes share this backend; FlashInfer remains a
+runtime dependency for sampling, not as a selectable attention backend.
 
 ## CUDA Graph
 

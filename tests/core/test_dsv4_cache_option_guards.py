@@ -36,7 +36,8 @@ def test_dsv4_swa_tail_retention_v1_fails_closed_before_runtime_cache_use():
 def test_dsv4_cache_type_resolution_preserves_phase1_radix_guardrails():
     assert resolve_dsv4_cache_type(_config(enable_radix=False)) == "naive"
     assert resolve_dsv4_cache_type(_config(enable_radix=True)) == "radix"
-    assert resolve_dsv4_cache_type(_config(is_deepseek_v4=False, cache_type="radix")) == "radix"
+    with pytest.raises(ValueError, match="DeepSeek V4 Flash only"):
+        resolve_dsv4_cache_type(_config(is_deepseek_v4=False, cache_type="radix"))
 
     with pytest.raises(ValueError, match="page size divisible"):
         resolve_dsv4_cache_type(_config(enable_radix=True, page_size=64))

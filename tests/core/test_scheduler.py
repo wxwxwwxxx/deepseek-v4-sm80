@@ -25,8 +25,9 @@ def scheduler(config: SchedulerConfig, queue: mp.Queue) -> None:
 
 @call_if_main(__name__)
 def main():
+    model_path = "/models/DeepSeek-V4-Flash"
     config = SchedulerConfig(
-        model_path="meta-llama/Llama-3.1-8B-Instruct",
+        model_path=model_path,
         tp_info=DistributedInfo(0, 1),
         dtype=torch.bfloat16,
         max_running_req=4,
@@ -51,7 +52,7 @@ def main():
         decoder=BaseTokenizerMsg.decoder,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompt = "What's the answer to life, the universe, and everything?"
     ids = tokenizer.encode(prompt, return_tensors="pt").view(-1).to(torch.int32)
     send_backend.put(

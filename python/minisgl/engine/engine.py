@@ -14,13 +14,9 @@ from minisgl.dsv4_runtime import (
 )
 from minisgl.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
-from minisgl.layers import set_rope_device
 from minisgl.models import create_model, load_weight
-from minisgl.moe import create_moe_backend
 from minisgl.utils import (
     init_logger,
-    is_sm90_supported,
-    is_sm100_supported,
     torch_dtype,
 )
 
@@ -124,7 +120,6 @@ class Engine:
         logger.info_rank0(f"Free memory before loading model: {mem_GB(init_free_memory)}")
 
         # ======================= Model initialization ========================
-        set_rope_device(self.device)
         with torch.device("meta"), torch_dtype(config.dtype):
             self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
@@ -189,12 +184,10 @@ class Engine:
             device=self.device,
         )
 
-        # ======================= Attention & MoE backend initialization ========================
+        # ======================= DSV4 attention backend initialization ========================
         self.ctx.attn_backend = self.attn_backend = create_attention_backend(
             config.attention_backend, config.model_config
         )
-        if config.model_config.is_moe:
-            self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
@@ -285,10 +278,7 @@ class Engine:
                 k: torch.randn_like(v, device=self.device)
                 for k, v in self.model.state_dict().items()
             }
-        else:
-            if config.model_config.is_deepseek_v4:
-                return dict(load_weight(config.model_path, self.device))
-            return {k: v.to(self.dtype) for k, v in load_weight(config.model_path, self.device)}
+        return dict(load_weight(config.model_path, self.device))
 
     def _determine_num_pages(self, old_free_memory: int, config: EngineConfig) -> int:
         new_free_memory = self._sync_get_memory()[1]
@@ -739,6 +729,14 @@ def _adjust_config(config: EngineConfig):
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)
 
+    if not config.model_config.is_deepseek_v4:
+        raise ValueError("This release supports DeepSeek V4 Flash only.")
+    if config.attention_backend not in ("auto", "dsv4"):
+        raise ValueError(
+            f"Attention backend {config.attention_backend!r} is not supported; "
+            "this release supports the DSV4 attention backend only."
+        )
+
     if config.model_config.is_deepseek_v4:
         runtime = resolve_dsv4_runtime_config(config.dsv4_runtime_mode)
         requested_recipe = getattr(config, "dsv4_sm80_recipe", None)
@@ -829,7 +827,7 @@ def _adjust_config(config: EngineConfig):
             ):
                 if hasattr(config, attr):
                     override(attr, False)
-        if config.attention_backend != "dsv4":
+        if config.attention_backend == "auto":
             override("attention_backend", "dsv4")
             logger.info_rank0("Using DSV4 attention backend for DeepSeek V4")
         if config.allow_dsv4_cuda_graph:
@@ -844,15 +842,3 @@ def _adjust_config(config: EngineConfig):
                 f"Opting in to DeepSeek V4 decode CUDA graph sizes: {config.cuda_graph_bs}"
             )
         _resolve_cuda_graph_policy(config)
-    elif config.attention_backend == "auto":
-        backend = "trtllm" if is_sm100_supported() else ("fa,fi" if is_sm90_supported() else "fi")
-        override("attention_backend", backend)
-        logger.info_rank0(f"Auto-selected attention backend: {config.attention_backend}")
-
-    if "trtllm" in config.attention_backend and config.page_size not in [16, 32, 64]:
-        override("page_size", 64)
-        logger.warning_rank0("Page size is overridden to 64 for TRTLLM backend")
-
-    if config.model_config.is_moe and config.moe_backend == "auto":
-        override("moe_backend", "fused")
-        logger.info_rank0(f"Auto-selected MoE backend: {config.moe_backend}")

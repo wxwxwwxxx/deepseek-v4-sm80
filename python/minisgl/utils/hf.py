@@ -16,7 +16,7 @@ class DisabledTqdm(tqdm):
 
 def load_tokenizer(model_path: str) -> PreTrainedTokenizerBase:
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    # Some Mistral models store chat_template in a separate JSON file
+    # Preserve a separately shipped chat template when the tokenizer omits it.
     if not getattr(tokenizer, "chat_template", None):
         try:
             path = hf_hub_download(repo_id=model_path, filename="chat_template.json")

@@ -2074,10 +2074,7 @@ def collect_runtime_environment(torch, dsv4_kernel, *, rank: int) -> dict[str, A
         "packages": {
             "torch": torch.__version__,
             "triton": _module_version("triton"),
-            "sgl_kernel": _module_version("sgl_kernel"),
             "flashinfer": _module_version("flashinfer"),
-            "deep_gemm": _module_version("deep_gemm"),
-            "tilelang": _module_version("tilelang"),
             "tvm_ffi": _module_version("tvm_ffi"),
         },
         "cuda": cuda,

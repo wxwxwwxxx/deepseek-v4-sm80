@@ -22,10 +22,11 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "accelerate",
+    "huggingface-hub",
     "msgpack",
-    "modelscope",
+    "safetensors",
     "torch<2.10.0",
+    "tqdm",
     "transformers>=4.56.0,<=4.57.3",
     "flashinfer-python>=0.5.3",
     "pyzmq",
@@ -34,8 +35,6 @@ dependencies = [
     "prompt_toolkit",
     "openai",
     "apache-tvm-ffi>=0.1.4",
-    "sgl_kernel>=0.3.17.post1",
-    "quack-kernels",
 ]
 
 [project.optional-dependencies]

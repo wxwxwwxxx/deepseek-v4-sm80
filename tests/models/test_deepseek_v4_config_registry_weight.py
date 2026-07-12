@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import safetensors
@@ -13,10 +14,38 @@ from minisgl.distributed import set_tp_info
 from minisgl.models import create_model
 from minisgl.models.config import ModelConfig
 from minisgl.models.deepseek_v4 import DeepseekV4ForCausalLM
+from minisgl.models.register import get_model_class
 from minisgl.models.weight import _remap_deepseek_v4_weight_name, _shard_deepseek_v4_tensor
 from minisgl.utils import cached_load_hf_config, torch_dtype
 
 MODEL_DIR = Path("/models/DeepSeek-V4-Flash")
+
+
+def _inline_dsv4_hf_config(**overrides):
+    values = {
+        "architectures": ["DeepseekV4ForCausalLM"],
+        "model_type": "deepseek_v4",
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 1,
+        "head_dim": 8,
+        "hidden_size": 32,
+        "vocab_size": 128,
+        "intermediate_size": 64,
+        "hidden_act": "silu",
+        "rms_norm_eps": 1e-6,
+        "max_position_embeddings": 4096,
+        "rope_theta": 10000,
+        "qk_rope_head_dim": 2,
+        "qk_nope_head_dim": 6,
+        "v_head_dim": 8,
+        "n_routed_experts": 8,
+        "num_experts_per_tok": 2,
+        "moe_intermediate_size": 16,
+        "compress_ratios": [0, 4],
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +94,59 @@ def test_deepseek_v4_config_parse_from_local_json():
     assert cfg.hc_mult == 4
     assert cfg.hc_sinkhorn_iters == 20
     assert cfg.hc_eps == pytest.approx(1e-6)
+
+
+def test_inline_deepseek_v4_architecture_succeeds_without_model_download():
+    cfg = ModelConfig.from_hf(_inline_dsv4_hf_config())
+
+    assert cfg.architectures == ["DeepseekV4ForCausalLM"]
+    assert cfg.model_type == "deepseek_v4"
+    assert cfg.is_deepseek_v4
+
+
+def test_inline_text_config_inherits_deepseek_v4_identity():
+    text_config = _inline_dsv4_hf_config(architectures=None, model_type=None)
+    wrapped = SimpleNamespace(
+        text_config=text_config,
+        architectures=["DeepseekV4ForCausalLM"],
+        model_type="deepseek_v4",
+    )
+
+    cfg = ModelConfig.from_hf(wrapped)
+
+    assert cfg.architectures == ["DeepseekV4ForCausalLM"]
+    assert cfg.model_type == "deepseek_v4"
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    ["LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3MoeForCausalLM", "MistralForCausalLM"],
+)
+def test_unsupported_architecture_fails_fast_without_model_download(architecture):
+    with pytest.raises(ValueError, match="supports DeepSeek V4 Flash only"):
+        ModelConfig.from_hf(_inline_dsv4_hf_config(architectures=[architecture]))
+
+    with pytest.raises(ValueError, match="supports DeepSeek V4 Flash only"):
+        get_model_class(architecture, object())
+
+
+def test_missing_architecture_does_not_fall_back_to_llama():
+    with pytest.raises(ValueError, match="missing architectures.*DeepSeek V4 Flash only"):
+        ModelConfig.from_hf(_inline_dsv4_hf_config(architectures=None))
+
+
+def test_deepseek_architecture_with_unsupported_model_type_fails_fast():
+    with pytest.raises(ValueError, match="Model type.*DeepSeek V4 Flash only"):
+        ModelConfig.from_hf(_inline_dsv4_hf_config(model_type="llama"))
+
+
+def test_public_attention_registry_exposes_dsv4_only():
+    from minisgl.attention import SUPPORTED_ATTENTION_BACKENDS, validate_attn_backend
+
+    assert SUPPORTED_ATTENTION_BACKENDS.supported_names() == ["dsv4"]
+    for backend in ("fa", "fi", "trtllm", "fa,fi"):
+        with pytest.raises(Exception, match="Unsupported Attention Backend"):
+            validate_attn_backend(backend)
 
 
 def test_cached_load_hf_config_falls_back_for_deepseek_v4():

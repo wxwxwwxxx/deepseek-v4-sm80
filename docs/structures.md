@@ -34,10 +34,10 @@ The source code is located in `python/minisgl`. Here is a breakdown of the modul
 
 - `minisgl.core`: Provides core dataclasses `Req` and `Batch` representing the state of requests, class `Context` which holds the global state of the inference context, and class `SamplingParams` holds the sampling parameters provided by users.
 - `minisgl.distributed`: Provides the interface to all-reduce and all-gather in tensor parallelism, and dataclass `DistributedInfo` which holds the TP information for a TP worker.
-- `minisgl.layers`: Implements basic building blocks for building LLMs with TP support, including linear, layernorm, embedding, RoPE, etc. They share common base classes defined in `minisgl.layers.base`.
-- `minisgl.models`: Implements LLM models, including Llama and Qwen3. Also defines utilities for loading weights from huggingface and sharding weights.
-- `minisgl.attention`: Provides interface of attention Backends and implements backends of `flashattention` and `flashinfer`. They are called by `AttentionLayer` and use metadata stored in `Context`.
-- `minisgl.kvcache`: Provides interface of KVCache pool and KVCache manager, and implements `MHAKVCache`, `NaiveCacheManager` and `RadixCacheManager`.
+- `minisgl.layers`: Provides the `BaseOP` and `OPList` state/weight ownership primitives used by the DSV4 model.
+- `minisgl.models`: Implements DeepSeek V4 Flash and its DSV4-only checkpoint remapping and sharding.
+- `minisgl.attention`: Provides the DSV4 attention backend and its optimized/fallback metadata paths.
+- `minisgl.kvcache`: Provides the DeepSeek V4 cache pool plus the retained naive and radix prefix-cache managers.
 - `minisgl.utils`: Provides a collection of utilities, including logger setup and wrappers around zmq.
 - `minisgl.engine`: Implements `Engine` class, which is a TP worker on a single process. It manages the model, context, KVCache, attention backend and cuda graph replaying.
 - `minisgl.message`: Defines messages exchanged (in zmq) between api_server, tokenizer, detokenizer and scheduler. All message types support automatic serialization and deserialization.

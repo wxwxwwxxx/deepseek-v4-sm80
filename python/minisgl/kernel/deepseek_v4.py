@@ -98,23 +98,8 @@ class DSV4KernelCapability:
     cuda_available: bool
     cuda_capability: tuple[int, int] | None
     is_sm80: bool
-    sgl_kernel_available: bool
-    sgl_kernel_error: str | None
-    sgl_kernel_sm80_common_ops: bool
-    sgl_kernel_dsv4_ops: dict[str, bool]
-    flash_mla_available: bool
-    flash_mla_error: str | None
-    flashinfer_available: bool
-    flashinfer_error: str | None
-    deep_gemm_available: bool
-    deep_gemm_error: str | None
-    deep_gemm_usable: bool
-    tilelang_available: bool
-    tilelang_error: str | None
     triton_available: bool
     triton_error: str | None
-    marlin_available: bool
-    marlin_error: str | None
 
 
 @dataclass(frozen=True)
@@ -192,63 +177,18 @@ def _cuda_capability() -> tuple[int, int] | None:
         return None
 
 
-def _has_sgl_common_ops_for_sm80() -> bool:
-    try:
-        import sgl_kernel  # type: ignore
-
-        package_paths = list(getattr(sgl_kernel, "__path__", []))
-    except Exception:
-        return False
-    return any(
-        os.path.exists(os.path.join(package_path, "sm80", "common_ops.abi3.so"))
-        for package_path in package_paths
-    )
-
-
 @lru_cache(maxsize=1)
 def detect_dsv4_kernel_capabilities() -> DSV4KernelCapability:
     cap = _cuda_capability()
     is_sm80 = cap == (8, 0)
 
-    sgl_ok, sgl_err = _module_available("sgl_kernel")
-    dsv4_ops = {
-        name: bool(sgl_ok and hasattr(torch.ops.sgl_kernel, name))
-        for name in (
-            "deepseek_v4_topk_transform_512",
-            "dsv4_fused_q_indexer_rope_hadamard_quant",
-            "dsv4_fused_q_indexer_rope_hadamard_fp4_quant",
-        )
-    }
-
-    flash_mla_ok, flash_mla_err = _module_available("sgl_kernel.flash_mla")
-    flashinfer_ok, flashinfer_err = _module_available("flashinfer")
-    deep_gemm_ok, deep_gemm_err = _module_available("deep_gemm")
-    tilelang_ok, tilelang_err = _module_available("tilelang")
     triton_ok, triton_err = _module_available("triton")
-    marlin_ok, marlin_err = _module_available("marlin")
-
-    deep_gemm_usable = bool(deep_gemm_ok and cap is not None and cap[0] >= 9)
     return DSV4KernelCapability(
         cuda_available=torch.cuda.is_available(),
         cuda_capability=cap,
         is_sm80=is_sm80,
-        sgl_kernel_available=sgl_ok,
-        sgl_kernel_error=sgl_err,
-        sgl_kernel_sm80_common_ops=_has_sgl_common_ops_for_sm80(),
-        sgl_kernel_dsv4_ops=dsv4_ops,
-        flash_mla_available=flash_mla_ok,
-        flash_mla_error=flash_mla_err,
-        flashinfer_available=flashinfer_ok,
-        flashinfer_error=flashinfer_err,
-        deep_gemm_available=deep_gemm_ok,
-        deep_gemm_error=deep_gemm_err,
-        deep_gemm_usable=deep_gemm_usable,
-        tilelang_available=tilelang_ok,
-        tilelang_error=tilelang_err,
         triton_available=triton_ok,
         triton_error=triton_err,
-        marlin_available=marlin_ok,
-        marlin_error=marlin_err,
     )
 
 
@@ -1388,7 +1328,6 @@ def dsv4_sparse_attention_two_source_splitk_bf16(
 ) -> torch.Tensor | None:
     if not dsv4_optimized_enabled():
         return None
-    cap = detect_dsv4_kernel_capabilities()
     try:
         out = _triton_dsv4_ops().sparse_attention_splitk_bf16(
             q,
@@ -3770,8 +3709,6 @@ __all__ = [
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
     "compressor_plan_fallback",
-    "flash_mla_sparse_prefill",
-    "flash_mla_with_kvcache",
     "get_paged_mqa_logits_metadata_fallback",
     "make_name",
     "triton_create_paged_compress_data",

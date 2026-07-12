@@ -458,12 +458,14 @@ def test_dsv4_capability_detection_keeps_sm80_gates_explicit():
 
     if caps.cuda_capability is not None:
         assert caps.is_sm80 is (caps.cuda_capability == (8, 0))
-        if caps.cuda_capability[0] < 9:
-            assert not caps.deep_gemm_usable
-    assert set(caps.sgl_kernel_dsv4_ops) == {
-        "deepseek_v4_topk_transform_512",
-        "dsv4_fused_q_indexer_rope_hadamard_quant",
-        "dsv4_fused_q_indexer_rope_hadamard_fp4_quant",
+    assert isinstance(caps.triton_available, bool)
+    assert caps.triton_error is None or isinstance(caps.triton_error, str)
+    assert set(vars(caps)) == {
+        "cuda_available",
+        "cuda_capability",
+        "is_sm80",
+        "triton_available",
+        "triton_error",
     }
 
 

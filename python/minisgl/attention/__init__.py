@@ -2,42 +2,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-from minisgl.utils import Registry, init_logger
+from minisgl.utils import Registry
 
-from .base import BaseAttnBackend, BaseAttnMetadata, HybridBackend
+from .base import BaseAttnBackend, BaseAttnMetadata
 
 if TYPE_CHECKING:
     from minisgl.models import ModelConfig
-
-logger = init_logger(__name__)
-
 
 class BackendCreator(Protocol):
     def __call__(self, config: ModelConfig) -> BaseAttnBackend: ...
 
 
 SUPPORTED_ATTENTION_BACKENDS = Registry[BackendCreator]("Attention Backend")
-
-
-@SUPPORTED_ATTENTION_BACKENDS.register("trtllm")
-def create_trtllm_backend(config: ModelConfig):
-    from .trtllm import TensorRTLLMBackend
-
-    return TensorRTLLMBackend(config)
-
-
-@SUPPORTED_ATTENTION_BACKENDS.register("fi")
-def create_fi_backend(config: ModelConfig):
-    from .fi import FlashInferBackend
-
-    return FlashInferBackend(config)
-
-
-@SUPPORTED_ATTENTION_BACKENDS.register("fa")
-def create_fa_backend(config: ModelConfig):
-    from .fa import FlashAttentionBackend
-
-    return FlashAttentionBackend(config)
 
 
 @SUPPORTED_ATTENTION_BACKENDS.register("dsv4")
@@ -61,17 +37,6 @@ def create_attention_backend(
     config: ModelConfig,
 ) -> BaseAttnBackend:
     validate_attn_backend(backend, allow_auto=False)
-    if "," in backend:
-        assert backend.count(",") == 1, "Only one comma is allowed in hybrid backend"
-        p_backend, d_backend = backend.split(",", 1)
-        if p_backend != d_backend:
-            logger.info(f"Using hybrid attention backend: prefill={p_backend}, decode={d_backend}")
-            p_backend = create_attention_backend(p_backend, config)
-            d_backend = create_attention_backend(d_backend, config)
-            return HybridBackend(p_backend, d_backend)
-        backend = p_backend  # both are the same, fall through to single backend
-        logger.warning(f"P/D attention backends are the same: {backend}, using single backend.")
-
     return SUPPORTED_ATTENTION_BACKENDS[backend](config)
 
 

@@ -19,7 +19,6 @@ def _fake_config(**overrides):
         max_running_req=256,
         max_running_req_explicit=False,
         attention_backend="auto",
-        moe_backend="auto",
         allow_dsv4_cuda_graph=False,
         cuda_graph_bs=None,
         cuda_graph_max_bs=None,
@@ -61,8 +60,6 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
     assert config.cuda_graph_policy.source_mode == "explicit_max"
     assert config.cuda_graph_policy.resolved_bs[-1] == 256
     assert config.cuda_graph_capture_fail_open is True
-    assert config.moe_backend == "fused"
-
     runtime = resolve_dsv4_runtime_config(config.dsv4_runtime_mode)
     assert runtime.moe_expert_backend == "marlin_wna16"
     assert runtime.direct_graph_metadata_groups == frozenset({"swa", "c4"})
@@ -70,6 +67,15 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
     assert runtime.marlin_release_timing == "before_kv_alloc"
     assert runtime.clear_allocated_page_scope == "component"
     assert runtime.pynccl_max_buffer_bytes == 32 * 1024 * 1024
+
+
+@pytest.mark.parametrize("backend", ["fa", "fi", "trtllm", "fa,fi"])
+def test_removed_attention_backends_fail_instead_of_falling_back(monkeypatch, backend):
+    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    config = _fake_config(attention_backend=backend)
+
+    with pytest.raises(ValueError, match="DSV4 attention backend only"):
+        engine_module._adjust_config(config)
 
 
 def test_deepseek_v4_mode_is_selected_only_by_typed_config(monkeypatch):

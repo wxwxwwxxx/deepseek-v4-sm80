@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from minisgl.server.args import parse_args
 
 
@@ -27,3 +29,22 @@ def test_server_args_expose_typed_dsv4_runtime_mode():
 
     assert default_config.dsv4_runtime_mode == "optimized"
     assert fallback_config.dsv4_runtime_mode == "fallback"
+
+
+@pytest.mark.parametrize("backend", ["fa", "fi", "trtllm", "fa,fi"])
+def test_server_args_reject_removed_attention_backends(backend):
+    base = ["--model-path", "/tmp/nonexistent-model", "--dtype", "bfloat16"]
+
+    with pytest.raises(SystemExit):
+        parse_args(base + ["--attention-backend", backend])
+
+
+def test_server_help_has_no_removed_backend_or_model_source_options(capsys):
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["--help"])
+
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--attention-backend" in help_text
+    assert "--moe-backend" not in help_text
+    assert "--model-source" not in help_text

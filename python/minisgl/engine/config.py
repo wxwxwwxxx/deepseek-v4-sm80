@@ -24,7 +24,6 @@ class EngineConfig:
     dsv4_runtime_mode: DSV4RuntimeMode = "optimized"
     dsv4_sm80_recipe: str | None = None
     attention_backend: str = "auto"
-    moe_backend: str = "auto"
     cuda_graph_bs: List[int] | None = None
     cuda_graph_max_bs: int | None = None
     disable_cuda_graph: bool = False
