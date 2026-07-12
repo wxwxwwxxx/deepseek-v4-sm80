@@ -1,0 +1,37 @@
+DSV4 on SM80
+Third-Party Notices
+
+This distribution is based on Mini-SGLang:
+  https://github.com/sgl-project/mini-sglang
+Mini-SGLang is licensed under the MIT License. The applicable copyright
+notice and license terms are reproduced in the root LICENSE file.
+
+Portions of this distribution are derived from SGLang:
+  https://github.com/sgl-project/sglang
+This includes the DeepSeek V4 top-k kernel and portions of tokenizer/runtime
+logic. SGLang is licensed under the Apache License, Version 2.0.
+
+The Marlin WNA16 sources under
+python/minisgl/kernel/csrc/vendor/vllm_marlin_wna16 are derived from vLLM and
+Marlin:
+  https://github.com/vllm-project/vllm
+  https://github.com/IST-DASLab/marlin
+These sources are licensed under the Apache License, Version 2.0. This project
+retains a Mini-SGLang-owned extension bridge and a generated subset of the
+SM80 BF16/FP4 MoE kernels. In particular, kernel_selector.h and
+sm80_kernel_bfloat16_fe2m1f_bfloat16.cu were reduced to the kernel variants
+used by this distribution.
+
+Portions of python/minisgl/tokenizer/detokenize.py are derived from Hugging
+Face Transformers:
+  https://github.com/huggingface/transformers
+Transformers is licensed under the Apache License, Version 2.0.
+
+The file python/minisgl/kernel/csrc/include/minisgl/nccl227.h is derived from
+NVIDIA NCCL:
+  https://github.com/NVIDIA/nccl
+Its applicable NVIDIA copyright, redistribution conditions, and disclaimer
+are reproduced in LICENSE-NVIDIA-NCCL.
+
+The complete Apache License, Version 2.0, applicable to the Apache-licensed
+components above is reproduced in LICENSE-APACHE-2.0.

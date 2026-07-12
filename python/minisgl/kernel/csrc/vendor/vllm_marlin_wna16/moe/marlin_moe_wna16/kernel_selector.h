@@ -1,3 +1,6 @@
+// Derived from vLLM's Apache-2.0 Marlin WNA16 sources.
+// Modified by this project to retain only the SM80 BF16/FP4 kernel variants used here.
+
 if (a_type == vllm::kBFloat16 && b_type == vllm::kFE2M1f && c_type == vllm::kBFloat16 && s_type == vllm::kFE8M0fnu && threads == 256 && thread_m_blocks == 1 && thread_n_blocks == 8 && thread_k_blocks == 8 && m_block_size_8 == true && stages == 4 && group_blocks == 2 && is_zp_float == false)
   kernel = Marlin<vllm::kBFloat16.id(), vllm::kFE2M1f.id(), vllm::kBFloat16.id(), vllm::kFE8M0fnu.id(), 256, 1, 8, 8, true, 4, 2, false>;
 else if (a_type == vllm::kBFloat16 && b_type == vllm::kFE2M1f && c_type == vllm::kBFloat16 && s_type == vllm::kFE8M0fnu && threads == 128 && thread_m_blocks == 1 && thread_n_blocks == 8 && thread_k_blocks == 4 && m_block_size_8 == true && stages == 4 && group_blocks == 2 && is_zp_float == false)
