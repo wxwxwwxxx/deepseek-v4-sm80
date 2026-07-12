@@ -2018,9 +2018,8 @@ def runtime_variant_env(dsv4_kernel, variant: Variant) -> dict[str, Any]:
 
 
 def active_dsv4_toggles(dsv4_kernel) -> list[str]:
-    return [
-        name for name in _all_dsv4_sm80_env_names(dsv4_kernel) if dsv4_kernel.dsv4_env_flag(name)
-    ]
+    del dsv4_kernel
+    return []
 
 
 def raw_dsv4_env() -> dict[str, str]:
@@ -2915,7 +2914,11 @@ def _select_scenarios(args: argparse.Namespace) -> list[Scenario]:
 
 
 def _select_variants(args: argparse.Namespace) -> list[Variant]:
-    names = args.variants or [variant.name for variant in DEFAULT_VARIANTS]
+    names = args.variants or [DSV4_RELEASE_DEFAULT_VARIANT]
+    if names != [DSV4_RELEASE_DEFAULT_VARIANT]:
+        raise SystemExit(
+            "The release perf matrix supports only the canonical optimized runtime."
+        )
     variant_map = _variant_map()
     return [variant_map[name] for name in names]
 
@@ -4219,6 +4222,51 @@ def _aggregate_case_report(
                 prefix_delta_rank0[key] = int(prefix_delta_rank0.get(key, 0)) + value
             elif isinstance(value, float):
                 prefix_delta_rank0[key] = float(prefix_delta_rank0.get(key, 0.0)) + value
+    repeat_summary: list[dict[str, Any]] = []
+    for repeat_index, repeat0 in enumerate(repeats0):
+        elapsed = max(
+            float(payload["repeats"][repeat_index]["elapsed_s"])
+            for payload in rank_payloads
+        )
+        prefill_s = max(
+            float(payload["repeats"][repeat_index]["phase_totals"]["prefill_forward_s"])
+            for payload in rank_payloads
+        )
+        decode_s = max(
+            float(payload["repeats"][repeat_index]["phase_totals"]["decode_forward_s"])
+            for payload in rank_payloads
+        )
+        prefill_tokens = int(repeat0["phase_totals"]["prefill_input_tokens"])
+        decode_tokens = int(repeat0["phase_totals"]["decode_tokens"])
+        output_tokens = int(repeat0["actual_output_tokens"])
+        repeat_summary.append(
+            {
+                "repeat_index": repeat_index,
+                "elapsed_s": elapsed,
+                "output_tokens": output_tokens,
+                "prefill_tokens": prefill_tokens,
+                "decode_tokens": decode_tokens,
+                "prefill_tokens_per_s": None if prefill_s <= 0 else prefill_tokens / prefill_s,
+                "decode_tokens_per_s": None if decode_s <= 0 else decode_tokens / decode_s,
+                "end_to_end_output_tokens_per_s": None if elapsed <= 0 else output_tokens / elapsed,
+            }
+        )
+
+    def stable_metric(name: str) -> dict[str, Any]:
+        values = [float(row[name]) for row in repeat_summary if row[name] is not None]
+        median = float(statistics.median(values)) if values else None
+        return {
+            "values": values,
+            "min": min(values) if values else None,
+            "median": median,
+            "max": max(values) if values else None,
+            "relative_span": (
+                None
+                if median in (None, 0.0)
+                else (max(values) - min(values)) / median
+            ),
+        }
+
     metrics = {
         "elapsed_s": elapsed_s,
         "completed_requests": len(all_requests),
@@ -4266,6 +4314,15 @@ def _aggregate_case_report(
         "prefix_cache": {
             "rank0_final": rank0.get("prefix_cache_metrics", {}),
             "rank0_repeat_delta": prefix_delta_rank0,
+        },
+        "repeat_summary": repeat_summary,
+        "repeat_stable_median": {
+            "repeat_count": len(repeat_summary),
+            "prefill_tokens_per_s": stable_metric("prefill_tokens_per_s"),
+            "decode_tokens_per_s": stable_metric("decode_tokens_per_s"),
+            "end_to_end_output_tokens_per_s": stable_metric(
+                "end_to_end_output_tokens_per_s"
+            ),
         },
     }
     graph_status_case = (
@@ -4330,6 +4387,7 @@ def _summary_row(report: dict[str, Any]) -> dict[str, Any]:
         "prefill_tokens_per_s": metrics.get("prefill_tokens_per_s"),
         "decode_tokens_per_s": metrics.get("decode_tokens_per_s"),
         "end_to_end_output_tokens_per_s": metrics.get("end_to_end_output_tokens_per_s"),
+        "repeat_stable_median": metrics.get("repeat_stable_median", {}),
         "prefix_hit_rate": prefix_metrics.get("hit_rate"),
         "prefix_saved_prefill_tokens": prefix_metrics.get("saved_prefill_tokens"),
         "prefix_retained_pages": prefix_metrics.get("retained_prefix_pages"),
@@ -4401,13 +4459,7 @@ def run_case(
     rank_path = output_dir / "reports" / f"{case_name}.rank{rank}.json"
     variant_env = runtime_variant_env(dsv4_kernel, variant)
     llm.sync_all_ranks()
-    from minisgl.distributed import reset_communication_stats, snapshot_communication_stats
-    from minisgl.utils import dsv4_long_prefill_timing, dsv4_owner_timing
-
     tracer.reset()
-    dsv4_owner_timing.reset()
-    dsv4_long_prefill_timing.reset()
-    reset_communication_stats()
     warmup = None
     repeats = []
     error: dict[str, Any] | None = None
@@ -4428,8 +4480,6 @@ def run_case(
         llm.sync_all_ranks()
         graph_status_after_warmup = _snapshot_graph_status(llm)
         case_boundary_debug.append(_case_boundary_debug_snapshot(llm, f"{case_name}:after_warmup"))
-        dsv4_owner_timing.reset()
-        dsv4_long_prefill_timing.reset()
         for repeat_idx in range(scenario.repeats):
             case_boundary_debug.append(
                 _case_boundary_debug_snapshot(llm, f"{case_name}:before_repeat_{repeat_idx}")
@@ -4503,11 +4553,10 @@ def run_case(
         "warmup": warmup,
         "repeats": repeats,
         "kernel_counters": tracer.snapshot(),
-        "communication_counters": snapshot_communication_stats(),
-        "owner_timing": dsv4_owner_timing.snapshot(
-            captured_shape_filter=replayed_padded_sizes,
-        ),
-        "long_prefill_timing": dsv4_long_prefill_timing.snapshot(),
+        # The misc02 release runtime intentionally removed the historical
+        # communication debug counter module.  Keep the benchmark payload
+        # schema stable without restoring a production hot-path probe.
+        "communication_counters": {},
         "c128_prefill_one_surface": _snapshot_c128_prefill_one_surface(llm),
         "graph_runner_before_case": graph_status_before,
         "graph_runner_after_warmup": graph_status_after_warmup,
@@ -4642,7 +4691,6 @@ def _init_llm(
 ):
     import torch
     from minisgl.distributed import DistributedInfo
-    from minisgl.utils import dsv4_owner_timing
 
     BenchmarkLLM = make_benchmark_llm_class()
     dtype = _dtype_from_name(args.dtype)
@@ -4662,6 +4710,7 @@ def _init_llm(
         args.model_path,
         dtype=dtype,
         tp_info=DistributedInfo(rank, tp_size),
+        dsv4_runtime_mode="optimized",
         dsv4_sm80_recipe=args.dsv4_sm80_recipe,
         num_page_override=args.num_pages,
         page_size=args.page_size,
@@ -4711,7 +4760,6 @@ def _init_llm(
             "rank": rank,
             "memory": _rank_memory_report(torch, llm),
             "model_prepare_report": getattr(llm.engine, "model_prepare_report", {}),
-            "owner_timing": dsv4_owner_timing.snapshot(resolve_cuda=False),
             "max_sequence": max_sequence,
             "max_running_req": max_running_req,
         },
@@ -4741,7 +4789,7 @@ def run_matrix(args: argparse.Namespace) -> int:
     init_variant = (
         _graph_init_variant(variants)
         if runtime_options["allow_dsv4_cuda_graph"]
-        else DEFAULT_VARIANTS[0]
+        else variants[0]
     )
     configure_variant(dsv4_kernel, init_variant)
     tracer = KernelCallTracer(dsv4_kernel)
@@ -4918,7 +4966,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Select a public DSV4 A100/sm80 recipe; omitted uses the no-env default.",
     )
-    parser.add_argument("--variants", nargs="*", choices=tuple(_variant_map()))
+    parser.add_argument(
+        "--variants",
+        nargs="*",
+        choices=(DSV4_RELEASE_DEFAULT_VARIANT,),
+        help="Compatibility label for the canonical optimized runtime only.",
+    )
     parser.add_argument("--scenarios", nargs="*", choices=tuple(_scenario_map()))
     parser.add_argument("--output-dir", default="/tmp/dsv4_sm80_target06_tp8")
     parser.add_argument("--tensor-parallel-size", type=int, default=None)

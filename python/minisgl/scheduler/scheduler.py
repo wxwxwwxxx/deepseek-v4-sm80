@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
 
@@ -15,7 +14,7 @@ from minisgl.message import (
     ExitMsg,
     UserMsg,
 )
-from minisgl.utils import dsv4_direct_copy_nvtx, dsv4_owner_timing, init_logger, load_tokenizer
+from minisgl.utils import init_logger, load_tokenizer
 
 from .cache import CacheManager
 from .config import SchedulerConfig
@@ -32,7 +31,7 @@ logger = init_logger(__name__)
 
 Indice2D: TypeAlias = Tuple[torch.Tensor, torch.Tensor]
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
-DSV4_PREPARE_SYNC_DEBUG_ENV = "MINISGL_DSV4_PREPARE_SYNC_DEBUG"
+
 
 
 # For overlap scheduling, we also need to cache some other data to avoid IMA
@@ -179,8 +178,11 @@ class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from minisgl.engine import Engine
 
-        cache_type = resolve_dsv4_cache_type(config)
         self.engine = Engine(config)
+        # Engine resolves the immutable typed DSV4 mode into its cache/lifecycle
+        # ownership fields. Select the prefix-cache implementation afterwards so
+        # optimized cannot pair component ownership with NaivePrefixCache.
+        cache_type = resolve_dsv4_cache_type(config)
 
         # use another stream to overlap metadata processing with computation
         self.device = self.engine.device
@@ -214,9 +216,7 @@ class Scheduler(SchedulerIOMixin):
         self.eos_token_id = self.tokenizer.eos_token_id
         self.token_pool = self.table_manager.token_pool
         self.prefill_budget = config.max_extend_tokens
-        self._dsv4_prepare_sync_debug = (
-            os.environ.get(DSV4_PREPARE_SYNC_DEBUG_ENV, "0").lower() in _TRUE_ENV_VALUES
-        )
+
         # self.config = config
 
         # Initialize the I/O mixin
@@ -378,184 +378,66 @@ class Scheduler(SchedulerIOMixin):
         self.table_manager.free(req.table_idx)
         self.cache_manager.cache_req(req, finished=True)
 
-    def _debug_sync_prepare(self, stage: str, batch: Batch, **metadata: object) -> None:
-        if not self._dsv4_prepare_sync_debug:
-            return
-        try:
-            torch.cuda.synchronize(self.device)
-        except RuntimeError as exc:
-            reqs = [
-                {
-                    "uid": getattr(req, "uid", None),
-                    "table_idx": getattr(req, "table_idx", None),
-                    "cached_len": getattr(req, "cached_len", None),
-                    "device_len": getattr(req, "device_len", None),
-                    "extend_len": getattr(req, "extend_len", None),
-                    "can_decode": getattr(req, "can_decode", None),
-                }
-                for req in batch.reqs[:4]
-            ]
-            raise RuntimeError(
-                "CUDA synchronize failed after DSV4 prepare stage "
-                f"{stage!r}: phase={batch.phase}, bs={batch.size}, "
-                f"padded={getattr(batch, 'padded_size', batch.size)}, "
-                f"metadata={metadata}, first_reqs={reqs}"
-            ) from exc
+
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
-        if not dsv4_owner_timing.enabled():
-            self.engine.graph_runner.pad_batch(batch)
-            self._debug_sync_prepare("pad_batch", batch)
-            self.cache_manager.allocate_paged(batch.reqs)
-            self._debug_sync_prepare("allocate_paged", batch)
-            with dsv4_direct_copy_nvtx(
-                f"batch_forward_bridge.prepare_positions.{batch.phase}.bs{batch.size}"
-            ):
-                batch.positions = _make_positions(batch, self.device)
-            validate_model_position_bound(
-                max_device_len=max((req.device_len for req in batch.reqs), default=0),
-                rope_cache_len=int(
-                    getattr(self.engine, "effective_rope_cache_len", self.engine.max_seq_len)
-                ),
-            )
-            self._debug_sync_prepare("positions", batch, positions=tuple(batch.positions.shape))
-            with dsv4_direct_copy_nvtx(
-                f"batch_forward_bridge.prepare_input_tuple.{batch.phase}.bs{batch.size}",
-                positions=batch.positions,
-            ):
-                input_mapping = _make_input_tuple(batch, self.device)
-            self._debug_sync_prepare(
-                "input_tuple",
-                batch,
-                token_mapping=tuple(input_mapping[0].shape),
-                positions=tuple(input_mapping[1].shape),
-            )
-            with dsv4_direct_copy_nvtx(
-                f"batch_forward_bridge.prepare_write_tuple.{batch.phase}.bs{batch.size}"
-            ):
-                write_mapping = _make_write_tuple(batch, self.device)
-            self._debug_sync_prepare(
-                "write_tuple",
-                batch,
-                write_mapping=tuple(write_mapping[0].shape),
-                write_positions=tuple(write_mapping[1].shape),
-            )
-            with dsv4_direct_copy_nvtx(
-                f"batch_forward_bridge.out_loc_gather.{batch.phase}.bs{batch.size}",
-                page_table=self.engine.page_table,
-                token_mapping=input_mapping[0],
-                positions=input_mapping[1],
-            ):
-                batch.out_loc = self.engine.page_table[input_mapping]
-            self._debug_sync_prepare("out_loc_gather", batch, out_loc=tuple(batch.out_loc.shape))
-            with dsv4_direct_copy_nvtx(
-                f"batch_forward_bridge.prepare_metadata.{batch.phase}.bs{batch.size}"
-            ):
-                self.engine.attn_backend.prepare_metadata(batch)
-            self._debug_sync_prepare("attention_metadata", batch)
-            sample_args = self.engine.sampler.prepare(batch)
-            self._debug_sync_prepare("sampler_prepare", batch)
-            return ForwardInput(
-                batch=batch,
-                sample_args=sample_args,
-                input_tuple=input_mapping,
-                write_tuple=write_mapping,
-            )
+        self.engine.graph_runner.pad_batch(batch)
 
-        timing_metadata = {
-            "phase": batch.phase,
-            "batch_size": int(batch.size),
-            "padded_size": int(getattr(batch, "padded_size", batch.size)),
-        }
-        with dsv4_owner_timing.maybe_host_range(
-            f"dsv4.prepare.{batch.phase}.pad_batch",
-            timing_metadata,
-        ):
-            self.engine.graph_runner.pad_batch(batch)
-        self._debug_sync_prepare("pad_batch", batch)
-        timing_metadata["padded_size"] = int(batch.padded_size)
-        with dsv4_owner_timing.maybe_host_range(
-            f"dsv4.prepare.{batch.phase}.allocate_paged",
-            timing_metadata,
-        ):
-            self.cache_manager.allocate_paged(batch.reqs)
-        self._debug_sync_prepare("allocate_paged", batch)
-        with dsv4_direct_copy_nvtx(
-            f"batch_forward_bridge.prepare_positions.{batch.phase}.bs{batch.size}"
-        ):
-            with dsv4_owner_timing.maybe_host_range(
-                f"dsv4.prepare.{batch.phase}.positions",
-                timing_metadata,
-            ):
-                batch.positions = _make_positions(batch, self.device)
+        self.cache_manager.allocate_paged(batch.reqs)
+
+        batch.positions = _make_positions(batch, self.device)
         validate_model_position_bound(
             max_device_len=max((req.device_len for req in batch.reqs), default=0),
             rope_cache_len=int(
                 getattr(self.engine, "effective_rope_cache_len", self.engine.max_seq_len)
             ),
         )
-        self._debug_sync_prepare("positions", batch, positions=tuple(batch.positions.shape))
-        with dsv4_direct_copy_nvtx(
-            f"batch_forward_bridge.prepare_input_tuple.{batch.phase}.bs{batch.size}",
-            positions=batch.positions,
-        ):
-            with dsv4_owner_timing.maybe_host_range(
-                f"dsv4.prepare.{batch.phase}.input_tuple",
-                {**timing_metadata, "positions": dsv4_owner_timing.tensor_metadata(batch.positions)},
-            ):
-                input_mapping = _make_input_tuple(batch, self.device)
-        self._debug_sync_prepare(
-            "input_tuple",
-            batch,
-            token_mapping=tuple(input_mapping[0].shape),
-            positions=tuple(input_mapping[1].shape),
+
+        input_mapping = _make_input_tuple(batch, self.device)
+
+        write_mapping = _make_write_tuple(batch, self.device)
+
+        batch.out_loc = self.engine.page_table[input_mapping]
+
+        self.engine.attn_backend.prepare_metadata(batch)
+
+        sample_args = self.engine.sampler.prepare(batch)
+
+        return ForwardInput(
+            batch=batch,
+            sample_args=sample_args,
+            input_tuple=input_mapping,
+            write_tuple=write_mapping,
         )
-        with dsv4_direct_copy_nvtx(
-            f"batch_forward_bridge.prepare_write_tuple.{batch.phase}.bs{batch.size}"
-        ):
-            with dsv4_owner_timing.maybe_host_range(
-                f"dsv4.prepare.{batch.phase}.write_tuple",
-                timing_metadata,
-            ):
-                write_mapping = _make_write_tuple(batch, self.device)
-        self._debug_sync_prepare(
-            "write_tuple",
-            batch,
-            write_mapping=tuple(write_mapping[0].shape),
-            write_positions=tuple(write_mapping[1].shape),
+
+        timing_metadata = {
+            "phase": batch.phase,
+            "batch_size": int(batch.size),
+            "padded_size": int(getattr(batch, "padded_size", batch.size)),
+        }
+        self.engine.graph_runner.pad_batch(batch)
+
+        timing_metadata["padded_size"] = int(batch.padded_size)
+        self.cache_manager.allocate_paged(batch.reqs)
+
+        batch.positions = _make_positions(batch, self.device)
+        validate_model_position_bound(
+            max_device_len=max((req.device_len for req in batch.reqs), default=0),
+            rope_cache_len=int(
+                getattr(self.engine, "effective_rope_cache_len", self.engine.max_seq_len)
+            ),
         )
-        with dsv4_direct_copy_nvtx(
-            f"batch_forward_bridge.out_loc_gather.{batch.phase}.bs{batch.size}",
-            page_table=self.engine.page_table,
-            token_mapping=input_mapping[0],
-            positions=input_mapping[1],
-        ):
-            with dsv4_owner_timing.maybe_host_range(
-                f"dsv4.prepare.{batch.phase}.out_loc_gather",
-                {
-                    **timing_metadata,
-                    "page_table": dsv4_owner_timing.tensor_metadata(self.engine.page_table),
-                    "token_mapping": dsv4_owner_timing.tensor_metadata(input_mapping[0]),
-                    "positions": dsv4_owner_timing.tensor_metadata(input_mapping[1]),
-                },
-            ):
-                batch.out_loc = self.engine.page_table[input_mapping]
-        self._debug_sync_prepare("out_loc_gather", batch, out_loc=tuple(batch.out_loc.shape))
-        with dsv4_direct_copy_nvtx(
-            f"batch_forward_bridge.prepare_metadata.{batch.phase}.bs{batch.size}"
-        ):
-            with dsv4_owner_timing.maybe_host_range(
-                f"dsv4.prepare.{batch.phase}.attention_metadata",
-                {**timing_metadata, "out_loc": dsv4_owner_timing.tensor_metadata(batch.out_loc)},
-            ):
-                self.engine.attn_backend.prepare_metadata(batch)
-        self._debug_sync_prepare("attention_metadata", batch)
-        with dsv4_owner_timing.maybe_host_range(
-            f"dsv4.prepare.{batch.phase}.sampler_prepare",
-            timing_metadata,
-        ):
-            sample_args = self.engine.sampler.prepare(batch)
-        self._debug_sync_prepare("sampler_prepare", batch)
+
+        input_mapping = _make_input_tuple(batch, self.device)
+
+        write_mapping = _make_write_tuple(batch, self.device)
+
+        batch.out_loc = self.engine.page_table[input_mapping]
+
+        self.engine.attn_backend.prepare_metadata(batch)
+
+        sample_args = self.engine.sampler.prepare(batch)
+
         return ForwardInput(
             batch=batch,
             sample_args=sample_args,
@@ -573,24 +455,9 @@ class Scheduler(SchedulerIOMixin):
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input
-        with dsv4_direct_copy_nvtx(
-            f"batch_forward_bridge.input_ids_gather.{batch.phase}.bs{batch.size}",
-            token_pool=self.token_pool,
-            token_mapping=input_mapping[0],
-            positions=input_mapping[1],
-        ):
-            batch.input_ids = self.token_pool[input_mapping]
-        with dsv4_direct_copy_nvtx(
-            f"batch_forward_bridge.engine_forward_batch.{batch.phase}.bs{batch.size}"
-        ):
-            forward_output = self.engine.forward_batch(batch, sample_args)
-        with dsv4_direct_copy_nvtx(
-            f"batch_forward_bridge.token_pool_write.{batch.phase}.bs{batch.size}",
-            token_pool=self.token_pool,
-            output_mapping=output_mapping[0],
-            next_tokens=forward_output.next_tokens_gpu,
-        ):
-            self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        batch.input_ids = self.token_pool[input_mapping]
+        forward_output = self.engine.forward_batch(batch, sample_args)
+        self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 

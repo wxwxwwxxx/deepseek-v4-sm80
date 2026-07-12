@@ -17,3 +17,13 @@ def test_server_args_mark_explicit_max_extend_tokens():
     equals_config, _ = parse_args(base + ["--max-extend-length=8192"])
     assert equals_config.max_extend_tokens == 8192
     assert equals_config.max_extend_tokens_explicit is True
+
+
+def test_server_args_expose_typed_dsv4_runtime_mode():
+    base = ["--model-path", "/tmp/nonexistent-model", "--dtype", "bfloat16"]
+
+    default_config, _ = parse_args(base)
+    fallback_config, _ = parse_args(base + ["--dsv4-runtime", "fallback"])
+
+    assert default_config.dsv4_runtime_mode == "optimized"
+    assert fallback_config.dsv4_runtime_mode == "fallback"

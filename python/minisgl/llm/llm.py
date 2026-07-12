@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Tuple
 import torch
 from minisgl.core import SamplingParams
 from minisgl.distributed import DistributedInfo
+from minisgl.engine import DSV4RuntimeMode
 from minisgl.message import (
     BaseBackendMsg,
     DetokenizeMsg,
@@ -36,6 +37,7 @@ class LLM(Scheduler):
         model_path: str,
         dtype: torch.dtype = torch.bfloat16,
         tp_info: DistributedInfo | None = None,
+        dsv4_runtime_mode: DSV4RuntimeMode = "optimized",
         **kwargs,
     ):
         kwargs.setdefault("max_extend_tokens_explicit", "max_extend_tokens" in kwargs)
@@ -44,6 +46,7 @@ class LLM(Scheduler):
             model_path=model_path,
             tp_info=tp_info or DistributedInfo(0, 1),
             dtype=dtype,
+            dsv4_runtime_mode=dsv4_runtime_mode,
             offline_mode=True,
             **kwargs,
         )

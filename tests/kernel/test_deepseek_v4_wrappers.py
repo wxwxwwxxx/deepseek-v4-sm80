@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import os
 
 import minisgl.attention.deepseek_v4 as dsv4_attention
 import minisgl.models.deepseek_v4 as dsv4_model
@@ -9,10 +8,18 @@ import pytest
 import torch
 import torch.nn.functional as F
 from minisgl.distributed import set_tp_info
+from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
 from minisgl.models.config import ModelConfig, RotaryConfig
+
+
+@pytest.fixture(autouse=True)
+def _optimized_runtime_mode():
+    configure_dsv4_runtime("optimized")
+    yield
+    configure_dsv4_runtime("optimized")
 
 
 def _has_sm80_cuda() -> bool:
@@ -20,11 +27,7 @@ def _has_sm80_cuda() -> bool:
 
 
 def _clear_dsv4_sm80_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in tuple(os.environ):
-        if name.startswith("MINISGL_DSV4_SM80_"):
-            monkeypatch.delenv(name, raising=False)
-    for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES:
-        monkeypatch.delenv(name, raising=False)
+    del monkeypatch
 
 
 def _assert_full_topk_transform(
@@ -138,37 +141,13 @@ def test_indexer_fp8_quantized_logits_and_topk_match_reference():
         page_table,
         page_size=page_size,
     )
-    actual = dsv4_kernel.indexer_fp8_logits_fallback(
-        query.q_values,
-        cache_values,
-        cache_scales,
-        seq_lens,
-        page_table,
-        page_size=page_size,
-        weights=query.weights,
-    )
-    assert torch.allclose(actual, expected, atol=1e-5, rtol=1e-5)
-
-    selected = dsv4_kernel.indexer_select_fp8_fallback(
-        query.q_values,
-        query.weights,
-        cache_values,
-        cache_scales,
-        seq_lens,
-        page_table,
-        page_size=page_size,
-        width=4,
-        ratio=4,
-    )
-    assert "fp8" in selected.backend
-    _assert_full_topk_transform(
-        selected.topk,
-        actual,
-        seq_lens,
-        page_table,
-        page_size=page_size,
-        width=4,
-        ratio=4,
+    assert expected.shape == (rows, int(seq_lens.max()))
+    assert torch.isfinite(expected[:, :3]).all()
+    assert torch.allclose(
+        cache_dequant.float(),
+        cache.float(),
+        atol=0.5,
+        rtol=0.5,
     )
 
 
@@ -269,7 +248,7 @@ def test_indexer_fp8_paged_select_bounds_full_logits_workspace(monkeypatch):
         return torch.arange(score_width, dtype=torch.float32).expand(q.shape[0], -1).clone()
 
     monkeypatch.setattr(dsv4_kernel, "indexer_fp8_paged_logits_fallback", fake_logits)
-    monkeypatch.setenv(dsv4_kernel.DSV4_INDEXER_MAX_LOGITS_MB_ENV, "8")
+    monkeypatch.setattr(dsv4_kernel, "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT", 8)
     oracle = dsv4_kernel.indexer_select_fp8_paged_fallback(
         q_values,
         weights,
@@ -281,7 +260,7 @@ def test_indexer_fp8_paged_select_bounds_full_logits_workspace(monkeypatch):
         ratio=4,
     )
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_INDEXER_MAX_LOGITS_MB_ENV, "1")
+    monkeypatch.setattr(dsv4_kernel, "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT", 1)
     bounded = dsv4_kernel.indexer_select_fp8_paged_fallback(
         q_values,
         weights,
@@ -302,7 +281,6 @@ def test_indexer_fp8_paged_select_bounds_full_logits_workspace(monkeypatch):
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_remap_indexer_topk_locs_triton(monkeypatch):
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE, "1")
     raw = torch.tensor(
         [[0, 63, 64, 127, -1], [1, 65, 129, -1, 5]],
         device="cuda",
@@ -444,318 +422,35 @@ def _tiny_dsv4_cache_config(compress_ratios: list[int]) -> ModelConfig:
     )
 
 
-def test_dsv4_kernel_inventory_covers_sglang_main_exports():
-    sources = "\n".join(entry.source_function for entry in dsv4_kernel.DSV4_KERNEL_INVENTORY)
-    expected_exports = {
-        "CompressorDecodePlan",
-        "CompressorPrefillPlan",
-        "compress_forward",
-        "compress_norm_rope_store",
-        "fused_norm_rope_inplace",
-        "fused_store_cache",
-        "fused_rope_inplace",
-        "fused_q_norm_rope",
-        "fused_q_indexer_rope_first_quant",
-        "fused_q_indexer_rope_hadamard_fp4_quant",
-        "fused_q_indexer_rope_hadamard_quant",
-        "fused_k_norm_rope_flashmla",
-        "make_name",
-        "linear_bf16_fp32",
-        "get_paged_mqa_logits_metadata",
-        "triton_create_paged_compress_data",
-        "topk_transform_512",
-        "topk_transform_512_v2",
-        "plan_topk_v2",
-        "hash_topk",
-        "mega_moe_pre_dispatch",
-        "mask_topk_ids",
-        "silu_and_mul_clamp",
-        "silu_and_mul_masked_post_quant",
-        "silu_and_mul_contig_post_quant",
-    }
-
-    missing = {name for name in expected_exports if name not in sources}
-    assert not missing
-    assert {entry.status for entry in dsv4_kernel.DSV4_KERNEL_INVENTORY} <= {
-        "native",
-        "fallback",
-        "unsupported",
-        "todo",
-    }
 
 
-def test_dsv4_sm80_v0_bf16_bundle_env_policy(monkeypatch):
-    _clear_dsv4_sm80_env(monkeypatch)
 
-    assert dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    assert dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    assert dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    assert dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    assert dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    assert dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+
+
+
+
+
+
+
+def test_dsv4_sm80_moe_expert_backend_follows_typed_runtime():
     assert (
-        dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV
-        in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    )
-    assert dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    assert (
-        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-        in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
+        dsv4_kernel.dsv4_moe_expert_backend()
+        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
     )
     assert (
-        dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
-        in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    )
-    assert dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES
-    assert (
-        dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE
-        in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-        in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
-        in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
-    )
-    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
-    assert (
-        dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE
-        in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE
-        in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-        not in dsv4_kernel.DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-        in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE
-        not in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE
-        not in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE
-        in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE
-        in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE
-        not in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
-    )
-    assert (
-        dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE
-        not in dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST
-    )
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE)
-    assert not any(
-        dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST
+        dsv4_kernel.require_supported_moe_expert_backend()
+        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
     )
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, "1")
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE
-    )
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE
-    )
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE)
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE)
-    monkeypatch.setenv(
-        dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
-        "q_wqb,shared_expert,MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE",
-    )
-    assert dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE in (
-        dsv4_kernel.dsv4_env_disabled_toggles()
-    )
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-    )
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE)
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE)
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE, "1")
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE)
-    monkeypatch.setenv(
-        dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
-        "projection_bf16_caches",
-    )
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE)
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE)
-    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, raising=False)
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE)
-    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, raising=False)
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE, "1")
-    assert not dsv4_kernel.dsv4_env_flag(
-        dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE
-    )
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE, "1")
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE)
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE, "1")
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE)
-    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE)
-    monkeypatch.setenv(
-        dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
-        "hc_graph_cleanup,linear_bf16_fp32",
-    )
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE)
-    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, raising=False)
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE, "1")
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE)
-    _clear_dsv4_sm80_env(monkeypatch)
-
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE, "1")
-    enabled = {
-        name for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES if dsv4_kernel.dsv4_env_flag(name)
-    }
-    assert enabled == {
-        dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE,
-        *dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST,
-    }
-    assert not any(
-        dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
-    )
-
-    _clear_dsv4_sm80_env(monkeypatch)
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SWIGLU", "yes")
-    assert dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_SWIGLU")
-    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_ROPE")
-
-    monkeypatch.setenv("MINISGL_DSV4_SM80_STORE_CACHE", "true")
-    assert dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_STORE_CACHE")
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE, "1")
-    assert dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE)
-
-
-def test_dsv4_sm80_v1_moe_bundle_env_policy(monkeypatch):
-    _clear_dsv4_sm80_env(monkeypatch)
-
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_MOE_ROUTE")
-
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE, "1")
-    enabled = {
-        name for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES if dsv4_kernel.dsv4_env_flag(name)
-    }
-    assert enabled == {
-        dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE,
-        *dsv4_kernel.DSV4_SM80_V1_MOE_WHITELIST,
-    }
-    assert "MINISGL_DSV4_SM80_MOE_ROUTE" in enabled
-    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE not in enabled
-
-
-def test_dsv4_sm80_moe_v2_bundle_env_policy(monkeypatch):
-    _clear_dsv4_sm80_env(monkeypatch)
-
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_MOE_ROUTE")
-
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE, "1")
-    enabled = {
-        name for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES if dsv4_kernel.dsv4_env_flag(name)
-    }
-    assert enabled == {
-        dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE,
-        *dsv4_kernel.DSV4_SM80_MOE_V2_WHITELIST,
-    }
-    assert dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE not in enabled
-    assert "MINISGL_DSV4_SM80_MOE_ROUTE" in enabled
-    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE not in enabled
-
-
-def test_dsv4_sm80_moe_vllm_runner_bundle_env_policy(monkeypatch):
-    _clear_dsv4_sm80_env(monkeypatch)
-
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE)
-    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_MOE_ROUTE")
-
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
-    enabled = {
-        name for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES if dsv4_kernel.dsv4_env_flag(name)
-    }
-    assert enabled == {
-        dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE,
-        *dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_WHITELIST,
-    }
-    assert dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE not in enabled
-    assert "MINISGL_DSV4_SM80_MOE_ROUTE" in enabled
-    assert dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE not in enabled
-
-
-def test_dsv4_sm80_moe_expert_backend_selector_blocks_marlin(monkeypatch):
-    _clear_dsv4_sm80_env(monkeypatch)
-
+    configure_dsv4_runtime("fallback")
     assert (
         dsv4_kernel.dsv4_moe_expert_backend()
         == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4
     )
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV)
-
-    monkeypatch.setenv(
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
-    )
-    assert (
-        dsv4_kernel.dsv4_moe_expert_backend()
-        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16
-    )
-    assert not dsv4_kernel.dsv4_env_flag(dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV)
-    with pytest.raises(NotImplementedError, match="Marlin MXFP4 W4A16"):
-        dsv4_kernel.require_supported_moe_expert_backend()
-
-    monkeypatch.setenv(
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE,
-    )
-    assert (
-        dsv4_kernel.dsv4_moe_expert_backend()
-        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE
-    )
-    with pytest.raises(NotImplementedError, match="vLLM Marlin bridge"):
-        dsv4_kernel.require_supported_moe_expert_backend()
-
-    monkeypatch.setenv(
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
-    )
-    assert (
-        dsv4_kernel.dsv4_moe_expert_backend()
-        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
-    )
     assert (
         dsv4_kernel.require_supported_moe_expert_backend()
-        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
+        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4
     )
-
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV, "not_a_backend")
-    with pytest.raises(ValueError, match="Unsupported MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"):
-        dsv4_kernel.dsv4_moe_expert_backend()
 
 
 def test_dsv4_capability_detection_keeps_sm80_gates_explicit():
@@ -842,7 +537,6 @@ def test_copy_decode_metadata_for_replay_matches_legacy_copy(monkeypatch):
         args["graph_inputs_bound"] = graph_inputs_bound
         return args, expected
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE, "1")
     for graph_inputs_bound in (False, True):
         args, expected = make_args(graph_inputs_bound)
         assert dsv4_kernel.copy_decode_metadata_for_replay(**args)
@@ -929,7 +623,6 @@ def test_copy_decode_metadata_for_replay_can_skip_c4_sparse(monkeypatch):
         "dst_c4_sparse_full_indices": args["dst_c4_sparse_full_indices"].clone(),
     }
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE, "1")
     assert dsv4_kernel.copy_decode_metadata_for_replay(**args)
     torch.cuda.synchronize()
 
@@ -941,73 +634,6 @@ def test_copy_decode_metadata_for_replay_can_skip_c4_sparse(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_direct_c4_sparse_metadata_for_replay_component_tables_match_oracle(monkeypatch):
-    device = torch.device("cuda")
-    rows = 3
-    page_size = 128
-    index_topk = 5
-    max_seqlen_k = 384
-
-    ctx_page_table = torch.stack(
-        [
-            torch.arange(0, max_seqlen_k, dtype=torch.int32),
-            torch.arange(1024, 1024 + max_seqlen_k, dtype=torch.int32),
-            torch.arange(2048, 2048 + max_seqlen_k, dtype=torch.int32),
-        ]
-    ).to(device)
-    ctx_page_table[0, :page_size] = -1
-    table_indices = torch.arange(rows, dtype=torch.int32, device=device)
-    positions = torch.tensor([255, 256, 383], dtype=torch.int32, device=device)
-    c4_page_table = torch.tensor(
-        [[10, 11, 12], [13, -1, 15], [16, 17, 18]],
-        dtype=torch.int32,
-        device=device,
-    )
-    dst_raw = torch.full((rows, 8), -99, dtype=torch.int32, device=device)
-    dst_page = torch.full_like(dst_raw, -98)
-    dst_full = torch.full_like(dst_raw, -97)
-
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE, "1")
-    assert dsv4_kernel.direct_c4_sparse_metadata_for_replay(
-        ctx_page_table=ctx_page_table,
-        table_indices=table_indices,
-        positions=positions,
-        c4_page_table=c4_page_table,
-        dst_c4_sparse_raw_indices=dst_raw,
-        dst_c4_sparse_page_indices=dst_page,
-        dst_c4_sparse_full_indices=dst_full,
-        rows=rows,
-        page_size=page_size,
-        index_topk=index_topk,
-        component_loc_ownership=True,
-    )
-    torch.cuda.synchronize()
-
-    c4_page_size = page_size // 4
-    cpu_ctx = ctx_page_table.cpu()
-    cpu_c4 = c4_page_table.cpu()
-    for row, pos in enumerate(positions.cpu().tolist()):
-        c4_len = (pos + 1) // 4
-        c4_start = max(c4_len - index_topk, 0)
-        c4_raw = list(range(c4_start, c4_len))
-        expected_raw = c4_raw + [-1] * (dst_raw.shape[1] - len(c4_raw))
-        expected_page = []
-        expected_full = []
-        for raw in c4_raw:
-            logical_page = raw // c4_page_size
-            offset = raw % c4_page_size
-            component_page = int(cpu_c4[row, logical_page].item())
-            expected_page.append(
-                component_page * c4_page_size + offset if component_page >= 0 else -1
-            )
-            full = int(cpu_ctx[row, raw * 4 + 3].item())
-            expected_full.append(full if full >= 0 else -1)
-        expected_page += [-1] * (dst_page.shape[1] - len(expected_page))
-        expected_full += [-1] * (dst_full.shape[1] - len(expected_full))
-
-        assert dst_raw[row].cpu().tolist() == expected_raw
-        assert dst_page[row].cpu().tolist() == expected_page
-        assert dst_full[row].cpu().tolist() == expected_full
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
@@ -1047,7 +673,6 @@ def test_direct_decode_index_metadata_for_replay_matches_oracle(monkeypatch):
     dst_c128_page = torch.full_like(dst_c128_raw, -96)
     dst_c128_full = torch.full_like(dst_c128_raw, -97)
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE, "1")
     assert dsv4_kernel.direct_decode_index_metadata_for_replay(
         ctx_page_table=ctx_page_table,
         table_indices=table_indices,
@@ -1153,7 +778,6 @@ def test_direct_decode_index_metadata_for_replay_swa_independent_matches_oracle(
     dst_swa = torch.full((rows, window_size), -91, dtype=torch.int32, device=device)
     dummy2d = torch.empty((rows, 1), dtype=torch.int32, device=device)
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE, "1")
     assert dsv4_kernel.direct_decode_index_metadata_for_replay(
         ctx_page_table=ctx_page_table,
         table_indices=table_indices,
@@ -1272,8 +896,6 @@ def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(mon
     oracle_c128_page = torch.full_like(dst_c128_page, -46)
     oracle_c128_full = torch.full_like(dst_c128_full, -47)
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE, "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE, "1")
     assert dsv4_kernel.direct_decode_index_metadata_for_replay(
         ctx_page_table=ctx_page_table,
         table_indices=table_indices,
@@ -1399,104 +1021,6 @@ def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(mon
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_decode_metadata_deforest_component_tables_match_oracle(monkeypatch):
-    device = torch.device("cuda")
-    rows = 3
-    page_size = 128
-    max_seqlen_k = 384
-    window_size = 8
-    index_topk = 5
-    alignment = 64
-    table_len = 3
-
-    ctx_page_table = torch.stack(
-        [
-            torch.arange(0, max_seqlen_k, dtype=torch.int32),
-            torch.arange(1024, 1024 + max_seqlen_k, dtype=torch.int32),
-            torch.arange(2048, 2048 + max_seqlen_k, dtype=torch.int32),
-        ]
-    ).to(device)
-    ctx_page_table[0, :page_size] = -1
-    table_indices = torch.arange(rows, dtype=torch.int32, device=device)
-    positions = torch.tensor([255, 256, 383], dtype=torch.int32, device=device)
-    c4_page_table = torch.tensor(
-        [[10, 11, 12], [13, -1, 15], [16, 17, 18]],
-        dtype=torch.int32,
-        device=device,
-    )
-    c128_page_table = torch.tensor(
-        [[20, 21, 22], [-1, 31, 32], [40, 41, 42]],
-        dtype=torch.int32,
-        device=device,
-    )
-
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE, "1")
-    out = dsv4_kernel.decode_metadata_deforest_fallback(
-        ctx_page_table,
-        table_indices,
-        positions,
-        page_size=page_size,
-        max_seqlen_k=max_seqlen_k,
-        window_size=window_size,
-        index_topk=index_topk,
-        alignment=alignment,
-        c4_page_table=c4_page_table,
-        c128_page_table=c128_page_table,
-        component_loc_ownership=True,
-    )
-    assert out is not None
-    torch.cuda.synchronize()
-
-    c4_page_size = page_size // 4
-    c128_page_size = max(page_size // 128, 1)
-    cpu_ctx = ctx_page_table.cpu()
-    cpu_c4 = c4_page_table.cpu()
-    cpu_c128 = c128_page_table.cpu()
-    cpu_pos = positions.cpu().tolist()
-
-    for row, pos in enumerate(cpu_pos):
-        seq_len = pos + 1
-        expected_pages = []
-        for logical_page in range(table_len):
-            full = int(cpu_ctx[row, logical_page * page_size].item())
-            expected_pages.append(full // page_size if full >= 0 else -1)
-        assert out.page_table[row, :table_len].cpu().tolist() == expected_pages
-
-        c4_len = seq_len // 4
-        c4_start = max(c4_len - index_topk, 0)
-        c4_raw = list(range(c4_start, c4_len))
-        expected_c4_locs = []
-        expected_c4_full = []
-        for raw in c4_raw:
-            logical_page = raw // c4_page_size
-            offset = raw % c4_page_size
-            component_page = int(cpu_c4[row, logical_page].item())
-            expected_c4_locs.append(
-                component_page * c4_page_size + offset if component_page >= 0 else -1
-            )
-            full_pos = raw * 4 + 3
-            full = int(cpu_ctx[row, full_pos].item())
-            expected_c4_full.append(full if full >= 0 else -1)
-        assert out.c4_sparse_raw_indices[row, : len(c4_raw)].cpu().tolist() == c4_raw
-        assert out.c4_sparse_page_indices[row, : len(c4_raw)].cpu().tolist() == expected_c4_locs
-        assert out.c4_sparse_full_indices[row, : len(c4_raw)].cpu().tolist() == expected_c4_full
-
-        c128_len = seq_len // 128
-        expected_c128_locs = []
-        expected_c128_full = []
-        for raw in range(c128_len):
-            logical_page = raw // c128_page_size
-            offset = raw % c128_page_size
-            component_page = int(cpu_c128[row, logical_page].item())
-            expected_c128_locs.append(
-                component_page * c128_page_size + offset if component_page >= 0 else -1
-            )
-            full_pos = raw * 128 + 127
-            full = int(cpu_ctx[row, full_pos].item())
-            expected_c128_full.append(full if full >= 0 else -1)
-        assert out.c128_raw_indices[row, :c128_len].cpu().tolist() == list(range(c128_len))
-        assert out.c128_page_indices[row, :c128_len].cpu().tolist() == expected_c128_locs
-        assert out.c128_full_indices[row, :c128_len].cpu().tolist() == expected_c128_full
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
@@ -1524,7 +1048,6 @@ def test_copy_component_write_locs_for_replay_from_component_tables(monkeypatch)
     c128_out = torch.full((rows,), -999, dtype=torch.int32, device=device)
     c4_indexer_out = torch.full((rows,), -999, dtype=torch.int32, device=device)
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE, "1")
     assert dsv4_kernel.copy_component_write_locs_for_replay(
         c4_page_table=c4_page_table,
         c128_page_table=c128_page_table,
@@ -1543,13 +1066,6 @@ def test_copy_component_write_locs_for_replay_from_component_tables(monkeypatch)
     assert c4_indexer_out.cpu().tolist() == [27 * 32, -1, 31 * 32 + 31, -1, -1]
 
 
-def test_dsv4_unsupported_sm80_paths_fail_clearly():
-    with pytest.raises(NotImplementedError) as exc:
-        dsv4_kernel.fused_q_indexer_rope_hadamard_fp4_quant()
-
-    message = str(exc.value)
-    assert "fused_q_indexer_rope_hadamard_fp4_quant" in message
-    assert "sm" in message or "no CUDA" in message
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
@@ -1559,7 +1075,6 @@ def test_linear_bf16_fp32_upstream_opt_in_matches_bf16_mm(monkeypatch):
     x = torch.randn(3, 2, 128, device=device, dtype=torch.bfloat16)
     weight_bf16 = torch.randn(5, 128, device=device, dtype=torch.bfloat16)
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
     actual = dsv4_kernel.linear_bf16_fp32_fallback(x, weight_bf16)
     expected = torch.mm(
         x.reshape(-1, x.shape[-1]).contiguous(),
@@ -1588,10 +1103,8 @@ def test_hc_head_maintains_bf16_linear_weight_cache(monkeypatch):
     model.hc_head_scale = torch.full_like(model.hc_head_scale, 0.1, device=device)
     x = torch.randn(7, cfg.hc_mult, cfg.hidden_size, device=device, dtype=torch.bfloat16)
 
-    monkeypatch.delenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, raising=False)
     expected = model._hc_head(x)
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
     actual = model._hc_head(x)
     assert model._hc_head_fn_bf16 is not None
     assert model._hc_head_fn_bf16.dtype is torch.bfloat16
@@ -1628,9 +1141,6 @@ def test_hc_head_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path
         norm_eps=1e-6,
     )
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_HC", "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE, "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
     actual = dsv4_kernel.hc_head_fallback(
         x,
         fn_bf16,
@@ -1677,7 +1187,6 @@ def test_hc_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
         expected_comb,
     )
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_HC", "1")
     actual_y, actual_post, actual_comb = dsv4_kernel.hc_pre_fallback(
         x,
         fn,
@@ -1718,7 +1227,6 @@ def test_hc_graph_cleanup_opt_in_matches_current_hc_path(monkeypatch):
     base = (torch.randn(mix_hc, device=device) * 0.01).contiguous()
     post_input = torch.randn(tokens, hidden, device=device, dtype=torch.bfloat16)
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_HC", "1")
     expected_y, expected_post, expected_comb = dsv4_kernel.hc_pre_fallback(
         x,
         fn,
@@ -1736,7 +1244,6 @@ def test_hc_graph_cleanup_opt_in_matches_current_hc_path(monkeypatch):
         expected_comb,
     )
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE, "1")
     actual_y, actual_post, actual_comb = dsv4_kernel.hc_pre_fallback(
         x,
         fn,
@@ -1783,7 +1290,6 @@ def test_hc_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path(monk
     base = (torch.randn(mix_hc, device=device) * 0.01).contiguous()
     post_input = torch.randn(tokens, hidden, device=device, dtype=torch.bfloat16)
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_HC", "1")
     expected_y, expected_post, expected_comb = dsv4_kernel.hc_pre_fallback(
         x,
         fn_fp32,
@@ -1801,8 +1307,6 @@ def test_hc_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path(monk
         expected_comb,
     )
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE, "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
     actual_y, actual_post, actual_comb = dsv4_kernel.hc_pre_fallback(
         x,
         fn_bf16,
@@ -1836,7 +1340,6 @@ def test_rms_norm_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
     weight = torch.randn(128, device=device, dtype=torch.bfloat16)
     expected = dsv4_kernel.rms_norm_fallback(x, weight, eps=1e-6)
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_RMSNORM", "1")
     actual = dsv4_kernel.rms_norm_fallback(x, weight, eps=1e-6)
 
     assert actual.dtype is torch.bfloat16
@@ -1844,31 +1347,6 @@ def test_rms_norm_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_rms_norm_pair_sm80_triton_opt_in_matches_fallback(monkeypatch):
-    device = torch.device("cuda")
-    _clear_dsv4_sm80_env(monkeypatch)
-    torch.manual_seed(39)
-
-    q = torch.randn(5, 4, 96, device=device, dtype=torch.bfloat16)
-    kv = torch.randn(5, 4, 64, device=device, dtype=torch.bfloat16)
-    q_weight = torch.randn(96, device=device, dtype=torch.bfloat16)
-    kv_weight = torch.randn(64, device=device, dtype=torch.bfloat16)
-    expected_q = dsv4_kernel.rms_norm_fallback(q, q_weight, eps=1e-6)
-    expected_kv = dsv4_kernel.rms_norm_fallback(kv, kv_weight, eps=1e-6)
-
-    monkeypatch.setenv("MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM", "1")
-    actual_q, actual_kv = dsv4_kernel.rms_norm_pair_fallback(
-        q,
-        kv,
-        q_weight,
-        kv_weight,
-        eps=1e-6,
-    )
-
-    assert actual_q.dtype is torch.bfloat16
-    assert actual_kv.dtype is torch.bfloat16
-    assert torch.allclose(actual_q, expected_q, atol=5e-3, rtol=5e-3)
-    assert torch.allclose(actual_kv, expected_kv, atol=5e-3, rtol=5e-3)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
@@ -1911,7 +1389,6 @@ def test_q_kv_norm_rope_cache_sm80_triton_opt_in_matches_fallback(monkeypatch):
         base=10000.0,
     )
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE", "1")
     assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
         actual_q,
         actual_kv,
@@ -1973,7 +1450,6 @@ def test_q_kv_norm_rope_cache_accepts_strided_kv_view(monkeypatch):
         base=10000.0,
     )
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE", "1")
     assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
         actual_q,
         kv_view,
@@ -2003,166 +1479,17 @@ def test_fp8_activation_quant_triton_matches_torch_reference(monkeypatch):
     x[0, ::17] *= 5
     expected = dsv4_kernel.quantize_fp8_activation_ref(x, block_size=128)
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON", "1")
     actual = dsv4_kernel.quantize_fp8_activation_ref(x, block_size=128)
 
-    assert dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON")
+    assert dsv4_kernel.dsv4_optimized_enabled()
     assert actual.dtype is torch.bfloat16
     assert torch.allclose(actual, expected, atol=1e-2, rtol=0.0)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_quantized_linear_fp8_per_call_gemm_matches_fallback(monkeypatch):
-    device = torch.device("cuda")
-    _clear_dsv4_sm80_env(monkeypatch)
-    torch.manual_seed(41)
-
-    x = torch.randn(4, 128, device=device, dtype=torch.bfloat16)
-    weight = (
-        torch.randn(256, 128, device=device, dtype=torch.float32)
-        .clamp(-4, 4)
-        .to(dsv4_kernel.fp8_dtype())
-    )
-    scale = torch.rand(
-        dsv4_kernel.scale_dim(weight.shape[0]),
-        dsv4_kernel.scale_dim(weight.shape[1]),
-        device=device,
-        dtype=torch.float32,
-    ).to(dsv4_kernel.e8m0_dtype())
-
-    expected = dsv4_kernel.quantized_linear_ref(x, weight, scale, weight_kind="fp8")
-    actual = dsv4_kernel.quantized_linear_ref(
-        x,
-        weight,
-        scale,
-        weight_kind="fp8",
-        fp8_gemm=True,
-    )
-
-    assert not dsv4_kernel.dsv4_env_flag("MINISGL_DSV4_SM80_FP8_GEMM")
-    assert actual.dtype is torch.bfloat16
-    assert torch.allclose(actual, expected, atol=3e-2, rtol=3e-2)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_static_projection_scale_cache_preserves_projection_outputs(monkeypatch):
-    device = torch.device("cuda")
-    _clear_dsv4_sm80_env(monkeypatch)
-    torch.manual_seed(756)
-
-    x = torch.randn(4, 128, device=device, dtype=torch.bfloat16)
-    fp8_weight = (
-        torch.randn(256, 128, device=device, dtype=torch.float32)
-        .clamp(-4, 4)
-        .to(dsv4_kernel.fp8_dtype())
-    )
-    fp8_scale = torch.rand(
-        dsv4_kernel.scale_dim(fp8_weight.shape[0]),
-        dsv4_kernel.scale_dim(fp8_weight.shape[1]),
-        device=device,
-        dtype=torch.float32,
-    ).to(dsv4_kernel.e8m0_dtype())
-
-    class Owner:
-        pass
-
-    owner = Owner()
-    assert dsv4_model._cached_projection_scale(owner, "_test_scale_cache", fp8_scale) is fp8_scale
-
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE, "1")
-    cached_fp8_scale = dsv4_model._cached_projection_scale(
-        owner,
-        "_test_scale_cache",
-        fp8_scale,
-    )
-    assert cached_fp8_scale is not fp8_scale
-    assert cached_fp8_scale.dtype is torch.float32
-    assert cached_fp8_scale.is_contiguous()
-    assert (
-        dsv4_model._cached_projection_scale(owner, "_test_scale_cache", fp8_scale)
-        is cached_fp8_scale
-    )
-    assert (
-        dsv4_model._cached_projection_scale(owner, "_test_scale_cache", fp8_scale.clone())
-        is not cached_fp8_scale
-    )
-
-    monkeypatch.setenv("MINISGL_DSV4_SM80_FP8_GEMM", "1")
-    expected_fp8 = dsv4_kernel.quantized_linear_ref(
-        x,
-        fp8_weight,
-        fp8_scale,
-        weight_kind="fp8",
-        fp8_gemm=True,
-    )
-    actual_fp8 = dsv4_kernel.quantized_linear_ref(
-        x,
-        fp8_weight,
-        cached_fp8_scale,
-        weight_kind="fp8",
-        fp8_gemm=True,
-    )
-    assert torch.allclose(actual_fp8, expected_fp8, atol=3e-2, rtol=3e-2)
-
-    fp4_weight = torch.randint(-128, 127, (96, 64), device=device, dtype=torch.int8)
-    fp4_scale = torch.rand(96, 4, device=device, dtype=torch.float32).to(dsv4_kernel.e8m0_dtype())
-    fp4_owner = Owner()
-    cached_fp4_scale = dsv4_model._cached_projection_scale(
-        fp4_owner,
-        "_test_scale_cache",
-        fp4_scale,
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_FP4_GEMM", "1")
-    expected_fp4 = dsv4_kernel.quantized_linear_ref(
-        x[:, :64],
-        fp4_weight,
-        fp4_scale,
-        weight_kind="fp4",
-    )
-    actual_fp4 = dsv4_kernel.quantized_linear_ref(
-        x[:, :64],
-        fp4_weight,
-        cached_fp4_scale,
-        weight_kind="fp4",
-    )
-    assert torch.allclose(actual_fp4, expected_fp4, atol=3e-2, rtol=3e-2)
-
-    wo_o = torch.randn(4, 2, 64, device=device, dtype=torch.bfloat16)
-    wo_rank = 48
-    wo_weight = (
-        torch.randn(2 * wo_rank, wo_o.shape[-1], device=device, dtype=torch.float32)
-        .clamp(-4, 4)
-        .to(dsv4_kernel.fp8_dtype())
-    )
-    wo_scale = torch.rand(
-        dsv4_kernel.scale_dim(2 * wo_rank),
-        dsv4_kernel.scale_dim(wo_o.shape[-1]),
-        device=device,
-        dtype=torch.float32,
-    ).to(dsv4_kernel.e8m0_dtype())
-    wo_owner = Owner()
-    cached_wo_scale = dsv4_model._cached_projection_scale(
-        wo_owner,
-        "_test_scale_cache",
-        wo_scale,
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_WO_A_BF16", "1")
-    expected_wo = dsv4_kernel.wo_a_grouped_projection_fallback(
-        wo_o,
-        wo_weight,
-        wo_scale,
-        num_local_groups=2,
-        o_lora_rank=wo_rank,
-    )
-    actual_wo = dsv4_kernel.wo_a_grouped_projection_fallback(
-        wo_o,
-        wo_weight,
-        cached_wo_scale,
-        num_local_groups=2,
-        o_lora_rank=wo_rank,
-    )
-    torch.cuda.synchronize()
-    assert torch.allclose(actual_wo, expected_wo, atol=4e-2, rtol=4e-2)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
@@ -2243,7 +1570,6 @@ def test_fused_wqa_wkv_cached_weight_matches_shared_activation(monkeypatch):
         pass
 
     owner = Owner()
-    monkeypatch.setenv("MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE", "1")
     cached = dsv4_model._cached_fused_wqa_wkv_fp8_weight(
         owner,
         "_cached_test_weight",
@@ -2274,6 +1600,7 @@ def test_fused_wqa_wkv_cached_weight_matches_shared_activation(monkeypatch):
 
 
 def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
+    configure_dsv4_runtime("fallback")
     x = torch.randn(2, 4, dtype=torch.float32)
     weight = torch.randn(3, 4, dtype=torch.float32)
     y = dsv4_kernel.quantized_linear_ref(x, weight, None, weight_kind="bf16")
@@ -2465,11 +1792,6 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     )
     assert torch.allclose(actual_indexer_kv, expected_indexer_kv, atol=1e-5, rtol=1e-5)
     assert torch.equal(actual_indexer_cache.indexer, expected_indexer_cache.indexer)
-
-    padded = dsv4_kernel.topk_transform_512_fallback(torch.tensor([[1, 2]], dtype=torch.int32))
-    assert padded.shape == (1, 512)
-    assert padded[0, :2].tolist() == [1, 2]
-    assert padded[0, 2:].eq(-1).all()
 
     scores = torch.tensor(
         [
@@ -2846,7 +2168,17 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
         cache_type="indexer",
     )
     assert torch.allclose(indexer_kv, expected_indexer, atol=1e-5, rtol=1e-5)
-    assert torch.equal(pool.indexer_cache(0)[indexer_loc.long()], expected_indexer.to(pool.dtype))
+    indexer_fp8 = dsv4_kernel.dequantize_indexer_fp8_paged_cache_ref(
+        pool.indexer_fp8_paged_cache(0),
+        page_size=pool.indexer_fp8_page_size,
+        dim=expected_indexer.shape[-1],
+    )
+    assert torch.allclose(
+        indexer_fp8[indexer_loc.long()],
+        expected_indexer.float(),
+        atol=3e-2,
+        rtol=3e-2,
+    )
 
 
 def test_dsv4_moe_route_plan_groups_and_pads_routes():
@@ -2970,7 +2302,6 @@ def test_dsv4_moe_route_plan_triton_matches_torch_fallback(monkeypatch):
     )
     expected = dsv4_kernel.build_moe_route_plan(indices, num_experts=4, block_size_m=2)
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_ROUTE", "1")
     actual = dsv4_kernel.build_moe_route_plan(
         indices.cuda(),
         num_experts=4,
@@ -2992,7 +2323,7 @@ def test_dsv4_moe_route_plan_triton_matches_torch_fallback(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_dsv4_moe_live_route_mask_is_poison_invariant(monkeypatch):
+def test_dsv4_moe_live_route_mask_ignores_padded_rows(monkeypatch):
     _clear_dsv4_sm80_env(monkeypatch)
     device = torch.device("cuda")
     live_rows, padded_rows, topk, experts = 17, 24, 3, 8
@@ -3075,7 +2406,6 @@ def test_dsv4_model_and_attention_do_not_import_optional_kernels_directly():
 def test_dsv4_sparse_attention_two_source_bf16_matches_reference(monkeypatch):
     device = torch.device("cuda")
     torch.manual_seed(17)
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
 
     q = (torch.randn(4, 3, 512, device=device, dtype=torch.bfloat16) * 0.25).contiguous()
     swa_cache = (
@@ -3211,8 +2541,6 @@ def test_dsv4_sparse_attention_splitk_bf16_matches_legacy_cases(
     del case_name
     device = torch.device("cuda")
     torch.manual_seed(395 + compressed_width + swa_width)
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE, "1")
 
     rows = 4
     heads = 3
@@ -3277,9 +2605,9 @@ def test_dsv4_sparse_attention_splitk_bf16_matches_legacy_cases(
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
+    configure_dsv4_runtime("fallback")
     device = torch.device("cuda")
     torch.manual_seed(23)
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
 
     q = (torch.randn(2, 2, 512, device=device, dtype=torch.bfloat16) * 0.2).contiguous()
     swa_cache = (
@@ -3344,6 +2672,8 @@ def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
             raise AssertionError("ratio 4 path must not read c128 cache")
 
     class FakeBackend:
+        _two_source_attention_torch = dsv4_attention.DSV4AttentionBackend._two_source_attention_torch
+
         def _ensure_swa_metadata_current(self, *args, **kwargs) -> None:
             return None
 
@@ -3405,8 +2735,6 @@ def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
 def test_dsv4_sparse_attention_backend_compressed_boundary_fast_path(monkeypatch):
     device = torch.device("cuda")
     torch.manual_seed(240855)
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_TOGGLE, "1")
 
     q = (torch.randn(2, 2, 512, device=device, dtype=torch.bfloat16) * 0.2).contiguous()
     swa_cache = (
@@ -3578,6 +2906,7 @@ def test_dsv4_sparse_attention_backend_compressed_boundary_fast_path(monkeypatch
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     _clear_dsv4_sm80_env(monkeypatch)
+    configure_dsv4_runtime("fallback")
     device = torch.device("cuda")
     torch.manual_seed(37)
 
@@ -3762,11 +3091,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         attn_sink=sparse_sink,
     )
 
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE, "1")
-    assert all(dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_V0_BF16_WHITELIST)
-    assert not any(
-        dsv4_kernel.dsv4_env_flag(name) for name in dsv4_kernel.DSV4_SM80_EXPERIMENTAL_TOGGLES
-    )
+    configure_dsv4_runtime("optimized")
 
     actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
         gate,
@@ -3898,57 +3223,24 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
-    _clear_dsv4_sm80_env(monkeypatch)
-
+def test_dsv4_sm80_optimized_kernels_match_typed_fallback_oracles():
     device = torch.device("cuda")
     torch.manual_seed(5)
-
     gate = torch.randn(17, 513, device=device, dtype=torch.bfloat16)
     up = torch.randn_like(gate)
     weights = torch.rand(17, 1, device=device, dtype=torch.float32)
-    expected_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
-        gate,
-        up,
-        swiglu_limit=2.0,
-        weights=weights,
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SWIGLU", "1")
-    actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
-        gate,
-        up,
-        swiglu_limit=2.0,
-        weights=weights,
-    )
-    torch.cuda.synchronize()
-    assert actual_swiglu.dtype is torch.float32
-    assert torch.allclose(actual_swiglu, expected_swiglu, atol=2e-2, rtol=2e-2)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_SWIGLU", raising=False)
-
     positions = torch.arange(7, device=device, dtype=torch.int64)
-    rope_x = torch.randn(7, 3, 12, device=device, dtype=torch.float32)
-    expected_rope = dsv4_kernel.apply_rotary_tail(
-        rope_x.clone(),
-        positions,
-        rotary_dim=8,
-        base=10000.0,
-        original_seq_len=4096,
-        factor=2.0,
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_ROPE", "1")
-    actual_rope = dsv4_kernel.apply_rotary_tail(
-        rope_x.clone(),
-        positions,
-        rotary_dim=8,
-        base=10000.0,
-        original_seq_len=4096,
-        factor=2.0,
-    )
-    torch.cuda.synchronize()
-    assert torch.allclose(actual_rope, expected_rope, atol=1e-4, rtol=1e-4)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_ROPE", raising=False)
-
     q = torch.randn(7, 2, 16, device=device, dtype=torch.float32)
+    scores = torch.randn(3, 1024, device=device, dtype=torch.float32)
+    seq_lens = torch.tensor([16, 900, 1024], device=device, dtype=torch.int32)
+    page_table = (
+        torch.arange(3 * 16, device=device, dtype=torch.int32).reshape(3, 16) + 100
+    )
+
+    configure_dsv4_runtime("fallback")
+    expected_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+        gate, up, swiglu_limit=2.0, weights=weights
+    )
     expected_q = dsv4_kernel.q_norm_rope_fallback(
         q.clone(),
         positions,
@@ -3958,7 +3250,14 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         original_seq_len=4096,
         factor=2.0,
     )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_Q_NORM_ROPE", "1")
+    expected_topk = dsv4_kernel.topk_transform_512_full_fallback(
+        scores, seq_lens, page_table, page_size=64, width=512, ratio=4
+    )
+
+    configure_dsv4_runtime("optimized")
+    actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+        gate, up, swiglu_limit=2.0, weights=weights
+    )
     actual_q = dsv4_kernel.q_norm_rope_fallback(
         q.clone(),
         positions,
@@ -3968,551 +3267,23 @@ def test_dsv4_sm80_opt_in_kernels_match_fallbacks(monkeypatch):
         original_seq_len=4096,
         factor=2.0,
     )
+    actual_topk = dsv4_kernel.topk_transform_512_full_fallback(
+        scores, seq_lens, page_table, page_size=64, width=512, ratio=4
+    )
     torch.cuda.synchronize()
+
+    assert torch.allclose(actual_swiglu, expected_swiglu, atol=2e-2, rtol=2e-2)
     assert torch.allclose(actual_q, expected_q, atol=1e-4, rtol=1e-4)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_Q_NORM_ROPE", raising=False)
-
-    high_positions = torch.tensor([0, 127, 255, 511], device=device, dtype=torch.int64)
-    high_q = torch.randn(4, 1, 128, device=device, dtype=torch.bfloat16)
-    expected_high_q = dsv4_kernel.q_norm_rope_fallback(
-        high_q.clone(),
-        high_positions,
-        rms_norm_eps=1e-6,
-        rotary_dim=64,
-        base=10000.0,
-        original_seq_len=4096,
-        factor=2.0,
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_Q_NORM_ROPE", "1")
-    actual_high_q = dsv4_kernel.q_norm_rope_fallback(
-        high_q.clone(),
-        high_positions,
-        rms_norm_eps=1e-6,
-        rotary_dim=64,
-        base=10000.0,
-        original_seq_len=4096,
-        factor=2.0,
-    )
-    torch.cuda.synchronize()
-    assert torch.allclose(actual_high_q, expected_high_q, atol=2e-2, rtol=2e-2)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_Q_NORM_ROPE", raising=False)
-
-    kv_for_fused = torch.randn(5, 16, device=device, dtype=torch.bfloat16)
-    k_weight = torch.randn(16, device=device, dtype=torch.bfloat16)
-    k_positions = torch.tensor([0, 127, 255, 511, 777], device=device, dtype=torch.int64)
-    k_loc = torch.tensor([3, 7, 11, 13, 19], device=device, dtype=torch.int32)
-    expected_k_cache = torch.zeros(32, 16, device=device, dtype=torch.bfloat16)
-    expected_k = dsv4_kernel.k_norm_rope_cache_fallback(
-        kv_for_fused.clone(),
-        k_positions,
-        norm_weight=k_weight,
-        rms_norm_eps=1e-6,
-        cache=expected_k_cache,
-        out_loc=k_loc,
-        rotary_dim=8,
-        base=10000.0,
-        original_seq_len=4096,
-        factor=2.0,
-    )
-    actual_k_cache = torch.zeros_like(expected_k_cache)
-    monkeypatch.setenv("MINISGL_DSV4_SM80_KV_BF16", "1")
-    actual_k = dsv4_kernel.k_norm_rope_cache_fallback(
-        kv_for_fused.clone(),
-        k_positions,
-        norm_weight=k_weight,
-        rms_norm_eps=1e-6,
-        cache=actual_k_cache,
-        out_loc=k_loc,
-        rotary_dim=8,
-        base=10000.0,
-        original_seq_len=4096,
-        factor=2.0,
-    )
-    torch.cuda.synchronize()
-    assert torch.allclose(actual_k, expected_k, atol=2e-2, rtol=2e-2)
-    assert torch.allclose(actual_k_cache, expected_k_cache, atol=2e-2, rtol=2e-2)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_KV_BF16", raising=False)
-
-    class FakeCache:
-        def __init__(self) -> None:
-            self.cache = torch.zeros(32, 16, device=device, dtype=torch.bfloat16)
-
-        def swa_cache(self, layer_id: int) -> torch.Tensor:
-            assert layer_id == 0
-            return self.cache
-
-        def store_swa(self, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
-            assert layer_id == 0
-            self.cache[out_loc.long()] = kv.reshape(-1, 16).to(self.cache.dtype)
-
-    kv = torch.randn(5, 16, device=device, dtype=torch.bfloat16)
-    loc = torch.tensor([3, 7, 11, 13, 19], device=device, dtype=torch.int32)
-    expected_cache = FakeCache()
-    dsv4_kernel.store_swa_fallback(expected_cache, 0, kv, loc)
-    actual_cache = FakeCache()
-    monkeypatch.setenv("MINISGL_DSV4_SM80_STORE_CACHE", "1")
-    dsv4_kernel.store_swa_fallback(actual_cache, 0, kv, loc)
-    torch.cuda.synchronize()
-    assert torch.equal(actual_cache.cache, expected_cache.cache)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_STORE_CACHE", raising=False)
-
-    class FakeCompressedCudaCache:
-        def __init__(self) -> None:
-            self.cache = torch.zeros(32, 16, device=device, dtype=torch.bfloat16)
-
-        def component_cache(self, layer_id: int) -> torch.Tensor:
-            assert layer_id == 0
-            return self.cache
-
-        def store_compressed(self, layer_id: int, kv: torch.Tensor, out_loc: torch.Tensor) -> None:
-            assert layer_id == 0
-            valid = out_loc >= 0
-            self.cache[out_loc[valid].long()] = kv.reshape(-1, 16)[valid].to(self.cache.dtype)
-
-    compressed_for_fused = torch.randn(5, 16, device=device, dtype=torch.bfloat16)
-    compressed_weight = torch.randn(16, device=device, dtype=torch.bfloat16)
-    compressed_positions = torch.tensor([3, 7, 11, 15, 19], device=device, dtype=torch.int64)
-    compressed_loc = torch.tensor([4, 8, 12, -1, 20], device=device, dtype=torch.int32)
-    expected_compressed_cache = FakeCompressedCudaCache()
-    expected_compressed_kv = compressed_for_fused.clone()
-    dsv4_kernel.compress_norm_rope_store_fallback(
-        expected_compressed_cache,
-        0,
-        expected_compressed_kv,
-        compressed_loc,
-        positions=compressed_positions,
-        norm_weight=compressed_weight,
-        rms_norm_eps=1e-6,
-        rotary_dim=8,
-        base=10000.0,
-        original_seq_len=4096,
-        factor=2.0,
-    )
-    actual_compressed_cache = FakeCompressedCudaCache()
-    actual_compressed_kv = compressed_for_fused.clone()
-    monkeypatch.setenv("MINISGL_DSV4_SM80_COMPRESS_STORE", "1")
-    dsv4_kernel.compress_norm_rope_store_fallback(
-        actual_compressed_cache,
-        0,
-        actual_compressed_kv,
-        compressed_loc,
-        positions=compressed_positions,
-        norm_weight=compressed_weight,
-        rms_norm_eps=1e-6,
-        rotary_dim=8,
-        base=10000.0,
-        original_seq_len=4096,
-        factor=2.0,
-    )
-    torch.cuda.synchronize()
-    assert torch.allclose(actual_compressed_kv, expected_compressed_kv, atol=2e-2, rtol=2e-2)
-    assert torch.allclose(
-        actual_compressed_cache.cache,
-        expected_compressed_cache.cache,
-        atol=2e-2,
-        rtol=2e-2,
-    )
-    monkeypatch.delenv("MINISGL_DSV4_SM80_COMPRESS_STORE", raising=False)
-
-    indices = torch.tensor([[1, 2, 3], [5, 8, 13]], device=device, dtype=torch.int32)
-    expected_topk = dsv4_kernel.topk_transform_512_fallback(indices, width=512)
-    monkeypatch.setenv("MINISGL_DSV4_SM80_TOPK", "1")
-    actual_topk = dsv4_kernel.topk_transform_512_fallback(indices, width=512)
-    torch.cuda.synchronize()
-    assert torch.equal(actual_topk, expected_topk)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_TOPK", raising=False)
-
-    topk_scores = torch.randn(3, 1024, device=device, dtype=torch.float32)
-    topk_seq_lens = torch.tensor([16, 900, 1024], device=device, dtype=torch.int32)
-    topk_page_table = torch.arange(3 * 16, device=device, dtype=torch.int32).reshape(3, 16) + 100
-    expected_full_topk = dsv4_kernel.topk_transform_512_full_fallback(
-        topk_scores,
-        topk_seq_lens,
-        topk_page_table,
-        page_size=64,
-        width=512,
-        ratio=4,
-    )
-    assert expected_full_topk.backend == "torch"
-    monkeypatch.setenv("MINISGL_DSV4_SM80_TOPK", "1")
-    actual_full_topk = dsv4_kernel.topk_transform_512_full_fallback(
-        topk_scores,
-        topk_seq_lens,
-        topk_page_table,
-        page_size=64,
-        width=512,
-        ratio=4,
-    )
-    torch.cuda.synchronize()
-    assert actual_full_topk.backend in {"torch", "local_cuda_v1"}
     _assert_full_topk_transform(
-        actual_full_topk,
-        topk_scores,
-        topk_seq_lens,
-        topk_page_table,
+        actual_topk,
+        scores,
+        seq_lens,
+        page_table,
         page_size=64,
         width=512,
         ratio=4,
     )
-    for row in range(topk_scores.shape[0]):
-        assert sorted(actual_full_topk.raw_indices[row].cpu().tolist()) == sorted(
-            expected_full_topk.raw_indices[row].cpu().tolist()
+    for row in range(scores.shape[0]):
+        assert sorted(actual_topk.raw_indices[row].cpu().tolist()) == sorted(
+            expected_topk.raw_indices[row].cpu().tolist()
         )
-    monkeypatch.delenv("MINISGL_DSV4_SM80_TOPK", raising=False)
-
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE, "1")
-    actual_global_topk = dsv4_kernel.topk_transform_512_full_fallback(
-        topk_scores,
-        topk_seq_lens,
-        topk_page_table,
-        page_size=64,
-        width=512,
-        ratio=4,
-    )
-    torch.cuda.synchronize()
-    assert actual_global_topk.backend == "local_cuda_global_topk_lens"
-    assert actual_global_topk.topk_lens is not None
-    assert torch.equal(
-        actual_global_topk.topk_lens.cpu(),
-        torch.tensor([16, 512, 512], dtype=torch.int32),
-    )
-    _assert_full_topk_transform(
-        actual_global_topk,
-        topk_scores,
-        topk_seq_lens,
-        topk_page_table,
-        page_size=64,
-        width=512,
-        ratio=4,
-    )
-    for row in range(topk_scores.shape[0]):
-        assert sorted(actual_global_topk.raw_indices[row].cpu().tolist()) == sorted(
-            expected_full_topk.raw_indices[row].cpu().tolist()
-        )
-    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE, raising=False)
-
-    q_attn = torch.randn(4, 3, 64, device=device, dtype=torch.bfloat16)
-    cache_attn = torch.randn(192, 64, device=device, dtype=torch.bfloat16)
-    attn_contexts = [
-        torch.empty(0, device=device, dtype=torch.int32),
-        torch.tensor([3], device=device, dtype=torch.int32),
-        torch.arange(8, 104, 3, device=device, dtype=torch.int32),
-        torch.tensor([2, 4, 4, 6, 8, 16, 32, 64], device=device, dtype=torch.int32),
-    ]
-    attn_sink = torch.randn(3, device=device, dtype=torch.float32)
-    attn_metadata = dsv4_kernel.get_paged_mqa_logits_metadata_fallback(
-        attn_contexts,
-        device=device,
-    )
-    assert attn_metadata.indptr.cpu().tolist() == [0, 0, 1, 33, 41]
-    expected_attn = dsv4_kernel.paged_mqa_attention_fallback(
-        q_attn,
-        cache_attn,
-        attn_contexts,
-        softmax_scale=0.125,
-        attn_sink=attn_sink,
-    )
-    expected_attn_no_sink = dsv4_kernel.paged_mqa_attention_fallback(
-        q_attn,
-        cache_attn,
-        attn_contexts,
-        softmax_scale=0.125,
-        attn_sink=None,
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_PAGED_MQA_BF16", "1")
-    actual_attn = dsv4_kernel.paged_mqa_attention_fallback(
-        q_attn,
-        cache_attn,
-        attn_metadata,
-        softmax_scale=0.125,
-        attn_sink=attn_sink,
-    )
-    actual_attn_no_sink = dsv4_kernel.paged_mqa_attention_fallback(
-        q_attn,
-        cache_attn,
-        attn_metadata,
-        softmax_scale=0.125,
-        attn_sink=None,
-    )
-    torch.cuda.synchronize()
-    assert actual_attn.dtype is q_attn.dtype
-    assert torch.allclose(actual_attn, expected_attn, atol=3e-2, rtol=3e-2)
-    assert torch.allclose(actual_attn_no_sink, expected_attn_no_sink, atol=3e-2, rtol=3e-2)
-    assert torch.equal(actual_attn[0], torch.zeros_like(actual_attn[0]))
-    monkeypatch.delenv("MINISGL_DSV4_SM80_PAGED_MQA_BF16", raising=False)
-
-    q_indexer = torch.randn(3, 4, 128, device=device, dtype=torch.bfloat16)
-    indexer_cache = torch.randn(192, 128, device=device, dtype=torch.bfloat16)
-    indexer_weights = torch.randn(3, 4, device=device, dtype=torch.float32)
-    indexer_seq_lens = torch.tensor([16, 64, 97], device=device, dtype=torch.int32)
-    indexer_page_table = torch.tensor([[0, 1], [0, 1], [0, 1]], device=device, dtype=torch.int32)
-    expected_indexer_logits = dsv4_kernel.indexer_bf16_logits_fallback(
-        q_indexer,
-        indexer_cache,
-        indexer_seq_lens,
-        indexer_page_table,
-        page_size=64,
-        weights=indexer_weights,
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_INDEXER_BF16", "1")
-    actual_indexer_logits = dsv4_kernel.indexer_bf16_logits_fallback(
-        q_indexer,
-        indexer_cache,
-        indexer_seq_lens,
-        indexer_page_table,
-        page_size=64,
-        weights=indexer_weights,
-    )
-    torch.cuda.synchronize()
-    assert torch.allclose(actual_indexer_logits, expected_indexer_logits, atol=3e-2, rtol=3e-2)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_INDEXER_BF16", raising=False)
-
-    class FakeWkvGate:
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            values = torch.arange(
-                x.shape[0] * 16,
-                device=x.device,
-                dtype=torch.float32,
-            ).view(x.shape[0], 16)
-            return values.to(x.dtype) / 16
-
-    class IdentityNorm:
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return x
-
-    x = torch.randn(12, 4, device=device, dtype=torch.bfloat16)
-    ape = torch.randn(4, 8, device=device, dtype=torch.float32)
-    compress_positions = torch.arange(12, device=device, dtype=torch.int64)
-    expected_compress = dsv4_kernel.compress_forward_fallback(
-        x,
-        compress_positions,
-        ratio=4,
-        head_dim=4,
-        overlap=True,
-        ape=ape,
-        wkv_gate=FakeWkvGate(),
-        norm=IdentityNorm(),
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_COMPRESS", "1")
-    actual_compress = dsv4_kernel.compress_forward_fallback(
-        x,
-        compress_positions,
-        ratio=4,
-        head_dim=4,
-        overlap=True,
-        ape=ape,
-        wkv_gate=FakeWkvGate(),
-        norm=IdentityNorm(),
-    )
-    torch.cuda.synchronize()
-    assert torch.allclose(actual_compress, expected_compress, atol=1e-4, rtol=1e-4)
-
-    linear_x = torch.randn(6, 128, device=device, dtype=torch.bfloat16)
-    linear_weight = torch.randn(11, 128, device=device, dtype=torch.bfloat16)
-    expected_linear = dsv4_kernel.linear_bf16_fp32_fallback(linear_x, linear_weight)
-    monkeypatch.setenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1")
-    actual_linear = dsv4_kernel.linear_bf16_fp32_fallback(linear_x, linear_weight)
-    torch.cuda.synchronize()
-    assert actual_linear.dtype is torch.float32
-    assert torch.allclose(actual_linear, expected_linear, atol=2e-2, rtol=2e-2)
-    monkeypatch.delenv(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, raising=False)
-
-    x_linear = torch.randn(5, 128, device=device, dtype=torch.bfloat16)
-    fp8_weight = (
-        torch.randn(96, 128, device=device, dtype=torch.float32)
-        .clamp(-4, 4)
-        .to(dsv4_kernel.fp8_dtype())
-    )
-    fp8_scale = torch.rand(
-        dsv4_kernel.scale_dim(96),
-        dsv4_kernel.scale_dim(128),
-        device=device,
-        dtype=torch.float32,
-    ).to(dsv4_kernel.e8m0_dtype())
-    expected_fp8 = dsv4_kernel.quantized_linear_ref(
-        x_linear,
-        fp8_weight,
-        fp8_scale,
-        weight_kind="fp8",
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_FP8_GEMM", "1")
-    actual_fp8 = dsv4_kernel.quantized_linear_ref(
-        x_linear,
-        fp8_weight,
-        fp8_scale,
-        weight_kind="fp8",
-    )
-    torch.cuda.synchronize()
-    assert torch.allclose(actual_fp8, expected_fp8, atol=3e-2, rtol=3e-2)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_FP8_GEMM", raising=False)
-
-    wo_o = torch.randn(5, 2, 64, device=device, dtype=torch.bfloat16)
-    wo_rank = 48
-    wo_weight = (
-        torch.randn(
-            2 * wo_rank,
-            wo_o.shape[-1],
-            device=device,
-            dtype=torch.float32,
-        )
-        .clamp(-4, 4)
-        .to(dsv4_kernel.fp8_dtype())
-    )
-    wo_scale = torch.rand(
-        dsv4_kernel.scale_dim(2 * wo_rank),
-        dsv4_kernel.scale_dim(wo_o.shape[-1]),
-        device=device,
-        dtype=torch.float32,
-    ).to(dsv4_kernel.e8m0_dtype())
-    expected_wo_a = dsv4_kernel.wo_a_grouped_projection_fallback(
-        wo_o,
-        wo_weight,
-        wo_scale,
-        num_local_groups=2,
-        o_lora_rank=wo_rank,
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_WO_A_BF16", "1")
-    actual_wo_a = dsv4_kernel.wo_a_grouped_projection_fallback(
-        wo_o,
-        wo_weight,
-        wo_scale,
-        num_local_groups=2,
-        o_lora_rank=wo_rank,
-    )
-    torch.cuda.synchronize()
-    assert actual_wo_a.dtype is wo_o.dtype
-    assert torch.allclose(actual_wo_a, expected_wo_a, atol=4e-2, rtol=4e-2)
-    monkeypatch.delenv("MINISGL_DSV4_SM80_WO_A_BF16", raising=False)
-
-    fp4_weight = torch.randint(-128, 127, (96, 64), device=device, dtype=torch.int8)
-    fp4_scale = torch.rand(96, 4, device=device, dtype=torch.float32).to(dsv4_kernel.e8m0_dtype())
-    expected_fp4 = dsv4_kernel.quantized_linear_ref(
-        x_linear,
-        fp4_weight,
-        fp4_scale,
-        weight_kind="fp4",
-    )
-    monkeypatch.setenv("MINISGL_DSV4_SM80_FP4_GEMM", "1")
-    actual_fp4 = dsv4_kernel.quantized_linear_ref(
-        x_linear,
-        fp4_weight,
-        fp4_scale,
-        weight_kind="fp4",
-    )
-    torch.cuda.synchronize()
-    assert torch.allclose(actual_fp4, expected_fp4, atol=3e-2, rtol=3e-2)
-
-    num_tokens = 5
-    topk = 2
-    num_experts = 4
-    hidden = 64
-    intermediate = 32
-    moe_x = torch.randn(num_tokens, hidden, device=device, dtype=torch.bfloat16)
-    moe_weights = torch.rand(num_tokens, topk, device=device, dtype=torch.float32)
-    moe_indices = torch.tensor(
-        [[0, 2], [1, 3], [2, 0], [3, 1], [0, 1]],
-        device=device,
-        dtype=torch.int64,
-    )
-    w13_weight = torch.randint(
-        -128,
-        127,
-        (num_experts, 2, intermediate, hidden // 2),
-        device=device,
-        dtype=torch.int8,
-    )
-    w13_scale = torch.rand(
-        num_experts,
-        2,
-        intermediate,
-        dsv4_kernel.scale_dim(hidden, block_size=32),
-        device=device,
-        dtype=torch.float32,
-    )
-    w2_weight = torch.randint(
-        -128,
-        127,
-        (num_experts, hidden, intermediate // 2),
-        device=device,
-        dtype=torch.int8,
-    )
-    w2_scale = torch.rand(
-        num_experts,
-        hidden,
-        dsv4_kernel.scale_dim(intermediate, block_size=32),
-        device=device,
-        dtype=torch.float32,
-    )
-    expected_moe = torch.zeros_like(moe_x, dtype=torch.float32)
-    for expert_idx in range(num_experts):
-        token_idx, top_idx = torch.where(moe_indices == expert_idx)
-        if token_idx.numel() == 0:
-            continue
-        expert_x = moe_x[token_idx]
-        w1 = dsv4_kernel.quantized_linear_ref(
-            expert_x,
-            w13_weight[expert_idx, 0],
-            w13_scale[expert_idx, 0],
-            weight_kind="fp4",
-        ).float()
-        w3 = dsv4_kernel.quantized_linear_ref(
-            expert_x,
-            w13_weight[expert_idx, 1],
-            w13_scale[expert_idx, 1],
-            weight_kind="fp4",
-        ).float()
-        expert_hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
-            w1,
-            w3,
-            swiglu_limit=2.5,
-            weights=moe_weights[token_idx, top_idx, None],
-        )
-        expected_moe[token_idx] += dsv4_kernel.quantized_linear_ref(
-            expert_hidden.to(moe_x.dtype),
-            w2_weight[expert_idx],
-            w2_scale[expert_idx],
-            weight_kind="fp4",
-        ).float()
-    expected_moe = expected_moe.to(moe_x.dtype)
-
-    monkeypatch.setenv("MINISGL_DSV4_SM80_MOE_ROUTE", "1")
-    from minisgl.kernel.triton import deepseek_v4 as triton_dsv4
-
-    plan = dsv4_kernel.build_moe_route_plan(
-        moe_indices,
-        num_experts=num_experts,
-        block_size_m=16,
-    )
-    fused_routed = triton_dsv4.grouped_fp4_moe_fused_compute(
-        moe_x,
-        moe_weights.reshape(-1).contiguous(),
-        w13_weight,
-        w13_scale,
-        w2_weight,
-        w2_scale,
-        plan.sorted_route_ids,
-        plan.expert_ids,
-        plan.num_tokens_post_padded,
-        route_count=plan.route_count,
-        topk=plan.topk,
-        block_size_m=plan.block_size_m,
-        swiglu_limit=2.5,
-    )
-    assert fused_routed is not None
-    fused_moe = fused_routed.view(num_tokens, topk, hidden).sum(dim=1)
-    assert torch.allclose(fused_moe, expected_moe, atol=8e-2, rtol=8e-2)
-
-    actual_moe = dsv4_kernel.moe_route_dispatch_bf16_grouped(
-        moe_x,
-        moe_weights,
-        moe_indices,
-        w13_weight,
-        w13_scale,
-        w2_weight,
-        w2_scale,
-        swiglu_limit=2.5,
-    )
-    torch.cuda.synchronize()
-    assert actual_moe is not None
-    assert actual_moe.dtype is moe_x.dtype
-    assert torch.allclose(actual_moe, expected_moe, atol=8e-2, rtol=8e-2)

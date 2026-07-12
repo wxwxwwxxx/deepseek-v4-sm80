@@ -9,7 +9,6 @@ into model or attention code.
 from __future__ import annotations
 
 import importlib.util
-import json
 import math
 import os
 from dataclasses import dataclass
@@ -18,113 +17,23 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
+from minisgl.dsv4_runtime import get_dsv4_runtime_config
 from minisgl.kernel.utils import load_jit
-from minisgl.utils import div_ceil, dsv4_long_prefill_timing
+from minisgl.utils import div_ceil
 
 WeightKind = Literal["bf16", "fp8", "fp4"]
 KernelStatus = Literal["native", "fallback", "unsupported", "todo"]
 DSV4KernelMode = Literal["fallback", "bf16_direct", "fp8_act", "fp4_act"]
 
 
-_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
-DSV4_SM80_V0_BF16_TOGGLE = "MINISGL_DSV4_SM80_V0_BF16"
-DSV4_SM80_V1_MOE_TOGGLE = "MINISGL_DSV4_SM80_V1_MOE"
-DSV4_SM80_MOE_V2_TOGGLE = "MINISGL_DSV4_SM80_MOE_V2"
-DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE = "MINISGL_DSV4_SM80_MOE_VLLM_RUNNER"
-DSV4_SM80_MOE_REDUCE_BF16_TOGGLE = "MINISGL_DSV4_SM80_MOE_REDUCE_BF16"
-DSV4_SM80_MOE_EXPERT_BACKEND_ENV = "MINISGL_DSV4_SM80_MOE_EXPERT_BACKEND"
 DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4 = "grouped_fp4"
-DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16 = "marlin_mxfp4_w4a16"
-DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE = "vllm_marlin_bridge"
 DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
-DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE = "MINISGL_DSV4_SM80_GLOBAL_TOPK_LENS"
-DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE = "MINISGL_DSV4_SM80_SPARSE_SPLITK_BF16"
-DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE = "MINISGL_DSV4_SM80_REPLAY_METADATA_COPY"
-DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS"
-DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS_ENV = "MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS"
-DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_TOGGLE = (
-    "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED"
-)
-DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE = (
-    "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE"
-)
-DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE = (
-    "MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY"
-)
-DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
-DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
-DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
-DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE = "MINISGL_DSV4_SM80_BF16_PROJECTION_CACHE"
-DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE = "MINISGL_DSV4_SM80_A100_VICTORY_BUNDLE"
-DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV = "MINISGL_DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES"
-DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE = "MINISGL_DSV4_SM80_DECODE_METADATA_DEFOREST"
-DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE = "MINISGL_DSV4_SM80_PREP_METADATA_IN_GRAPH"
-DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE = "MINISGL_DSV4_SM80_HC_GRAPH_CLEANUP"
-DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE = "MINISGL_DSV4_SM80_FUSED_TOPK_SWA_INDICES"
-DSV4_FORCE_TORCH_TOPK_ENV = "MINISGL_DSV4_FORCE_TORCH_TOPK"
-DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE"
-DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_B_BF16_WEIGHT_CACHE"
-DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE = "MINISGL_DSV4_SM80_WO_A_BF16_BMM_CACHE"
-DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE"
-DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE = (
-    "MINISGL_DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE"
-)
-DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE = "MINISGL_DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE"
-DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION"
-DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE = "MINISGL_DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION"
-DSV4_INDEXER_CAPTURE_WIDTH_DEBUG_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_WIDTH_DEBUG"
-DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_WIDTH_MODE"
-DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV = "MINISGL_DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE"
-DSV4_INDEXER_MAX_LOGITS_MB_ENV = "MINISGL_DSV4_INDEXER_MAX_LOGITS_MB"
 DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT = 512
-DSV4_AUDIT_LOG_DIR_ENV = "MINISGL_DSV4_AUDIT_LOG_DIR"
-DSV4_AUDIT_RUN_LABEL_ENV = "MINISGL_DSV4_AUDIT_RUN_LABEL"
-DSV4_MARLIN_WNA16_CACHE_DEBUG_ENV = "MINISGL_DSV4_MARLIN_WNA16_CACHE_DEBUG"
-DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV = "MINISGL_DSV4_WARMUP_FORWARD_MEMORY_DEBUG"
-DSV4_CACHE_BOUNDS_DEBUG_ENV = "MINISGL_DSV4_CACHE_BOUNDS_DEBUG"
-DSV4_MARLIN_WNA16_PREBUILD_ENV = "MINISGL_DSV4_MARLIN_WNA16_PREBUILD"
-DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
-)
-DSV4_MARLIN_WNA16_RELEASE_TIMING_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING"
-)
-DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT"
-)
-DSV4_MARLIN_WNA16_RELEASE_CREDIT_SAFETY_MARGIN_BYTES_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CREDIT_SAFETY_MARGIN_BYTES"
-)
-DSV4_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
-)
-DSV4_MARLIN_WNA16_QUARANTINE_BYTES_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
-)
-DSV4_MARLIN_WNA16_QUARANTINE_PATTERN_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
-)
-DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG"
-)
-DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG"
-)
-DSV4_MARLIN_WNA16_KV_SENTINEL_BYTES_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_KV_SENTINEL_BYTES"
-)
-DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_THEN_FREE"
-)
-DSV4_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_THEN_FREE_BYTES"
-)
-DSV4_MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_POISON_THEN_FREE_PATTERN"
-)
-DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV = (
-    "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC"
-)
+
+
+
+
+
 DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR = (
     "Marlin WNA16 release preset has released raw routed expert weights; "
     "fallback/grouped_fp4 backend is unavailable in this Engine. Use the "
@@ -133,176 +42,9 @@ DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR = (
 DSV4_INDEXER_CAPTURE_WIDTH_MODES = ("current", "table_width", "seq_len_aligned")
 DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
     DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
-    DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16,
-    DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE,
     DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
 )
-DSV4_SM80_MOE_MARLIN_BLOCKER = (
-    "TARGET 07.38 feasibility audit: vLLM's exact SM80 Marlin MXFP4 W4A16 "
-    "path depends on custom CUDA ops gptq_marlin_repack and "
-    "_moe_C::moe_wna16_marlin_gemm plus Marlin scale/layout transforms. "
-    "mini-sglang does not currently build an equivalent extension surface; "
-    "falling back to grouped FP4 would make the opt-in backend silently fake."
-)
-DSV4_SM80_MOE_VLLM_MARLIN_BRIDGE_BLOCKER = (
-    "TARGET 07.39 bridge probe can execute locally installed vLLM Marlin "
-    "compiled ops as an external experiment, but mini runtime is not wired to "
-    "depend on vLLM or cache Marlin-repacked weights. Use the 07.39 probe "
-    "artifact to justify a narrow mini-owned csrc port target instead."
-)
-DSV4_SM80_MOE_MARLIN_WNA16_BLOCKER = (
-    "TARGET 07.391 source-level probe builds and runs a mini-owned-style "
-    "Marlin WNA16 op namespace, but this runtime cannot initialize the "
-    "packaged extension loader, lazy MXFP4-to-Marlin weight cache, or routed "
-    "expert call path. Falling back to grouped FP4 would silently hide that "
-    "missing integration."
-)
 DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES = 512
-DSV4_LINEAR_BF16_FP32_TOGGLE = "MINISGL_DSV4_SM80_LINEAR_BF16_FP32"
-DSV4_SM80_V0_BF16_WHITELIST: tuple[str, ...] = (
-    "MINISGL_DSV4_SM80_SWIGLU",
-    "MINISGL_DSV4_SM80_ROPE",
-    "MINISGL_DSV4_SM80_Q_NORM_ROPE",
-    "MINISGL_DSV4_SM80_KV_BF16",
-    "MINISGL_DSV4_SM80_COMPRESS",
-    "MINISGL_DSV4_SM80_COMPRESS_STORE",
-    "MINISGL_DSV4_SM80_TOPK",
-    "MINISGL_DSV4_SM80_INDEXER_BF16",
-    "MINISGL_DSV4_SM80_PAGED_MQA_BF16",
-    "MINISGL_DSV4_SM80_SPARSE_ATTN_BF16",
-)
-DSV4_SM80_V1_MOE_WHITELIST: tuple[str, ...] = (
-    *DSV4_SM80_V0_BF16_WHITELIST,
-    "MINISGL_DSV4_SM80_MOE_ROUTE",
-)
-DSV4_SM80_MOE_V2_WHITELIST: tuple[str, ...] = (
-    *DSV4_SM80_V1_MOE_WHITELIST,
-    DSV4_SM80_MOE_V2_TOGGLE,
-)
-DSV4_SM80_MOE_VLLM_RUNNER_WHITELIST: tuple[str, ...] = (
-    *DSV4_SM80_MOE_V2_WHITELIST,
-    DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE,
-)
-DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST: tuple[str, ...] = (
-    DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,
-    DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,
-    DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,
-    DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,
-)
-DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST: tuple[str, ...] = (
-    *DSV4_SM80_MOE_VLLM_RUNNER_WHITELIST,
-    "MINISGL_DSV4_SM80_HC",
-    "MINISGL_DSV4_SM80_RMSNORM",
-    "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT",
-    "MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE",
-    "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE",
-    "MINISGL_DSV4_SM80_GATE_FP32_WEIGHT_CACHE",
-    "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE",
-    DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE,
-    DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE,
-    DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE,
-    DSV4_SM80_MOE_REDUCE_BF16_TOGGLE,
-    DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE,
-    DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE,
-    DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE,
-    DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE,
-    *DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST,
-    DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE,
-)
-DSV4_SM80_EXPERIMENTAL_TOGGLES: tuple[str, ...] = (
-    "MINISGL_DSV4_SM80_STORE_CACHE",
-    "MINISGL_DSV4_SM80_FP4_GEMM",
-    "MINISGL_DSV4_SM80_FP8_GEMM",
-    "MINISGL_DSV4_SM80_WO_A_BF16",
-    "MINISGL_DSV4_SM80_MOE_ROUTE",
-    DSV4_LINEAR_BF16_FP32_TOGGLE,
-    "MINISGL_DSV4_SM80_KV_FP8",
-    "MINISGL_DSV4_SM80_PAGED_MQA_FP8",
-    "MINISGL_DSV4_SM80_WO_A_FP8",
-    "MINISGL_DSV4_SM80_INDEXER_FP8",
-    "MINISGL_DSV4_SM80_INDEXER_FP4",
-    "MINISGL_DSV4_SM80_HC",
-    "MINISGL_DSV4_SM80_RMSNORM",
-    "MINISGL_DSV4_SM80_FUSED_WQA_WKV_SHARED_ACT",
-    "MINISGL_DSV4_SM80_FUSED_WQA_WKV_WEIGHT_CACHE",
-    "MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM",
-    "MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE",
-    "MINISGL_DSV4_SM80_Q_WQA_FP8_GEMM",
-    "MINISGL_DSV4_SM80_Q_WQB_FP8_GEMM",
-    "MINISGL_DSV4_SM80_WO_B_FP8_GEMM",
-    "MINISGL_DSV4_SM80_INDEXER_WQB_FP8_GEMM",
-    "MINISGL_DSV4_SM80_SHARED_FP8_GEMM",
-    "MINISGL_DSV4_SM80_GATE_FP32_WEIGHT_CACHE",
-    "MINISGL_DSV4_SM80_INDEXER_STORE_NORM_FP32_WEIGHT_CACHE",
-    DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE,
-    DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE,
-    DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE,
-    DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE,
-    DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS_ENV,
-    DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_TOGGLE,
-    DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE,
-    DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY_TOGGLE,
-    DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE,
-    DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE,
-    DSV4_SM80_STATIC_SCALE_CACHE_TOGGLE,
-    DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE,
-    DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE,
-    DSV4_FORCE_TORCH_TOPK_ENV,
-    DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE,
-    DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE,
-    DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE,
-    DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE,
-    DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,
-    DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,
-    DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,
-    DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,
-    DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE,
-    DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE,
-    DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE,
-    DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE,
-    DSV4_SM80_MOE_REDUCE_BF16_TOGGLE,
-    DSV4_MARLIN_WNA16_CACHE_DEBUG_ENV,
-    DSV4_WARMUP_FORWARD_MEMORY_DEBUG_ENV,
-    DSV4_MARLIN_WNA16_PREBUILD_ENV,
-    DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV,
-    DSV4_MARLIN_WNA16_RELEASE_TIMING_ENV,
-    DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV,
-    DSV4_MARLIN_WNA16_RELEASE_CREDIT_SAFETY_MARGIN_BYTES_ENV,
-    DSV4_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV,
-    DSV4_MARLIN_WNA16_QUARANTINE_BYTES_ENV,
-    DSV4_MARLIN_WNA16_QUARANTINE_PATTERN_ENV,
-    DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG_ENV,
-    DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG_ENV,
-    DSV4_MARLIN_WNA16_KV_SENTINEL_BYTES_ENV,
-    DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV,
-    DSV4_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV,
-    DSV4_MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV,
-    DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV,
-)
-DSV4_SM80_KNOWN_TOGGLES: tuple[str, ...] = (
-    DSV4_SM80_V0_BF16_TOGGLE,
-    DSV4_SM80_V1_MOE_TOGGLE,
-    DSV4_SM80_MOE_V2_TOGGLE,
-    DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE,
-    DSV4_SM80_MOE_REDUCE_BF16_TOGGLE,
-    DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
-    DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV,
-    *DSV4_SM80_V0_BF16_WHITELIST,
-    *DSV4_SM80_EXPERIMENTAL_TOGGLES,
-)
-
-
-@dataclass(frozen=True)
-class DSV4KernelInventoryEntry:
-    wrapper: str
-    source_function: str
-    expected_inputs: str
-    expected_outputs: str
-    mini_call_site: str
-    sm80_behavior: str
-    optional_dependencies: tuple[str, ...]
-    status: KernelStatus
-    port_target: str
 
 
 @dataclass(frozen=True)
@@ -349,357 +91,6 @@ class DSV4IndexerSelectOutput:
 class DSV4IndexerFP8Query:
     q_values: torch.Tensor
     weights: torch.Tensor
-
-
-@dataclass(frozen=True)
-class DSV4DecodeMetadataDeforestOutput:
-    page_table: torch.Tensor
-    swa_page_indices: torch.Tensor
-    swa_topk_lengths: torch.Tensor
-    c4_topk_lengths_raw: torch.Tensor
-    c4_topk_lengths_clamp1: torch.Tensor
-    c4_sparse_topk_lengths: torch.Tensor
-    c4_sparse_raw_indices: torch.Tensor
-    c4_sparse_page_indices: torch.Tensor
-    c4_sparse_full_indices: torch.Tensor
-    c128_topk_lengths_clamp1: torch.Tensor
-    c128_raw_indices: torch.Tensor
-    c128_page_indices: torch.Tensor
-    c128_full_indices: torch.Tensor
-
-
-DSV4_KERNEL_INVENTORY: tuple[DSV4KernelInventoryEntry, ...] = (
-    DSV4KernelInventoryEntry(
-        "apply_rotary_tail",
-        "sglang.jit_kernel.dsv4.fused_rope_inplace",
-        "x[..., rotary_dim], positions[tokens]",
-        "x updated in-place and returned",
-        "models.deepseek_v4.DSV4Attention",
-        "torch fallback",
-        ("triton", "sglang JIT"),
-        "fallback",
-        "Triton/TileLang sm80 rope kernel",
-    ),
-    DSV4KernelInventoryEntry(
-        "q_norm_rope_fallback",
-        "sglang.jit_kernel.dsv4.fused_q_norm_rope",
-        "q[tokens, heads, dim], positions[tokens]",
-        "RMS-normalized q with RoPE tail",
-        "models.deepseek_v4.DSV4Attention",
-        "torch fallback",
-        ("triton", "sglang JIT"),
-        "fallback",
-        "Triton sm80 fused RMSNorm+RoPE",
-    ),
-    DSV4KernelInventoryEntry(
-        "fused_q_indexer_rope_first_quant",
-        "sglang.jit_kernel.dsv4.fused_q_indexer_rope_first_quant",
-        "indexer q, positions, quant scale buffers",
-        "quantized first-stage indexer q",
-        "future indexer fast path",
-        "explicit NotImplementedError",
-        ("sgl_kernel", "triton"),
-        "todo",
-        "sm80 indexer quant kernel",
-    ),
-    DSV4KernelInventoryEntry(
-        "fused_q_indexer_rope_hadamard_quant",
-        "sglang.jit_kernel.dsv4.fused_q_indexer_rope_hadamard_quant",
-        "indexer q, positions, hadamard scale buffers",
-        "fp8 quantized indexer q",
-        "future DSV4Indexer fast path",
-        "explicit NotImplementedError",
-        ("sgl_kernel", "triton"),
-        "unsupported",
-        "sm80 fp8 indexer quant kernel",
-    ),
-    DSV4KernelInventoryEntry(
-        "fused_q_indexer_rope_hadamard_fp4_quant",
-        "sglang.jit_kernel.dsv4.fused_q_indexer_rope_hadamard_fp4_quant",
-        "indexer q, positions, fp4/hadamard scale buffers",
-        "fp4 quantized indexer q",
-        "future DSV4Indexer fast path",
-        "sm100-only path is blocked on sm80",
-        ("sgl_kernel", "cutlass", "triton"),
-        "unsupported",
-        "rewrite fp4 indexer quant for sm80 or keep bf16 indexer fallback",
-    ),
-    DSV4KernelInventoryEntry(
-        "k_norm_rope_cache_fallback",
-        "sglang.jit_kernel.dsv4.fused_k_norm_rope_flashmla",
-        "kv[tokens, dim], positions[tokens], cache locations",
-        "normalized/rotated k and cache writes",
-        "models.deepseek_v4.DSV4Attention + attention.deepseek_v4",
-        "bf16 torch cache fallback",
-        ("sgl_kernel.flash_mla", "flashinfer"),
-        "fallback",
-        "sm80 FlashMLA-compatible bf16/fp8 cache path",
-    ),
-    DSV4KernelInventoryEntry(
-        "norm_rope_inplace_fallback",
-        "sglang.jit_kernel.dsv4.fused_norm_rope_inplace",
-        "kv[tokens, dim], positions[tokens]",
-        "normalized/rotated compressed kv",
-        "models.deepseek_v4.DSV4Compressor",
-        "torch fallback inside compressor",
-        ("triton", "sglang JIT"),
-        "fallback",
-        "sm80 fused compressor norm+RoPE",
-    ),
-    DSV4KernelInventoryEntry(
-        "store_swa_fallback",
-        "sglang.jit_kernel.dsv4.fused_store_cache",
-        "kv[tokens, dim], out_loc[tokens]",
-        "KV cache updated",
-        "attention.deepseek_v4.DSV4AttentionBackend.forward",
-        "bf16 torch cache write",
-        ("sgl_kernel", "triton"),
-        "fallback",
-        "sm80 fused/paged store cache",
-    ),
-    DSV4KernelInventoryEntry(
-        "triton_create_paged_compress_data",
-        "sglang.jit_kernel.dsv4.triton_create_paged_compress_data",
-        "positions, sequence lengths, compress ratio",
-        "paged compressor write metadata",
-        "attention.deepseek_v4 metadata builder",
-        "torch metadata construction",
-        ("triton",),
-        "fallback",
-        "sm80 Triton metadata kernel if CPU overhead matters",
-    ),
-    DSV4KernelInventoryEntry(
-        "compressor_plan_fallback",
-        "sglang.jit_kernel.dsv4.CompressorDecodePlan/CompressorPrefillPlan",
-        "compress ratio and seq lengths",
-        "compressor plan object",
-        "models.deepseek_v4.DSV4Compressor",
-        "Python loop fallback",
-        ("triton",),
-        "fallback",
-        "sm80 compressor planning kernels",
-    ),
-    DSV4KernelInventoryEntry(
-        "compress_forward_fallback",
-        "sglang.jit_kernel.dsv4.compress_forward",
-        "x[tokens, hidden], compressor weights/state",
-        "compressed kv[compressed_tokens, dim]",
-        "models.deepseek_v4.DSV4Compressor.forward",
-        "torch pooled-compress fallback",
-        ("triton", "flashinfer"),
-        "fallback",
-        "sm80 fused compressor forward",
-    ),
-    DSV4KernelInventoryEntry(
-        "compress_norm_rope_store_fallback",
-        "sglang.jit_kernel.dsv4.compress_norm_rope_store",
-        "compressed kv, positions, cache locations",
-        "compressed KV cache updated",
-        "attention.deepseek_v4.store_compressed",
-        "bf16 torch cache write",
-        ("triton", "sgl_kernel"),
-        "fallback",
-        "sm80 fused compress norm+RoPE+store",
-    ),
-    DSV4KernelInventoryEntry(
-        "topk_transform_512_fallback",
-        "sglang.jit_kernel.dsv4.topk_transform_512",
-        "topk indices/logits for C4 sparse attention",
-        "512-wide transformed topk rows",
-        "attention.deepseek_v4 metadata/index fallback",
-        "deterministic torch fallback",
-        ("sgl_kernel", "triton"),
-        "fallback",
-        "sm80 topk transform tuned for shared memory",
-    ),
-    DSV4KernelInventoryEntry(
-        "topk_transform_512_v2_fallback",
-        "sglang.jit_kernel.dsv4.topk_transform_512_v2",
-        "topk indices/logits for C4 sparse attention",
-        "512-wide transformed topk rows",
-        "future indexer fast path",
-        "deterministic torch fallback",
-        ("sgl_kernel", "triton"),
-        "fallback",
-        "sm80 topk v2 without sm90/sm100 assumptions",
-    ),
-    DSV4KernelInventoryEntry(
-        "plan_topk_v2_fallback",
-        "sglang.jit_kernel.dsv4.plan_topk_v2",
-        "topk lengths and workspace sizing",
-        "topk v2 plan metadata",
-        "future indexer fast path",
-        "Python plan fallback",
-        ("sgl_kernel", "triton"),
-        "fallback",
-        "sm80-safe planner",
-    ),
-    DSV4KernelInventoryEntry(
-        "flash_mla_with_kvcache",
-        "sgl_kernel.flash_mla.flash_mla_with_kvcache",
-        "q, paged KV caches, topk lengths, FlashMLA metadata",
-        "attention output[tokens, heads, dim]",
-        "attention.deepseek_v4.DSV4AttentionBackend.forward",
-        "blocked on packed cache layout; torch sparse fallback",
-        ("sgl_kernel.flash_mla", "flashinfer"),
-        "todo",
-        "sm80-compatible FlashMLA or FlashInfer MLA backend",
-    ),
-    DSV4KernelInventoryEntry(
-        "flash_mla_sparse_prefill",
-        "sgl_kernel.flash_mla.flash_mla_sparse_fwd",
-        "q, sparse pages, compressed/SWA cache",
-        "prefill attention output",
-        "attention.deepseek_v4 prefill fallback",
-        "torch sparse fallback",
-        ("sgl_kernel.flash_mla",),
-        "todo",
-        "sm80 sparse prefill attention",
-    ),
-    DSV4KernelInventoryEntry(
-        "paged_mqa_attention_fallback",
-        "sglang.jit_kernel.dsv4.get_paged_mqa_logits_metadata",
-        "q[tokens, heads, dim], cache[slots, dim], index rows",
-        "attention output[tokens, heads, dim]",
-        "attention.deepseek_v4._fallback_attention",
-        "torch sparse attention fallback",
-        ("deep_gemm", "triton"),
-        "fallback",
-        "sm80 paged-MQA logits + value reduction",
-    ),
-    DSV4KernelInventoryEntry(
-        "dsv4_sparse_attention_two_source_bf16",
-        "SGLang DSV4 FlashMLA sparse decode contract",
-        "q, SWA cache, optional C4/C128 cache, per-source sparse rows",
-        "attention output[tokens, heads, dim]",
-        "attention.deepseek_v4._fallback_attention",
-        "local CUDA bf16 two-source sparse decode",
-        ("tvm_ffi", "CUDA"),
-        "fallback",
-        "sm80 DSV4 sparse attention with compressed C4/C128 + SWA",
-    ),
-    DSV4KernelInventoryEntry(
-        "linear_bf16_fp32_fallback",
-        "sglang.jit_kernel.dsv4.linear_bf16_fp32",
-        "x[..., k], weight[n, k]",
-        "fp32/bf16 linear output",
-        "models.deepseek_v4 HC/router helpers",
-        "torch linear fallback; opt-in cuBLAS bf16/bf16->fp32 path for cached HC weights",
-        ("torch CUDA/cuBLAS",),
-        "fallback",
-        "upstream torch.mm out_dtype path before any custom matmul",
-    ),
-    DSV4KernelInventoryEntry(
-        "quantized_linear_ref",
-        "DeepGEMM / fp8-fp4 GEMM call sites in sglang-main",
-        "x[..., k], quantized weight[n, k], scale",
-        "linear output",
-        "models.deepseek_v4.DSV4Linear and MoE experts",
-        "dequant + torch linear fallback",
-        ("deep_gemm", "flashinfer", "marlin", "tilelang", "triton"),
-        "fallback",
-        "sm80 fp8/fp4 fused dequant GEMM",
-    ),
-    DSV4KernelInventoryEntry(
-        "wo_a_grouped_projection_fallback",
-        "sm100-only fp8 wo_a grouped GEMM/einsum path",
-        "o[tokens, groups, d], wo_a[groups, rank, d]",
-        "o_lora[tokens, groups*rank]",
-        "models.deepseek_v4.DSV4Attention",
-        "dequant + torch einsum fallback",
-        ("deep_gemm", "sgl_kernel"),
-        "fallback",
-        "sm80 grouped fp8 GEMM or Triton einsum",
-    ),
-    DSV4KernelInventoryEntry(
-        "hc_pre_fallback/hc_post_fallback/hc_head_fallback",
-        "MHC fused helper call sites in sglang-main",
-        "HC residual states and learned mixing tensors",
-        "mixed residual states",
-        "models.deepseek_v4.DeepseekV4DecoderLayer/Model",
-        "torch fallback",
-        ("tilelang", "triton"),
-        "fallback",
-        "sm80 HC split/Sinkhorn and post kernels",
-    ),
-    DSV4KernelInventoryEntry(
-        "hash_topk_fallback",
-        "sglang.jit_kernel.dsv4.hash_topk",
-        "input token ids, token-to-expert table",
-        "expert indices[tokens, topk]",
-        "models.deepseek_v4.DSV4MoEGate",
-        "torch embedding/table fallback",
-        ("triton",),
-        "fallback",
-        "sm80 hash topk kernel if routing overhead matters",
-    ),
-    DSV4KernelInventoryEntry(
-        "moe_gate_fallback",
-        "sglang.jit_kernel.dsv4.mask_topk_ids",
-        "router scores, correction bias, topk",
-        "router weights and expert indices",
-        "models.deepseek_v4.DSV4MoEGate",
-        "torch topk fallback",
-        ("triton",),
-        "fallback",
-        "sm80 fused router topk/mask",
-    ),
-    DSV4KernelInventoryEntry(
-        "mega_moe_pre_dispatch_fallback",
-        "sglang.jit_kernel.dsv4.mega_moe_pre_dispatch",
-        "hidden states, router weights/indices",
-        "grouped expert dispatch metadata",
-        "models.deepseek_v4.DSV4FusedRoutedExperts",
-        "Python expert loop fallback",
-        ("sgl_kernel", "flashinfer", "triton"),
-        "fallback",
-        "sm80 grouped MoE dispatch",
-    ),
-    DSV4KernelInventoryEntry(
-        "silu_and_mul_clamp_fallback",
-        "sglang.jit_kernel.dsv4.silu_and_mul_clamp",
-        "gate/up activations",
-        "SiLU(gate) * up",
-        "models.deepseek_v4 MoE/shared experts",
-        "torch fallback",
-        ("sgl_kernel", "triton"),
-        "fallback",
-        "sm80 fused activation",
-    ),
-    DSV4KernelInventoryEntry(
-        "silu_and_mul_masked_post_quant",
-        "sglang.jit_kernel.dsv4.silu_and_mul_masked_post_quant",
-        "expert activations and route mask",
-        "quantized expert activations",
-        "future MoE fast path",
-        "explicit NotImplementedError",
-        ("sgl_kernel", "triton"),
-        "todo",
-        "sm80 fused activation+post quant",
-    ),
-    DSV4KernelInventoryEntry(
-        "silu_and_mul_contig_post_quant",
-        "sglang.jit_kernel.dsv4.silu_and_mul_contig_post_quant",
-        "contiguous expert activations",
-        "quantized expert activations",
-        "future MoE fast path",
-        "explicit NotImplementedError",
-        ("sgl_kernel", "triton"),
-        "todo",
-        "sm80 fused contiguous activation+post quant",
-    ),
-    DSV4KernelInventoryEntry(
-        "make_name",
-        "sglang.jit_kernel.dsv4.make_name",
-        "kernel name fragments",
-        "stable generated kernel name",
-        "wrapper/debug utilities",
-        "pure Python utility",
-        (),
-        "native",
-        "none; utility export only",
-    ),
-)
 
 
 @dataclass(frozen=True)
@@ -861,145 +252,25 @@ def detect_dsv4_kernel_capabilities() -> DSV4KernelCapability:
     )
 
 
-def dsv4_kernel_inventory_by_wrapper() -> dict[str, DSV4KernelInventoryEntry]:
-    return {entry.wrapper: entry for entry in DSV4_KERNEL_INVENTORY}
 
 
-def unsupported_kernel(name: str, detail: str) -> None:
-    cap = detect_dsv4_kernel_capabilities()
-    sm = (
-        "no CUDA"
-        if cap.cuda_capability is None
-        else f"sm{cap.cuda_capability[0]}{cap.cuda_capability[1]}"
-    )
-    raise NotImplementedError(f"{name} is not available for {sm}: {detail}")
 
 
-def _dsv4_disable_aliases() -> dict[str, tuple[str, ...]]:
-    projection_caches = (
-        DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE,
-        DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,
-        DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,
-        DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,
-        DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,
-    )
-    shared_expert = (DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE,)
-    return {
-        "q_wqb": (DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
-        "attn_q_wqb": (DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
-        "q_wqb_bf16": (DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
-        "q_wqb_bf16_weight_cache": (DSV4_SM80_Q_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
-        "wo_b": (DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,),
-        "attn_wo_b": (DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,),
-        "wo_b_bf16": (DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,),
-        "wo_b_bf16_weight_cache": (DSV4_SM80_WO_B_BF16_WEIGHT_CACHE_TOGGLE,),
-        "wo_a": (DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,),
-        "attn_wo_a": (DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,),
-        "wo_a_bf16": (DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,),
-        "wo_a_bf16_bmm_cache": (DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE,),
-        "indexer_wq_b": (DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
-        "indexer_wqb": (DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
-        "indexer_wq_b_bf16": (DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
-        "indexer_wqb_bf16": (DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE,),
-        "shared_expert": shared_expert,
-        "shared_experts": shared_expert,
-        "shared_expert_bf16": shared_expert,
-        "shared_experts_bf16": shared_expert,
-        "shared_expert_bf16_weight_cache": shared_expert,
-        "shared_experts_bf16_weight_cache": shared_expert,
-        "projection": projection_caches,
-        "projection_bf16": projection_caches,
-        "projection_bf16_caches": projection_caches,
-        "projection_bf16_weight_cache": projection_caches,
-        "all_tested_bf16_caches": (*projection_caches, *shared_expert),
-        "all_bf16_caches": (*projection_caches, *shared_expert),
-        "direct_graph_metadata": (DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE,),
-        "route_b_metadata": (
-            DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE,
-            DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_TOGGLE,
-            DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE,
-        ),
-        "prep_metadata_in_graph": (DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE,),
-        "hc_graph_cleanup": (DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE,),
-        "hccleanup": (DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE,),
-        "linear_bf16_fp32": (DSV4_LINEAR_BF16_FP32_TOGGLE,),
-        "hc_linear_bf16_fp32": (DSV4_LINEAR_BF16_FP32_TOGGLE,),
-        "moe_reduce_bf16": (DSV4_SM80_MOE_REDUCE_BF16_TOGGLE,),
-    }
+def dsv4_optimized_enabled() -> bool:
+    return get_dsv4_runtime_config().optimized
 
 
-def dsv4_env_disabled_toggles() -> tuple[str, ...]:
-    raw = os.environ.get(DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV, "")
-    if not raw.strip():
-        return ()
-    disabled: set[str] = set()
-    aliases = _dsv4_disable_aliases()
-    for item in raw.replace(";", ",").split(","):
-        token = item.strip()
-        if not token:
-            continue
-        normalized = token.lower().replace("-", "_").replace(".", "_")
-        if token.startswith("MINISGL_DSV4_SM80_"):
-            disabled.add(token)
-        elif normalized in aliases:
-            disabled.update(aliases[normalized])
-        else:
-            disabled.add(token)
-    return tuple(sorted(disabled))
-
-
-def dsv4_env_flag(name: str) -> bool:
-    if name == DSV4_SM80_MOE_EXPERT_BACKEND_ENV:
-        return False
-    if name == DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV:
-        return False
-    if name in dsv4_env_disabled_toggles():
-        return False
-    if os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES:
-        return True
-    a100_victory_bundle = (
-        os.environ.get(DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
-    )
-    if name in DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST and a100_victory_bundle:
-        return True
-    bf16_projection_cache = (
-        os.environ.get(DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE, "").strip().lower()
-        in _TRUE_ENV_VALUES
-    )
-    if name in DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST and bf16_projection_cache:
-        return True
-    if name in DSV4_SM80_MOE_VLLM_RUNNER_WHITELIST and (
-        os.environ.get(DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
-    ):
-        return True
-    if name in DSV4_SM80_MOE_V2_WHITELIST and (
-        os.environ.get(DSV4_SM80_MOE_V2_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
-    ):
-        return True
-    if name in DSV4_SM80_V1_MOE_WHITELIST and (
-        os.environ.get(DSV4_SM80_V1_MOE_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
-    ):
-        return True
-    return name in DSV4_SM80_V0_BF16_WHITELIST and (
-        os.environ.get(DSV4_SM80_V0_BF16_TOGGLE, "").strip().lower() in _TRUE_ENV_VALUES
-    )
-
-
-def dsv4_sm80_triton_enabled(toggle: str) -> bool:
-    if not dsv4_env_flag(toggle):
+def dsv4_optimized_triton_enabled() -> bool:
+    if not dsv4_optimized_enabled():
         return False
     cap = detect_dsv4_kernel_capabilities()
     return bool(cap.is_sm80 and cap.triton_available)
 
 
-def dense_fp8_marlin_projection_enabled() -> bool:
-    return dsv4_env_flag(DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE) or dsv4_env_flag(
-        DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE
-    )
 
 
 def warmup_indexer_fp8_backend(device: torch.device) -> None:
-    if not dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+    if not dsv4_optimized_triton_enabled():
         return
     if torch.device(device).type != "cuda":
         return
@@ -1009,35 +280,13 @@ def warmup_indexer_fp8_backend(device: torch.device) -> None:
 
 
 def dsv4_moe_expert_backend() -> str:
-    raw_env = os.environ.get(DSV4_SM80_MOE_EXPERT_BACKEND_ENV)
-    if raw_env is None and dsv4_env_flag(DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE):
-        return DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
-    raw = (
-        (raw_env if raw_env is not None else DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4)
-        .strip()
-        .lower()
-    )
-    if raw in {"", "default", "current", "grouped"}:
-        return DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4
-    if raw not in DSV4_SM80_MOE_EXPERT_BACKENDS:
-        valid = ", ".join(DSV4_SM80_MOE_EXPERT_BACKENDS)
-        raise ValueError(
-            f"Unsupported {DSV4_SM80_MOE_EXPERT_BACKEND_ENV}={raw!r}; " f"valid values: {valid}"
-        )
-    return raw
+    return get_dsv4_runtime_config().moe_expert_backend
 
 
 def require_supported_moe_expert_backend() -> str:
     backend = dsv4_moe_expert_backend()
-    if backend == DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16:
-        unsupported_kernel(
-            "DSV4 Marlin MXFP4 W4A16 MoE expert backend", DSV4_SM80_MOE_MARLIN_BLOCKER
-        )
-    if backend == DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE:
-        unsupported_kernel(
-            "DSV4 vLLM Marlin bridge MoE expert backend",
-            DSV4_SM80_MOE_VLLM_MARLIN_BRIDGE_BLOCKER,
-        )
+    if backend not in DSV4_SM80_MOE_EXPERT_BACKENDS:
+        raise RuntimeError(f"Unsupported typed DSV4 MoE backend: {backend!r}")
     return backend
 
 
@@ -1179,15 +428,17 @@ def _run_moe_bf16_marlin_wna16_prepacked(
     return output
 
 
-def dsv4_sm80_cuda_enabled(toggle: str) -> bool:
-    if not dsv4_env_flag(toggle):
+def dsv4_optimized_cuda_enabled() -> bool:
+    if not dsv4_optimized_enabled():
         return False
     cap = detect_dsv4_kernel_capabilities()
     return bool(cap.is_sm80 and cap.cuda_available)
 
 
 def linear_bf16_fp32_upstream_enabled() -> bool:
-    return dsv4_sm80_cuda_enabled(DSV4_LINEAR_BF16_FP32_TOGGLE)
+    return dsv4_optimized_cuda_enabled()
+
+
 
 
 def _triton_dsv4_ops():
@@ -1278,7 +529,7 @@ def quantize_fp8_activation_ref(x: torch.Tensor, *, block_size: int = 128) -> to
     fp8 = getattr(torch, "float8_e4m3fn", None)
     if fp8 is None or x.numel() == 0 or x.shape[-1] % block_size != 0:
         return x
-    if dsv4_sm80_triton_enabled(DSV4_SM80_FP8_ACT_QUANT_TRITON_TOGGLE):
+    if dsv4_optimized_triton_enabled():
         try:
             y = _triton_dsv4_ops().fp8_activation_quantize(x, block_size=block_size)
             if y is not None:
@@ -1463,7 +714,7 @@ def indexer_q_rope_fp8_fallback(
     )
     q_values = None
     weights_out = None
-    if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+    if dsv4_optimized_triton_enabled():
         try:
             triton_quant = _triton_dsv4_ops().indexer_fp8_quantize_fold(
                 q_work,
@@ -1500,24 +751,12 @@ def quantized_linear_ref(
     scale: torch.Tensor | None,
     *,
     weight_kind: WeightKind,
-    fp8_gemm: bool | None = None,
 ) -> torch.Tensor:
     if weight_kind == "fp4":
         x = quantize_fp8_activation_ref(x)
-        if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FP4_GEMM"):
-            y = _triton_dsv4_ops().quantized_linear_fp4(x, weight, scale)
-            if y is not None:
-                return y
         w = dequant_fp4_weight(weight, scale, out_dtype=x.dtype)
     elif weight_kind == "fp8":
         x = quantize_fp8_activation_ref(x)
-        use_fp8_gemm = (
-            dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FP8_GEMM") if fp8_gemm is None else fp8_gemm
-        )
-        if use_fp8_gemm:
-            y = _triton_dsv4_ops().quantized_linear_fp8(x, weight, scale)
-            if y is not None:
-                return y
         w = dequant_fp8_weight(weight, scale, out_dtype=x.dtype)
     else:
         w = weight.to(x.dtype)
@@ -1558,7 +797,7 @@ def linear_bf16_fp32_fallback(x: torch.Tensor, weight: torch.Tensor) -> torch.Te
 
 
 def rms_norm_fallback(x: torch.Tensor, weight: torch.Tensor, *, eps: float) -> torch.Tensor:
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_RMSNORM"):
+    if dsv4_optimized_triton_enabled():
         y = _triton_dsv4_ops().rms_norm_bf16(x, weight, eps=eps)
         if y is not None:
             return y
@@ -1568,28 +807,6 @@ def rms_norm_fallback(x: torch.Tensor, weight: torch.Tensor, *, eps: float) -> t
     return (y * weight.float()).to(dtype)
 
 
-def rms_norm_pair_fallback(
-    q: torch.Tensor,
-    kv: torch.Tensor,
-    q_weight: torch.Tensor,
-    kv_weight: torch.Tensor,
-    *,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FUSED_Q_KV_RMSNORM"):
-        y = _triton_dsv4_ops().rms_norm_pair_bf16(
-            q,
-            kv,
-            q_weight,
-            kv_weight,
-            eps=eps,
-        )
-        if y is not None:
-            return y
-    return (
-        rms_norm_fallback(q, q_weight, eps=eps),
-        rms_norm_fallback(kv, kv_weight, eps=eps),
-    )
 
 
 def _compress_forward_vectorized(
@@ -1659,7 +876,7 @@ def apply_rotary_tail(
         return x
     if rotary_dim % 2 != 0:
         raise ValueError(f"DeepSeek V4 rotary_dim must be even, got {rotary_dim}")
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_ROPE"):
+    if dsv4_optimized_triton_enabled():
         try:
             if _triton_dsv4_ops().apply_rotary_tail(
                 x,
@@ -1728,7 +945,7 @@ def q_norm_rope_fallback(
     beta_fast: int = 32,
     beta_slow: int = 1,
 ) -> torch.Tensor:
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_Q_NORM_ROPE"):
+    if dsv4_optimized_triton_enabled():
         try:
             if _triton_dsv4_ops().q_norm_rope(
                 q,
@@ -1808,7 +1025,7 @@ def k_norm_rope_cache_fallback(
                 "DSV4 K norm weight must match kv dim, "
                 f"got weight={norm_weight.numel()} dim={kv.shape[-1]}"
             )
-        if has_cache and dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_KV_BF16"):
+        if has_cache and dsv4_optimized_triton_enabled():
             try:
                 if _triton_dsv4_ops().k_norm_rope_cache_bf16(
                     kv,
@@ -1874,7 +1091,7 @@ def q_kv_norm_rope_cache_fallback(
     beta_fast: int = 32,
     beta_slow: int = 1,
 ) -> bool:
-    if not dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_FUSED_Q_KV_NORM_ROPE_STORE"):
+    if not dsv4_optimized_triton_enabled():
         return False
     try:
         return bool(
@@ -1898,29 +1115,10 @@ def q_kv_norm_rope_cache_fallback(
         return False
 
 
-def make_name(*parts: object) -> str:
-    return "_".join(str(part) for part in parts if str(part))
 
 
-def compressor_plan_fallback(
-    compress_ratio: int,
-    seq_lens: torch.Tensor,
-    *,
-    is_prefill: bool,
-) -> dict[str, torch.Tensor | int | bool]:
-    return {
-        "compress_ratio": int(compress_ratio),
-        "seq_lens": seq_lens.to(torch.int32),
-        "is_prefill": bool(is_prefill),
-    }
 
 
-def triton_create_paged_compress_data(*args, **kwargs):
-    del args, kwargs
-    unsupported_kernel(
-        "triton_create_paged_compress_data",
-        "mini-sglang builds equivalent paged compression metadata in DSV4AttentionBackend._build_metadata",
-    )
 
 
 def compress_forward_fallback(
@@ -1943,7 +1141,7 @@ def compress_forward_fallback(
         positions = torch.arange(x.shape[0], device=x.device, dtype=torch.long)
     else:
         positions = positions.to(device=x.device, dtype=torch.long)
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS"):
+    if dsv4_optimized_triton_enabled():
         fast = _compress_forward_vectorized(
             x,
             positions,
@@ -1993,20 +1191,8 @@ def compress_forward_fallback(
     return torch.cat(rows, dim=0)
 
 
-def flash_mla_with_kvcache(*args, **kwargs):
-    del args, kwargs
-    unsupported_kernel(
-        "flash_mla_with_kvcache",
-        "FlashMLA is present only as an optional backend; mini-sglang currently uses bf16 paged-MQA fallback on sm80",
-    )
 
 
-def flash_mla_sparse_prefill(*args, **kwargs):
-    del args, kwargs
-    unsupported_kernel(
-        "flash_mla_sparse_prefill",
-        "sparse prefill FlashMLA requires packed cache layouts that are not implemented for sm80 yet",
-    )
 
 
 def get_paged_mqa_logits_metadata_fallback(
@@ -2092,7 +1278,7 @@ def dsv4_sparse_attention_two_source_bf16(
     attn_sink: torch.Tensor | None,
 ) -> torch.Tensor | None:
     if not (
-        dsv4_env_flag("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16")
+        dsv4_optimized_enabled()
         and detect_dsv4_kernel_capabilities().is_sm80
     ):
         return None
@@ -2200,15 +1386,9 @@ def dsv4_sparse_attention_two_source_splitk_bf16(
     softmax_scale: float,
     attn_sink: torch.Tensor | None,
 ) -> torch.Tensor | None:
-    if not dsv4_env_flag(DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE):
+    if not dsv4_optimized_enabled():
         return None
     cap = detect_dsv4_kernel_capabilities()
-    if not (cap.is_sm80 and cap.triton_available):
-        unsupported_kernel(
-            "DSV4 exact bf16 sparse split-K decode",
-            "requires A100/sm80 CUDA plus Triton; falling back would hide "
-            f"the requested {DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE}=1 path.",
-        )
     try:
         out = _triton_dsv4_ops().sparse_attention_splitk_bf16(
             q,
@@ -2223,14 +1403,12 @@ def dsv4_sparse_attention_two_source_splitk_bf16(
         )
     except Exception as exc:
         raise RuntimeError(
-            "DSV4 exact bf16 sparse split-K decode failed while "
-            f"{DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE}=1 was requested."
+            "Optimized DSV4 exact bf16 sparse split-K decode failed."
         ) from exc
     if out is None:
         raise RuntimeError(
             "DSV4 exact bf16 sparse split-K decode does not support this "
-            "tensor contract; no legacy fallback is allowed when "
-            f"{DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE}=1."
+            "tensor contract; optimized mode does not silently change backends."
         )
     return out
 
@@ -2300,72 +1478,12 @@ def _cuda_graph_capture_active(device: torch.device) -> bool:
         return False
 
 
-def _truthy_env(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
-
-
-def _audit_rank() -> int:
-    try:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            return int(torch.distributed.get_rank())
-    except Exception:
-        pass
-    for name in ("RANK", "LOCAL_RANK"):
-        raw = os.environ.get(name)
-        if raw is not None:
-            try:
-                return int(raw)
-            except ValueError:
-                pass
-    return 0
-
-
-def _audit_log_dir() -> str:
-    return os.environ.get(
-        DSV4_AUDIT_LOG_DIR_ENV,
-        "performance_milestones/target08_indexer_capture_static_width_audit/raw",
-    )
-
-
-def _audit_run_label() -> str:
-    raw = os.environ.get(DSV4_AUDIT_RUN_LABEL_ENV, "run").strip()
-    return raw or "run"
-
-
-def _append_audit_jsonl(kind: str, payload: dict) -> None:
-    try:
-        directory = _audit_log_dir()
-        os.makedirs(directory, exist_ok=True)
-        path = os.path.join(
-            directory,
-            f"{kind}_{_audit_run_label()}_rank{_audit_rank()}.jsonl",
-        )
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
-    except Exception:
-        return
-
-
 def _indexer_capture_width_mode() -> str:
-    raw = os.environ.get(DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV, "current").strip().lower()
-    mode = "current" if raw in {"", "default"} else raw
-    if mode not in DSV4_INDEXER_CAPTURE_WIDTH_MODES:
-        valid = ", ".join(DSV4_INDEXER_CAPTURE_WIDTH_MODES)
-        raise ValueError(
-            f"Unsupported {DSV4_INDEXER_CAPTURE_WIDTH_MODE_ENV}={raw!r}; "
-            f"valid values: {valid}."
-        )
-    return mode
+    return "current"
 
 
 def _indexer_capture_seq_len_override() -> int | None:
-    raw = os.environ.get(DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV, "").strip()
-    if not raw:
-        return None
-    value = int(raw)
-    if value < 0:
-        raise ValueError(f"{DSV4_INDEXER_CAPTURE_SEQ_LEN_OVERRIDE_ENV} must be non-negative")
-    return value
+    return None
 
 
 def _seq_len_aligned_width_for_capture(page_size: int) -> int | None:
@@ -2429,54 +1547,6 @@ def _indexer_width_candidates(
     return widths, bytes_by_candidate, seq_lens_status
 
 
-def _record_indexer_capture_width_event(
-    *,
-    function_name: str,
-    backend_path: str,
-    q: torch.Tensor,
-    cache_shape,
-    seq_lens: torch.Tensor,
-    page_table: torch.Tensor,
-    page_size: int,
-    static_max_seq_len: int | None,
-    layer_id: int | None,
-    width_mode: str,
-    width_mode_note: str | None,
-) -> None:
-    if not _truthy_env(DSV4_INDEXER_CAPTURE_WIDTH_DEBUG_ENV):
-        return
-    rows = int(q.shape[0]) if q.ndim > 0 else 0
-    widths, implied_bytes, seq_lens_status = _indexer_width_candidates(
-        rows,
-        page_table,
-        int(page_size),
-    )
-    payload = {
-        "event": "dsv4_indexer_capture_width",
-        "function": function_name,
-        "backend_path": backend_path,
-        "layer_id": None if layer_id is None else int(layer_id),
-        "call_index": None,
-        "rank": _audit_rank(),
-        "pid": os.getpid(),
-        "rows": rows,
-        "q_shape": list(q.shape),
-        "cache_shape": cache_shape,
-        "seq_lens_shape": list(seq_lens.shape),
-        "seq_lens_min": None,
-        "seq_lens_max": None,
-        "seq_lens_status": seq_lens_status,
-        "page_table_shape": list(page_table.shape),
-        "page_size": int(page_size),
-        "capture_width_mode": width_mode,
-        "capture_width_mode_note": width_mode_note,
-        "current_static_max_seq_len": None
-        if static_max_seq_len is None
-        else int(static_max_seq_len),
-        "candidate_widths": widths,
-        "implied_fp32_logits_bytes": implied_bytes,
-    }
-    _append_audit_jsonl("indexer_capture_width", payload)
 
 
 def indexer_bf16_logits_fallback(
@@ -2516,7 +1586,7 @@ def indexer_bf16_logits_fallback(
         page_size,
         capture_active,
     )
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_INDEXER_BF16") and weights is not None:
+    if dsv4_optimized_triton_enabled() and weights is not None:
         try:
             logits = _triton_dsv4_ops().indexer_bf16_logits(
                 q,
@@ -2530,20 +1600,6 @@ def indexer_bf16_logits_fallback(
             if logits is not None:
                 if _backend is not None:
                     _backend.append("triton")
-                if capture_active:
-                    _record_indexer_capture_width_event(
-                        function_name="indexer_bf16_logits_fallback",
-                        backend_path="triton",
-                        q=q,
-                        cache_shape=list(cache.shape),
-                        seq_lens=seq_lens,
-                        page_table=page_table,
-                        page_size=page_size,
-                        static_max_seq_len=static_max_seq_len,
-                        layer_id=layer_id,
-                        width_mode=width_mode,
-                        width_mode_note=width_mode_note,
-                    )
                 return logits
             if capture_active:
                 raise RuntimeError(
@@ -2600,181 +1656,9 @@ def indexer_bf16_logits_fallback(
         logits[row, :length] = row_scores
     if _backend is not None:
         _backend.append("torch")
-    if capture_active:
-        _record_indexer_capture_width_event(
-            function_name="indexer_bf16_logits_fallback",
-            backend_path="torch",
-            q=q,
-            cache_shape=list(cache.shape),
-            seq_lens=seq_lens,
-            page_table=page_table,
-            page_size=page_size,
-            static_max_seq_len=static_max_seq_len,
-            layer_id=layer_id,
-            width_mode=width_mode,
-            width_mode_note=width_mode_note,
-        )
     return logits
 
 
-def indexer_fp8_logits_fallback(
-    q_values: torch.Tensor,
-    cache_values: torch.Tensor,
-    cache_scales: torch.Tensor,
-    seq_lens: torch.Tensor,
-    page_table: torch.Tensor,
-    *,
-    page_size: int,
-    weights: torch.Tensor,
-    _backend: list[str] | None = None,
-    layer_id: int | None = None,
-) -> torch.Tensor:
-    if q_values.ndim != 3:
-        raise ValueError(
-            f"DSV4 FP8 indexer q expects shape [rows, heads, dim], got {q_values.shape}"
-        )
-    if cache_values.ndim != 2 or cache_values.shape[-1] != q_values.shape[-1]:
-        raise ValueError(
-            "DSV4 FP8 indexer cache values must be [slots, dim] with dim matching q, "
-            f"got cache={tuple(cache_values.shape)} q={tuple(q_values.shape)}"
-        )
-    if cache_scales.shape != (cache_values.shape[0], 4):
-        raise ValueError(
-            "DSV4 FP8 indexer cache scales must be [slots, 4], " f"got {tuple(cache_scales.shape)}"
-        )
-    if q_values.dtype is not torch.uint8 or cache_values.dtype is not torch.uint8:
-        raise ValueError("DSV4 FP8 indexer q/cache values must be uint8 byte tensors")
-    if cache_scales.dtype is not torch.uint8:
-        raise ValueError("DSV4 FP8 indexer cache scales must be uint8 byte tensors")
-    if seq_lens.ndim != 1 or seq_lens.shape[0] != q_values.shape[0]:
-        raise ValueError("DSV4 FP8 indexer seq_lens must have shape [rows]")
-    if page_table.ndim != 2 or page_table.shape[0] != q_values.shape[0]:
-        raise ValueError("DSV4 FP8 indexer page_table must have shape [rows, pages]")
-    if page_size <= 0 or page_size & (page_size - 1):
-        raise ValueError(f"DSV4 indexer page_size must be a positive power of two, got {page_size}")
-    if weights.ndim not in (2, 3) or weights.shape[:2] != q_values.shape[:2]:
-        raise ValueError(
-            "DSV4 FP8 indexer weights must have shape [rows, heads] or [rows, heads, 1], "
-            f"got weights={tuple(weights.shape)} q={tuple(q_values.shape)}"
-        )
-    if weights.ndim == 3 and weights.shape[-1] != 1:
-        raise ValueError(
-            "DSV4 FP8 indexer weights with rank 3 must have a singleton last dimension, "
-            f"got {tuple(weights.shape)}"
-        )
-
-    capture_active = _cuda_graph_capture_active(q_values.device)
-    static_max_seq_len, width_mode, width_mode_note = _indexer_capture_static_max_seq_len(
-        seq_lens,
-        page_table,
-        page_size,
-        capture_active,
-    )
-    if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
-        try:
-            logits = _triton_dsv4_ops().indexer_fp8_logits(
-                q_values,
-                cache_values,
-                cache_scales,
-                weights,
-                seq_lens,
-                page_table,
-                page_size=page_size,
-                max_seq_len=static_max_seq_len,
-            )
-            if logits is not None:
-                if _backend is not None:
-                    _backend.append("triton_fp8")
-                if capture_active:
-                    _record_indexer_capture_width_event(
-                        function_name="indexer_fp8_logits_fallback",
-                        backend_path="triton_fp8",
-                        q=q_values,
-                        cache_shape={
-                            "values": list(cache_values.shape),
-                            "scales": list(cache_scales.shape),
-                        },
-                        seq_lens=seq_lens,
-                        page_table=page_table,
-                        page_size=page_size,
-                        static_max_seq_len=static_max_seq_len,
-                        layer_id=layer_id,
-                        width_mode=width_mode,
-                        width_mode_note=width_mode_note,
-                    )
-                return logits
-            if capture_active:
-                raise RuntimeError(
-                    "DSV4 CUDA graph capture requires the Triton indexer FP8 logits path; "
-                    "the current tensor layout/dtype was unsupported."
-                )
-        except Exception as exc:
-            if capture_active:
-                raise RuntimeError(
-                    "DSV4 CUDA graph capture failed in Triton indexer FP8 logits."
-                ) from exc
-
-    rows = q_values.shape[0]
-    max_seq_len = (
-        int(static_max_seq_len)
-        if static_max_seq_len is not None
-        else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
-    )
-    logits = torch.full(
-        (rows, max(max_seq_len, 1)), float("-inf"), dtype=torch.float32, device=q_values.device
-    )
-    if rows == 0 or max_seq_len <= 0:
-        return logits[:, :0]
-
-    page_bits = (page_size - 1).bit_length()
-    q_f = q_values.contiguous().view(fp8_dtype()).to(torch.float32)
-    cache_f = dequantize_indexer_fp8_cache_ref(cache_values, cache_scales, out_dtype=torch.float32)
-    page_table_i = page_table.to(device=q_values.device, dtype=torch.int32)
-    weights_f = weights.squeeze(-1).to(device=q_values.device, dtype=torch.float32)
-
-    for row in range(rows):
-        length = int(seq_lens[row].item())
-        if length <= 0:
-            continue
-        length = min(length, logits.shape[1])
-        raw = torch.arange(length, dtype=torch.long, device=q_values.device)
-        page_idx = raw >> page_bits
-        offset = raw & (page_size - 1)
-        valid = page_idx < page_table.shape[1]
-        physical_page = torch.full_like(raw, -1)
-        if bool(torch.any(valid)):
-            physical_page[valid] = page_table_i[row, page_idx[valid]].to(torch.long)
-        valid = valid & (physical_page >= 0)
-        cache_rows = physical_page * page_size + offset
-        row_scores = torch.full(
-            (length,), float("-inf"), dtype=torch.float32, device=q_values.device
-        )
-        if bool(torch.any(valid)):
-            kv = cache_f[cache_rows[valid]]
-            scores = torch.einsum("hd,td->th", q_f[row], kv)
-            scores = torch.relu(scores) * weights_f[row][None, :]
-            row_scores[valid] = scores.sum(dim=-1)
-        logits[row, :length] = row_scores
-    if _backend is not None:
-        _backend.append("torch_fp8")
-    if capture_active:
-        _record_indexer_capture_width_event(
-            function_name="indexer_fp8_logits_fallback",
-            backend_path="torch_fp8",
-            q=q_values,
-            cache_shape={
-                "values": list(cache_values.shape),
-                "scales": list(cache_scales.shape),
-            },
-            seq_lens=seq_lens,
-            page_table=page_table,
-            page_size=page_size,
-            static_max_seq_len=static_max_seq_len,
-            layer_id=layer_id,
-            width_mode=width_mode,
-            width_mode_note=width_mode_note,
-        )
-    return logits
 
 
 def indexer_fp8_paged_logits_fallback(
@@ -2823,7 +1707,7 @@ def indexer_fp8_paged_logits_fallback(
         page_size,
         capture_active,
     )
-    if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+    if dsv4_optimized_triton_enabled():
         try:
             logits = _triton_dsv4_ops().indexer_fp8_paged_logits(
                 q_values,
@@ -2837,20 +1721,6 @@ def indexer_fp8_paged_logits_fallback(
             if logits is not None:
                 if _backend is not None:
                     _backend.append("triton_fp8_paged_vllm")
-                if capture_active:
-                    _record_indexer_capture_width_event(
-                        function_name="indexer_fp8_paged_logits_fallback",
-                        backend_path="triton_fp8_paged_vllm",
-                        q=q_values,
-                        cache_shape=list(packed_cache.shape),
-                        seq_lens=seq_lens,
-                        page_table=page_table,
-                        page_size=page_size,
-                        static_max_seq_len=static_max_seq_len,
-                        layer_id=layer_id,
-                        width_mode=width_mode,
-                        width_mode_note=width_mode_note,
-                    )
                 return logits
             if capture_active:
                 raise RuntimeError(
@@ -2915,20 +1785,6 @@ def indexer_fp8_paged_logits_fallback(
         logits[row, :length] = row_scores
     if _backend is not None:
         _backend.append("torch_fp8_paged")
-    if capture_active:
-        _record_indexer_capture_width_event(
-            function_name="indexer_fp8_paged_logits_fallback",
-            backend_path="torch_fp8_paged",
-            q=q_values,
-            cache_shape=list(packed_cache.shape),
-            seq_lens=seq_lens,
-            page_table=page_table,
-            page_size=page_size,
-            static_max_seq_len=static_max_seq_len,
-            layer_id=layer_id,
-            width_mode=width_mode,
-            width_mode_note=width_mode_note,
-        )
     return logits
 
 
@@ -2951,20 +1807,7 @@ def indexer_select_fp8_paged_fallback(
         if capture_active
         else int(seq_lens.clamp_min(0).max().item()) if seq_lens.numel() else 0
     )
-    raw_budget = os.environ.get(
-        DSV4_INDEXER_MAX_LOGITS_MB_ENV,
-        str(DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT),
-    ).strip()
-    try:
-        max_logits_mb = int(raw_budget)
-    except ValueError as exc:
-        raise ValueError(
-            f"{DSV4_INDEXER_MAX_LOGITS_MB_ENV} must be a positive integer, got {raw_budget!r}"
-        ) from exc
-    if max_logits_mb <= 0:
-        raise ValueError(
-            f"{DSV4_INDEXER_MAX_LOGITS_MB_ENV} must be positive, got {max_logits_mb}"
-        )
+    max_logits_mb = DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT
     max_logits_bytes = max_logits_mb * 1024 * 1024
     full_logits_bytes = rows * max(max_seq_len, 1) * torch.float32.itemsize
 
@@ -2991,7 +1834,7 @@ def indexer_select_fp8_paged_fallback(
         for start in range(0, rows, max_chunk_rows):
             end = min(start + max_chunk_rows, rows)
             logits_backend: list[str] = []
-            slice_metadata = {
+            {
                 "layer_id": int(layer_id) if layer_id is not None else -1,
                 "max_c4_seq_len": int(max_seq_len),
                 "slice_rows": int(end - start),
@@ -2999,53 +1842,37 @@ def indexer_select_fp8_paged_fallback(
                 "logits_bytes": int((end - start) * max_seq_len * 4),
                 "topk_width": int(width),
             }
-            with dsv4_long_prefill_timing.maybe_cuda_range(
-                "indexer_logits", slice_metadata
-            ):
-                chunk_logits = indexer_fp8_paged_logits_fallback(
-                    q_values[start:end],
-                    packed_cache,
-                    seq_lens[start:end],
-                    page_table[start:end],
-                    page_size=page_size,
-                    weights=weights[start:end],
-                    _backend=logits_backend,
-                    layer_id=layer_id,
-                )
-            with dsv4_long_prefill_timing.maybe_cuda_range(
-                "indexer_local_global_topk", slice_metadata
-            ):
-                chunk_topk = topk_transform_512_full_fallback(
-                    chunk_logits,
-                    seq_lens[start:end].to(
-                        device=chunk_logits.device, dtype=torch.int32
-                    ),
-                    page_table[start:end].to(
-                        device=chunk_logits.device, dtype=torch.int32
-                    ),
-                    page_size=page_size,
-                    width=width,
-                    ratio=ratio,
-                )
-                raw_indices[start:end].copy_(chunk_topk.raw_indices)
-                page_indices[start:end].copy_(chunk_topk.page_indices)
-                full_indices[start:end].copy_(chunk_topk.full_indices)
-                if chunk_topk.topk_lens is None:
-                    topk_lens[start:end].copy_(
-                        seq_lens[start:end].clamp(min=0, max=width).to(torch.int32)
-                    )
-                else:
-                    topk_lens[start:end].copy_(chunk_topk.topk_lens)
-            dsv4_long_prefill_timing.record_counter(
-                "indexer_slice",
-                {
-                    **slice_metadata,
-                    "backend": (
-                        logits_backend[0] if logits_backend else "torch_fp8_paged"
-                    ),
-                    "topk_backend": chunk_topk.backend,
-                },
+            chunk_logits = indexer_fp8_paged_logits_fallback(
+                q_values[start:end],
+                packed_cache,
+                seq_lens[start:end],
+                page_table[start:end],
+                page_size=page_size,
+                weights=weights[start:end],
+                _backend=logits_backend,
+                layer_id=layer_id,
             )
+            chunk_topk = topk_transform_512_full_fallback(
+                chunk_logits,
+                seq_lens[start:end].to(
+                    device=chunk_logits.device, dtype=torch.int32
+                ),
+                page_table[start:end].to(
+                    device=chunk_logits.device, dtype=torch.int32
+                ),
+                page_size=page_size,
+                width=width,
+                ratio=ratio,
+            )
+            raw_indices[start:end].copy_(chunk_topk.raw_indices)
+            page_indices[start:end].copy_(chunk_topk.page_indices)
+            full_indices[start:end].copy_(chunk_topk.full_indices)
+            if chunk_topk.topk_lens is None:
+                topk_lens[start:end].copy_(
+                    seq_lens[start:end].clamp(min=0, max=width).to(torch.int32)
+                )
+            else:
+                topk_lens[start:end].copy_(chunk_topk.topk_lens)
             backend_names.add(logits_backend[0] if logits_backend else "torch_fp8_paged")
             backend_names.add(chunk_topk.backend)
             chunk_count += 1
@@ -3073,7 +1900,7 @@ def indexer_select_fp8_paged_fallback(
         )
 
     logits_backend: list[str] = []
-    slice_metadata = {
+    {
         "layer_id": int(layer_id) if layer_id is not None else -1,
         "max_c4_seq_len": int(max_seq_len),
         "slice_rows": int(rows),
@@ -3081,33 +1908,25 @@ def indexer_select_fp8_paged_fallback(
         "logits_bytes": int(rows * max_seq_len * 4),
         "topk_width": int(width),
     }
-    with dsv4_long_prefill_timing.maybe_cuda_range("indexer_logits", slice_metadata):
-        logits = indexer_fp8_paged_logits_fallback(
-            q_values,
-            packed_cache,
-            seq_lens,
-            page_table,
-            page_size=page_size,
-            weights=weights,
-            _backend=logits_backend,
-            layer_id=layer_id,
-        )
-    with dsv4_long_prefill_timing.maybe_cuda_range(
-        "indexer_local_global_topk", slice_metadata
-    ):
-        topk = topk_transform_512_full_fallback(
-            logits,
-            seq_lens.to(device=logits.device, dtype=torch.int32),
-            page_table.to(device=logits.device, dtype=torch.int32),
-            page_size=page_size,
-            width=width,
-            ratio=ratio,
-        )
-    backend = logits_backend[0] if logits_backend else "torch_fp8_paged"
-    dsv4_long_prefill_timing.record_counter(
-        "indexer_slice",
-        {**slice_metadata, "backend": backend, "topk_backend": topk.backend},
+    logits = indexer_fp8_paged_logits_fallback(
+        q_values,
+        packed_cache,
+        seq_lens,
+        page_table,
+        page_size=page_size,
+        weights=weights,
+        _backend=logits_backend,
+        layer_id=layer_id,
     )
+    topk = topk_transform_512_full_fallback(
+        logits,
+        seq_lens.to(device=logits.device, dtype=torch.int32),
+        page_table.to(device=logits.device, dtype=torch.int32),
+        page_size=page_size,
+        width=width,
+        ratio=ratio,
+    )
+    backend = logits_backend[0] if logits_backend else "torch_fp8_paged"
     return DSV4IndexerSelectOutput(logits=logits, topk=topk, backend=f"{backend}+{topk.backend}")
 
 
@@ -3121,7 +1940,7 @@ def remap_indexer_topk_locs(
     ratio: int,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Map compressed raw top-k indices without int64 matrix temporaries."""
-    if not dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+    if not dsv4_optimized_triton_enabled():
         return None
     try:
         return _triton_dsv4_ops().remap_indexer_topk_locs(
@@ -3175,41 +1994,6 @@ def c128_prefill_page_indices_one_surface(
     return result
 
 
-def indexer_select_fp8_fallback(
-    q_values: torch.Tensor,
-    weights: torch.Tensor,
-    cache_values: torch.Tensor,
-    cache_scales: torch.Tensor,
-    seq_lens: torch.Tensor,
-    page_table: torch.Tensor,
-    *,
-    page_size: int,
-    width: int = 512,
-    ratio: int = 4,
-    layer_id: int | None = None,
-) -> DSV4IndexerSelectOutput:
-    logits_backend: list[str] = []
-    logits = indexer_fp8_logits_fallback(
-        q_values,
-        cache_values,
-        cache_scales,
-        seq_lens,
-        page_table,
-        page_size=page_size,
-        weights=weights,
-        _backend=logits_backend,
-        layer_id=layer_id,
-    )
-    topk = topk_transform_512_full_fallback(
-        logits,
-        seq_lens.to(device=logits.device, dtype=torch.int32),
-        page_table.to(device=logits.device, dtype=torch.int32),
-        page_size=page_size,
-        width=width,
-        ratio=ratio,
-    )
-    backend = logits_backend[0] if logits_backend else "torch_fp8"
-    return DSV4IndexerSelectOutput(logits=logits, topk=topk, backend=f"{backend}+{topk.backend}")
 
 
 def indexer_select_bf16_fallback(
@@ -3289,9 +2073,7 @@ def hc_pre_fallback(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     shape = x.shape
     flat = x.flatten(1)
-    if dsv4_sm80_triton_enabled(DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE) and dsv4_sm80_triton_enabled(
-        "MINISGL_DSV4_SM80_HC"
-    ):
+    if dsv4_optimized_triton_enabled() and dsv4_optimized_triton_enabled():
         mixes = linear_bf16_fp32_fallback(flat, fn)
         fused = _triton_dsv4_ops().hc_prenorm_split_pre(
             mixes.contiguous(),
@@ -3308,7 +2090,7 @@ def hc_pre_fallback(
     flat_float = flat.float()
     rsqrt = torch.rsqrt(flat_float.square().mean(-1, keepdim=True) + norm_eps)
     mixes = linear_bf16_fp32_fallback(flat, fn) * rsqrt
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_HC"):
+    if dsv4_optimized_triton_enabled():
         fused = _triton_dsv4_ops().hc_split_pre(
             mixes.contiguous(),
             x,
@@ -3331,7 +2113,7 @@ def hc_post_fallback(
     post: torch.Tensor,
     comb: torch.Tensor,
 ) -> torch.Tensor:
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_HC"):
+    if dsv4_optimized_triton_enabled():
         fused = _triton_dsv4_ops().hc_post(x, residual, post, comb)
         if fused is not None:
             return fused
@@ -3351,9 +2133,7 @@ def hc_head_fallback(
 ) -> torch.Tensor:
     shape = x.shape
     flat = x.flatten(1)
-    if dsv4_sm80_triton_enabled(DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE) and dsv4_sm80_triton_enabled(
-        "MINISGL_DSV4_SM80_HC"
-    ):
+    if dsv4_optimized_triton_enabled() and dsv4_optimized_triton_enabled():
         mixes = linear_bf16_fp32_fallback(flat, fn)
         fused = _triton_dsv4_ops().hc_prenorm_head(
             mixes.contiguous(),
@@ -3417,7 +2197,7 @@ def paged_mqa_attention_fallback(
             "DSV4 paged MQA metadata row count must match q tokens, "
             f"got {metadata.row_count} rows for {q.shape[0]} tokens"
         )
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_PAGED_MQA_BF16"):
+    if dsv4_optimized_triton_enabled():
         try:
             out = _triton_dsv4_ops().paged_mqa_attention_bf16(
                 q,
@@ -3466,19 +2246,6 @@ def wo_a_grouped_projection_fallback(
     o_lora_rank: int,
 ) -> torch.Tensor:
     d_per_group = o.shape[-1]
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_WO_A_BF16"):
-        try:
-            y = _triton_dsv4_ops().wo_a_grouped_projection_fp8(
-                o,
-                weight,
-                scale,
-                num_local_groups=num_local_groups,
-                o_lora_rank=o_lora_rank,
-            )
-            if y is not None:
-                return y
-        except Exception:
-            pass
     wo_a = dequant_fp8_weight(weight, scale, out_dtype=o.dtype)
     wo_a = wo_a.view(num_local_groups, o_lora_rank, d_per_group)
     return torch.einsum("tgd,grd->tgr", o, wo_a).reshape(o.shape[0], -1)
@@ -3506,7 +2273,7 @@ def build_moe_route_plan(
     route_count = indices.numel()
     topk = indices.shape[1]
     device = indices.device
-    if route_count and indices.is_cuda and dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_MOE_ROUTE"):
+    if route_count and indices.is_cuda and dsv4_optimized_triton_enabled():
         try:
             route_plan = _triton_dsv4_ops().build_moe_route_plan(
                 indices,
@@ -3740,7 +2507,7 @@ def silu_and_mul_clamp_fallback(
     swiglu_limit: float = 0.0,
     weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_SWIGLU"):
+    if dsv4_optimized_triton_enabled():
         try:
             out = _triton_dsv4_ops().silu_and_mul_clamp(
                 gate,
@@ -3763,21 +2530,6 @@ def silu_and_mul_clamp_fallback(
     return out
 
 
-def mega_moe_pre_dispatch_fallback(
-    hidden_states: torch.Tensor,
-    weights: torch.Tensor,
-    indices: torch.Tensor,
-    *,
-    num_experts: int | None = None,
-    block_size_m: int = 16,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | DSV4MoERoutePlan:
-    if num_experts is not None:
-        return build_moe_route_plan(
-            indices,
-            num_experts=num_experts,
-            block_size_m=block_size_m,
-        )
-    return hidden_states, weights, indices
 
 
 def moe_route_dispatch_bf16_grouped(
@@ -3793,7 +2545,7 @@ def moe_route_dispatch_bf16_grouped(
     moe_plan: DSV4MoEExecutionPlan | None = None,
     workspace: DSV4MoEWorkspace | None = None,
 ) -> torch.Tensor | None:
-    if not dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_MOE_ROUTE"):
+    if not dsv4_optimized_triton_enabled():
         return None
     if hidden_states.dtype is not torch.bfloat16 or not hidden_states.is_cuda:
         return None
@@ -3874,7 +2626,7 @@ def _run_local_cuda_topk_transform_512(
     width: int,
 ) -> bool:
     if not (
-        dsv4_env_flag("MINISGL_DSV4_SM80_TOPK")
+        dsv4_optimized_enabled()
         and scores.is_cuda
         and detect_dsv4_kernel_capabilities().is_sm80
         and width in (512, 1024)
@@ -3908,7 +2660,7 @@ def _run_local_cuda_global_topk_lens_512(
     ratio: int,
 ) -> bool:
     if not (
-        dsv4_env_flag(DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE)
+        dsv4_optimized_enabled()
         and scores.is_cuda
         and detect_dsv4_kernel_capabilities().is_sm80
         and width in (512, 1024)
@@ -4039,7 +2791,7 @@ def topk_transform_512_full_fallback(
         width=int(width),
         ratio=int(ratio),
     )
-    force_torch = os.environ.get(DSV4_FORCE_TORCH_TOPK_ENV, "").strip().lower() in _TRUE_ENV_VALUES
+    force_torch = False
     raw_indices = torch.empty(
         (scores.shape[0], int(width)), dtype=torch.int32, device=scores.device
     )
@@ -4068,12 +2820,11 @@ def topk_transform_512_full_fallback(
             "local_cuda_global_topk_lens",
             topk_lens,
         )
-    if dsv4_env_flag(DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE) and _cuda_graph_capture_active(
+    if dsv4_optimized_enabled() and _cuda_graph_capture_active(
         scores.device
     ):
         raise RuntimeError(
-            "DSV4 CUDA graph capture requires the global topk/lens JIT path when "
-            f"{DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE}=1."
+            "Optimized DSV4 CUDA graph capture requires the global topk/lens JIT path."
         )
     if not force_torch and _run_local_cuda_topk_transform_512(
         scores.to(torch.float32),
@@ -4102,62 +2853,12 @@ def topk_transform_512_full_fallback(
     )
 
 
-def topk_transform_512_fallback(indices: torch.Tensor, *, width: int = 512) -> torch.Tensor:
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_TOPK"):
-        try:
-            out = _triton_dsv4_ops().topk_transform_512(indices, width=width)
-            if out is not None:
-                return out
-        except Exception:
-            pass
-    if indices.shape[-1] == width:
-        return indices
-    out = torch.full(
-        (*indices.shape[:-1], width),
-        -1,
-        dtype=indices.dtype,
-        device=indices.device,
-    )
-    n = min(indices.shape[-1], width)
-    out[..., :n] = indices[..., :n]
-    return out
 
 
-def topk_transform_512_v2_fallback(indices: torch.Tensor, *, width: int = 512) -> torch.Tensor:
-    return topk_transform_512_fallback(indices, width=width)
 
 
-def plan_topk_v2_fallback(
-    lengths: torch.Tensor, *, width: int = 512
-) -> dict[str, torch.Tensor | int]:
-    return {"lengths": lengths.to(torch.int32), "width": width}
 
 
-def _debug_check_store_loc_bounds(
-    cache: torch.Tensor,
-    loc: torch.Tensor,
-    *,
-    cache_type: str,
-    layer_id: int,
-) -> None:
-    if os.environ.get(DSV4_CACHE_BOUNDS_DEBUG_ENV, "").strip().lower() not in _TRUE_ENV_VALUES:
-        return
-    if loc.numel() == 0:
-        return
-    loc_flat = loc.reshape(-1)
-    valid = loc_flat >= 0
-    if not bool(torch.any(valid).item()):
-        return
-    valid_locs = loc_flat[valid]
-    bad = valid_locs >= int(cache.shape[0])
-    if not bool(torch.any(bad).item()):
-        return
-    bad_locs = valid_locs[bad]
-    raise RuntimeError(
-        "DSV4 cache store loc out of bounds before fused store: "
-        f"cache_type={cache_type}, layer={layer_id}, "
-        f"value={int(bad_locs[0].item())}, cache_rows={int(cache.shape[0])}"
-    )
 
 
 def store_swa_fallback(
@@ -4176,18 +2877,6 @@ def store_swa_fallback(
         and bool(getattr(kvcache, "swa_independent_lifecycle_enabled", False))
     ):
         store_loc = translate(out_loc)
-    _debug_check_store_loc_bounds(
-        kvcache.swa_cache(layer_id),
-        store_loc,
-        cache_type="swa",
-        layer_id=layer_id,
-    )
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_STORE_CACHE"):
-        try:
-            if _triton_dsv4_ops().store_cache(kvcache.swa_cache(layer_id), kv, store_loc):
-                return
-        except Exception:
-            pass
     if out_loc_is_swa:
         if not bool(torch.all(store_loc >= 0).item()):
             raise RuntimeError("DSV4 SWA write requested for full loc without live SWA mapping")
@@ -4205,13 +2894,7 @@ def store_compressed_fallback(
     loc: torch.Tensor,
 ) -> None:
     loc_flat = loc.reshape(-1)
-    _debug_check_store_loc_bounds(
-        kvcache.component_cache(layer_id),
-        loc,
-        cache_type="component",
-        layer_id=layer_id,
-    )
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
+    if dsv4_optimized_triton_enabled():
         try:
             if _triton_dsv4_ops().store_cache(kvcache.component_cache(layer_id), kv, loc):
                 return
@@ -4228,13 +2911,7 @@ def store_compressed_fallback(
 
 def store_indexer_fallback(kvcache, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
     loc_flat = loc.reshape(-1)
-    _debug_check_store_loc_bounds(
-        kvcache.indexer_cache(layer_id),
-        loc,
-        cache_type="indexer",
-        layer_id=layer_id,
-    )
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
+    if dsv4_optimized_triton_enabled():
         try:
             if _triton_dsv4_ops().store_cache(kvcache.indexer_cache(layer_id), kv, loc):
                 return
@@ -4255,12 +2932,12 @@ def store_indexer_fp8_cache_fallback(
     kv: torch.Tensor,
     loc: torch.Tensor,
 ) -> bool:
-    if not dsv4_env_flag(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+    if not dsv4_optimized_enabled():
         return False
     if not hasattr(kvcache, "has_indexer_fp8_cache") or not kvcache.has_indexer_fp8_cache():
         raise RuntimeError(
-            f"{DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE}=1 requires DeepSeekV4KVCache "
-            "to be allocated with an FP8 indexer side cache."
+            "Optimized DSV4 requires DeepSeekV4KVCache to be allocated with an "
+            "FP8 indexer side cache."
         )
     flat = kv.reshape(-1, kv.shape[-1]).contiguous()
     loc_flat = loc.to(device=flat.device, dtype=torch.long).reshape(-1)
@@ -4281,7 +2958,7 @@ def store_indexer_fp8_cache_fallback(
                 f"cache page bytes={packed_cache.shape[-1]} kv dim={flat.shape[-1]} "
                 f"page_size={page_size}"
             )
-        if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+        if dsv4_optimized_triton_enabled():
             try:
                 if _triton_dsv4_ops().indexer_fp8_paged_quant_store(
                     flat,
@@ -4326,7 +3003,7 @@ def store_indexer_fp8_cache_fallback(
             f"DSV4 FP8 indexer cache dim mismatch: cache dim={values.shape[-1]} kv dim={flat.shape[-1]}"
         )
 
-    if dsv4_sm80_triton_enabled(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+    if dsv4_optimized_triton_enabled():
         try:
             if _triton_dsv4_ops().indexer_fp8_quant_store(flat, loc_flat, values, scales):
                 return True
@@ -4348,157 +3025,6 @@ def store_indexer_fp8_cache_fallback(
     return True
 
 
-def decode_metadata_deforest_fallback(
-    ctx_page_table: torch.Tensor,
-    table_indices: torch.Tensor,
-    positions: torch.Tensor,
-    *,
-    page_size: int,
-    max_seqlen_k: int,
-    window_size: int,
-    index_topk: int,
-    alignment: int = 64,
-    c4_page_table: torch.Tensor | None = None,
-    c128_page_table: torch.Tensor | None = None,
-    component_loc_ownership: bool = False,
-) -> DSV4DecodeMetadataDeforestOutput | None:
-    if not dsv4_sm80_triton_enabled(DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE):
-        return None
-    if (
-        ctx_page_table.ndim != 2
-        or table_indices.ndim != 1
-        or positions.ndim != 1
-        or table_indices.numel() != positions.numel()
-        or ctx_page_table.dtype is not torch.int32
-        or table_indices.dtype is not torch.int32
-        or positions.dtype is not torch.int32
-        or page_size <= 0
-        or window_size <= 0
-        or index_topk <= 0
-        or alignment <= 0
-        or page_size & (page_size - 1)
-    ):
-        return None
-    if not (ctx_page_table.is_cuda and table_indices.is_cuda and positions.is_cuda):
-        return None
-    if not (ctx_page_table.is_contiguous() and table_indices.is_contiguous()):
-        return None
-    if component_loc_ownership:
-        if c4_page_table is None or c128_page_table is None:
-            return None
-        if (
-            c4_page_table.ndim != 2
-            or c128_page_table.ndim != 2
-            or c4_page_table.dtype is not torch.int32
-            or c128_page_table.dtype is not torch.int32
-            or not c4_page_table.is_cuda
-            or not c128_page_table.is_cuda
-            or not c4_page_table.is_contiguous()
-            or not c128_page_table.is_contiguous()
-            or c4_page_table.shape[0] != positions.numel()
-            or c128_page_table.shape[0] != positions.numel()
-        ):
-            return None
-
-    rows = positions.numel()
-    device = positions.device
-    page_table_width = max(div_ceil(max(int(max_seqlen_k), 1), int(page_size)), 1)
-    swa_width = div_ceil(int(window_size), int(alignment)) * int(alignment)
-    c4_width = div_ceil(max(int(index_topk), 1), int(alignment)) * int(alignment)
-    c128_len = max(int(max_seqlen_k), 1) // 128
-    c128_width = div_ceil(max(c128_len, 1), int(alignment)) * int(alignment)
-
-    page_table = torch.empty((rows, page_table_width), dtype=torch.int32, device=device)
-    swa_page_indices = torch.empty((rows, swa_width), dtype=torch.int32, device=device)
-    swa_topk_lengths = torch.empty((rows,), dtype=torch.int32, device=device)
-    c4_topk_lengths_raw = torch.empty((rows,), dtype=torch.int32, device=device)
-    c4_topk_lengths_clamp1 = torch.empty((rows,), dtype=torch.int32, device=device)
-    c4_sparse_topk_lengths = torch.empty((rows,), dtype=torch.int32, device=device)
-    c4_sparse_raw_indices = torch.empty((rows, c4_width), dtype=torch.int32, device=device)
-    c4_sparse_page_indices = torch.empty_like(c4_sparse_raw_indices)
-    c4_sparse_full_indices = torch.empty_like(c4_sparse_raw_indices)
-    c128_topk_lengths_clamp1 = torch.empty((rows,), dtype=torch.int32, device=device)
-    c128_raw_indices = torch.empty((rows, c128_width), dtype=torch.int32, device=device)
-    c128_page_indices = torch.empty_like(c128_raw_indices)
-    c128_full_indices = torch.empty_like(c128_raw_indices)
-
-    try:
-        if component_loc_ownership:
-            assert c4_page_table is not None and c128_page_table is not None
-            ok = _triton_dsv4_ops().build_decode_metadata_indices_component(
-                ctx_page_table,
-                table_indices,
-                positions,
-                c4_page_table,
-                c128_page_table,
-                page_table,
-                swa_page_indices,
-                swa_topk_lengths,
-                c4_topk_lengths_raw,
-                c4_topk_lengths_clamp1,
-                c4_sparse_topk_lengths,
-                c4_sparse_raw_indices,
-                c4_sparse_page_indices,
-                c4_sparse_full_indices,
-                c128_topk_lengths_clamp1,
-                c128_raw_indices,
-                c128_page_indices,
-                c128_full_indices,
-                page_size=int(page_size),
-                max_seqlen_k=int(max_seqlen_k),
-                window_size=int(window_size),
-                index_topk=int(index_topk),
-            )
-        else:
-            ok = _triton_dsv4_ops().build_decode_metadata_indices(
-                ctx_page_table,
-                table_indices,
-                positions,
-                page_table,
-                swa_page_indices,
-                swa_topk_lengths,
-                c4_topk_lengths_raw,
-                c4_topk_lengths_clamp1,
-                c4_sparse_topk_lengths,
-                c4_sparse_raw_indices,
-                c4_sparse_page_indices,
-                c4_sparse_full_indices,
-                c128_topk_lengths_clamp1,
-                c128_raw_indices,
-                c128_page_indices,
-                c128_full_indices,
-                page_size=int(page_size),
-                max_seqlen_k=int(max_seqlen_k),
-                window_size=int(window_size),
-                index_topk=int(index_topk),
-            )
-        if ok:
-            return DSV4DecodeMetadataDeforestOutput(
-                page_table=page_table,
-                swa_page_indices=swa_page_indices,
-                swa_topk_lengths=swa_topk_lengths,
-                c4_topk_lengths_raw=c4_topk_lengths_raw,
-                c4_topk_lengths_clamp1=c4_topk_lengths_clamp1,
-                c4_sparse_topk_lengths=c4_sparse_topk_lengths,
-                c4_sparse_raw_indices=c4_sparse_raw_indices,
-                c4_sparse_page_indices=c4_sparse_page_indices,
-                c4_sparse_full_indices=c4_sparse_full_indices,
-                c128_topk_lengths_clamp1=c128_topk_lengths_clamp1,
-                c128_raw_indices=c128_raw_indices,
-                c128_page_indices=c128_page_indices,
-                c128_full_indices=c128_full_indices,
-            )
-    except Exception as exc:
-        if _cuda_graph_capture_active(device):
-            raise RuntimeError(
-                "DSV4 CUDA graph capture failed in decode metadata deforestation."
-            ) from exc
-    if _cuda_graph_capture_active(device):
-        raise RuntimeError(
-            "DSV4 CUDA graph capture requires the decode metadata deforestation path "
-            f"when {DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE}=1."
-        )
-    return None
 
 
 def copy_masked_compressed_locs(
@@ -4511,7 +3037,7 @@ def copy_masked_compressed_locs(
     if (
         c4_out_loc is not None
         and c128_out_loc is not None
-        and dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE")
+        and dsv4_optimized_triton_enabled()
     ):
         try:
             if _triton_dsv4_ops().copy_masked_compressed_locs(
@@ -4528,74 +3054,6 @@ def copy_masked_compressed_locs(
     _copy_masked_compressed_locs_fallback(c128_out_loc, raw_out_loc, positions, rows, ratio=128)
 
 
-def direct_c4_sparse_metadata_for_replay(
-    *,
-    ctx_page_table: torch.Tensor,
-    table_indices: torch.Tensor,
-    positions: torch.Tensor,
-    c4_page_table: torch.Tensor | None,
-    dst_c4_sparse_raw_indices: torch.Tensor,
-    dst_c4_sparse_page_indices: torch.Tensor,
-    dst_c4_sparse_full_indices: torch.Tensor,
-    rows: int,
-    page_size: int,
-    index_topk: int,
-    component_loc_ownership: bool,
-) -> bool:
-    if not dsv4_env_flag(DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE):
-        return False
-    if rows < 0 or page_size <= 0 or index_topk <= 0:
-        return False
-    if rows == 0:
-        return True
-    tensors = (
-        ctx_page_table,
-        table_indices,
-        positions,
-        dst_c4_sparse_raw_indices,
-        dst_c4_sparse_page_indices,
-        dst_c4_sparse_full_indices,
-    )
-    if component_loc_ownership:
-        if c4_page_table is None:
-            return False
-        tensors = (*tensors, c4_page_table)
-    if not all(t.is_cuda and t.dtype is torch.int32 and t.is_contiguous() for t in tensors):
-        return False
-    if (
-        ctx_page_table.ndim != 2
-        or table_indices.ndim != 1
-        or positions.ndim != 1
-        or dst_c4_sparse_raw_indices.ndim != 2
-        or dst_c4_sparse_page_indices.shape != dst_c4_sparse_raw_indices.shape
-        or dst_c4_sparse_full_indices.shape != dst_c4_sparse_raw_indices.shape
-        or table_indices.numel() < rows
-        or positions.numel() < rows
-        or dst_c4_sparse_raw_indices.shape[0] < rows
-        or page_size & (page_size - 1)
-    ):
-        return False
-    if component_loc_ownership:
-        assert c4_page_table is not None
-        if c4_page_table.ndim != 2 or c4_page_table.shape[0] < rows:
-            return False
-    try:
-        return bool(
-            _triton_dsv4_ops().direct_c4_sparse_metadata_for_replay(
-                ctx_page_table,
-                table_indices[:rows],
-                positions[:rows],
-                c4_page_table[:rows] if c4_page_table is not None else None,
-                dst_c4_sparse_raw_indices,
-                dst_c4_sparse_page_indices,
-                dst_c4_sparse_full_indices,
-                page_size=int(page_size),
-                index_topk=int(index_topk),
-                component_loc_ownership=bool(component_loc_ownership),
-            )
-        )
-    except Exception:
-        return False
 
 
 def direct_decode_index_metadata_for_replay(
@@ -4624,7 +3082,7 @@ def direct_decode_index_metadata_for_replay(
     swa_dummy_page: int = -1,
     swa_independent: bool = False,
 ) -> bool:
-    if not dsv4_env_flag(DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE):
+    if not dsv4_optimized_enabled():
         return False
     if rows < 0 or page_size <= 0 or window_size <= 0 or index_topk <= 0:
         return False
@@ -4755,7 +3213,7 @@ def copy_decode_metadata_for_replay(
     skip_c4_sparse_indices: bool = False,
     skip_c128_indices: bool = False,
 ) -> bool:
-    if not dsv4_env_flag(DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE):
+    if not dsv4_optimized_enabled():
         return False
     tensors = (
         dst_raw_out_loc,
@@ -4889,7 +3347,7 @@ def copy_component_write_locs_for_replay(
     rows: int,
     page_size: int,
 ) -> bool:
-    if not dsv4_env_flag(DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE):
+    if not dsv4_optimized_enabled():
         return False
     tensors = (
         c4_page_table,
@@ -4985,7 +3443,7 @@ def prep_decode_metadata_in_graph(
     swa_dummy_page: int = -1,
     swa_independent: bool = False,
 ) -> bool:
-    if not dsv4_env_flag(DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE):
+    if not dsv4_optimized_enabled():
         return False
     if rows < 0 or page_size <= 0 or window_size <= 0 or index_topk <= 0:
         return False
@@ -5208,10 +3666,10 @@ def compress_norm_rope_store_fallback(
         )
 
     if (
-        dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE")
+        dsv4_optimized_triton_enabled()
         and not apply_hadamard
         and positions_flat is not None
-        and not (cache_type == "indexer" and dsv4_env_flag(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE))
+        and not (cache_type == "indexer" and dsv4_optimized_enabled())
     ):
         try:
             if _triton_dsv4_ops().compress_norm_rope_store_bf16(
@@ -5251,11 +3709,11 @@ def compress_norm_rope_store_fallback(
     if apply_hadamard:
         indexer_kv_hadamard_fallback(flat)
 
-    if cache_type == "indexer" and dsv4_env_flag(DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE):
+    if cache_type == "indexer" and dsv4_optimized_enabled():
         store_indexer_fp8_cache_fallback(kvcache, layer_id, flat, loc_flat)
         return
 
-    if dsv4_sm80_triton_enabled("MINISGL_DSV4_SM80_COMPRESS_STORE"):
+    if dsv4_optimized_triton_enabled():
         try:
             if _triton_dsv4_ops().store_cache(cache, flat, loc_flat):
                 return
@@ -5269,44 +3727,14 @@ def compress_norm_rope_store_fallback(
         cache[loc_flat[valid].to(device=cache.device)] = flat[valid].to(cache.dtype)
 
 
-def fused_q_indexer_rope_first_quant(*args, **kwargs):
-    del args, kwargs
-    unsupported_kernel(
-        "fused_q_indexer_rope_first_quant",
-        "sm80 indexer first-quant kernel has not been ported; use bf16 indexer fallback",
-    )
 
 
-def fused_q_indexer_rope_hadamard_quant(*args, **kwargs):
-    del args, kwargs
-    unsupported_kernel(
-        "fused_q_indexer_rope_hadamard_quant",
-        "sgl_kernel DeepSeek V4 fp8 indexer op is missing for sm80",
-    )
 
 
-def fused_q_indexer_rope_hadamard_fp4_quant(*args, **kwargs):
-    del args, kwargs
-    unsupported_kernel(
-        "fused_q_indexer_rope_hadamard_fp4_quant",
-        "the upstream fp4 hadamard quant path is sm100-oriented and must be rewritten for sm80",
-    )
 
 
-def silu_and_mul_masked_post_quant(*args, **kwargs):
-    del args, kwargs
-    unsupported_kernel(
-        "silu_and_mul_masked_post_quant",
-        "post-quant MoE activation fusion is not implemented in the sm80 wrapper",
-    )
 
 
-def silu_and_mul_contig_post_quant(*args, **kwargs):
-    del args, kwargs
-    unsupported_kernel(
-        "silu_and_mul_contig_post_quant",
-        "contiguous post-quant MoE activation fusion is not implemented in the sm80 wrapper",
-    )
 
 
 __all__ = [
@@ -5317,66 +3745,11 @@ __all__ = [
     "DSV4IndexerFP8Query",
     "DSV4IndexerSelectOutput",
     "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT",
-    "DSV4_INDEXER_MAX_LOGITS_MB_ENV",
-    "DSV4_LINEAR_BF16_FP32_TOGGLE",
-    "DSV4_SM80_A100_VICTORY_DISABLE_TOGGLES_ENV",
-    "DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE",
-    "DSV4_SM80_A100_VICTORY_BUNDLE_WHITELIST",
-    "DSV4_SM80_BF16_PROJECTION_CACHE_TOGGLE",
-    "DSV4_SM80_BF16_PROJECTION_CACHE_WHITELIST",
-    "DSV4_SM80_BF16_SMALL_GEMM_PRETRANSPOSE_TOGGLE",
-    "DSV4_SM80_DECODE_METADATA_DEFOREST_TOGGLE",
-    "DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS_TOGGLE",
-    "DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_TOGGLE",
-    "DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE",
-    "DSV4_SM80_PREP_METADATA_IN_GRAPH_TOGGLE",
-    "DSV4_SM80_HC_GRAPH_CLEANUP_TOGGLE",
-    "DSV4_SM80_FUSED_TOPK_SWA_INDICES_TOGGLE",
-    "DSV4_SM80_GLOBAL_TOPK_LENS_TOGGLE",
-    "DSV4_SM80_INDEXER_WQB_BF16_WEIGHT_CACHE_TOGGLE",
-    "DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE",
-    "DSV4_SM80_WO_A_BF16_BMM_CACHE_TOGGLE",
-    "DSV4_SM80_INDEXER_FP8_CACHE_TOGGLE",
-    "DSV4_SM80_SPARSE_SPLITK_BF16_TOGGLE",
-    "DSV4_SM80_REPLAY_METADATA_COPY_TOGGLE",
-    "DSV4_SM80_EXPERIMENTAL_TOGGLES",
-    "DSV4_SM80_KNOWN_TOGGLES",
-    "DSV4_SM80_MOE_EXPERT_BACKEND_ENV",
     "DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4",
-    "DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_MXFP4_W4A16",
-    "DSV4_SM80_MOE_EXPERT_BACKEND_VLLM_MARLIN_BRIDGE",
     "DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16",
     "DSV4_SM80_MOE_EXPERT_BACKENDS",
-    "DSV4_SM80_MOE_MARLIN_BLOCKER",
-    "DSV4_SM80_MOE_VLLM_MARLIN_BRIDGE_BLOCKER",
-    "DSV4_SM80_MOE_MARLIN_WNA16_BLOCKER",
-    "DSV4_MARLIN_WNA16_PREBUILD_ENV",
-    "DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV",
-    "DSV4_MARLIN_WNA16_RELEASE_TIMING_ENV",
-    "DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV",
-    "DSV4_MARLIN_WNA16_RELEASE_CREDIT_SAFETY_MARGIN_BYTES_ENV",
-    "DSV4_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV",
-    "DSV4_MARLIN_WNA16_QUARANTINE_BYTES_ENV",
-    "DSV4_MARLIN_WNA16_QUARANTINE_PATTERN_ENV",
-    "DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG_ENV",
-    "DSV4_MARLIN_WNA16_KV_SENTINEL_DEBUG_ENV",
-    "DSV4_MARLIN_WNA16_KV_SENTINEL_BYTES_ENV",
-    "DSV4_MARLIN_WNA16_POISON_THEN_FREE_ENV",
-    "DSV4_MARLIN_WNA16_POISON_THEN_FREE_BYTES_ENV",
-    "DSV4_MARLIN_WNA16_POISON_THEN_FREE_PATTERN_ENV",
-    "DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV",
     "DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR",
-    "DSV4_SM80_MOE_REDUCE_BF16_TOGGLE",
-    "DSV4_SM80_MOE_V2_TOGGLE",
-    "DSV4_SM80_MOE_V2_WHITELIST",
-    "DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE",
-    "DSV4_SM80_MOE_VLLM_RUNNER_WHITELIST",
     "DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES",
-    "DSV4_SM80_V0_BF16_TOGGLE",
-    "DSV4_SM80_V0_BF16_WHITELIST",
-    "DSV4_SM80_V1_MOE_TOGGLE",
-    "DSV4_SM80_V1_MOE_WHITELIST",
-    "DSV4_SM80_VLLM_FP8_MARLIN_PROJECTION_TOGGLE",
     "DSV4DecodeMetadataDeforestOutput",
     "DSV4MoEExecutionPlan",
     "DSV4MoERoutePlan",
@@ -5394,7 +3767,6 @@ __all__ = [
     "direct_decode_index_metadata_for_replay",
     "direct_c4_sparse_metadata_for_replay",
     "decode_metadata_deforest_fallback",
-    "dense_fp8_marlin_projection_enabled",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
     "compressor_plan_fallback",
@@ -5408,14 +3780,13 @@ __all__ = [
     "dequantize_indexer_fp8_cache_ref",
     "dequantize_indexer_fp8_paged_cache_ref",
     "detect_dsv4_kernel_capabilities",
-    "dsv4_env_disabled_toggles",
-    "dsv4_env_flag",
     "dsv4_moe_expert_backend",
+    "dsv4_optimized_cuda_enabled",
+    "dsv4_optimized_enabled",
+    "dsv4_optimized_triton_enabled",
     "dsv4_kernel_inventory_by_wrapper",
     "dsv4_sparse_attention_two_source_bf16",
     "dsv4_sparse_attention_two_source_splitk_bf16",
-    "dsv4_sm80_cuda_enabled",
-    "dsv4_sm80_triton_enabled",
     "e8m0_dtype",
     "fp8_dtype",
     "fused_q_indexer_rope_first_quant",

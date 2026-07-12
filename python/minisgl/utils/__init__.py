@@ -1,4 +1,3 @@
-from . import dsv4_long_prefill_timing, dsv4_memory_debug, dsv4_owner_timing
 from .arch import is_arch_supported, is_sm90_supported, is_sm100_supported
 from .hf import cached_load_hf_config, download_hf_weight, load_tokenizer
 from .logger import init_logger
@@ -12,12 +11,7 @@ from .mp import (
     ZmqSubQueue,
 )
 from .registry import Registry
-from .torch_utils import (
-    dsv4_direct_copy_nvtx,
-    dsv4_direct_copy_nvtx_enabled,
-    nvtx_annotate,
-    torch_dtype,
-)
+from .torch_utils import nvtx_annotate, torch_dtype
 
 __all__ = [
     "cached_load_hf_config",
@@ -36,11 +30,6 @@ __all__ = [
     "Unset",
     "torch_dtype",
     "nvtx_annotate",
-    "dsv4_direct_copy_nvtx",
-    "dsv4_direct_copy_nvtx_enabled",
-    "dsv4_owner_timing",
-    "dsv4_long_prefill_timing",
-    "dsv4_memory_debug",
     "Registry",
     "ZmqPushQueue",
     "ZmqPullQueue",

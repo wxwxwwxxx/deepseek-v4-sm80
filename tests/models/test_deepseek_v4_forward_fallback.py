@@ -8,11 +8,10 @@ import minisgl.distributed.info as dist_info
 import pytest
 import torch
 import torch.nn.functional as F
-from minisgl.utils import dsv4_memory_debug
 from minisgl.attention import create_attention_backend
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
-from minisgl.kernel import dense_fp8_marlin
+from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
@@ -20,11 +19,19 @@ from minisgl.models.deepseek_v4 import (
     DeepseekV4Model,
     DSV4Attention,
     DSV4FusedRoutedExperts,
+    DSV4Linear,
     DSV4MoE,
     DSV4MoEGate,
     DSV4SharedExperts,
 )
 from minisgl.models.register import get_model_class
+
+
+@pytest.fixture(autouse=True)
+def _optimized_runtime_mode():
+    configure_dsv4_runtime("optimized")
+    yield
+    configure_dsv4_runtime("optimized")
 
 
 def _tiny_dsv4_config() -> ModelConfig:
@@ -74,6 +81,27 @@ def _reset_globals(*, tp_rank: int = 0, tp_size: int = 1) -> None:
     set_tp_info(tp_rank, tp_size)
 
 
+def test_fallback_fp8_linear_preserves_loaded_scale(monkeypatch):
+    configure_dsv4_runtime("fallback")
+    _reset_globals()
+    linear = DSV4Linear(
+        128,
+        128,
+        weight_dtype=dsv4_kernel.fp8_dtype(),
+        scale_dtype=dsv4_kernel.e8m0_dtype(),
+    )
+    captured = {}
+
+    def fake_quantized_linear(x, weight, scale, **kwargs):
+        captured["scale"] = scale
+        return torch.zeros((*x.shape[:-1], weight.shape[0]), dtype=x.dtype)
+
+    monkeypatch.setattr(dsv4_kernel, "quantized_linear_ref", fake_quantized_linear)
+    linear.forward(torch.zeros(1, 128, dtype=torch.bfloat16))
+
+    assert captured["scale"] is linear.weight_scale_inv
+
+
 @pytest.fixture(autouse=True)
 def _clear_deepseek_v4_test_globals():
     yield
@@ -82,8 +110,7 @@ def _clear_deepseek_v4_test_globals():
 
 
 def _clear_dsv4_sm80_env(monkeypatch) -> None:
-    for name in dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES:
-        monkeypatch.delenv(name, raising=False)
+    del monkeypatch
 
 
 def _install_dsv4_context(cfg: ModelConfig, *, max_len: int) -> Context:
@@ -153,6 +180,7 @@ def _fill_forward_weights(model) -> None:
 
 
 def test_deepseek_v4_small_prefill_forward_fallback_reaches_logits():
+    configure_dsv4_runtime("fallback")
     _reset_globals()
     cfg = _tiny_dsv4_config()
     model = get_model_class(cfg.architectures[0], cfg)
@@ -184,6 +212,7 @@ def test_deepseek_v4_small_prefill_forward_fallback_reaches_logits():
 
 
 def test_deepseek_v4_ratio4_prefill_forward_fallback_reaches_logits():
+    configure_dsv4_runtime("fallback")
     _reset_globals()
     cfg = replace(
         _tiny_dsv4_config(),
@@ -220,8 +249,8 @@ def test_deepseek_v4_ratio4_prefill_forward_fallback_reaches_logits():
 
 
 def test_deepseek_v4_ratio4_prefill_forward_with_indexer_bf16_toggle(monkeypatch):
+    configure_dsv4_runtime("fallback")
     _reset_globals()
-    monkeypatch.setenv("MINISGL_DSV4_SM80_INDEXER_BF16", "1")
     cfg = replace(
         _tiny_dsv4_config(),
         compress_ratios=[4],
@@ -297,6 +326,7 @@ def test_deepseek_v4_moe_gate_matches_sqrtsoftplus_oracle():
 
 
 def test_deepseek_v4_routed_experts_all_reduce_tp_sharded_output(monkeypatch):
+    configure_dsv4_runtime("fallback")
     _reset_globals(tp_rank=0, tp_size=2)
     cfg = _tiny_dsv4_config()
     experts = DSV4FusedRoutedExperts(cfg)
@@ -334,6 +364,7 @@ def test_deepseek_v4_routed_experts_all_reduce_tp_sharded_output(monkeypatch):
 
 
 def test_deepseek_v4_grouped_routed_experts_all_reduce_tp_sharded_output(monkeypatch):
+    configure_dsv4_runtime("fallback")
     _reset_globals(tp_rank=0, tp_size=2)
     cfg = _tiny_dsv4_config()
     experts = DSV4FusedRoutedExperts(cfg)
@@ -415,16 +446,13 @@ def test_deepseek_v4_marlin_release_report_is_idempotent():
     assert second["raw_weights_available_after"] is False
 
 
-def test_deepseek_v4_marlin_release_fail_closed_for_grouped_backend(monkeypatch):
+def test_deepseek_v4_marlin_release_fail_closed_for_grouped_backend():
     _reset_globals()
     cfg = _tiny_dsv4_config()
     experts = DSV4FusedRoutedExperts(cfg)
     experts._marlin_wna16_weights = _FakeMarlinWNA16Cache(experts)
     experts.release_marlin_wna16_original_expert_weights()
-    monkeypatch.setenv(
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
-    )
+    configure_dsv4_runtime("fallback")
 
     hidden = torch.zeros(2, cfg.hidden_size, dtype=torch.bfloat16)
     weights = torch.ones(2, 1, dtype=torch.float32)
@@ -437,41 +465,10 @@ def test_deepseek_v4_marlin_release_fail_closed_for_grouped_backend(monkeypatch)
         experts.forward(hidden, weights, indices)
 
 
-def test_deepseek_v4_release_guard_integrity_reports_mutation(monkeypatch, tmp_path):
-    _reset_globals()
-    cfg = _tiny_dsv4_config()
-    model = DeepseekV4Model(cfg)
-    guard = torch.empty(64, dtype=torch.uint8)
-    guard.fill_(7)
-    initial = dsv4_memory_debug.tensor_integrity_summary(guard)
-    model._marlin_wna16_release_quarantine_tensors = [guard]
-    model._marlin_wna16_release_quarantine_records = [
-        {
-            "owner": "test.guard",
-            "stage": "test",
-            "pattern": "deterministic",
-            "quarantine_index": 0,
-            "tensor_index": 0,
-            "source_released_item": {"layer_id": 0, "component": "w13_weight"},
-            "initial_integrity": initial,
-        }
-    ]
-    monkeypatch.setenv(
-        dsv4_memory_debug.DSV4_MARLIN_WNA16_GUARD_INTEGRITY_ENV,
-        "1",
-    )
-    monkeypatch.setenv(dsv4_memory_debug.DSV4_AUDIT_LOG_DIR_ENV, str(tmp_path))
-
-    clean = model.check_marlin_wna16_release_guards("before")
-    guard[0] = 9
-    mutated = model.check_marlin_wna16_release_guards("after")
-
-    assert clean["mutated_count"] == 0
-    assert mutated["mutated_count"] == 1
-    assert mutated["records"][0]["mutated"] is True
 
 
-def test_deepseek_v4_prepare_releases_marlin_weights_after_all_prebuilds(monkeypatch):
+def test_deepseek_v4_prepare_defers_release_until_before_kv_alloc():
+    configure_dsv4_runtime("optimized")
     _reset_globals()
     cfg = replace(_tiny_dsv4_config(), num_layers=3)
     model = DeepseekV4Model(cfg)
@@ -498,32 +495,19 @@ def test_deepseek_v4_prepare_releases_marlin_weights_after_all_prebuilds(monkeyp
         layer.mlp.experts.prepare_marlin_wna16_weight_cache = fake_prepare
         layer.mlp.experts.release_marlin_wna16_original_expert_weights = fake_release
 
-    monkeypatch.setenv(
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
-    )
-    monkeypatch.setenv(dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV, "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV, "1")
-
     report = model.prepare_for_cuda_graph_capture()
 
-    assert calls == [
-        ("prebuild", 0),
-        ("prebuild", 1),
-        ("prebuild", 2),
-        ("release", 0),
-        ("release", 1),
-        ("release", 2),
-    ]
+    assert calls == [("prebuild", 0), ("prebuild", 1), ("prebuild", 2)]
     moe_report = report["moe_marlin_wna16_cache"]
     assert moe_report["layers_cached"] == 3
     assert moe_report["total_persistent_bytes"] == 33
     assert moe_report["total_source_bytes"] == 66
-    assert moe_report["total_released_original_bytes"] == 66
-    assert moe_report["release_runtime_policy"] == "marlin_wna16_prepacked_only"
+    assert moe_report["total_released_original_bytes"] == 0
+    assert moe_report["release_timing"] == "before_kv_alloc"
 
 
-def test_deepseek_v4_prepare_does_not_release_after_prebuild_failure(monkeypatch):
+def test_deepseek_v4_prepare_does_not_release_after_prebuild_failure():
+    configure_dsv4_runtime("optimized")
     _reset_globals()
     cfg = replace(_tiny_dsv4_config(), num_layers=3)
     model = DeepseekV4Model(cfg)
@@ -552,13 +536,6 @@ def test_deepseek_v4_prepare_does_not_release_after_prebuild_failure(monkeypatch
         layer.mlp.experts.prepare_marlin_wna16_weight_cache = fake_prepare
         layer.mlp.experts.release_marlin_wna16_original_expert_weights = fake_release
 
-    monkeypatch.setenv(
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
-        dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
-    )
-    monkeypatch.setenv(dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV, "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV, "1")
-
     with pytest.raises(RuntimeError, match="prebuild failed"):
         model.prepare_for_cuda_graph_capture()
 
@@ -566,6 +543,7 @@ def test_deepseek_v4_prepare_does_not_release_after_prebuild_failure(monkeypatch
 
 
 def test_deepseek_v4_moe_v2_workspace_is_decode_sized(monkeypatch):
+    configure_dsv4_runtime("fallback")
     _reset_globals()
     cfg = _tiny_dsv4_config()
     experts = DSV4FusedRoutedExperts(cfg)
@@ -609,165 +587,15 @@ def test_deepseek_v4_moe_v2_workspace_is_decode_sized(monkeypatch):
     assert seen_workspaces[1] is None
 
 
-def test_deepseek_v4_v1_moe_sums_routed_and_shared_before_one_all_reduce(monkeypatch):
-    _reset_globals(tp_rank=0, tp_size=2)
-    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE, raising=False)
-    cfg = _tiny_dsv4_config()
-    moe = DSV4MoE(cfg, layer_id=0)
-
-    class FakeComm:
-        def __init__(self) -> None:
-            self.calls: list[torch.Tensor] = []
-
-        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
-            del label
-            self.calls.append(x.clone())
-            return x + 30.0
-
-    fake_comm = FakeComm()
-    moe._comm = fake_comm
-    calls: list[tuple[str, bool]] = []
-
-    def fake_gate_forward(*args, **kwargs):
-        hidden = args[0]
-        return (
-            torch.ones(hidden.shape[0], 1, dtype=torch.float32),
-            torch.zeros(hidden.shape[0], 1, dtype=torch.long),
-        )
-
-    def fake_experts_forward(hidden, weights, indices, *, reduce=True):
-        del weights, indices
-        calls.append(("routed", reduce))
-        return torch.full_like(hidden, 1.25)
-
-    def fake_shared_forward(hidden, *, reduce=True):
-        calls.append(("shared", reduce))
-        return torch.full_like(hidden, 2.75)
-
-    moe.gate.forward = fake_gate_forward
-    moe.experts.forward = fake_experts_forward
-    moe.shared_experts.forward = fake_shared_forward
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE, "1")
-
-    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
-    input_ids = torch.zeros(2, 1, dtype=torch.long)
-    out = moe.forward(hidden, input_ids)
-
-    assert calls == [("routed", False), ("shared", False)]
-    assert len(fake_comm.calls) == 1
-    assert fake_comm.calls[0].dtype is torch.float32
-    assert torch.equal(out, torch.full_like(hidden, 34.0))
 
 
-def test_deepseek_v4_v1_moe_reduce_once_bf16_opt_in(monkeypatch):
-    _reset_globals(tp_rank=0, tp_size=2)
-    cfg = _tiny_dsv4_config()
-    moe = DSV4MoE(cfg, layer_id=0)
-
-    class FakeComm:
-        def __init__(self) -> None:
-            self.calls: list[torch.Tensor] = []
-
-        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
-            del label
-            self.calls.append(x.clone())
-            return x + 30.0
-
-    fake_comm = FakeComm()
-    moe._comm = fake_comm
-
-    def fake_gate_forward(*args, **kwargs):
-        hidden = args[0]
-        return (
-            torch.ones(hidden.shape[0], 1, dtype=torch.float32),
-            torch.zeros(hidden.shape[0], 1, dtype=torch.long),
-        )
-
-    def fake_experts_forward(hidden, weights, indices, *, reduce=True):
-        del weights, indices
-        assert reduce is False
-        return torch.full_like(hidden, 1.25)
-
-    def fake_shared_forward(hidden, *, reduce=True):
-        assert reduce is False
-        return torch.full_like(hidden, 2.75)
-
-    moe.gate.forward = fake_gate_forward
-    moe.experts.forward = fake_experts_forward
-    moe.shared_experts.forward = fake_shared_forward
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE, "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE, "1")
-
-    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
-    input_ids = torch.zeros(2, 1, dtype=torch.long)
-    out = moe.forward(hidden, input_ids)
-
-    assert len(fake_comm.calls) == 1
-    assert fake_comm.calls[0].dtype is torch.bfloat16
-    assert out.dtype is torch.bfloat16
-    assert torch.equal(out, torch.full_like(hidden, 34.0))
 
 
-def test_deepseek_v4_moe_v2_builds_execution_plan_before_reduce_once(monkeypatch):
-    _reset_globals(tp_rank=0, tp_size=2)
-    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE, raising=False)
-    cfg = _tiny_dsv4_config()
-    moe = DSV4MoE(cfg, layer_id=0)
-
-    class FakeComm:
-        def __init__(self) -> None:
-            self.calls: list[torch.Tensor] = []
-
-        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
-            del label
-            self.calls.append(x.clone())
-            return x + 30.0
-
-    fake_comm = FakeComm()
-    moe._comm = fake_comm
-    calls: list[tuple[str, bool]] = []
-    seen_plans: list[dsv4_kernel.DSV4MoEExecutionPlan] = []
-
-    def fake_gate_forward(*args, **kwargs):
-        hidden = args[0]
-        return (
-            torch.ones(hidden.shape[0], 1, dtype=torch.float32),
-            torch.zeros(hidden.shape[0], 1, dtype=torch.long),
-        )
-
-    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
-        del weights, indices
-        calls.append(("routed", reduce))
-        assert moe_plan is not None
-        seen_plans.append(moe_plan)
-        return torch.full_like(hidden, 1.25)
-
-    def fake_shared_forward(hidden, *, reduce=True):
-        calls.append(("shared", reduce))
-        return torch.full_like(hidden, 2.75)
-
-    moe.gate.forward = fake_gate_forward
-    moe.experts.forward = fake_experts_forward
-    moe.shared_experts.forward = fake_shared_forward
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_V2_TOGGLE, "1")
-
-    hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
-    input_ids = torch.zeros(2, 1, dtype=torch.long)
-    out = moe.forward(hidden, input_ids)
-
-    assert calls == [("routed", False), ("shared", False)]
-    assert len(seen_plans) == 1
-    assert seen_plans[0].tokens == 2
-    assert seen_plans[0].hidden == cfg.hidden_size
-    assert seen_plans[0].route_plan.route_count == 2
-    assert len(fake_comm.calls) == 1
-    assert fake_comm.calls[0].dtype is torch.float32
-    assert torch.equal(out, torch.full_like(hidden, 34.0))
 
 
 def test_deepseek_v4_vllm_runner_sums_routed_and_shared_before_late_reduce(monkeypatch):
+    configure_dsv4_runtime("optimized")
     _reset_globals(tp_rank=0, tp_size=2)
-    monkeypatch.delenv(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE, raising=False)
     cfg = _tiny_dsv4_config()
     moe = DSV4MoE(cfg, layer_id=0)
 
@@ -805,7 +633,6 @@ def test_deepseek_v4_vllm_runner_sums_routed_and_shared_before_late_reduce(monke
     moe.gate.forward = fake_gate_forward
     moe.experts.forward = fake_experts_forward
     moe.shared_experts.forward = fake_shared_forward
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
 
     hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
     input_ids = torch.zeros(2, 1, dtype=torch.long)
@@ -817,7 +644,7 @@ def test_deepseek_v4_vllm_runner_sums_routed_and_shared_before_late_reduce(monke
     assert seen_plans[0].route_plan.route_count == 2
     assert len(fake_comm.calls) == 1
     reduced, label = fake_comm.calls[0]
-    assert reduced.dtype is torch.float32
+    assert reduced.dtype is torch.bfloat16
     assert label == "dsv4.v1_moe_reduce_once_all_reduce"
     assert torch.equal(out, torch.full_like(hidden, 34.0))
 
@@ -858,8 +685,6 @@ def test_deepseek_v4_vllm_runner_reduce_once_bf16_opt_in(monkeypatch):
     moe.gate.forward = fake_gate_forward
     moe.experts.forward = fake_experts_forward
     moe.shared_experts.forward = fake_shared_forward
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_REDUCE_BF16_TOGGLE, "1")
 
     hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
     input_ids = torch.zeros(2, 1, dtype=torch.long)
@@ -893,7 +718,6 @@ def test_deepseek_v4_vllm_runner_routed_only_path(monkeypatch):
 
     moe.gate.forward = fake_gate_forward
     moe.experts.forward = fake_experts_forward
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
 
     hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
     input_ids = torch.zeros(2, 1, dtype=torch.long)
@@ -927,7 +751,6 @@ def test_deepseek_v4_vllm_runner_shared_only_effect(monkeypatch):
     moe.gate.forward = fake_gate_forward
     moe.experts.forward = fake_experts_forward
     moe.shared_experts.forward = fake_shared_forward
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
 
     hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
     input_ids = torch.zeros(2, 1, dtype=torch.long)
@@ -954,7 +777,6 @@ def test_deepseek_v4_vllm_runner_hash_routing_uses_input_ids(monkeypatch):
         return torch.zeros_like(hidden)
 
     moe.experts.forward = fake_experts_forward
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
 
     hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
     input_ids = torch.tensor([[3], [4]], dtype=torch.long)
@@ -980,7 +802,6 @@ def test_deepseek_v4_vllm_runner_correction_bias_routing(monkeypatch):
         return torch.zeros_like(hidden)
 
     moe.experts.forward = fake_experts_forward
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_MOE_VLLM_RUNNER_TOGGLE, "1")
 
     hidden = torch.zeros(2, 1, cfg.hidden_size, dtype=torch.bfloat16)
     input_ids = torch.zeros(2, 1, dtype=torch.long)
@@ -991,6 +812,7 @@ def test_deepseek_v4_vllm_runner_correction_bias_routing(monkeypatch):
 
 
 def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
+    configure_dsv4_runtime("fallback")
     _reset_globals()
     _clear_dsv4_sm80_env(monkeypatch)
     cfg = _tiny_dsv4_config()
@@ -1021,7 +843,7 @@ def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
     expected = shared.forward(hidden, reduce=False)
 
     assert shared.prepare_bf16_weight_cache() == []
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE, "1")
+    configure_dsv4_runtime("optimized")
     reports = shared.prepare_bf16_weight_cache()
     actual = shared.forward(hidden, reduce=False)
 
@@ -1035,85 +857,3 @@ def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
         * torch.tensor([], dtype=torch.bfloat16).element_size()
     )
     assert torch.allclose(actual, expected, atol=2e-2, rtol=2e-2)
-
-
-def test_shared_experts_marlin_down_skips_bf16_down_cache_and_releases_original(
-    monkeypatch,
-):
-    _reset_globals()
-    _clear_dsv4_sm80_env(monkeypatch)
-    cfg = _tiny_dsv4_config()
-    shared = DSV4SharedExperts(cfg, layer_id=0)
-    torch.manual_seed(774)
-
-    with torch.no_grad():
-        shared.gate_up_proj.weight.copy_(
-            torch.randn_like(shared.gate_up_proj.weight.float())
-            .clamp(-2, 2)
-            .to(dsv4_kernel.fp8_dtype())
-        )
-        shared.down_proj.weight.copy_(
-            torch.randn_like(shared.down_proj.weight.float())
-            .clamp(-2, 2)
-            .to(dsv4_kernel.fp8_dtype())
-        )
-        shared.gate_up_proj.weight_scale_inv.copy_(
-            torch.ones_like(shared.gate_up_proj.weight_scale_inv.float()).to(
-                dsv4_kernel.e8m0_dtype()
-            )
-        )
-        shared.down_proj.weight_scale_inv.copy_(
-            torch.ones_like(shared.down_proj.weight_scale_inv.float()).to(dsv4_kernel.e8m0_dtype())
-        )
-
-    def fake_prepare(weight, weight_scale_inv, *, owner_label):
-        dequant = dsv4_kernel.dequant_fp8_weight(
-            weight,
-            weight_scale_inv,
-            out_dtype=torch.bfloat16,
-        ).contiguous()
-        return SimpleNamespace(
-            weight=dequant,
-            weight_scale=torch.empty(0),
-            workspace=torch.empty(0),
-            size_n=weight.shape[0],
-            size_k=weight.shape[1],
-            prepared_weight_bytes=dequant.numel() * dequant.element_size(),
-            prepared_scale_bytes=0,
-            workspace_bytes=0,
-            persistent_bytes=dequant.numel() * dequant.element_size(),
-            original_weight_bytes=weight.numel() * weight.element_size(),
-            original_scale_bytes=weight_scale_inv.numel() * weight_scale_inv.element_size(),
-        )
-
-    monkeypatch.setattr(dense_fp8_marlin, "prepare_dense_fp8_marlin_weight", fake_prepare)
-    monkeypatch.setattr(
-        dense_fp8_marlin,
-        "apply_dense_fp8_marlin_linear",
-        lambda x, prepared, **_: F.linear(x, prepared.weight),
-    )
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_SHARED_EXPERT_BF16_WEIGHT_CACHE_TOGGLE, "1")
-    monkeypatch.setenv(dsv4_kernel.DSV4_SM80_DENSE_FP8_MARLIN_PROJECTION_TOGGLE, "1")
-
-    bf16_reports = shared.prepare_bf16_weight_cache()
-    marlin_report = shared.prepare_down_marlin_weight_cache()
-
-    assert {report["owner"] for report in bf16_reports} == {
-        "layer0.shared_experts.gate_up_proj",
-    }
-    assert marlin_report is not None
-    assert marlin_report["owner"] == "layer0.shared_experts.down_proj"
-    assert marlin_report["released_original"] is True
-    assert {entry["attribute"] for entry in marlin_report["released"]} == {
-        "weight",
-        "weight_scale_inv",
-    }
-    assert not hasattr(shared.down_proj, "weight")
-    assert not hasattr(shared.down_proj, "weight_scale_inv")
-    assert not hasattr(shared.down_proj, shared._down_bf16_weight_cache_name)
-
-    hidden = torch.randn(3, cfg.hidden_size, dtype=torch.bfloat16)
-    actual = shared.forward(hidden, reduce=False)
-
-    assert actual.shape == (3, cfg.hidden_size)
-    assert actual.dtype is torch.bfloat16

@@ -4,15 +4,11 @@ import minisgl.core as core
 import pytest
 import torch
 from minisgl.core import Req, SamplingParams
+from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
 from minisgl.kvcache.deepseek_v4_pool import (
-    DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV,
-    DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV,
-    DSV4_INDEXER_FP8_CACHE_ENV,
-    DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV,
     DSV4SWAPageHandles,
     DeepSeekV4KVCache,
-    DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV,
     _clear_allocated_kv_modes,
 )
 from minisgl.models.config import ModelConfig, RotaryConfig
@@ -24,7 +20,9 @@ from minisgl.scheduler.utils import PendingReq
 def reset_global_ctx():
     old_ctx = core._GLOBAL_CTX
     core._GLOBAL_CTX = None
+    configure_dsv4_runtime("optimized")
     yield
+    configure_dsv4_runtime("optimized")
     core._GLOBAL_CTX = old_ctx
 
 
@@ -218,6 +216,7 @@ def test_deepseek_v4_pool_factory_defaults_to_bf16_and_maps_layers():
 def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
     cfg = _tiny_dsv4_config([4, 128, 0])
 
+    configure_dsv4_runtime("fallback")
     assert (
         estimate_kvcache_bytes_per_page(
             cfg,
@@ -227,16 +226,26 @@ def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
         )
         == 4919
     )
+    configure_dsv4_runtime("optimized")
+    assert (
+        estimate_kvcache_bytes_per_page(
+            cfg,
+            page_size=1,
+            dtype=torch.float16,
+            tp_size=1,
+        )
+        == 4921
+    )
 
 
-def test_deepseek_v4_indexer_fp8_side_cache_is_opt_in(monkeypatch):
-    monkeypatch.delenv(DSV4_INDEXER_FP8_CACHE_ENV, raising=False)
-    default_pool = _make_dsv4_pool([4], num_pages=4, page_size=4)
+def test_deepseek_v4_indexer_fp8_side_cache_follows_typed_runtime():
+    configure_dsv4_runtime("fallback")
+    fallback_pool = _make_dsv4_pool([4], num_pages=4, page_size=4)
 
-    assert not default_pool.has_indexer_fp8_cache()
-    assert default_pool.indexer_cache(0).dtype is torch.bfloat16
+    assert not fallback_pool.has_indexer_fp8_cache()
+    assert fallback_pool.indexer_cache(0).dtype is torch.bfloat16
 
-    monkeypatch.setenv(DSV4_INDEXER_FP8_CACHE_ENV, "1")
+    configure_dsv4_runtime("optimized")
     fp8_pool = _make_dsv4_pool([4], num_pages=4, page_size=4)
     values, scales = fp8_pool.indexer_fp8_cache(0)
 
@@ -248,31 +257,19 @@ def test_deepseek_v4_indexer_fp8_side_cache_is_opt_in(monkeypatch):
     assert fp8_pool.indexer_cache(0).dtype is torch.bfloat16
 
 
-def test_deepseek_v4_allocated_page_clear_defaults_follow_release_env(monkeypatch):
-    monkeypatch.delenv(DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV, raising=False)
-    monkeypatch.delenv(DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV, raising=False)
-    monkeypatch.delenv(DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV, raising=False)
-
+def test_deepseek_v4_allocated_page_clear_defaults_follow_typed_runtime():
+    configure_dsv4_runtime("fallback")
     assert _clear_allocated_kv_modes() == set()
 
-    monkeypatch.setenv(DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV, "1")
+    configure_dsv4_runtime("optimized")
     assert _clear_allocated_kv_modes() == {"component"}
-
-    monkeypatch.setenv(DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV, "none")
-    with pytest.raises(RuntimeError, match="unsafe with"):
-        _clear_allocated_kv_modes()
-
-    monkeypatch.setenv(DSV4_ALLOW_UNSAFE_RELEASE_NO_CLEAR_ENV, "1")
-    assert _clear_allocated_kv_modes() == set()
 
 
 @pytest.mark.parametrize("enable_component_loc_ownership", [False, True])
 def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_slots(
-    monkeypatch,
     enable_component_loc_ownership: bool,
 ):
-    monkeypatch.setenv(DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV, "component")
-    monkeypatch.setenv(DSV4_INDEXER_FP8_CACHE_ENV, "1")
+    configure_dsv4_runtime("optimized")
     pool = _make_dsv4_pool(
         [4, 128, 0],
         num_pages=4,
@@ -316,8 +313,8 @@ def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_sl
     assert torch.all(indexer_state == 9)
 
 
-def test_deepseek_v4_allocated_page_clear_resets_live_buffers(monkeypatch):
-    monkeypatch.setenv("MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC", "all")
+def test_deepseek_v4_allocated_page_fallback_does_not_clear_live_buffers():
+    configure_dsv4_runtime("fallback")
     pool = _make_dsv4_pool([4, 128, 0], num_pages=4, page_size=4)
 
     pool.swa_cache(0).fill_(3)
@@ -333,26 +330,13 @@ def test_deepseek_v4_allocated_page_clear_resets_live_buffers(monkeypatch):
 
     pool.on_pages_allocated(torch.tensor([0], dtype=torch.int32), page_size=4)
 
-    assert torch.all(pool.swa_cache(0)[:4] == 0)
-    assert torch.all(pool.swa_cache(0)[4:] == 3)
-    assert torch.all(pool.c4_cache(0)[:1] == 0)
-    assert torch.all(pool.c4_cache(0)[1:] == 4)
-    assert torch.all(pool.c128_cache(1)[:1] == 0)
-    assert torch.all(pool.indexer_cache(0)[:1] == 0)
-    assert torch.all(pool.indexer_cache(0)[1:] == 6)
-
-    c4_item_size = c4_state.shape[-1] // 2
-    c128_item_size = c128_state.shape[-1] // 2
-    indexer_item_size = indexer_state.shape[-1] // 2
-    assert torch.all(c4_state[:4, :c4_item_size] == 0)
-    assert torch.all(torch.isneginf(c4_state[:4, c4_item_size:]))
-    assert torch.all(c4_state[4:-1] == 7)
-    assert torch.all(c128_state[:4, :c128_item_size] == 0)
-    assert torch.all(torch.isneginf(c128_state[:4, c128_item_size:]))
-    assert torch.all(c128_state[4:-1] == 8)
-    assert torch.all(indexer_state[:4, :indexer_item_size] == 0)
-    assert torch.all(torch.isneginf(indexer_state[:4, indexer_item_size:]))
-    assert torch.all(indexer_state[4:-1] == 9)
+    assert torch.all(pool.swa_cache(0) == 3)
+    assert torch.all(pool.c4_cache(0) == 4)
+    assert torch.all(pool.c128_cache(1) == 5)
+    assert torch.all(pool.indexer_cache(0) == 6)
+    assert torch.all(c4_state == 7)
+    assert torch.all(c128_state == 8)
+    assert torch.all(indexer_state == 9)
 
 
 def test_deepseek_v4_pool_can_write_and_read_all_cache_components():

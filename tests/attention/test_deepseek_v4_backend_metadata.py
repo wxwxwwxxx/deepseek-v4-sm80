@@ -14,9 +14,17 @@ from minisgl.attention.deepseek_v4 import (
 )
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
+from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
+
+
+@pytest.fixture(autouse=True)
+def _optimized_runtime_mode():
+    configure_dsv4_runtime("optimized")
+    yield
+    configure_dsv4_runtime("optimized")
 
 
 def _tiny_dsv4_config(compress_ratios: list[int]) -> ModelConfig:
@@ -289,6 +297,7 @@ def test_dsv4_capture_replay_can_bind_graph_out_loc_and_positions():
     assert capture.c128_out_loc.tolist() == [-1, -1, (1024 + 127) // 128, -1]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA graph input tensors")
 def test_dsv4_capture_replay_can_defer_compressed_locs_to_graph_hook(monkeypatch):
     cfg = _tiny_dsv4_config([4, 128])
     ctx = _install_context(cfg, page_size=1, table_bases=[0, 512, 1024], max_len=260)
@@ -301,8 +310,8 @@ def test_dsv4_capture_replay_can_defer_compressed_locs_to_graph_hook(monkeypatch
     backend = ctx.attn_backend
     backend.prepare_metadata(batch)
 
-    def fake_triton_enabled(toggle: str) -> bool:
-        return toggle == "MINISGL_DSV4_SM80_COMPRESS_STORE"
+    def fake_triton_enabled() -> bool:
+        return True
 
     def fake_copy_masked_compressed_locs(
         raw_out_loc: torch.Tensor,
@@ -321,7 +330,7 @@ def test_dsv4_capture_replay_can_defer_compressed_locs_to_graph_hook(monkeypatch
             dst[:rows].copy_(values)
             dst[rows:].fill_(-1)
 
-    monkeypatch.setattr(dsv4_kernel, "dsv4_sm80_triton_enabled", fake_triton_enabled)
+    monkeypatch.setattr(dsv4_kernel, "dsv4_optimized_triton_enabled", fake_triton_enabled)
     monkeypatch.setattr(
         dsv4_kernel,
         "copy_masked_compressed_locs",
@@ -329,10 +338,10 @@ def test_dsv4_capture_replay_can_defer_compressed_locs_to_graph_hook(monkeypatch
     )
 
     backend.init_capture_graph(max_seq_len=260, bs_list=[4])
-    graph_out_loc = torch.full((4,), -123, dtype=torch.int32)
-    graph_positions = torch.full((4,), -456, dtype=torch.int32)
+    graph_out_loc = torch.full((4,), -123, dtype=torch.int32, device="cuda")
+    graph_positions = torch.full((4,), -456, dtype=torch.int32, device="cuda")
     backend.bind_capture_graph_inputs(
-        input_ids=torch.empty(4, dtype=torch.int32),
+        input_ids=torch.empty(4, dtype=torch.int32, device="cuda"),
         out_loc=graph_out_loc,
         positions=graph_positions,
     )
@@ -356,26 +365,6 @@ def test_dsv4_capture_replay_can_defer_compressed_locs_to_graph_hook(monkeypatch
     assert capture.c128_out_loc.tolist() == [-1, -1, (1024 + 127) // 128, -1]
 
 
-def test_dsv4_capture_compressed_locs_graph_hook_can_be_disabled(monkeypatch):
-    cfg = _tiny_dsv4_config([4, 128])
-    ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=260)
-    backend = ctx.attn_backend
-    monkeypatch.setenv("MINISGL_DSV4_DISABLE_CAPTURE_COMPRESSED_LOCS_IN_GRAPH", "1")
-    monkeypatch.setattr(
-        dsv4_kernel,
-        "dsv4_sm80_triton_enabled",
-        lambda toggle: toggle == "MINISGL_DSV4_SM80_COMPRESS_STORE",
-    )
-
-    backend.init_capture_graph(max_seq_len=260, bs_list=[4])
-    backend.bind_capture_graph_inputs(
-        input_ids=torch.empty(4, dtype=torch.int32),
-        out_loc=torch.full((4,), -1, dtype=torch.int32),
-        positions=torch.full((4,), -1, dtype=torch.int32),
-    )
-
-    assert backend.capture_compressed_locs_in_graph_disabled_by_env
-    assert not backend.capture_compressed_locs_in_graph
 
 
 def test_dsv4_masked_compressed_store_ignores_negative_locs():
@@ -393,6 +382,7 @@ def test_dsv4_masked_compressed_store_ignores_negative_locs():
 
 
 def test_dsv4_fallback_attention_reads_compressed_cache_as_separate_source():
+    configure_dsv4_runtime("fallback")
     cfg = _tiny_dsv4_config([4])
     ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=16)
     batch = _prepare_decode_batch([_req(0, 0, 8, cached_len=7)])
@@ -605,7 +595,6 @@ def test_dsv4_release_eager_c128_dispatches_one_surface_with_ragged_prefix_rows(
     boundary_req = _req(1, 1, 129, cached_len=126)
     batch = _prepare_batch([prefix_req, boundary_req])
     backend = ctx.attn_backend
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
 
     call: dict[str, object] = {}
 
@@ -693,7 +682,6 @@ def test_dsv4_release_eager_metadata_calls_native_c128_one_surface(monkeypatch):
     batch.positions = torch.arange(126, 129, dtype=torch.int32, device=device)
     batch.out_loc = ctx.page_table[0, batch.positions.long()]
     batch.input_ids = req.input_ids[126:]
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
 
     original = dsv4_kernel.c128_prefill_page_indices_one_surface
     calls: list[dict[str, object]] = []
@@ -789,7 +777,6 @@ def test_dsv4_explicit_c128_oracle_keeps_legacy_raw_full_materialization(monkeyp
     )
     batch = _prepare_batch([_req(0, 0, 258, cached_len=256)])
     backend = ctx.attn_backend
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
     monkeypatch.setattr(
         backend,
         "_explicit_c128_raw_full_oracle_requested",
@@ -827,7 +814,6 @@ def test_dsv4_release_toggle_does_not_change_decode_graph_c128_contract(monkeypa
     req = _req(0, 0, 256, cached_len=255)
     batch = _prepare_decode_batch([req])
     backend = ctx.attn_backend
-    monkeypatch.setenv("MINISGL_DSV4_SM80_SPARSE_ATTN_BF16", "1")
     monkeypatch.setattr(
         backend,
         "_build_release_eager_c128_one_surface",
@@ -961,90 +947,6 @@ def test_dsv4_graph_replay_clamps_compressed_reads_to_materialized_prompt():
     assert capture.c128_raw_indices[0, :3].tolist() == [0, 1, -1]
 
 
-def test_dsv4_prep_metadata_oracle_splits_pre_and_post_forward_c4_sparse_boundary():
-    cfg = _tiny_dsv4_config([4, 128])
-    ctx = _install_context(cfg, page_size=128, table_bases=[0], max_len=512)
-    backend = ctx.attn_backend
-
-    def make_core(
-        *,
-        c4_sparse_topk_lengths: list[int],
-        c4_sparse_raw_indices: list[list[int]],
-    ) -> DSV4CoreAttentionMetadata:
-        rows = len(c4_sparse_topk_lengths)
-        raw_out_loc = torch.arange(rows, dtype=torch.int32)
-        page_table = torch.arange(rows * 4, dtype=torch.int32).reshape(rows, 4)
-        cu_seqlens_q = torch.arange(rows + 1, dtype=torch.int32)
-        seq_lens = torch.tensor([256 + row for row in range(rows)], dtype=torch.int32)
-        positions = seq_lens - 1
-        req_seq_lens = seq_lens.clone()
-        extend_lens = torch.ones(rows, dtype=torch.int32)
-        req_table_indices = torch.zeros(rows, dtype=torch.int32)
-        swa_topk_lengths = torch.full((rows,), 4, dtype=torch.int32)
-        swa_page_indices = torch.arange(rows * 4, dtype=torch.int32).reshape(rows, 4)
-        c4_topk_lengths_raw = torch.full((rows,), 64, dtype=torch.int32)
-        c4_topk_lengths_clamp1 = c4_topk_lengths_raw.clone()
-        c4_sparse_lens = torch.tensor(c4_sparse_topk_lengths, dtype=torch.int32)
-        c4_raw = torch.tensor(c4_sparse_raw_indices, dtype=torch.int32)
-        c4_page = c4_raw.clone()
-        c4_full = c4_raw * 4 + 3
-        c4_full = torch.where(c4_raw >= 0, c4_full, c4_raw)
-        c128_lengths = torch.full((rows,), 2, dtype=torch.int32)
-        c128_raw = torch.tensor([[0, 1, -1, -1] for _ in range(rows)], dtype=torch.int32)
-        c128_page = c128_raw.clone()
-        c128_full = torch.where(c128_raw >= 0, c128_raw * 128 + 127, c128_raw)
-        return DSV4CoreAttentionMetadata(
-            raw_out_loc=raw_out_loc,
-            page_table=page_table,
-            cu_seqlens_q=cu_seqlens_q,
-            seq_lens=seq_lens,
-            req_seq_lens=req_seq_lens,
-            extend_lens=extend_lens,
-            positions=positions,
-            req_table_indices=req_table_indices,
-            max_seqlen_q=1,
-            max_seqlen_k=512,
-            swa_page_indices=swa_page_indices,
-            swa_topk_lengths=swa_topk_lengths,
-            c4_out_loc=None,
-            c128_out_loc=None,
-            c4_indexer_out_loc=None,
-            c4_topk_lengths_raw=c4_topk_lengths_raw,
-            c4_topk_lengths_clamp1=c4_topk_lengths_clamp1,
-            c4_sparse_topk_lengths=c4_sparse_lens,
-            c4_sparse_raw_indices=c4_raw,
-            c4_sparse_page_indices=c4_page,
-            c4_sparse_full_indices=c4_full,
-            c128_topk_lengths_clamp1=c128_lengths,
-            c128_raw_indices=c128_raw,
-            c128_page_indices=c128_page,
-            c128_full_indices=c128_full,
-            materialized_seq_lens=seq_lens.clone(),
-        )
-
-    expected = make_core(c4_sparse_topk_lengths=[2], c4_sparse_raw_indices=[[62, 63, -1, -1]])
-    pre_forward_mismatch = make_core(
-        c4_sparse_topk_lengths=[2],
-        c4_sparse_raw_indices=[[10, 11, -1, -1]],
-    )
-    with pytest.raises(RuntimeError, match="c4_sparse_raw_indices.*pre_forward"):
-        backend._compare_prep_metadata_in_graph_oracle(
-            pre_forward_mismatch,
-            expected,
-            1,
-            boundary="pre_forward",
-        )
-
-    post_forward_indexer_mutated = make_core(
-        c4_sparse_topk_lengths=[1],
-        c4_sparse_raw_indices=[[10, -1, -1, -1]],
-    )
-    backend._compare_prep_metadata_in_graph_oracle(
-        post_forward_indexer_mutated,
-        expected,
-        1,
-        boundary="post_forward",
-    )
 
 
 def test_dsv4_route_b_component_page_table_lifetime_cache_invalidates_lifecycle(
@@ -1063,8 +965,6 @@ def test_dsv4_route_b_component_page_table_lifetime_cache_invalidates_lifecycle(
     ctx.kv_cache.on_pages_allocated(page_starts, page_size)
     backend = ctx.attn_backend
 
-    monkeypatch.setenv("MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE", "1")
-    monkeypatch.setenv("MINISGL_DSV4_SM80_ROUTE_B_COMPONENT_PAGE_TABLE_CACHE_VERIFY", "1")
 
     def cache_handle(row: int, cached_pages: int, node_uuid: int) -> SimpleNamespace:
         prefix_len = cached_pages * page_size
@@ -1125,8 +1025,8 @@ def test_dsv4_component_loc_ownership_capture_locs_graph_hook_is_guarded(monkeyp
     backend = ctx.attn_backend
     monkeypatch.setattr(
         dsv4_kernel,
-        "dsv4_sm80_triton_enabled",
-        lambda toggle: toggle == "MINISGL_DSV4_SM80_COMPRESS_STORE",
+        "dsv4_optimized_triton_enabled",
+        lambda: True,
     )
 
     backend.init_capture_graph(max_seq_len=256, bs_list=[4])
@@ -1188,7 +1088,6 @@ def test_dsv4_independent_swa_page_table_cache_reuses_and_invalidates(monkeypatc
         page_size,
     )
     backend = ctx.attn_backend
-    monkeypatch.setenv("MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE", "1")
 
     def expected_pages(row: int, logical_pages: int) -> list[int]:
         starts = ctx.page_table[
@@ -1212,8 +1111,13 @@ def test_dsv4_independent_swa_page_table_cache_reuses_and_invalidates(monkeypatc
         )
 
     def decode_cached_row(req: Req) -> list[int]:
-        batch = _prepare_decode_batch([req])
-        backend.prepare_metadata(batch)
+        backend._make_swa_page_tables(
+            [req],
+            req.device_len,
+            table_indices=torch.tensor([req.table_idx], dtype=torch.int32),
+            use_cache=True,
+            timing_base={},
+        )
         logical_pages = (req.device_len + page_size - 1) // page_size
         assert backend._swa_page_table_cache is not None
         return backend._swa_page_table_cache[req.table_idx, :logical_pages].tolist()
@@ -1270,8 +1174,6 @@ def test_dsv4_independent_swa_direct_token_metadata_matches_page_table_and_wins(
     )
     expected = backend._make_swa_indices_from_page_table(table, batch.positions)
 
-    monkeypatch.setenv("MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA", "1")
-    monkeypatch.setenv("MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE", "1")
     backend.prepare_metadata(batch)
     meta = batch.attn_metadata.core_metadata
 
@@ -1281,73 +1183,12 @@ def test_dsv4_independent_swa_direct_token_metadata_matches_page_table_and_wins(
     assert meta.swa_page_indices[0, 0].item() != ctx.page_table[0, req.device_len - 1].item()
 
 
-def test_dsv4_independent_swa_metadata_rejects_tombstone_inside_active_length(
-    monkeypatch,
-):
-    ctx = _install_independent_swa_context()
-    backend = ctx.attn_backend
-    monkeypatch.setenv("MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG", "1")
-
-    with pytest.raises(RuntimeError, match="out of bounds"):
-        backend._debug_check_swa_index_bounds(
-            torch.tensor([[-1]], dtype=torch.int32),
-            torch.tensor([1], dtype=torch.int32),
-            ctx.kv_cache.swa_cache(0).shape[0],
-            layer_id=0,
-        )
 
 
-def test_dsv4_independent_swa_metadata_rejects_dummy_page_for_real_row(
-    monkeypatch,
-):
-    ctx = _install_independent_swa_context()
-    backend = ctx.attn_backend
-    monkeypatch.setenv("MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG", "1")
-    dummy_loc = int(ctx.kv_cache._swa_dummy_page) * ctx.page_size
-
-    with pytest.raises(RuntimeError, match="dummy page"):
-        backend._debug_check_swa_index_bounds(
-            torch.tensor([[dummy_loc]], dtype=torch.int32),
-            torch.tensor([1], dtype=torch.int32),
-            ctx.kv_cache.swa_cache(0).shape[0],
-            layer_id=0,
-        )
 
 
-def test_dsv4_independent_swa_metadata_rejects_zero_refcount_page(monkeypatch):
-    ctx = _install_independent_swa_context()
-    backend = ctx.attn_backend
-    monkeypatch.setenv("MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG", "1")
-    page = int(ctx.kv_cache._full_to_swa_page[0].item())
-    ctx.kv_cache._swa_page_refcount[page] = 0
-
-    with pytest.raises(RuntimeError, match="zero-refcount"):
-        backend._debug_check_swa_index_bounds(
-            torch.tensor([[page * ctx.page_size]], dtype=torch.int32),
-            torch.tensor([1], dtype=torch.int32),
-            ctx.kv_cache.swa_cache(0).shape[0],
-            layer_id=0,
-        )
 
 
-def test_dsv4_independent_swa_metadata_rejects_free_page_inside_active_length(
-    monkeypatch,
-):
-    ctx = _install_independent_swa_context()
-    backend = ctx.attn_backend
-    monkeypatch.setenv("MINISGL_DSV4_SWA_INDEX_BOUNDS_DEBUG", "1")
-    page = int(ctx.kv_cache._full_to_swa_page[0].item())
-    ctx.kv_cache._free_swa_pages = torch.cat(
-        [ctx.kv_cache._free_swa_pages, torch.tensor([page], dtype=torch.int32)]
-    )
-
-    with pytest.raises(RuntimeError, match="free list"):
-        backend._debug_check_swa_index_bounds(
-            torch.tensor([[page * ctx.page_size]], dtype=torch.int32),
-            torch.tensor([1], dtype=torch.int32),
-            ctx.kv_cache.swa_cache(0).shape[0],
-            layer_id=0,
-        )
 
 
 def test_dsv4_cuda_graph_replay_rejects_stale_swa_metadata_version():
@@ -1422,9 +1263,7 @@ def test_dsv4_cuda_graph_replay_rebuilds_stale_swa_metadata_version():
     assert backend.capture.core_metadata.swa_ownership_version == ctx.kv_cache.swa_ownership_version
 
 
-def test_dsv4_cuda_graph_replay_keeps_direct_swa_disabled_under_independent(monkeypatch):
-    monkeypatch.setenv("MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_GROUPS", "swa")
-    monkeypatch.setenv("MINISGL_DSV4_SM80_DIRECT_GRAPH_METADATA_BUFFERS", "1")
+def test_dsv4_cuda_graph_replay_keeps_direct_swa_disabled_under_independent():
     ctx = _install_independent_swa_context()
     req = _req(0, 0, 8, cached_len=7)
     batch = _prepare_decode_batch([req])

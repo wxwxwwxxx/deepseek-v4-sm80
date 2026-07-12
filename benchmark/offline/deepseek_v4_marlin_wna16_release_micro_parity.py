@@ -13,41 +13,13 @@ from minisgl.distributed import DistributedInfo
 
 
 def _configure_variant(name: str) -> dict[str, Any]:
-    from minisgl.kernel import deepseek_v4 as dsv4_kernel
-
-    variants = {
-        "dsv4_sm80_a100_victory_marlin_prebuild": {
-            dsv4_kernel.DSV4_SM80_A100_VICTORY_BUNDLE_TOGGLE: "1",
-            dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV: (
-                dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
-            ),
-            dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV: "1",
-        },
-    }
-    if name not in variants:
-        valid = ", ".join(sorted(variants))
-        raise SystemExit(f"unknown variant {name!r}; valid variants: {valid}")
-    cleared = set(getattr(dsv4_kernel, "DSV4_SM80_KNOWN_TOGGLES", ()))
-    cleared.update(env for env in os.environ if env.startswith("MINISGL_DSV4_SM80_"))
-    cleared.update(
-        {
-            dsv4_kernel.DSV4_MARLIN_WNA16_PREBUILD_ENV,
-            dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV,
-            dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_ENV,
-        }
-    )
-    for env in cleared:
-        os.environ.pop(env, None)
-    for env, value in variants[name].items():
-        os.environ[env] = value
+    if name != "typed_marlin_release_oracle":
+        raise SystemExit("only variant 'typed_marlin_release_oracle' is supported")
     return {
         "name": name,
-        "cleared_dsv4_env": sorted(cleared),
-        "raw_dsv4_env": {
-            env: os.environ[env]
-            for env in sorted(os.environ)
-            if env.startswith("MINISGL_DSV4_")
-        },
+        "runtime_mode": "fallback",
+        "oracle_backend": "grouped_fp4",
+        "candidate_backend": "marlin_wna16",
     }
 
 
@@ -125,21 +97,21 @@ def _run_layer(args: argparse.Namespace, llm, layer_id: int) -> dict[str, Any]:
         *raw_tensors,
         swiglu_limit=experts.swiglu_limit,
     )
-    raw_present = experts.forward(hidden, weights, indices, reduce=False)
-    previous_force = os.environ.get("MINISGL_DSV4_MARLIN_WNA16_DEBUG_FORCE_PREPACKED_WITH_RAW_PRESENT")
-    os.environ["MINISGL_DSV4_MARLIN_WNA16_DEBUG_FORCE_PREPACKED_WITH_RAW_PRESENT"] = "1"
-    try:
-        force_prepacked_raw_present = experts.forward(hidden, weights, indices, reduce=False)
-    finally:
-        if previous_force is None:
-            os.environ.pop(
-                "MINISGL_DSV4_MARLIN_WNA16_DEBUG_FORCE_PREPACKED_WITH_RAW_PRESENT",
-                None,
-            )
-        else:
-            os.environ[
-                "MINISGL_DSV4_MARLIN_WNA16_DEBUG_FORCE_PREPACKED_WITH_RAW_PRESENT"
-            ] = previous_force
+    raw_present, _ = dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16(
+        hidden,
+        weights,
+        indices,
+        *raw_tensors,
+        swiglu_limit=experts.swiglu_limit,
+        cache=cache,
+    )
+    force_prepacked_raw_present = dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16_prepacked(
+        hidden,
+        weights,
+        indices,
+        cache,
+        swiglu_limit=experts.swiglu_limit,
+    )
 
     release_report = experts.release_marlin_wna16_original_expert_weights()
     torch.cuda.synchronize(device)
@@ -152,7 +124,13 @@ def _run_layer(args: argparse.Namespace, llm, layer_id: int) -> dict[str, Any]:
             device=device,
         )
         pressure.fill_(17)
-    released_same_cache = experts.forward(hidden, weights, indices, reduce=False)
+    released_same_cache = dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16_prepacked(
+        hidden,
+        weights,
+        indices,
+        cache,
+        swiglu_limit=experts.swiglu_limit,
+    )
     torch.cuda.synchronize(device)
     del pressure
 
@@ -199,6 +177,7 @@ def run(args: argparse.Namespace) -> int:
         args.model_path,
         dtype=torch.bfloat16,
         tp_info=DistributedInfo(rank, tp_size),
+        dsv4_runtime_mode="fallback",
         max_running_req=1,
         max_seq_len_override=args.max_seq_len,
         max_extend_tokens=args.max_extend_tokens,
@@ -243,7 +222,7 @@ def run(args: argparse.Namespace) -> int:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", default="/models/DeepSeek-V4-Flash")
-    parser.add_argument("--variant", default="dsv4_sm80_a100_victory_marlin_prebuild")
+    parser.add_argument("--variant", default="typed_marlin_release_oracle")
     parser.add_argument("--tensor-parallel-size", type=int, default=8)
     parser.add_argument("--tp-rank", type=int, default=None)
     parser.add_argument("--distributed-init-method", default=None)

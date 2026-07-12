@@ -6,8 +6,9 @@ import os
 import sys
 import time
 import traceback
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 
@@ -17,15 +18,18 @@ sys.path.insert(0, str(ROOT / "python"))
 
 os.environ.setdefault("MINISGL_DISABLE_OVERLAP_SCHEDULING", "1")
 
-from minisgl.kernel import deepseek_v4 as dsv4_kernel  # noqa: E402
+from minisgl.dsv4_runtime import (  # noqa: E402
+    DSV4RuntimeConfig,
+    resolve_dsv4_runtime_config,
+)
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Minimal DeepSeek V4 offline E2E generation smoke for mini-sglang."
     )
     parser.add_argument("--model-path", required=True)
-    parser.add_argument("--variant", required=True, choices=("fallback", "v0_bf16", "v1_moe"))
+    parser.add_argument("--variant", required=True, choices=("optimized", "fallback"))
     parser.add_argument("--prompt-len", type=int, default=16)
     parser.add_argument("--decode-len", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -35,41 +39,33 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor-parallel-size", type=int, default=None)
     parser.add_argument("--tp-rank", type=int, default=None)
     parser.add_argument("--distributed-addr", default=None)
-    parser.add_argument("--use-pynccl", action="store_true")
-    return parser.parse_args()
+    parser.add_argument(
+        "--use-pynccl",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use PyNCCL in optimized mode (fallback always disables it).",
+    )
+    return parser.parse_args(argv)
 
 
-def _all_dsv4_sm80_env_names() -> list[str]:
-    names = set(dsv4_kernel.DSV4_SM80_KNOWN_TOGGLES)
-    names.update(name for name in os.environ if name.startswith("MINISGL_DSV4_SM80_"))
-    return sorted(names)
+def _configure_variant(variant: str) -> DSV4RuntimeConfig:
+    return resolve_dsv4_runtime_config(variant)
 
 
-def _configure_variant(variant: str) -> list[str]:
-    cleared = _all_dsv4_sm80_env_names()
-    for name in cleared:
-        os.environ.pop(name, None)
-    if variant == "v0_bf16":
-        os.environ[dsv4_kernel.DSV4_SM80_V0_BF16_TOGGLE] = "1"
-    elif variant == "v1_moe":
-        os.environ[dsv4_kernel.DSV4_SM80_V1_MOE_TOGGLE] = "1"
-    return cleared
+def _execution_settings(
+    runtime: DSV4RuntimeConfig, requested_use_pynccl: bool
+) -> tuple[bool, bool]:
+    if not runtime.optimized:
+        return False, False
+    return requested_use_pynccl, True
 
 
-def _active_dsv4_toggles() -> list[str]:
-    return [
-        name
-        for name in _all_dsv4_sm80_env_names()
-        if dsv4_kernel.dsv4_env_flag(name)
-    ]
-
-
-def _raw_dsv4_env() -> dict[str, str]:
-    return {
-        name: os.environ[name]
-        for name in sorted(os.environ)
-        if name.startswith("MINISGL_DSV4_SM80_")
-    }
+def _jsonable_runtime(runtime: DSV4RuntimeConfig) -> dict[str, Any]:
+    payload = asdict(runtime)
+    payload["direct_graph_metadata_groups"] = sorted(
+        payload["direct_graph_metadata_groups"]
+    )
+    return payload
 
 
 def _gpu_report() -> dict[str, Any]:
@@ -134,7 +130,8 @@ def main() -> int:
     _validate_args(args)
     tp_rank, tp_size = _tp_rank_size(args)
     is_primary = tp_rank == 0
-    cleared_env = _configure_variant(args.variant)
+    runtime = _configure_variant(args.variant)
+    use_pynccl, allow_cuda_graph = _execution_settings(runtime, args.use_pynccl)
     start = time.perf_counter()
     llm = None
     expected_tokens = args.batch_size * args.decode_len
@@ -151,13 +148,15 @@ def main() -> int:
         "decode_len": args.decode_len,
         "batch_size": args.batch_size,
         "expected_generated_tokens": expected_tokens,
-        "cleared_dsv4_sm80_env": cleared_env,
+        "dsv4_runtime": _jsonable_runtime(runtime),
         "torch_version": torch.__version__,
         "tp_rank": tp_rank,
         "tp_size": tp_size,
         "is_primary_rank": is_primary,
         "distributed_addr": distributed_addr,
-        "use_pynccl": args.use_pynccl,
+        "requested_use_pynccl": args.use_pynccl,
+        "use_pynccl": use_pynccl,
+        "allow_cuda_graph": allow_cuda_graph,
     }
 
     try:
@@ -172,13 +171,16 @@ def main() -> int:
             args.model_path,
             dtype=torch.bfloat16,
             tp_info=DistributedInfo(tp_rank, tp_size),
+            dsv4_runtime_mode=runtime.mode,
             max_running_req=max(args.batch_size, 1),
             max_seq_len_override=max_seq_len,
             max_extend_tokens=args.prompt_len * args.batch_size,
             num_page_override=num_pages,
-            page_size=1,
+            page_size=256,
             memory_ratio=args.memory_ratio,
-            use_pynccl=args.use_pynccl,
+            use_pynccl=use_pynccl,
+            allow_dsv4_cuda_graph=allow_cuda_graph,
+            disable_cuda_graph=not allow_cuda_graph,
             **llm_kwargs,
         )
         prompts = _make_prompts(
@@ -217,8 +219,6 @@ def main() -> int:
         )
     finally:
         result["elapsed_s"] = time.perf_counter() - start
-        result["active_dsv4_toggles"] = _active_dsv4_toggles()
-        result["raw_dsv4_sm80_env"] = _raw_dsv4_env()
         result["gpu"] = _gpu_report()
         if llm is not None:
             try:

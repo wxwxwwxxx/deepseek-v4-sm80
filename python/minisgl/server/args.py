@@ -110,6 +110,14 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
+        "--dsv4-runtime",
+        dest="dsv4_runtime_mode",
+        choices=["optimized", "fallback"],
+        default=ServerArgs.dsv4_runtime_mode,
+        help="Select the DeepSeek V4 optimized release runtime or reference fallback.",
+    )
+
+    parser.add_argument(
         "--dsv4-sm80-recipe",
         default=ServerArgs.dsv4_sm80_recipe,
         choices=[

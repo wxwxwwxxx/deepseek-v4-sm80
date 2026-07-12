@@ -5,6 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, List
 
 import torch
+from minisgl.dsv4_runtime import DSV4RuntimeMode
 from minisgl.distributed import DistributedInfo
 from minisgl.utils import cached_load_hf_config
 
@@ -20,6 +21,7 @@ class EngineConfig:
     dtype: torch.dtype
     max_running_req: int = 256
     max_running_req_explicit: bool = False
+    dsv4_runtime_mode: DSV4RuntimeMode = "optimized"
     dsv4_sm80_recipe: str | None = None
     attention_backend: str = "auto"
     moe_backend: str = "auto"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -9,7 +8,6 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from minisgl.utils import dsv4_memory_debug
 
 FLOAT4_E2M1F_ID = 562949953487106
 EXTENSION_NAME = "minisgl_marlin_wna16"
@@ -63,7 +61,8 @@ def load_ops() -> Any:
         source_root / "schema.cpp",
         source_root / "quantization/marlin/gptq_marlin_repack.cu",
         source_root / "moe/marlin_moe_wna16/ops.cu",
-        *sorted((source_root / "moe/marlin_moe_wna16").glob("sm80_kernel_*.cu")),
+        source_root
+        / "moe/marlin_moe_wna16/sm80_kernel_bfloat16_fe2m1f_bfloat16.cu",
     ]
     include_dirs = [
         source_root,
@@ -165,17 +164,6 @@ def prepare_moe_mxfp4_weights(
             f"{(experts, hidden, intermediate // 2)}, got {tuple(w2_weight.shape)}"
         )
 
-    debug = (
-        dsv4_memory_debug.env_flag(dsv4_memory_debug.DSV4_MARLIN_WNA16_CACHE_DEBUG_ENV)
-        and w13_weight.is_cuda
-    )
-    before_memory = (
-        dsv4_memory_debug.cuda_memory_snapshot(w13_weight.device, synchronize=True)
-        if debug
-        else {}
-    )
-    start_s = time.perf_counter()
-
     ops = load_ops()
     perm = torch.empty(0, dtype=torch.int, device=w13_weight.device)
     w13_u8 = (
@@ -237,63 +225,6 @@ def prepare_moe_mxfp4_weights(
         w2_scale=marlin_w2_scale,
         source_signature=_source_signature(w13_weight, w13_scale, w2_weight, w2_scale),
     )
-    if debug:
-        after_memory = dsv4_memory_debug.cuda_memory_snapshot(w13_weight.device, synchronize=True)
-        elapsed_ms = (time.perf_counter() - start_s) * 1000.0
-        source_bytes = {
-            "w13_weight": dsv4_memory_debug.tensor_nbytes(w13_weight),
-            "w13_scale": dsv4_memory_debug.tensor_nbytes(w13_scale),
-            "w2_weight": dsv4_memory_debug.tensor_nbytes(w2_weight),
-            "w2_scale": dsv4_memory_debug.tensor_nbytes(w2_scale),
-        }
-        repacked_bytes = {
-            "w13": dsv4_memory_debug.tensor_nbytes(marlin_w13),
-            "w13_scale": dsv4_memory_debug.tensor_nbytes(marlin_w13_scale),
-            "w2": dsv4_memory_debug.tensor_nbytes(marlin_w2),
-            "w2_scale": dsv4_memory_debug.tensor_nbytes(marlin_w2_scale),
-        }
-        dsv4_memory_debug.append_jsonl(
-            "marlin_wna16_cache",
-            {
-                "event": "dsv4_marlin_wna16_prepare_moe_mxfp4_weights",
-                "owner": owner_label,
-                "cache_was_present": cache_was_present,
-                "cache_signature_match": cache_signature_match,
-                "experts": int(experts),
-                "hidden": int(hidden),
-                "local_intermediate": int(intermediate),
-                "params_dtype": str(params_dtype),
-                "elapsed_ms": elapsed_ms,
-                "source_tensors": {
-                    "w13_weight": dsv4_memory_debug.tensor_summary(w13_weight),
-                    "w13_scale": dsv4_memory_debug.tensor_summary(w13_scale),
-                    "w2_weight": dsv4_memory_debug.tensor_summary(w2_weight),
-                    "w2_scale": dsv4_memory_debug.tensor_summary(w2_scale),
-                },
-                "repacked_tensors": {
-                    "w13": dsv4_memory_debug.tensor_summary(marlin_w13),
-                    "w13_scale": dsv4_memory_debug.tensor_summary(marlin_w13_scale),
-                    "w2": dsv4_memory_debug.tensor_summary(marlin_w2),
-                    "w2_scale": dsv4_memory_debug.tensor_summary(marlin_w2_scale),
-                },
-                "source_total_bytes": int(sum(source_bytes.values())),
-                "repacked_total_bytes": int(sum(repacked_bytes.values())),
-                "before_memory": before_memory,
-                "after_memory": after_memory,
-                "free_delta_bytes": int(
-                    before_memory.get("free_memory_bytes", 0)
-                    - after_memory.get("free_memory_bytes", 0)
-                ),
-                "memory_allocated_delta_bytes": int(
-                    after_memory.get("memory_allocated_bytes", 0)
-                    - before_memory.get("memory_allocated_bytes", 0)
-                ),
-                "memory_reserved_delta_bytes": int(
-                    after_memory.get("memory_reserved_bytes", 0)
-                    - before_memory.get("memory_reserved_bytes", 0)
-                ),
-            },
-        )
     return result
 
 

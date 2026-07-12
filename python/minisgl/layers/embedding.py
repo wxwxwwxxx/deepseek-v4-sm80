@@ -31,13 +31,18 @@ class VocabParallelEmbedding(BaseOP):
 
     @nvtx_annotate("Embedding")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        from minisgl.kernel import indexing
-
-        y = indexing(
-            weights=self.weight,
-            indices=x,
-            vocab_range=self.vocab_range if self.tp_size > 1 else None,
-        )
+        if self.tp_size > 1:
+            start_idx, length = self.vocab_range
+            if length <= 0:
+                y = self.weight.new_zeros((*x.shape, self.weight.shape[1]))
+                return self._comm.all_reduce(y)
+            local_indices = x - start_idx
+            mask = (local_indices >= 0) & (local_indices < length)
+            local_indices = local_indices.clamp(min=0, max=length - 1)
+            y = F.embedding(local_indices, self.weight)
+            y = y * mask.unsqueeze(-1).to(dtype=y.dtype)
+        else:
+            y = F.embedding(x, self.weight)
 
         return self._comm.all_reduce(y) if self.tp_size > 1 else y
 
