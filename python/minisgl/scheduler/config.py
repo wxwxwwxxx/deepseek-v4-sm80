@@ -20,6 +20,8 @@ class SchedulerConfig(EngineConfig):
     enable_dsv4_swa_tail_retention_v1: bool = False
     enable_dsv4_component_loc_ownership: bool = False
     enable_dsv4_swa_independent_lifecycle: bool = False
+    disable_log_stats: bool = False
+    stats_log_interval: float = 10.0
     offline_mode: bool = False
 
     # networking config

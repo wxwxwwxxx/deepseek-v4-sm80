@@ -21,6 +21,7 @@ from .config import SchedulerConfig
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
 from .prefill import ChunkedReq, PrefillManager
+from .stats import SchedulerStatsTracker
 from .table import TableManager
 
 if TYPE_CHECKING:
@@ -31,7 +32,6 @@ logger = init_logger(__name__)
 
 Indice2D: TypeAlias = Tuple[torch.Tensor, torch.Tensor]
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
-
 
 
 # For overlap scheduling, we also need to cache some other data to avoid IMA
@@ -65,21 +65,16 @@ def decide_max_sequence_admission(
         raise ValueError("input and requested output lengths must be non-negative")
     if input_len > max_seq_len:
         reason = (
-            f"input sequence length {input_len} exceeds effective max sequence length "
-            f"{max_seq_len}"
+            f"input sequence length {input_len} exceeds effective max sequence length {max_seq_len}"
         )
-        return MaxSequenceAdmission(
-            input_len, requested_output_len, 0, max_seq_len, False, reason
-        )
+        return MaxSequenceAdmission(input_len, requested_output_len, 0, max_seq_len, False, reason)
     available_output_len = max_seq_len - input_len
     if requested_output_len > 0 and available_output_len == 0:
         reason = (
             f"input sequence length {input_len} equals effective max sequence length "
             f"{max_seq_len}; no model position remains for generation"
         )
-        return MaxSequenceAdmission(
-            input_len, requested_output_len, 0, max_seq_len, False, reason
-        )
+        return MaxSequenceAdmission(input_len, requested_output_len, 0, max_seq_len, False, reason)
     admitted_output_len = min(requested_output_len, available_output_len)
     return MaxSequenceAdmission(
         input_len,
@@ -121,8 +116,7 @@ def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
     if getattr(config, "enable_dsv4_swa_independent_lifecycle", False):
         if not config.enable_dsv4_radix_prefix_cache:
             raise ValueError(
-                "DeepSeek V4 SWA independent lifecycle requires "
-                "--enable-dsv4-radix-prefix-cache."
+                "DeepSeek V4 SWA independent lifecycle requires --enable-dsv4-radix-prefix-cache."
             )
         if not getattr(config, "enable_dsv4_component_loc_ownership", False):
             raise ValueError(
@@ -137,9 +131,8 @@ def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
                 "prefix cache opt-in. Add --enable-dsv4-radix-prefix-cache."
             )
         window_size = int(getattr(config.model_config, "window_size", 128) or 128)
-        if (
-            window_size > config.page_size
-            and not getattr(config, "enable_dsv4_swa_independent_lifecycle", False)
+        if window_size > config.page_size and not getattr(
+            config, "enable_dsv4_swa_independent_lifecycle", False
         ):
             raise ValueError(
                 "DeepSeek V4 component loc ownership currently keeps one "
@@ -159,18 +152,8 @@ def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
                 "DeepSeek V4 radix prefix cache opt-in requires "
                 f"cache_type='radix', got {cache_type!r}."
             )
-        logger.info("Opting in to DeepSeek V4 radix prefix cache.")
-        if getattr(config, "enable_dsv4_component_loc_ownership", False):
-            logger.info(
-                "Opting in to DeepSeek V4 Route B component loc ownership "
-                "for C4/C128/indexer components."
-            )
-        if getattr(config, "enable_dsv4_swa_independent_lifecycle", False):
-            logger.info("Opting in to DeepSeek V4 independent SWA lifecycle.")
         return cache_type
 
-    if cache_type != "naive":
-        logger.info("Disabling radix prefix cache for DeepSeek V4 KV cache v1.")
     return "naive"
 
 
@@ -216,6 +199,9 @@ class Scheduler(SchedulerIOMixin):
         self.eos_token_id = self.tokenizer.eos_token_id
         self.token_pool = self.table_manager.token_pool
         self.prefill_budget = config.max_extend_tokens
+        self._stats_tracker = (
+            None if config.disable_log_stats else SchedulerStatsTracker(config.stats_log_interval)
+        )
 
         # self.config = config
 
@@ -224,6 +210,8 @@ class Scheduler(SchedulerIOMixin):
 
     def run_when_idle(self) -> None:
         """Called when the scheduler is idle to perform background tasks."""
+        if self._stats_tracker is not None:
+            self._stats_tracker.reset_idle()
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
 
@@ -250,6 +238,7 @@ class Scheduler(SchedulerIOMixin):
                 ongoing_data = (forward_input, self._forward(forward_input))
 
         self._process_last_data(last_data)
+        self._maybe_log_stats()
         return ongoing_data
 
     def normal_loop(self) -> None:
@@ -263,6 +252,7 @@ class Scheduler(SchedulerIOMixin):
             ongoing_data = (forward_input, self._forward(forward_input))
 
         self._process_last_data(ongoing_data)
+        self._maybe_log_stats()
 
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:
@@ -289,6 +279,11 @@ class Scheduler(SchedulerIOMixin):
         batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
         copy_done.synchronize()
         self.engine.release_copy_done_event(copy_done)
+        if self._stats_tracker is not None:
+            if batch.is_prefill:
+                self._stats_tracker.record(prompt_tokens=sum(req.extend_len for req in batch.reqs))
+            else:
+                self._stats_tracker.record(generation_tokens=len(batch.reqs))
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         with self.cache_manager.lazy_free_region():
@@ -332,9 +327,7 @@ class Scheduler(SchedulerIOMixin):
             )
             if not admission.accepted:
                 reason = admission.rejection_reason or "request rejected by max-sequence policy"
-                logger.warning_rank0(
-                    f"Request {msg.uid} rejected: {reason}."
-                )
+                logger.warning_rank0(f"Request {msg.uid} rejected: {reason}.")
                 self._record_max_sequence_admission(msg.uid, admission)
                 self.send_result(
                     [
@@ -368,17 +361,13 @@ class Scheduler(SchedulerIOMixin):
             logger.error(f"Unknown message type: {type(msg)}")
             raise NotImplementedError
 
-    def _record_max_sequence_admission(
-        self, uid: int, admission: MaxSequenceAdmission
-    ) -> None:
+    def _record_max_sequence_admission(self, uid: int, admission: MaxSequenceAdmission) -> None:
         """Offline frontends override this to make clamps/rejections observable."""
         del uid, admission
 
     def _free_req_resources(self, req: Req) -> None:
         self.table_manager.free(req.table_idx)
         self.cache_manager.cache_req(req, finished=True)
-
-
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
         self.engine.graph_runner.pad_batch(batch)
@@ -460,6 +449,26 @@ class Scheduler(SchedulerIOMixin):
         self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
+
+    def _maybe_log_stats(self) -> None:
+        if self._stats_tracker is None:
+            return
+        snapshot = self._stats_tracker.maybe_snapshot()
+        if snapshot is None:
+            return
+        total_pages = int(self.cache_manager.num_pages)
+        # len(tensor) reads shape metadata only; this path never synchronizes CUDA.
+        free_pages = len(self.cache_manager.free_slots)
+        used_pages = max(total_pages - free_pages, 0)
+        kv_usage = 0.0 if total_pages == 0 else 100.0 * used_pages / total_pages
+        logger.info_rank0(
+            "Engine stats: "
+            f"P={snapshot.prompt_throughput:.1f} tok/s, "
+            f"D={snapshot.generation_throughput:.1f} tok/s, "
+            f"running={len(self.decode_manager.running_reqs)}, "
+            f"waiting={len(self.prefill_manager.pending_list)}, "
+            f"KV={kv_usage:.1f}% ({used_pages}/{total_pages} pages)."
+        )
 
 
 def _make_positions(batch: Batch, device: torch.device) -> torch.Tensor:

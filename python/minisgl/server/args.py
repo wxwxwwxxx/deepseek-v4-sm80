@@ -68,8 +68,7 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         for arg in args
     )
     max_running_req_explicit = any(
-        arg == "--max-running-requests" or arg.startswith("--max-running-requests=")
-        for arg in args
+        arg == "--max-running-requests" or arg.startswith("--max-running-requests=") for arg in args
     )
     from minisgl.attention import validate_attn_backend
     from minisgl.kvcache import SUPPORTED_CACHE_MANAGER
@@ -126,7 +125,10 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
             "dsv4_sm80_long_context_512k",
             "dsv4_sm80_1m_smoke",
         ],
-        help="Select a public DeepSeek V4 A100/sm80 request/graph/context recipe.",
+        help=(
+            "Optionally apply a request/graph/context recipe validated on DGX A100 "
+            "8x80GB. Explicit request, graph, and sequence settings override its fields."
+        ),
     )
 
     parser.add_argument(
@@ -198,6 +200,18 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         dest="max_extend_tokens",
         default=ServerArgs.max_extend_tokens,
         help="Chunk Prefill maximum chunk size in tokens.",
+    )
+
+    parser.add_argument(
+        "--stats-log-interval",
+        type=float,
+        default=ServerArgs.stats_log_interval,
+        help="Seconds between periodic scheduler throughput and load logs.",
+    )
+    parser.add_argument(
+        "--disable-log-stats",
+        action="store_true",
+        help="Disable periodic scheduler throughput and load logs.",
     )
 
     parser.add_argument(
@@ -280,6 +294,8 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
 
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
+    if kwargs["stats_log_interval"] <= 0:
+        parser.error("--stats-log-interval must be positive")
     kwargs["max_extend_tokens_explicit"] = max_extend_tokens_explicit
     kwargs["max_running_req_explicit"] = max_running_req_explicit
 
@@ -290,6 +306,7 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         kwargs["max_running_req"] = 1
         kwargs["max_running_req_explicit"] = True
         kwargs["silent_output"] = True
+        kwargs["disable_log_stats"] = True
 
     if kwargs["model_path"].startswith("~"):
         kwargs["model_path"] = os.path.expanduser(kwargs["model_path"])

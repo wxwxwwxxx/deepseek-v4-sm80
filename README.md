@@ -35,9 +35,10 @@ python -m pip install -e '.[benchmark]'
 
 ## Serve and request
 
-The optimized runtime and `dsv4_sm80_balanced` recipe are the defaults. The
-recipe automatically resolves the validated page size of 256; no DSV4 tuning
-environment variables are needed.
+The optimized runtime uses release defaults with page size 256, up to 256
+running requests, and CUDA graph buckets through M=256. These values were
+validated on the DGX A100 platform above; no DSV4 tuning environment variables
+or named recipe are required.
 
 ```bash
 python -m minisgl --model /models/DeepSeek-V4-Flash --tp-size 8 --host 0.0.0.0 --port 1919
@@ -56,10 +57,10 @@ Interactive shell:
 python -m minisgl.shell --model /models/DeepSeek-V4-Flash --tp-size 8
 ```
 
-The Python `LLM` entry also uses one process per TP rank:
+The Python `LLM` example launches its local TP workers from one process:
 
 ```bash
-torchrun --standalone --nproc_per_node=8 examples/offline_dsv4.py
+python examples/offline_dsv4.py
 ```
 
 For a slow reference/oracle run, select fallback explicitly before model
@@ -72,18 +73,17 @@ python -m minisgl --model /models/DeepSeek-V4-Flash --tp-size 8 --dsv4-runtime f
 
 ## Public benchmarks
 
-The offline defaults are DSV4 optimized/balanced TP8. Every command accepts
-overrides and can write a machine-readable report with `--output`.
+The four public benchmarks are intentionally small examples. Edit the constants
+near the top of each script to change its workload.
 
 ```bash
-torchrun --standalone --nproc_per_node=8 benchmark/offline/bench.py --request-count 256 --output /tmp/minisgl-offline.json
+python benchmark/offline/bench.py
 ```
 
-WildChat shards are cached under `~/.cache/minisgl/benchmarks/` unless
-`--dataset-cache` or `--dataset-shard` is provided:
+The first WildChat shard is cached under `~/.cache/minisgl/benchmarks/`:
 
 ```bash
-torchrun --standalone --nproc_per_node=8 benchmark/offline/bench_wildchat.py --request-count 32 --output /tmp/minisgl-wildchat.json
+python benchmark/offline/bench_wildchat.py
 ```
 
 Against the server above, run the simple synthetic benchmark and the
@@ -92,8 +92,8 @@ schema/workload; this release does not serve a Qwen model. Trace files also use
 the user benchmark cache by default.
 
 ```bash
-python benchmark/online/bench_simple.py --request-count 16 --batch-size 4 --output /tmp/minisgl-online-simple.json
-python benchmark/online/bench_qwen.py --request-count 16 --max-concurrency 4 --output /tmp/minisgl-trace-replay.json
+python benchmark/online/bench_simple.py
+python benchmark/online/bench_qwen.py
 ```
 
 The stable public benchmark API is these four scripts. DSV4 microbenchmarks,
@@ -111,12 +111,14 @@ in this release.
 | --- | --- |
 | `dsv4_sm80_low_m64` | Low active-M or KV-capacity-sensitive serving; graph through M=64. |
 | `dsv4_sm80_mid_m128` | Capacity/throughput compromise through M=128. |
-| `dsv4_sm80_balanced` | Default throughput-oriented configuration through M=256. |
+| `dsv4_sm80_balanced` | Explicit DGX A100 throughput template through M=256. |
 | `dsv4_sm80_long_context_512k` | Low-concurrency 512 Ki-token capability. |
 | `dsv4_sm80_1m_smoke` | Single-request 1 Mi-token capability smoke, not a performance recipe. |
 
-Select one with `--dsv4-sm80-recipe NAME` on the server or `--recipe NAME` in
-the offline benchmarks.
+Recipes are optional DGX A100 configuration templates, not generic sm80
+defaults. Select one on the server with `--dsv4-sm80-recipe NAME`. The server
+prints the values supplied by the recipe and lists any fields overridden by
+explicit request, graph, or sequence-length arguments.
 
 ## Validated baseline
 

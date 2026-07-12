@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-import builtins
 import importlib.util
-import os
-import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from minisgl.distributed import launch_tensor_parallel
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC_SCRIPTS = (
@@ -37,96 +33,57 @@ simple = load_script("public_online_simple_bench", PUBLIC_SCRIPTS[2])
 trace = load_script("public_online_trace_bench", PUBLIC_SCRIPTS[3])
 
 
+def _record_local_tp_rank(output_dir: str) -> None:
+    import os
+
+    rank = os.environ["LOCAL_RANK"]
+    world_size = os.environ["WORLD_SIZE"]
+    Path(output_dir, f"rank-{rank}").write_text(world_size, encoding="utf-8")
+
+
 @pytest.mark.parametrize("script", PUBLIC_SCRIPTS)
-def test_public_benchmark_help(script: Path):
-    result = subprocess.run(
-        [sys.executable, str(script), "--help"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "usage:" in result.stdout
+def test_public_benchmark_is_a_small_compilable_example(script: Path):
+    source = script.read_text(encoding="utf-8")
+    compile(source, str(script), "exec")
+    assert "argparse" not in source
+    assert "dsv4_sm80_recipe" not in source
 
 
-def test_public_defaults_are_dsv4_release_defaults():
-    offline_args = offline.parse_args([])
-    wildchat_args = wildchat.parse_args([])
-    simple_args = simple.parse_args([])
-    trace_args = trace.parse_args([])
-
-    assert offline_args.model == wildchat_args.model == DEFAULT_MODEL
-    assert offline_args.tp_size == wildchat_args.tp_size == 8
-    assert offline_args.recipe == wildchat_args.recipe == "dsv4_sm80_balanced"
-    assert offline_args.runtime_mode == wildchat_args.runtime_mode == "optimized"
-    assert simple_args.expected_model == trace_args.expected_model == DEFAULT_MODEL
-    assert simple_args.base_url == trace_args.base_url == "http://127.0.0.1:1919/v1"
-    assert str(wildchat_args.dataset_cache).startswith(str(Path.home() / ".cache"))
-    assert str(trace_args.trace_cache).startswith(str(Path.home() / ".cache"))
+def test_public_defaults_point_to_dsv4_release_surfaces():
+    assert offline.MODEL == wildchat.MODEL == DEFAULT_MODEL
+    assert offline.TP_SIZE == wildchat.TP_SIZE == 8
+    assert simple.PORT == trace.PORT == 1919
+    assert str(wildchat.CACHE_DIR).startswith(str(Path.home() / ".cache"))
+    assert str(trace.TRACE_PATH).startswith(str(Path.home() / ".cache"))
 
 
 @pytest.mark.parametrize("module", [offline, wildchat])
-def test_offline_tp_world_size_mismatch_is_explicit(module, monkeypatch):
-    monkeypatch.setenv("WORLD_SIZE", "1")
-    monkeypatch.setenv("LOCAL_RANK", "0")
-    with pytest.raises(SystemExit, match=r"WORLD_SIZE=1 does not match --tp-size=8"):
-        module.distributed_info_from_env(8)
+def test_offline_examples_use_framework_tp_launcher(module):
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "launch_tensor_parallel(TP_SIZE, main)" in source
+    assert "WORLD_SIZE" not in source
+    assert "LOCAL_RANK" not in source
 
 
-class FakeModels:
-    def list(self):
-        async def models():
-            yield SimpleNamespace(id="/models/not-deepseek-v4")
-
-        return models()
+def test_framework_tp_launcher_spawns_all_local_ranks(tmp_path):
+    launch_tensor_parallel(2, _record_local_tp_rank, str(tmp_path))
+    assert (tmp_path / "rank-0").read_text(encoding="utf-8") == "2"
+    assert (tmp_path / "rank-1").read_text(encoding="utf-8") == "2"
 
 
-class FakeClient:
-    models = FakeModels()
+def test_llm_uses_launcher_environment(monkeypatch):
+    from minisgl.llm.llm import LLM, Scheduler
 
+    configs = []
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    monkeypatch.setattr(Scheduler, "__init__", lambda self, config: configs.append(config))
 
-@pytest.mark.parametrize("module", [simple, trace])
-def test_online_model_mismatch_is_explicit(module):
-    with pytest.raises(RuntimeError, match="server model mismatch"):
-        asyncio.run(module.verify_server_model(FakeClient(), DEFAULT_MODEL))
+    LLM("/models/DeepSeek-V4-Flash")
 
-
-def test_online_connection_failure_returns_nonzero():
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(PUBLIC_SCRIPTS[2]),
-            "--base-url",
-            "http://127.0.0.1:1/v1",
-            "--timeout",
-            "0.2",
-            "--request-count",
-            "1",
-            "--batch-size",
-            "1",
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        env={**os.environ, "NO_PROXY": "127.0.0.1"},
-    )
-    assert result.returncode != 0
-    assert "online simple benchmark failed" in result.stderr
-
-
-def test_wildchat_missing_pyarrow_has_install_hint(monkeypatch):
-    real_import = builtins.__import__
-
-    def reject_pyarrow(name, *args, **kwargs):
-        if name == "pyarrow.parquet":
-            raise ModuleNotFoundError("No module named 'pyarrow'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", reject_pyarrow)
-    with pytest.raises(RuntimeError, match=r"\.\[benchmark\]"):
-        wildchat._load_pyarrow_parquet()
+    assert configs[0].tp_info.rank == 3
+    assert configs[0].tp_info.size == 8
+    assert configs[0].distributed_init_method == "env://"
 
 
 def test_all_moved_debug_scripts_exist_and_compile():

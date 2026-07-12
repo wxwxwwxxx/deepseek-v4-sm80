@@ -44,9 +44,7 @@ class GraphCaptureBuffer:
             num_token_non_padded=torch.zeros(1, dtype=torch.int32, device=device),
             logits=torch.empty(bs, vocab_size, dtype=torch.float32, device=device),
             next_tokens=(
-                torch.empty(bs, dtype=torch.int32, device=device)
-                if capture_greedy_sample
-                else None
+                torch.empty(bs, dtype=torch.int32, device=device) if capture_greedy_sample else None
             ),
         )
 
@@ -63,15 +61,12 @@ class GraphCaptureBuffer:
             self.input_ids.numel() * self.input_ids.element_size()
             + self.out_loc.numel() * self.out_loc.element_size()
             + self.positions.numel() * self.positions.element_size()
-            + self.num_token_non_padded.numel()
-            * self.num_token_non_padded.element_size()
+            + self.num_token_non_padded.numel() * self.num_token_non_padded.element_size()
             + self.logits.numel() * self.logits.element_size()
         )
         if self.next_tokens is not None:
             total += self.next_tokens.numel() * self.next_tokens.element_size()
         return int(total)
-
-
 
     def copy_from(self, batch: Batch) -> int:
         _slice = slice(batch.padded_size)
@@ -81,11 +76,15 @@ class GraphCaptureBuffer:
         self.out_loc[_slice] = batch.out_loc
         self.positions[_slice] = batch.positions
         copied_items = int(batch.padded_size)
-        return copied_items * (
-            self.input_ids.element_size()
-            + self.out_loc.element_size()
-            + self.positions.element_size()
-        ) + self.num_token_non_padded.element_size()
+        return (
+            copied_items
+            * (
+                self.input_ids.element_size()
+                + self.out_loc.element_size()
+                + self.positions.element_size()
+            )
+            + self.num_token_non_padded.element_size()
+        )
 
 
 def mem_GB(size: int) -> str:
@@ -94,30 +93,6 @@ def mem_GB(size: int) -> str:
 
 def get_free_memory(device: torch.device) -> int:
     return torch.cuda.mem_get_info(device)[0]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 class GraphRunner:
@@ -196,12 +171,6 @@ class GraphRunner:
                 logger.error(f"CUDA graph capture failed: {type(exc).__name__}: {exc}")
                 raise
 
-
-
-
-
-
-
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
         if self.max_graph_bs == 0:
@@ -213,7 +182,10 @@ class GraphRunner:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
 
-        logger.info_rank0(f"Start capturing CUDA graphs with sizes: {self.graph_bs_list}")
+        logger.info_rank0(
+            f"Capturing {len(self.graph_bs_list)} CUDA graph buckets "
+            f"through M={max(self.graph_bs_list)}."
+        )
         free_memory = get_free_memory(self.device)
         capture_start_free_memory = free_memory
         capture_start_s = time.perf_counter()
@@ -233,9 +205,7 @@ class GraphRunner:
             capture_greedy_sample=self.capture_greedy_sample,
         )
         self.capture_status["capture_buffer_bytes"] = self.buffer.nbytes()
-        bind_capture_graph_inputs = getattr(
-            self.attn_backend, "bind_capture_graph_inputs", None
-        )
+        bind_capture_graph_inputs = getattr(self.attn_backend, "bind_capture_graph_inputs", None)
         if bind_capture_graph_inputs is not None:
             bind_capture_graph_inputs(
                 input_ids=self.buffer.input_ids,
@@ -296,9 +266,9 @@ class GraphRunner:
                 self.buffer.logits[:bs] = model.forward()
                 if self.capture_greedy_sample:
                     assert self.buffer.next_tokens is not None
-                    self.buffer.next_tokens[:bs] = torch.argmax(
-                        self.buffer.logits[:bs], dim=-1
-                    ).to(torch.int32)
+                    self.buffer.next_tokens[:bs] = torch.argmax(self.buffer.logits[:bs], dim=-1).to(
+                        torch.int32
+                    )
                 with torch.cuda.graph(graph, pool=pool, stream=self.stream):
                     if stage_capture_metadata is not None:
                         stage_capture_metadata(batch)
@@ -364,18 +334,12 @@ class GraphRunner:
         str_key = str(int(key))
         counter[str_key] = int(counter.get(str_key, 0)) + 1
 
-
-
-
-
-
-
     def record_eager_decode(self, batch: Batch) -> None:
         if not batch.is_decode:
             return
-        self.capture_status["eager_decode_count"] = int(
-            self.capture_status["eager_decode_count"]
-        ) + 1
+        self.capture_status["eager_decode_count"] = (
+            int(self.capture_status["eager_decode_count"]) + 1
+        )
         self._increment_status_counter("eager_decode_count_by_batch_size", batch.size)
 
     def _replay_to_buffer(self, batch: Batch) -> None:
@@ -391,9 +355,9 @@ class GraphRunner:
         if validate_after_replay is not None:
             validate_after_replay(batch)
         self.capture_status["replay_count"] = int(self.capture_status["replay_count"]) + 1
-        self.capture_status["replay_input_copy_bytes"] = int(
-            self.capture_status["replay_input_copy_bytes"]
-        ) + copied_bytes
+        self.capture_status["replay_input_copy_bytes"] = (
+            int(self.capture_status["replay_input_copy_bytes"]) + copied_bytes
+        )
         self._increment_status_counter("replay_count_by_batch_size", batch.size)
         self._increment_status_counter("replay_count_by_padded_size", batch.padded_size)
 
@@ -408,9 +372,9 @@ class GraphRunner:
         assert self.can_replay_greedy_sample(batch)
         self._replay_to_buffer(batch)
         assert self.buffer.next_tokens is not None
-        self.capture_status["greedy_sample_replay_count"] = int(
-            self.capture_status["greedy_sample_replay_count"]
-        ) + 1
+        self.capture_status["greedy_sample_replay_count"] = (
+            int(self.capture_status["greedy_sample_replay_count"]) + 1
+        )
         self._increment_status_counter("greedy_sample_replay_count_by_batch_size", batch.size)
         return self.buffer.next_tokens[: batch.size]
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
@@ -40,11 +41,18 @@ class LLM(Scheduler):
         dsv4_runtime_mode: DSV4RuntimeMode = "optimized",
         **kwargs,
     ):
+        if tp_info is None:
+            world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
+            tp_info = DistributedInfo(rank, world_size)
+            if world_size > 1:
+                kwargs.setdefault("distributed_init_method", "env://")
+        kwargs.setdefault("disable_log_stats", True)
         kwargs.setdefault("max_extend_tokens_explicit", "max_extend_tokens" in kwargs)
         kwargs.setdefault("max_running_req_explicit", "max_running_req" in kwargs)
         config = SchedulerConfig(
             model_path=model_path,
-            tp_info=tp_info or DistributedInfo(0, 1),
+            tp_info=tp_info,
             dtype=dtype,
             dsv4_runtime_mode=dsv4_runtime_mode,
             offline_mode=True,
@@ -94,9 +102,7 @@ class LLM(Scheduler):
                 status.finish_reason = msg.finish_reason or "stop"
                 status.error = msg.error
 
-    def _record_max_sequence_admission(
-        self, uid: int, admission: MaxSequenceAdmission
-    ) -> None:
+    def _record_max_sequence_admission(self, uid: int, admission: MaxSequenceAdmission) -> None:
         status = self.status_map[uid]
         status.admitted_output_len = admission.admitted_output_len
         if not admission.accepted:

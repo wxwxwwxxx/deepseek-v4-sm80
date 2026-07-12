@@ -54,7 +54,7 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
     assert config.enable_dsv4_swa_independent_lifecycle is True
     assert config.max_extend_tokens == 8192
     assert config.allow_dsv4_cuda_graph is True
-    assert config.dsv4_sm80_recipe == "dsv4_sm80_balanced"
+    assert config.dsv4_sm80_recipe is None
     assert config.max_running_req == 256
     assert config.cuda_graph_max_bs == 256
     assert config.cuda_graph_policy.source_mode == "explicit_max"
@@ -154,6 +154,7 @@ def test_public_dsv4_sm80_recipes_resolve_through_one_graph_policy(
     monkeypatch, recipe, max_req, graph_max, max_seq
 ):
     monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine_module.logger, "warning_rank0", lambda *args, **kwargs: None)
     monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
     config = _fake_config(dsv4_sm80_recipe=recipe)
 
@@ -167,6 +168,12 @@ def test_public_dsv4_sm80_recipes_resolve_through_one_graph_policy(
 
 def test_recipe_preserves_explicit_request_graph_and_sequence_overrides(monkeypatch):
     monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    warnings = []
+    monkeypatch.setattr(
+        engine_module.logger,
+        "warning_rank0",
+        lambda message, *args, **kwargs: warnings.append(message),
+    )
     monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
     config = _fake_config(
         dsv4_sm80_recipe="dsv4_sm80_long_context_512k",
@@ -181,9 +188,13 @@ def test_recipe_preserves_explicit_request_graph_and_sequence_overrides(monkeypa
     assert config.max_running_req == 8
     assert config.cuda_graph_policy.resolved_max_bs == 2
     assert config.max_seq_len_override == 262_144
+    assert "Explicit settings override recipe fields" in warnings[0]
+    assert "max_running_req=8" in warnings[0]
+    assert "cuda_graph_max_bs=2" in warnings[0]
+    assert "max_seq_len_override=262144" in warnings[0]
 
 
-def test_default_recipe_caps_graph_to_explicit_request_capacity(monkeypatch):
+def test_release_defaults_cap_graph_to_explicit_request_capacity(monkeypatch):
     monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
     monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
     config = _fake_config(max_running_req=32, max_running_req_explicit=True)

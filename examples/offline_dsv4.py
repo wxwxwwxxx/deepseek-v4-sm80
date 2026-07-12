@@ -1,33 +1,28 @@
-"""Minimal torchrun-native DeepSeek V4 Flash LLM example."""
+"""Minimal single-command DeepSeek V4 Flash TP8 example."""
 
 from __future__ import annotations
 
-import os
-
 from minisgl.core import SamplingParams
-from minisgl.distributed import DistributedInfo
+from minisgl.distributed import get_tp_info, launch_tensor_parallel
 from minisgl.llm import LLM
+from minisgl.tokenizer.tokenize import load_dsv4_chat_formatter
+
+MODEL = "/models/DeepSeek-V4-Flash"
 
 
 def main() -> None:
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
-    if world_size != 8:
-        raise SystemExit(f"this validated example requires WORLD_SIZE=8, got {world_size}")
-    llm = LLM(
-        "/models/DeepSeek-V4-Flash",
-        tp_info=DistributedInfo(rank, world_size),
-        distributed_init_method="env://",
-        dsv4_runtime_mode="optimized",
-        dsv4_sm80_recipe="dsv4_sm80_balanced",
-    )
+    llm = LLM(MODEL)
+    chat_formatter = load_dsv4_chat_formatter(MODEL)
+    if chat_formatter is None:
+        raise RuntimeError("DeepSeek V4 chat formatter is missing from the model directory")
+    prompt = chat_formatter([{"role": "user", "content": "Reply with only 4: 2 + 2 ="}])
     result = llm.generate(
-        ["Answer briefly: what is 2 + 2?"],
+        [prompt],
         SamplingParams(temperature=0.0, max_tokens=32),
     )
-    if rank == 0:
+    if get_tp_info().is_primary():
         print(result[0]["text"])
 
 
 if __name__ == "__main__":
-    main()
+    launch_tensor_parallel(8, main)

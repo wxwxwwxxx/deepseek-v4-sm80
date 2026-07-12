@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from minisgl.server.args import parse_args
 
 
@@ -29,6 +28,21 @@ def test_server_args_expose_typed_dsv4_runtime_mode():
 
     assert default_config.dsv4_runtime_mode == "optimized"
     assert fallback_config.dsv4_runtime_mode == "fallback"
+
+
+def test_server_args_expose_periodic_stats_controls():
+    base = ["--model-path", "/tmp/nonexistent-model", "--dtype", "bfloat16"]
+
+    default_config, _ = parse_args(base)
+    custom_config, _ = parse_args(base + ["--stats-log-interval", "3.5", "--disable-log-stats"])
+
+    assert default_config.stats_log_interval == 10.0
+    assert default_config.disable_log_stats is False
+    assert custom_config.stats_log_interval == 3.5
+    assert custom_config.disable_log_stats is True
+
+    with pytest.raises(SystemExit):
+        parse_args(base + ["--stats-log-interval", "0"])
 
 
 @pytest.mark.parametrize("backend", ["fa", "fi", "trtllm", "fa,fi"])

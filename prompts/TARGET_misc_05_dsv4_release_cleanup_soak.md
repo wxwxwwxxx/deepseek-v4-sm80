@@ -18,6 +18,7 @@ Read all prior cleanup reports and:
 
 ```text
 prompts/TARGET_misc_dsv4_release_cleanup.md
+prompts/TARGET_misc_04.5_dsv4_openai_api_compatibility_hardening.md
 prompts/DSV4_SM80_V0.0.0_RELEASE_BASELINE.md
 prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md
 prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md
@@ -114,6 +115,7 @@ Execute every command in the README command matrix:
 - Python `LLM` entry under its documented TP launch;
 - `python -m minisgl` server;
 - `/v1/models` and OpenAI-compatible request;
+- OpenAI SDK streaming/non-streaming and a short vLLM `openai-chat` benchmark;
 - `python -m minisgl.shell` startup/exit;
 - offline `bench.py`;
 - offline `bench_wildchat.py` with a small cached shard or documented network

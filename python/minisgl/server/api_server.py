@@ -56,9 +56,20 @@ class GenerateRequest(BaseModel):
     ignore_eos: bool = False
 
 
+class TextContentPart(BaseModel):
+    type: Literal["text"]
+    text: str
+
+
 class Message(BaseModel):
     role: Literal["system", "user", "assistant"]
-    content: str
+    content: str | List[TextContentPart]
+
+    def to_prompt_message(self) -> dict[str, str]:
+        content = self.content
+        if not isinstance(content, str):
+            content = "".join(part.text for part in content)
+        return {"role": self.role, "content": content}
 
 
 class OpenAICompletionRequest(BaseModel):
@@ -70,6 +81,7 @@ class OpenAICompletionRequest(BaseModel):
     messages: List[Message] | None = None
 
     max_tokens: int = 16
+    max_completion_tokens: int | None = None
     temperature: float = 1.0
 
     top_k: int = -1
@@ -81,6 +93,12 @@ class OpenAICompletionRequest(BaseModel):
     frequency_penalty: float = 0.0
 
     ignore_eos: bool = False
+
+    @property
+    def output_token_limit(self) -> int:
+        if self.max_completion_tokens is not None:
+            return self.max_completion_tokens
+        return self.max_tokens
 
 
 class ModelCard(BaseModel):
@@ -266,7 +284,7 @@ async def v1_root():
 async def v1_completions(req: OpenAICompletionRequest, request: Request):
     state = get_global_state()
     if req.messages:
-        prompt = [msg.model_dump() for msg in req.messages]
+        prompt = [msg.to_prompt_message() for msg in req.messages]
     else:
         assert req.prompt is not None, "Either 'messages' or 'prompt' must be provided"
         prompt = req.prompt
@@ -279,7 +297,7 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
             text=prompt,
             sampling_params=SamplingParams(
                 ignore_eos=req.ignore_eos,
-                max_tokens=req.max_tokens,
+                max_tokens=req.output_token_limit,
                 temperature=req.temperature,
                 top_k=req.top_k,
                 top_p=req.top_p,
@@ -334,7 +352,7 @@ async def available_models():
 async def shell_completion(req: OpenAICompletionRequest):
     state = get_global_state()
     assert req.messages is not None, "Shell completion only supports chat-completions"
-    prompt = [msg.model_dump() for msg in req.messages]
+    prompt = [msg.to_prompt_message() for msg in req.messages]
 
     # TODO: support more sampling parameters
     uid = state.new_user()
@@ -344,7 +362,7 @@ async def shell_completion(req: OpenAICompletionRequest):
             text=prompt,
             sampling_params=SamplingParams(
                 ignore_eos=req.ignore_eos,
-                max_tokens=req.max_tokens,
+                max_tokens=req.output_token_limit,
                 temperature=req.temperature,
                 top_k=req.top_k,
                 top_p=req.top_p,

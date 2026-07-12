@@ -7,12 +7,12 @@ from typing import Any, Dict, NamedTuple, Tuple
 import torch
 from minisgl.attention import create_attention_backend
 from minisgl.core import Batch, Context, Req, set_global_ctx
+from minisgl.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from minisgl.dsv4_runtime import (
     configure_dsv4_runtime,
     get_dsv4_runtime_config,
     resolve_dsv4_runtime_config,
 )
-from minisgl.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
 from minisgl.models import create_model, load_weight
 from minisgl.utils import (
@@ -38,7 +38,7 @@ from .sample import BatchSamplingArgs, Sampler
 logger = init_logger(__name__)
 
 _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES = 32 * 1024 * 1024
-_DSV4_SM80_DEFAULT_RECIPE = "dsv4_sm80_balanced"
+_DSV4_SM80_DEFAULT_CUDA_GRAPH_MAX_BS = 256
 _DSV4_SM80_FALLBACK_CUDA_GRAPH_BS = (1, 2, 4, 8, 16)
 _DSV4_SM80_RECIPES = {
     "dsv4_sm80_low_m64": (256, 64, None),
@@ -49,6 +49,8 @@ _DSV4_SM80_RECIPES = {
 }
 _GENERIC_DEFAULT_MAX_EXTEND_TOKENS = 8192
 _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS = 8192
+
+
 class ForwardOutput(NamedTuple):
     next_tokens_gpu: torch.Tensor
     next_tokens_cpu: torch.Tensor
@@ -114,9 +116,7 @@ class Engine:
 
         self.tp_cpu_group = self._init_communication(config)
         init_free_memory = self._sync_get_memory()[1]
-        self.cuda_graph_policy = _resolve_cuda_graph_policy(
-            config, free_memory=init_free_memory
-        )
+        self.cuda_graph_policy = _resolve_cuda_graph_policy(config, free_memory=init_free_memory)
         logger.info_rank0(f"Free memory before loading model: {mem_GB(init_free_memory)}")
 
         # ======================= Model initialization ========================
@@ -290,10 +290,7 @@ class Engine:
         )
         fixed_swa_cache_bytes = 0
         legacy_cache_per_page = cache_per_page
-        if (
-            config.model_config.is_deepseek_v4
-            and self._dsv4_swa_independent_enabled(config)
-        ):
+        if config.model_config.is_deepseek_v4 and self._dsv4_swa_independent_enabled(config):
             dtype_size = torch.bfloat16.itemsize
             planned_swa_pages = self._planned_dsv4_swa_independent_pages(config)
             swa_per_page = (
@@ -312,9 +309,7 @@ class Engine:
         model_memory = old_free_memory - new_free_memory
         requested_device_budget = int(config.memory_ratio * old_free_memory)
         credit_bytes = int(credit_report.get("net_release_credit_bytes", 0) or 0)
-        applied_credit_bytes = (
-            credit_bytes if bool(credit_report.get("eligible", False)) else 0
-        )
+        applied_credit_bytes = credit_bytes if bool(credit_report.get("eligible", False)) else 0
         requested_width = _align_up(config.max_seq_len, max(32, config.page_size))
         request_table_bytes = int(
             (int(config.max_running_req) + 1) * requested_width * torch.int32.itemsize
@@ -371,12 +366,8 @@ class Engine:
             "weights_and_transformed_cache_bytes": int(model_memory),
             "request_page_table_bytes": int(request_table_bytes),
             "request_page_table_width": int(requested_width),
-            "non_graph_activation_allowance_bytes": int(
-                non_graph_activation_allowance_bytes
-            ),
-            "unrequested_device_headroom_bytes": int(
-                old_free_memory - requested_device_budget
-            ),
+            "non_graph_activation_allowance_bytes": int(non_graph_activation_allowance_bytes),
+            "unrequested_device_headroom_bytes": int(old_free_memory - requested_device_budget),
             "graph_memory": self.graph_memory_estimate.to_report(),
             "cuda_graph_bucket_policy": self.cuda_graph_policy.to_report(),
             "graph_memory_estimate_elapsed_s": float(
@@ -397,7 +388,9 @@ class Engine:
                 f"{mem_GB(int(credit_report['net_release_credit_bytes']))}, "
                 f"equivalent_pages={credit_report.get('net_release_credit_pages')}"
             )
-        logger.info(f"Allocating {num_tokens} tokens for KV cache, K + V = {mem_GB(real_kv_size)}")
+        logger.info_rank0(
+            f"Allocating {num_tokens} tokens for KV cache, K + V = {mem_GB(real_kv_size)}"
+        )
         return num_pages
 
     def _estimate_graph_memory(self, config: EngineConfig) -> GraphMemoryEstimate:
@@ -420,7 +413,10 @@ class Engine:
         )
         estimate_bytes = self._sync_max_int(estimate.estimate_bytes)
         margin_bytes = self._sync_max_int(estimate.safety_margin_bytes)
-        if estimate_bytes != estimate.estimate_bytes or margin_bytes != estimate.safety_margin_bytes:
+        if (
+            estimate_bytes != estimate.estimate_bytes
+            or margin_bytes != estimate.safety_margin_bytes
+        ):
             estimate = GraphMemoryEstimate(
                 **{
                     **estimate.__dict__,
@@ -552,9 +548,7 @@ class Engine:
                 float(net_credit) / float(cache_per_page) if cache_per_page else 0.0
             ),
             "net_release_credit_tokens": (
-                int(net_credit // cache_per_page) * int(config.page_size)
-                if cache_per_page
-                else 0
+                int(net_credit // cache_per_page) * int(config.page_size) if cache_per_page else 0
             ),
         }
 
@@ -664,9 +658,6 @@ def _marlin_wna16_credit_ineligible_reason(
 def _pynccl_max_buffer_bytes(config: EngineConfig, dtype: torch.dtype) -> int:
     max_bytes = config.max_forward_len * config.model_config.hidden_size * dtype.itemsize
     if _use_dsv4_sm80_default_pynccl_threshold(config):
-        logger.info_rank0(
-            "Using DeepSeek V4 sm80 PyNCCL max buffer size of 32 MiB."
-        )
         return min(max_bytes, _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES)
     return max_bytes
 
@@ -718,9 +709,9 @@ def _resolve_cuda_graph_policy(
     object.__setattr__(config, "cuda_graph_bs", list(policy.resolved_bs))
     object.__setattr__(config, "cuda_graph_max_bs", policy.resolved_max_bs)
     logger.info_rank0(
-        "Resolved CUDA graph bucket policy before KV planning: "
-        f"mode={policy.source_mode}, buckets={list(policy.resolved_bs)}, "
-        f"reason={policy.validation_or_cap_reason}."
+        "CUDA graph policy: "
+        f"mode={policy.source_mode}, buckets={len(policy.resolved_bs)}, "
+        f"max_bs={policy.resolved_max_bs}."
     )
     return policy
 
@@ -750,23 +741,43 @@ def _adjust_config(config: EngineConfig):
                 f"dsv4_sm80_recipe={requested_recipe!r} conflicts with "
                 "dsv4_runtime_mode='fallback'."
             )
-        recipe_name = requested_recipe or (
-            _DSV4_SM80_DEFAULT_RECIPE if runtime.optimized else None
-        )
+        recipe_name = requested_recipe
         if recipe_name is not None:
-            recipe_max_req, recipe_graph_max, recipe_max_seq = _DSV4_SM80_RECIPES[
-                recipe_name
-            ]
-            override("dsv4_sm80_recipe", recipe_name)
+            recipe_max_req, recipe_graph_max, recipe_max_seq = _DSV4_SM80_RECIPES[recipe_name]
+            manual_overrides = []
+            if bool(getattr(config, "max_running_req_explicit", False)):
+                manual_overrides.append(f"max_running_req={config.max_running_req}")
+            if config.cuda_graph_bs is not None:
+                manual_overrides.append(f"cuda_graph_bs={config.cuda_graph_bs}")
+            elif config.cuda_graph_max_bs is not None:
+                manual_overrides.append(f"cuda_graph_max_bs={config.cuda_graph_max_bs}")
+            if getattr(config, "max_seq_len_override", None) is not None:
+                manual_overrides.append(f"max_seq_len_override={config.max_seq_len_override}")
             if not bool(getattr(config, "max_running_req_explicit", False)):
                 override("max_running_req", recipe_max_req)
             if config.cuda_graph_bs is None and config.cuda_graph_max_bs is None:
                 override("cuda_graph_max_bs", min(recipe_graph_max, config.max_running_req))
-            if (
-                recipe_max_seq is not None
-                and getattr(config, "max_seq_len_override", None) is None
-            ):
+            if recipe_max_seq is not None and getattr(config, "max_seq_len_override", None) is None:
                 override("max_seq_len_override", recipe_max_seq)
+            logger.warning_rank0(
+                f"Applying DeepSeek V4 recipe {recipe_name!r}, validated on one "
+                "DGX A100 8x80GB system: "
+                f"max_running_req={recipe_max_req}, "
+                f"cuda_graph_max_bs={recipe_graph_max}, "
+                f"max_seq_len_override={recipe_max_seq}. "
+                + (
+                    "Explicit settings override recipe fields: " + ", ".join(manual_overrides) + "."
+                    if manual_overrides
+                    else "No explicit field overrides were detected."
+                )
+            )
+        elif (
+            runtime.optimized and config.cuda_graph_bs is None and config.cuda_graph_max_bs is None
+        ):
+            override(
+                "cuda_graph_max_bs",
+                min(_DSV4_SM80_DEFAULT_CUDA_GRAPH_MAX_BS, config.max_running_req),
+            )
         if runtime.optimized:
             if config.page_size == 1:
                 override("page_size", 256)
@@ -785,9 +796,7 @@ def _adjust_config(config: EngineConfig):
             ):
                 override("enable_dsv4_swa_independent_lifecycle", True)
             max_extend_tokens = getattr(config, "max_extend_tokens", None)
-            max_extend_tokens_explicit = bool(
-                getattr(config, "max_extend_tokens_explicit", False)
-            )
+            max_extend_tokens_explicit = bool(getattr(config, "max_extend_tokens_explicit", False))
             if max_extend_tokens is None or (
                 max_extend_tokens == _GENERIC_DEFAULT_MAX_EXTEND_TOKENS
                 and not max_extend_tokens_explicit
@@ -800,18 +809,15 @@ def _adjust_config(config: EngineConfig):
             )
             if not graph_explicitly_disabled and not config.allow_dsv4_cuda_graph:
                 override("allow_dsv4_cuda_graph", True)
+            communication = (
+                "PyNCCL threshold=32 MiB" if bool(getattr(config, "use_pynccl", True)) else "NCCL"
+            )
             logger.info_rank0(
-                "Using DeepSeek V4 A100/sm80 release defaults: page_size=256, "
-                "radix prefix/component ownership, SWA independent lifecycle, "
-                "Route-B SWA/C4 graph metadata, SWA direct/page-table/replay "
-                "metadata, BF16 MoE reduce, in-graph replay metadata prep, "
-                "HC prenorm graph cleanup plus BF16/FP32 HC linear, "
-                "Marlin WNA16 prebuild/release/capacity credit, PyNCCL "
-                f"threshold32m, prefill chunk budget {_DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS}, "
-                f"and public recipe {recipe_name} "
-                f"(max_running_req={config.max_running_req}, "
-                f"cuda_graph_max_bs={config.cuda_graph_max_bs}). "
-                "Select dsv4_runtime_mode='fallback' for fallback/oracle runs."
+                "DeepSeek V4 optimized runtime: "
+                f"page_size={config.page_size}, max_running_req={config.max_running_req}, "
+                f"cuda_graph_max_bs={config.cuda_graph_max_bs}, "
+                f"max_prefill_tokens={config.max_extend_tokens}, communication={communication}. "
+                "Use dsv4_runtime_mode='fallback' for the reference path."
             )
         else:
             override("page_size", 256)
@@ -827,18 +833,12 @@ def _adjust_config(config: EngineConfig):
             ):
                 if hasattr(config, attr):
                     override(attr, False)
+            logger.info_rank0(
+                "DeepSeek V4 fallback runtime: page_size=256, CUDA graph=off, "
+                "PyNCCL=off, cache=naive."
+            )
         if config.attention_backend == "auto":
             override("attention_backend", "dsv4")
-            logger.info_rank0("Using DSV4 attention backend for DeepSeek V4")
         if config.allow_dsv4_cuda_graph:
             override("cuda_graph_capture_fail_open", True)
-            if getattr(config, "enable_dsv4_component_loc_ownership", False):
-                logger.info_rank0(
-                    "Opting in to DeepSeek V4 Route B decode CUDA graph metadata "
-                    "copy; release defaults enable direct graph metadata buffers "
-                    "for the validated SWA/C4 groups."
-                )
-            logger.info_rank0(
-                f"Opting in to DeepSeek V4 decode CUDA graph sizes: {config.cuda_graph_bs}"
-            )
         _resolve_cuda_graph_policy(config)

@@ -113,7 +113,12 @@ Run these targets in order:
    - preserve the four requested generic benchmark entry files;
    - move DSV4 development/microbench scripts under `debug/`;
    - rewrite README and public examples for DSV4-only support.
-6. `TARGET_misc_05_dsv4_release_cleanup_soak.md`
+6. `TARGET_misc_04.5_dsv4_openai_api_compatibility_hardening.md`
+   - harden the text-only OpenAI chat request/response contract;
+   - eliminate silently ignored semantic parameters and fabricated usage;
+   - validate the OpenAI SDK and vLLM `openai-chat` benchmark without touching
+     the model execution path.
+7. `TARGET_misc_05_dsv4_release_cleanup_soak.md`
    - validate package, Python/CLI/server/shell/benchmark entries, optimized and
      fallback modes, correctness, capacity, and performance.
 
