@@ -134,7 +134,7 @@ COVERAGE_CASES: list[dict[str, Any]] = [
         "evidence": ["/tmp/dsv4_misc015_non_greedy/result.json"],
         "command": (
             "CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --standalone "
-            "--nproc-per-node=8 benchmark/offline/deepseek_v4_text_smoke.py "
+            "--nproc-per-node=8 debug/dsv4/benchmark/offline/deepseek_v4_text_smoke.py "
             "--model-path /models/DeepSeek-V4-Flash --variants dsv4_sm80_release_default "
             "--tensor-parallel-size 8 --page-size 256 --max-tokens 16 "
             "--temperature 0.6 --top-p 0.9 --fail-on-warning"

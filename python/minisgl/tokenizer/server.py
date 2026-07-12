@@ -48,9 +48,9 @@ def tokenize_worker(
     logger = init_logger(__name__, f"tokenizer_{tokenizer_id}")
 
     from .detokenize import DetokenizeManager
-    from .tokenize import TokenizeManager
+    from .tokenize import TokenizeManager, load_dsv4_chat_formatter
 
-    tokenize_manager = TokenizeManager(tokenizer)
+    tokenize_manager = TokenizeManager(tokenizer, load_dsv4_chat_formatter(tokenizer_path))
     detokenize_manager = DetokenizeManager(tokenizer)
 
     if ack_queue is not None:

@@ -17,24 +17,28 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
     import torch
     from minisgl.scheduler import Scheduler
 
-    with torch.inference_mode():
+    # DSV4 prepares version-keyed weight caches during construction. Tensors
+    # created by inference_mode do not expose version counters, so construct
+    # under no_grad and let Scheduler.run_forever's inference_mode own the
+    # steady-state execution loop.
+    with torch.no_grad():
         scheduler = Scheduler(args)
-        scheduler.sync_all_ranks()
+    scheduler.sync_all_ranks()
 
+    if args.tp_info.is_primary():
+        ack_queue.put("Scheduler is ready")
+
+    if args.silent_output:
+        logging.disable(logging.INFO)
+
+    try:
+        scheduler.run_forever()
+    except KeyboardInterrupt:
+        logger = init_logger(__name__)
         if args.tp_info.is_primary():
-            ack_queue.put("Scheduler is ready")
-
-        if args.silent_output:
-            logging.disable(logging.INFO)
-
-        try:
-            scheduler.run_forever()
-        except KeyboardInterrupt:
-            logger = init_logger(__name__)
-            if args.tp_info.is_primary():
-                print()  # for a clean newline after ^C
-                logger.info("Scheduler exiting gracefully...")
-            scheduler.shutdown()
+            print()  # for a clean newline after ^C
+            logger.info("Scheduler exiting gracefully...")
+        scheduler.shutdown()
 
 
 def launch_server(run_shell: bool = False) -> None:

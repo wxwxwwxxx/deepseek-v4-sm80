@@ -1,4 +1,4 @@
-ARG CUDA_VERSION=12.8.1
+ARG CUDA_VERSION=12.8.2
 ARG UBUNTU_VERSION=24.04
 ARG PYTHON_VERSION=3.12
 
@@ -22,7 +22,7 @@ ENV PATH="/root/.local/bin:${PATH}"
 WORKDIR /app
 
 # Copy all source files (editable install requires source to exist)
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY python/ ./python/
 
 # Create venv and install dependencies
@@ -69,4 +69,4 @@ USER minisgl
 EXPOSE 1919
 
 ENTRYPOINT ["python", "-m", "minisgl"]
-CMD ["--help"]
+CMD ["--model", "/models/DeepSeek-V4-Flash", "--tp-size", "8", "--host", "0.0.0.0"]

@@ -1,56 +1,68 @@
-# Features of Mini-SGLang
+# DeepSeek V4 release features
 
-## Online Serving
+This `minisgl==0.1.0+dsv4.sm80` release supports DeepSeek V4 Flash only. The
+validated deployment is 8× A100-SXM4-80GB, sm80, tensor parallelism 8, CUDA
+12.8.2, and NCCL 2.26.2-1.
 
-Mini-SGLang supports online serving with an OpenAI-compatible API server. It provides the standard `/v1/chat/completions` endpoint, allowing seamless integration with existing tools and clients. For detailed command-line arguments and configuration options, run `python -m minisgl --help`.
+## Runtime modes
 
-## Interactive Shell Mode
+`optimized` is the default product mode. With no explicit recipe it resolves
+`dsv4_sm80_balanced`, including page size 256, radix prefix caching, independent
+SWA cache lifecycle, component cache ownership, chunked prefill, CUDA graphs,
+Marlin WNA16 routed experts, and PyNCCL communication.
 
-For demonstration and testing purposes, an interactive shell mode is available. In this mode, users can input prompts directly, and the LLM will generate responses in real-time. The shell automatically caches chat history to maintain context. To clear the conversation history and start a new session, use the `/reset` command.
+`fallback` is a slow, explicit correctness oracle selected with
+`--dsv4-runtime fallback` or `dsv4_runtime_mode="fallback"` before constructing
+an `LLM`. It disables the optimized graph, Marlin, PyNCCL, and cache-ownership
+path. Internal shape-aware optimized dispatch is not another public runtime
+mode.
 
-Example:
+MTP is not included.
+
+## Serving and shell
+
+The server provides `/v1/models` and the OpenAI-compatible
+`/v1/chat/completions` endpoint:
 
 ```bash
-python -m minisgl --model "/models/DeepSeek-V4-Flash" --tp-size 8 --shell
+python -m minisgl --model /models/DeepSeek-V4-Flash --tp-size 8
 ```
 
-## Distributed Serving
+The terminal shell uses the same TP8 runtime:
 
-To scale performance across multiple GPUs, Mini-SGLang supports Tensor Parallelism (TP). You can enable distributed serving by specifying the number of GPUs with the `--tp n` argument, where `n` is the degree of parallelism.
+```bash
+python -m minisgl.shell --model /models/DeepSeek-V4-Flash --tp-size 8
+```
 
-## Supported Models
+Run `python -m minisgl --help` for the complete CLI.
 
-This release supports DeepSeek V4 Flash (`DeepseekV4ForCausalLM`) only, with
-the NVIDIA A100/sm80 TP8 configuration as its validated deployment target.
+## Cache and long-context behavior
 
-## Chunked Prefill
+- Radix prefix caching reuses shared DeepSeek V4 prompt prefixes.
+- SWA state has an independent lifecycle from full-context C4/C128/indexer
+  state, preserving the model's different attention windows.
+- Chunked prefill bounds each extension step; the balanced recipe uses an
+  8,192-token chunk budget.
+- Public 512 Ki-token and 1 Mi-token recipes deliberately reduce concurrency
+  to preserve KV capacity.
 
-Chunked Prefill, a technique introduced by [Sarathi-Serve](https://arxiv.org/abs/2403.02310), is enabled by default. This feature splits long prompts into smaller chunks during the prefill phase, significantly reducing peak memory usage and preventing Out-Of-Memory (OOM) errors in long-context serving. The chunk size can be configured using `--max-prefill-length n`. Note that setting `n` to a very small value (e.g., 128) is not recommended as it may significantly degrade performance.
+## CUDA graph and MoE
 
-## Page Size
+The balanced recipe captures decode shapes through active M=256; legal larger
+shapes execute eagerly. Marlin WNA16 is the optimized DeepSeek V4 routed-expert
+backend on sm80. The fallback oracle retains raw grouped-FP4 weights and does
+not depend on Marlin.
 
-You can specify the page size of the system using the `--page-size` argument.
+## Public recipes
 
-## Attention Backends
+| Recipe | Maximum running requests | Graph max M | Use |
+| --- | ---: | ---: | --- |
+| `dsv4_sm80_low_m64` | 256 | 64 | Low-M or KV-capacity-sensitive serving. |
+| `dsv4_sm80_mid_m128` | 256 | 128 | Capacity/throughput compromise. |
+| `dsv4_sm80_balanced` | 256 | 256 | Ordinary throughput-oriented default. |
+| `dsv4_sm80_long_context_512k` | 4 | 4 | 512 Ki-token capability. |
+| `dsv4_sm80_1m_smoke` | 1 | 1 | 1 Mi-token capability smoke only. |
 
-Mini-SGLang exposes only the DeepSeek V4 attention backend (`dsv4`). The
-optimized and fallback runtime modes share this backend; FlashInfer remains a
-runtime dependency for sampling, not as a selectable attention backend.
-
-## CUDA Graph
-
-To minimize CPU launch overhead during decoding, Mini-SGLang supports capturing and replaying CUDA graphs. This feature is enabled by default. The maximum batch size for CUDA graph capture can be set with `--cuda-graph-max-bs n`. Setting `n` to `0` disables this feature.
-
-## Radix Cache
-
-Adopting the original design from [SGLang](https://github.com/sgl-project/sglang.git), Mini-SGLang implements a Radix Cache to manage the Key-Value (KV) cache. This allows the reuse of KV cache for shared prefixes across requests, reducing redundant computation. This feature is enabled by default but can be switched to a naive cache management strategy using `--cache naive`.
-
-![radix](https://lmsys.org/images/blog/sglang/radix_attn.jpg)
-*Illustration of Radix Attention from [LMSYS Blog](https://lmsys.org/blog/2024-01-17-sglang/).*
-
-## Overlap Scheduling
-
-To further reduce CPU overhead, Mini-SGLang employs overlap scheduling, a technique proposed in [NanoFlow](https://arxiv.org/abs/2408.12757). This approach overlaps the CPU scheduling overhead with GPU computation, improving overall system throughput.
-
-![overlap](https://lmsys.org/images/blog/sglang_v0_4/scheduler.jpg)
-*Illustration of Overlap Scheduling from [LMSYS Blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/).*
+Explicit request-capacity, graph, sequence, memory, and chunk settings remain
+authoritative when supplied. These recipes and their recorded performance are
+qualified only on the validated A100 TP8 platform.

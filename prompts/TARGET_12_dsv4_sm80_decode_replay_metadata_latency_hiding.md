@@ -332,7 +332,7 @@ Start with the short TP8 probe:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 torchrun --standalone --nproc_per_node=8 \
-  benchmark/offline/deepseek_v4_perf_matrix.py \
+  debug/dsv4/benchmark/offline/deepseek_v4_perf_matrix.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variants dsv4_sm80_release_default \
   --scenarios historical_4096_128_bs4 \
@@ -502,7 +502,7 @@ Text sanity:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 torchrun --standalone --nproc_per_node=8 \
-  benchmark/offline/deepseek_v4_text_smoke.py \
+  debug/dsv4/benchmark/offline/deepseek_v4_text_smoke.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variants dsv4_sm80_release_default \
   --num-pages 0 \

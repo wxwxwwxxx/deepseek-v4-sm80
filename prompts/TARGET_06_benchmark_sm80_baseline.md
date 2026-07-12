@@ -93,7 +93,7 @@ Suggested command shape:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 torchrun --standalone --nproc_per_node=8 \
-  benchmark/offline/deepseek_v4_perf_matrix.py \
+  debug/dsv4/benchmark/offline/deepseek_v4_perf_matrix.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variants fallback v0_bf16 \
   --page-size 256 \
@@ -181,7 +181,7 @@ torchrun --standalone --nproc_per_node=8 \
 
 ## Completion Record
 
-- Added `benchmark/offline/deepseek_v4_perf_matrix.py` for torchrun-native TP8 baseline runs with `page_size=256`, PyTorch/NCCL collectives, fallback/v0_bf16 variants, JSON/JSONL artifacts, environment capture, memory metrics, fallback counters, and bottleneck labels.
-- Added pre-benchmark text correctness gate `benchmark/offline/deepseek_v4_text_smoke.py`; it loads `/models/DeepSeek-V4-Flash` with the same TP8/page_size=256 shape as formal runs and checks simple Chinese/English prompts for sane text, expected substrings, repeated symbols, prompt echo, and parse quality.
+- Added `debug/dsv4/benchmark/offline/deepseek_v4_perf_matrix.py` for torchrun-native TP8 baseline runs with `page_size=256`, PyTorch/NCCL collectives, fallback/v0_bf16 variants, JSON/JSONL artifacts, environment capture, memory metrics, fallback counters, and bottleneck labels.
+- Added pre-benchmark text correctness gate `debug/dsv4/benchmark/offline/deepseek_v4_text_smoke.py`; it loads `/models/DeepSeek-V4-Flash` with the same TP8/page_size=256 shape as formal runs and checks simple Chinese/English prompts for sane text, expected substrings, repeated symbols, prompt echo, and parse quality.
 - Fixed correctness blockers found by the smoke: TP routed expert outputs now all-reduce across ranks, DSV4 `attn_sink` weights are local-head sharded, fallback `q_norm_rope` writes query updates in-place, and fallback two-source sparse attention reads compressed cache separately from SWA cache.
 - Verified TP8/page_size=256 text smoke for both `fallback` and `v0_bf16`; artifact: `/tmp/dsv4_text_smoke_full_after_qnorm_fix.json`.

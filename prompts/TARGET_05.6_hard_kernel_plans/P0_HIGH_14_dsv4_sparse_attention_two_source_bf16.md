@@ -113,7 +113,7 @@ decision, and artifact paths.
 ## 2026-06-29 NCU Basic Tuning Note
 
 - Added focused NCU workload
-  `benchmark/offline/deepseek_v4_sparse_attention_two_source_ncu_workload.py`.
+  `debug/dsv4/benchmark/offline/deepseek_v4_sparse_attention_two_source_ncu_workload.py`.
 - Profiled realistic `heads=64`, `tokens=8`, `candidates=128/640/1024`
   workload because `/models/DeepSeek-V4-Flash/config.json` has
   `num_attention_heads=64`.

@@ -1,186 +1,134 @@
-<p align="center">
-<img width="400" src="/assets/logo.png">
-</p>
+# Mini-SGLang 0.1.0, DSV4 on SM80
 
-# Mini-SGLang
+This downstream release serves **DeepSeek V4 Flash only**. Its Python
+distribution is `minisgl==0.1.0+dsv4.sm80`; the `+dsv4.sm80` suffix is a
+PEP 440 local version intended for source installs, direct wheels, or private
+indexes. It is not a claim that this build has been published to PyPI.
 
-A **lightweight yet high-performance** inference framework for Large Language Models.
+The validated platform is one DGX with **8× NVIDIA A100-SXM4-80GB**, tensor
+parallelism 8, sm80, CUDA 12.8.2, and NCCL 2.26.2-1. Other hardware and model
+families are outside this release contract.
 
----
+## Install
 
-Mini-SGLang is a compact implementation of [SGLang](https://github.com/sgl-project/sglang), designed to demystify the complexities of modern LLM serving systems. With a compact codebase of **~5,000 lines of Python**, it serves as both a capable inference engine and a transparent reference for researchers and developers.
-
-## ✨ Key Features
-
-- **High Performance**: Achieves state-of-the-art throughput and latency with advanced optimizations.
-- **Lightweight & Readable**: A clean, modular, and fully type-annotated codebase that is easy to understand and modify.
-- **Advanced Optimizations**:
-  - **Radix Cache**: Reuses KV cache for shared prefixes across requests.
-  - **Chunked Prefill**: Reduces peak memory usage for long-context serving.
-  - **Overlap Scheduling**: Hides CPU scheduling overhead with GPU computation.
-  - **Tensor Parallelism**: Scales inference across multiple GPUs.
-  - **Optimized Kernels**: Integrates **FlashAttention** and **FlashInfer** for maximum efficiency.
-  - ...
-
-## 🚀 Quick Start
-
-> **⚠️ Platform Support**: Mini-SGLang currently supports **Linux only** (x86_64 and aarch64). Windows and macOS are not supported due to dependencies on Linux-specific CUDA kernels (`sgl-kernel`, `flashinfer`). We recommend using [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows or Docker for cross-platform compatibility.
-
-### 1. Environment Setup
-
-We recommend using `uv` for a fast and reliable installation (note that `uv` does not conflict with `conda`).
+From the current source checkout:
 
 ```bash
-# Create a virtual environment (Python 3.10+ recommended)
-uv venv --python=3.12
-source .venv/bin/activate
+python -m pip install -e .
+python -c "from importlib.metadata import version; from minisgl.llm import LLM; print(version('minisgl'), LLM.__name__)"
 ```
 
-**Prerequisites**: Mini-SGLang relies on CUDA kernels that are JIT-compiled. Ensure you have the **NVIDIA CUDA Toolkit** installed and that its version matches your driver's version. You can check your driver's CUDA capability with `nvidia-smi`.
-
-### 2. Installation
-
-Install Mini-SGLang directly from the source:
+Or build and install a wheel:
 
 ```bash
-git clone https://github.com/sgl-project/mini-sglang.git
-cd mini-sglang && uv venv --python=3.12 && source .venv/bin/activate
-uv pip install -e .
+python -m pip install build
+python -m build --wheel
+python -m pip install dist/minisgl-0.1.0+dsv4.sm80-*.whl
 ```
 
-<details>
-<summary><b>💡 Installing on Windows (WSL2)</b></summary>
-
-Since Mini-SGLang requires Linux-specific dependencies, Windows users should use WSL2:
-
-1. **Install WSL2** (if not already installed):
-   ```powershell
-   # In PowerShell (as Administrator)
-   wsl --install
-   ```
-
-2. **Install CUDA on WSL2**:
-   - Follow [NVIDIA's WSL2 CUDA guide](https://docs.nvidia.com/cuda/wsl-user-guide/index.html)
-   - Ensure your Windows GPU drivers support WSL2
-
-3. **Install Mini-SGLang in WSL2**:
-   ```bash
-   # Inside WSL2 terminal
-   git clone https://github.com/sgl-project/mini-sglang.git
-   cd mini-sglang && uv venv --python=3.12 && source .venv/bin/activate
-   uv pip install -e .
-   ```
-
-4. **Access from Windows**: The server will be accessible at `http://localhost:8000` from Windows browsers and applications.
-
-</details>
-
-<details>
-<summary><b>🐳 Running with Docker</b></summary>
-
-**Prerequisites**:
-- [Docker](https://docs.docker.com/get-docker/)
-- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-
-1. **Build the Docker image**:
-   ```bash
-   docker build -t minisgl .
-   ```
-
-2. **Run the server**:
-   ```bash
-   docker run --gpus all -p 1919:1919 \
-       minisgl --model Qwen/Qwen3-0.6B --host 0.0.0.0
-   ```
-
-3. **Run in interactive shell mode**:
-   ```bash
-   docker run -it --gpus all \
-       minisgl --model Qwen/Qwen3-0.6B --shell
-   ```
-
-4. **Using Docker Volumes for persistent caches** (recommended for faster subsequent startups):
-   ```bash
-   docker run --gpus all -p 1919:1919 \
-       -v huggingface_cache:/app/.cache/huggingface \
-       -v tvm_cache:/app/.cache/tvm-ffi \
-       -v flashinfer_cache:/app/.cache/flashinfer \
-       minisgl --model Qwen/Qwen3-0.6B --host 0.0.0.0
-   ```
-
-</details>
-
-### 3. Online Serving
-
-Launch an OpenAI-compatible API server with a single command.
+WildChat benchmarking has one optional dependency and does not affect the base
+CLI:
 
 ```bash
-# Deploy Qwen/Qwen3-0.6B on a single GPU
-python -m minisgl --model "Qwen/Qwen3-0.6B"
-
-# Deploy meta-llama/Llama-3.1-70B-Instruct on 4 GPUs with Tensor Parallelism, on port 30000
-python -m minisgl --model "meta-llama/Llama-3.1-70B-Instruct" --tp 4 --port 30000
+python -m pip install -e '.[benchmark]'
 ```
 
-Once the server is running, you can send requests using standard tools like `curl` or any OpenAI-compatible client.
+## Serve and request
 
-### 4. Interactive Shell
-
-Chat with your model directly in the terminal by adding the `--shell` flag.
+The optimized runtime and `dsv4_sm80_balanced` recipe are the defaults. The
+recipe automatically resolves the validated page size of 256; no DSV4 tuning
+environment variables are needed.
 
 ```bash
-python -m minisgl --model "Qwen/Qwen3-0.6B" --shell
+python -m minisgl --model /models/DeepSeek-V4-Flash --tp-size 8 --host 0.0.0.0 --port 1919
 ```
 
-![shell-example](https://lmsys.org/images/blog/minisgl/shell.png)
-
-You can also use `/reset` to clear the chat history.
-
-## Benchmark
-
-### Offline inference
-
-See [bench.py](./benchmark/offline/bench.py) for more details. Set `MINISGL_DISABLE_OVERLAP_SCHEDULING=1` for ablation study on overlap scheduling.
-
-Test Configuration:
-
-- Hardware: 1xH200 GPU.
-- Model: Qwen3-0.6B, Qwen3-14B
-- Total Requests: 256 sequences
-- Input Length: Randomly sampled between 100-1024 tokens
-- Output Length: Randomly sampled between 100-1024 tokens
-
-![offline](https://lmsys.org/images/blog/minisgl/offline.png)
-
-### Online inference
-
-See [benchmark_qwen.py](./benchmark/online/bench_qwen.py) for more details.
-
-Test Configuration:
-
-- Hardware: 4xH200 GPU, connected by NVLink.
-- Model: Qwen3-32B
-- Dataset: [Qwen trace](https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon/blob/main/qwen_traceA_blksz_16.jsonl), replaying first 1000 requests.
-
-Launch command:
+Query the OpenAI-compatible API from another terminal with the installed
+OpenAI client:
 
 ```bash
-# Mini-SGLang
-python -m minisgl --model "Qwen/Qwen3-32B" --tp 4 --cache naive
-
-# SGLang
-python3 -m sglang.launch_server --model "Qwen/Qwen3-32B" --tp 4 \
-    --disable-radix --port 1919 --decode-attention flashinfer
+python -c "from openai import OpenAI; c=OpenAI(base_url='http://127.0.0.1:1919/v1', api_key='dummy'); print(c.chat.completions.create(model='/models/DeepSeek-V4-Flash', messages=[{'role':'user','content':'Reply with only 4: 2+2='}], max_tokens=16, temperature=0).choices[0].message.content)"
 ```
 
-> **Note**: If you encounter network issues when downloading models from HuggingFace, try using `--model-source modelscope` to download from ModelScope instead:
-> ```bash
-> python -m minisgl --model "Qwen/Qwen3-32B" --tp 4 --model-source modelscope
-> ```
+Interactive shell:
 
-![online](https://lmsys.org/images/blog/minisgl/online.png)
+```bash
+python -m minisgl.shell --model /models/DeepSeek-V4-Flash --tp-size 8
+```
 
-## 📚 Learn More
+The Python `LLM` entry also uses one process per TP rank:
 
-- **[Detailed Features](./docs/features.md)**: Explore all available features and command-line arguments.
-- **[System Architecture](./docs/structures.md)**: Dive deep into the design and data flow of Mini-SGLang.
+```bash
+torchrun --standalone --nproc_per_node=8 examples/offline_dsv4.py
+```
+
+For a slow reference/oracle run, select fallback explicitly before model
+construction. Fallback disables the optimized CUDA-graph, PyNCCL, and Marlin
+path; it is for correctness diagnosis rather than performance:
+
+```bash
+python -m minisgl --model /models/DeepSeek-V4-Flash --tp-size 8 --dsv4-runtime fallback
+```
+
+## Public benchmarks
+
+The offline defaults are DSV4 optimized/balanced TP8. Every command accepts
+overrides and can write a machine-readable report with `--output`.
+
+```bash
+torchrun --standalone --nproc_per_node=8 benchmark/offline/bench.py --request-count 256 --output /tmp/minisgl-offline.json
+```
+
+WildChat shards are cached under `~/.cache/minisgl/benchmarks/` unless
+`--dataset-cache` or `--dataset-shard` is provided:
+
+```bash
+torchrun --standalone --nproc_per_node=8 benchmark/offline/bench_wildchat.py --request-count 32 --output /tmp/minisgl-wildchat.json
+```
+
+Against the server above, run the simple synthetic benchmark and the
+Qwen-format request trace replay. “Qwen-format” describes only the public trace
+schema/workload; this release does not serve a Qwen model. Trace files also use
+the user benchmark cache by default.
+
+```bash
+python benchmark/online/bench_simple.py --request-count 16 --batch-size 4 --output /tmp/minisgl-online-simple.json
+python benchmark/online/bench_qwen.py --request-count 16 --max-concurrency 4 --output /tmp/minisgl-trace-replay.json
+```
+
+The stable public benchmark API is these four scripts. DSV4 microbenchmarks,
+correctness probes, and profiling harnesses live under
+[`debug/dsv4/`](debug/dsv4/README.md).
+
+## Runtime contract and recipes
+
+The optimized path includes radix prefix caching, independent SWA cache
+lifecycle, chunked prefill, CUDA graph decode replay, Marlin WNA16 MoE, and
+PyNCCL TP communication. `fallback` is the explicit oracle. MTP is not included
+in this release.
+
+| Recipe | Intent |
+| --- | --- |
+| `dsv4_sm80_low_m64` | Low active-M or KV-capacity-sensitive serving; graph through M=64. |
+| `dsv4_sm80_mid_m128` | Capacity/throughput compromise through M=128. |
+| `dsv4_sm80_balanced` | Default throughput-oriented configuration through M=256. |
+| `dsv4_sm80_long_context_512k` | Low-concurrency 512 Ki-token capability. |
+| `dsv4_sm80_1m_smoke` | Single-request 1 Mi-token capability smoke, not a performance recipe. |
+
+Select one with `--dsv4-sm80-recipe NAME` on the server or `--recipe NAME` in
+the offline benchmarks.
+
+## Validated baseline
+
+Git tag `v0.0.0` is the immutable pre-cleanup performance baseline. On the
+validated DGX A100 platform, its two fresh balanced graph256 runs measured
+1.1943/1.1939 requests/s and 1,222.97/1,222.53 output tokens/s for 256 requests
+with 1K-token prompts and 1,024-token outputs. See
+[`prompts/DSV4_SM80_V0.0.0_RELEASE_BASELINE.md`](prompts/DSV4_SM80_V0.0.0_RELEASE_BASELINE.md)
+for the full measurement contract and capacity limits.
+
+The final cleaned release tag is planned as `v0.1.0-dsv4-sm80`; it is created
+only after the misc05 final soak and does not exist as part of this misc04 work.
+
+Developer documentation: [`docs/features.md`](docs/features.md) and
+[`docs/structures.md`](docs/structures.md).

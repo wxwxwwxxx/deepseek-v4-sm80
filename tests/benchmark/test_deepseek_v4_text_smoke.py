@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
-
-SCRIPT = Path(__file__).resolve().parents[2] / "benchmark/offline/deepseek_v4_text_smoke.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "debug/dsv4/benchmark/offline/deepseek_v4_text_smoke.py"
+)
 SPEC = importlib.util.spec_from_file_location("deepseek_v4_text_smoke", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 smoke = importlib.util.module_from_spec(SPEC)

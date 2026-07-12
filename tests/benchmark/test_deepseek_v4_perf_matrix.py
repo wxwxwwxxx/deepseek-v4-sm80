@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
-
-SCRIPT = Path(__file__).resolve().parents[2] / "benchmark/offline/deepseek_v4_perf_matrix.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[2]
+    / "debug/dsv4/benchmark/offline/deepseek_v4_perf_matrix.py"
+)
 SPEC = importlib.util.spec_from_file_location("deepseek_v4_perf_matrix", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 perf = importlib.util.module_from_spec(SPEC)

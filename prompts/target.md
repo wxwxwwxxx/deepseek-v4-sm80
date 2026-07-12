@@ -464,7 +464,7 @@ TARGET 06 baseline example:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 torchrun --standalone --nproc_per_node=8 \
-  benchmark/offline/deepseek_v4_perf_matrix.py \
+  debug/dsv4/benchmark/offline/deepseek_v4_perf_matrix.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variants fallback v0_bf16 \
   --page-size 256 \
@@ -477,7 +477,7 @@ TARGET 08 prefix baseline example:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 torchrun --standalone --nproc_per_node=8 \
-  benchmark/offline/deepseek_v4_perf_matrix.py \
+  debug/dsv4/benchmark/offline/deepseek_v4_perf_matrix.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variants dsv4_sm80_a100_victory_prefix_routeb_lifetime \
   --page-size 256 --num-pages 128 \
@@ -492,7 +492,7 @@ TARGET 08 text correctness smoke example:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 torchrun --standalone --nproc_per_node=8 \
-  benchmark/offline/deepseek_v4_text_smoke.py \
+  debug/dsv4/benchmark/offline/deepseek_v4_text_smoke.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variants dsv4_sm80_a100_victory_prefix_routeb_lifetime \
   --page-size 256 --num-pages 128 \

@@ -152,7 +152,7 @@ Use the smallest TP8 full-model probe that reproduces the regression:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 torchrun --standalone --nproc_per_node=8 \
-  benchmark/offline/deepseek_v4_perf_matrix.py \
+  debug/dsv4/benchmark/offline/deepseek_v4_perf_matrix.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variants dsv4_sm80_a100_victory_prefix_routeb_lifetime_moereducebf16 \
   --scenarios historical_4096_128_bs4 \

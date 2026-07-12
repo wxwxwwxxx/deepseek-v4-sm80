@@ -120,7 +120,7 @@ Fallback E2E smoke:
 
 ```bash
 env -u MINISGL_DSV4_SM80_V0_BF16 \
-  python -u benchmark/offline/deepseek_v4_e2e_smoke.py \
+  python -u debug/dsv4/benchmark/offline/deepseek_v4_e2e_smoke.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variant fallback \
   --prompt-len 16 \
@@ -133,7 +133,7 @@ v0 bf16 E2E smoke:
 
 ```bash
 MINISGL_DSV4_SM80_V0_BF16=1 \
-  python -u benchmark/offline/deepseek_v4_e2e_smoke.py \
+  python -u debug/dsv4/benchmark/offline/deepseek_v4_e2e_smoke.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variant v0_bf16 \
   --prompt-len 16 \
@@ -151,7 +151,7 @@ TP=4 instead of the single-process form above:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
-  benchmark/offline/deepseek_v4_e2e_smoke.py \
+  debug/dsv4/benchmark/offline/deepseek_v4_e2e_smoke.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variant fallback \
   --prompt-len 16 \
@@ -160,7 +160,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
   --output /tmp/dsv4_v0_fallback_smoke.json
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
-  benchmark/offline/deepseek_v4_e2e_smoke.py \
+  debug/dsv4/benchmark/offline/deepseek_v4_e2e_smoke.py \
   --model-path /models/DeepSeek-V4-Flash \
   --variant v0_bf16 \
   --prompt-len 16 \
