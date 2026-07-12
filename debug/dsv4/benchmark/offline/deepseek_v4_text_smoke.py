@@ -195,12 +195,11 @@ def run_text_smoke(args: argparse.Namespace) -> int:
     try:
         llm = LLM(
             args.model_path,
-            dtype=torch.bfloat16,
             tp_info=DistributedInfo(rank, world_size),
             dsv4_runtime_mode=args.dsv4_runtime,
             dsv4_sm80_recipe=args.dsv4_sm80_recipe,
             max_running_req=args.max_running_req or max(len(prompts), 1),
-            max_seq_len_override=args.max_seq_len,
+            context_length=args.max_seq_len,
             max_extend_tokens=args.max_extend_tokens,
             num_page_override=args.num_pages,
             page_size=args.page_size,

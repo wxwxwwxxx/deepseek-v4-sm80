@@ -1,4 +1,8 @@
-"""Minimal single-command DeepSeek V4 Flash TP8 example."""
+"""Run one DeepSeek V4 Flash generation with local TP8 workers.
+
+Execute this file directly; ``launch_tensor_parallel`` starts all eight local
+workers, so an external ``torchrun`` command is not required.
+"""
 
 from __future__ import annotations
 

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple
 
-import torch
 from minisgl.distributed import DistributedInfo
 from minisgl.scheduler import SchedulerConfig
 from minisgl.utils import init_logger
@@ -94,9 +93,6 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     max_running_req_explicit = any(
         arg == "--max-running-requests" or arg.startswith("--max-running-requests=") for arg in args
     )
-    from minisgl.attention import validate_attn_backend
-    from minisgl.kvcache import SUPPORTED_CACHE_MANAGER
-
     parser = argparse.ArgumentParser(description="MiniSGL Server Arguments")
 
     parser.add_argument(
@@ -115,14 +111,6 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
             "Defaults to the input repo ID for Hugging Face models and the path basename "
             "for local models."
         ),
-    )
-
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        default="auto",
-        choices=["auto", "float16", "bfloat16", "float32"],
-        help="Data type for model weights and activations. 'auto' will use FP16 for FP32/FP16 models and BF16 for BF16 models.",
     )
 
     parser.add_argument(
@@ -166,10 +154,16 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
-        "--max-seq-len-override",
+        "--context-length",
+        "--max-model-len",
+        dest="context_length",
         type=int,
-        default=ServerArgs.max_seq_len_override,
-        help="The maximum sequence length override.",
+        default=ServerArgs.context_length,
+        help=(
+            "The model's requested maximum context length, including prompt and generated "
+            "tokens. Defaults to max_position_embeddings from the model config.json. "
+            "The effective limit may be lower when constrained by KV-cache capacity or RoPE."
+        ),
     )
 
     parser.add_argument(
@@ -264,63 +258,6 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
-        "--attention-backend",
-        "--attn",
-        type=validate_attn_backend,
-        default=ServerArgs.attention_backend,
-        help="The DeepSeek V4 attention backend to use; only 'dsv4' is supported.",
-    )
-
-    parser.add_argument(
-        "--cache-type",
-        type=str,
-        default=ServerArgs.cache_type,
-        choices=SUPPORTED_CACHE_MANAGER.supported_names(),
-        help="The KV cache management strategy.",
-    )
-
-    parser.add_argument(
-        "--enable-dsv4-radix-prefix-cache",
-        action="store_true",
-        dest="enable_dsv4_radix_prefix_cache",
-        help=(
-            "Explicitly enable DeepSeek V4 radix prefix cache. Requires a "
-            "DSV4-safe 128-aligned page size such as --page-size 256."
-        ),
-    )
-    parser.add_argument(
-        "--enable-dsv4-swa-tail-retention-v1",
-        action="store_true",
-        dest="enable_dsv4_swa_tail_retention_v1",
-        help=(
-            "Explicitly request TARGET 08.20 DSV4 SWA tail/component retention V1. "
-            "This fail-closed guard currently rejects runtime enablement; see "
-            "performance_milestones/target08_swa_tail_retention_v1/DESIGN.md."
-        ),
-    )
-    parser.add_argument(
-        "--enable-dsv4-component-loc-ownership",
-        action="store_true",
-        dest="enable_dsv4_component_loc_ownership",
-        help=(
-            "Explicitly enable TARGET 08.21.2 DSV4 Route B C4/C128/indexer "
-            "component loc ownership. Requires --enable-dsv4-radix-prefix-cache "
-            "and keeps Route B metadata deforest/direct graph metadata buffers "
-            "as explicit env opt-ins."
-        ),
-    )
-    parser.add_argument(
-        "--enable-dsv4-swa-independent-lifecycle",
-        action="store_true",
-        dest="enable_dsv4_swa_independent_lifecycle",
-        help=(
-            "Explicitly enable TARGET 08.31 DSV4 independent SWA lifecycle. "
-            "Requires --enable-dsv4-radix-prefix-cache and "
-            "--enable-dsv4-component-loc-ownership."
-        ),
-    )
-
-    parser.add_argument(
         "--shell-mode",
         action="store_true",
         help="Run the server in shell mode.",
@@ -345,17 +282,6 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     if kwargs["model_path"].startswith("~"):
         kwargs["model_path"] = os.path.expanduser(kwargs["model_path"])
 
-    if (dtype_str := kwargs["dtype"]) == "auto":
-        from minisgl.utils import cached_load_hf_config
-
-        dtype_str = cached_load_hf_config(kwargs["model_path"]).dtype
-
-    DTYPE_MAP = {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }
-    kwargs["dtype"] = DTYPE_MAP[dtype_str] if isinstance(dtype_str, str) else dtype_str
     kwargs["tp_info"] = DistributedInfo(0, kwargs["tensor_parallel_size"])
     del kwargs["tensor_parallel_size"]
 

@@ -27,7 +27,7 @@ def _fake_config(**overrides):
         page_size=1,
         max_extend_tokens=8192,
         max_extend_tokens_explicit=False,
-        max_seq_len_override=None,
+        context_length=None,
         cache_type="radix",
         enable_dsv4_radix_prefix_cache=False,
         enable_dsv4_component_loc_ownership=False,
@@ -163,7 +163,7 @@ def test_public_dsv4_sm80_recipes_resolve_through_one_graph_policy(
     assert config.max_running_req == max_req
     assert config.cuda_graph_policy.source_mode == "explicit_max"
     assert config.cuda_graph_policy.resolved_max_bs == graph_max
-    assert config.max_seq_len_override == max_seq
+    assert config.context_length == max_seq
 
 
 def test_recipe_preserves_explicit_request_graph_and_sequence_overrides(monkeypatch):
@@ -180,18 +180,18 @@ def test_recipe_preserves_explicit_request_graph_and_sequence_overrides(monkeypa
         max_running_req=8,
         max_running_req_explicit=True,
         cuda_graph_max_bs=2,
-        max_seq_len_override=262_144,
+        context_length=262_144,
     )
 
     engine_module._adjust_config(config)
 
     assert config.max_running_req == 8
     assert config.cuda_graph_policy.resolved_max_bs == 2
-    assert config.max_seq_len_override == 262_144
+    assert config.context_length == 262_144
     assert "Explicit settings override recipe fields" in warnings[0]
     assert "max_running_req=8" in warnings[0]
     assert "cuda_graph_max_bs=2" in warnings[0]
-    assert "max_seq_len_override=262144" in warnings[0]
+    assert "context_length=262144" in warnings[0]
 
 
 def test_release_defaults_cap_graph_to_explicit_request_capacity(monkeypatch):

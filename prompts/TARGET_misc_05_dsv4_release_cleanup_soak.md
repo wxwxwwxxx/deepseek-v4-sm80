@@ -19,6 +19,7 @@ Read all prior cleanup reports and:
 ```text
 prompts/TARGET_misc_dsv4_release_cleanup.md
 prompts/TARGET_misc_04.5_dsv4_openai_api_compatibility_hardening.md
+prompts/TARGET_misc_04.75_dsv4_bf16_pretranspose_accidental_promotion_fix.md
 prompts/DSV4_SM80_V0.0.0_RELEASE_BASELINE.md
 prompts/TARGET_11_dsv4_sm80_mtp_speculative_decoding.md
 prompts/TARGET_12_dsv4_sm80_decode_replay_metadata_latency_hiding.md
@@ -160,6 +161,11 @@ Record:
 - prefix saved tokens;
 - communication backend/bytes;
 - text sanity result.
+
+Use the accepted post-misc04.75 graph64/128/256 capacity and performance
+numbers. Confirm that the rejected BF16 small-GEMM pretranspose experiment is
+not resident in `optimized`; do not qualify the pre-fix 771,328-token graph64
+capacity as the final release result.
 
 ### 8. Unsupported-Surface Behavior
 

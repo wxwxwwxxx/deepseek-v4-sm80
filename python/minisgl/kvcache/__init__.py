@@ -28,7 +28,6 @@ def create_kvcache_pool(
     model_config: ModelConfig,
     num_pages: int,
     page_size: int,
-    dtype: torch.dtype,
     device: torch.device,
     enable_dsv4_component_loc_ownership: bool = False,
     enable_dsv4_swa_independent_lifecycle: bool = False,
@@ -45,7 +44,6 @@ def create_kvcache_pool(
         num_pages=num_pages,
         page_size=page_size,
         device=device,
-        dtype=dtype,
         enable_component_loc_ownership=enable_dsv4_component_loc_ownership,
         enable_swa_independent_lifecycle=enable_dsv4_swa_independent_lifecycle,
         max_running_req=max_running_req,
@@ -57,7 +55,6 @@ def create_kvcache_pool(
 def estimate_kvcache_bytes_per_page(
     model_config: ModelConfig,
     page_size: int,
-    dtype: torch.dtype,
     tp_size: int,
 ) -> int:
     if not model_config.is_deepseek_v4:

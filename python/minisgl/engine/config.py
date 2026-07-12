@@ -4,9 +4,8 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, List
 
-import torch
-from minisgl.dsv4_runtime import DSV4RuntimeMode
 from minisgl.distributed import DistributedInfo
+from minisgl.dsv4_runtime import DSV4RuntimeMode
 from minisgl.utils import cached_load_hf_config
 
 if TYPE_CHECKING:
@@ -18,7 +17,6 @@ if TYPE_CHECKING:
 class EngineConfig:
     model_path: str
     tp_info: DistributedInfo
-    dtype: torch.dtype
     max_running_req: int = 256
     max_running_req_explicit: bool = False
     dsv4_runtime_mode: DSV4RuntimeMode = "optimized"
@@ -38,7 +36,7 @@ class EngineConfig:
     distributed_timeout: float = 60.0
     use_dummy_weight: bool = False
     use_pynccl: bool = True
-    max_seq_len_override: int | None = None
+    context_length: int | None = None
     num_page_override: int | None = None  # if not None, will override the number of pages
     distributed_init_method: str | None = None
 
@@ -54,8 +52,8 @@ class EngineConfig:
 
     @property
     def max_seq_len(self) -> int:
-        if self.max_seq_len_override is not None:
-            return self.max_seq_len_override
+        if self.context_length is not None:
+            return self.context_length
         return self.model_config.rotary_config.max_position
 
     @property

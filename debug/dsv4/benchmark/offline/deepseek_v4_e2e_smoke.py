@@ -12,7 +12,6 @@ from typing import Any, Sequence
 
 import torch
 
-
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "python"))
 
@@ -169,11 +168,10 @@ def main() -> int:
             llm_kwargs["distributed_init_method"] = distributed_addr
         llm = LLM(
             args.model_path,
-            dtype=torch.bfloat16,
             tp_info=DistributedInfo(tp_rank, tp_size),
             dsv4_runtime_mode=runtime.mode,
             max_running_req=max(args.batch_size, 1),
-            max_seq_len_override=max_seq_len,
+            context_length=max_seq_len,
             max_extend_tokens=args.prompt_len * args.batch_size,
             num_page_override=num_pages,
             page_size=256,

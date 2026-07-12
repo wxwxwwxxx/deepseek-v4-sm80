@@ -408,7 +408,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         num_pages: int,
         page_size: int,
         device: torch.device,
-        dtype: torch.dtype | None = None,
         policy: DSV4CacheLayoutPolicy | None = None,
         enable_component_loc_ownership: bool = False,
         enable_swa_independent_lifecycle: bool = False,
@@ -416,7 +415,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         swa_num_pages: int | None = None,
         dummy_token_start: int | None = None,
     ) -> None:
-        del dtype
         self._policy = policy or DSV4CacheLayoutPolicy()
         self._device = device
         self._dtype = self._policy.storage_dtype

@@ -17,7 +17,6 @@ class SchedulerConfig(EngineConfig):
     max_extend_tokens_explicit: bool = False
     cache_type: str = "radix"
     enable_dsv4_radix_prefix_cache: bool = False
-    enable_dsv4_swa_tail_retention_v1: bool = False
     enable_dsv4_component_loc_ownership: bool = False
     enable_dsv4_swa_independent_lifecycle: bool = False
     disable_log_stats: bool = False

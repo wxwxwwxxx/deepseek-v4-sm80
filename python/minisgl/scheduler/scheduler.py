@@ -109,16 +109,6 @@ def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
     if not config.model_config.is_deepseek_v4:
         raise ValueError("This release supports DeepSeek V4 Flash only.")
 
-    if config.enable_dsv4_swa_tail_retention_v1:
-        raise RuntimeError(
-            "TARGET 08.20 DSV4 SWA tail/component retention V1 is fail-closed. "
-            "Mini's current DSV4 C4/C128/indexer/compression-state locations are "
-            "derived from released full-token pages, so enabling this would risk "
-            "dangling component reads or double frees. Keep using "
-            "--enable-dsv4-radix-prefix-cache for the phase-1 full-page-owner "
-            "baseline; see performance_milestones/target08_swa_tail_retention_v1/"
-            "DESIGN.md."
-        )
     if getattr(config, "enable_dsv4_swa_independent_lifecycle", False):
         if not config.enable_dsv4_radix_prefix_cache:
             raise ValueError(

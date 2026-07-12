@@ -2842,17 +2842,6 @@ class KernelCallTracer:
         setattr(self.module, name, wrapper)
 
 
-def _dtype_from_name(name: str):
-    import torch
-
-    mapping = {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }
-    return mapping[name]
-
-
 def _tp_rank_size(args: argparse.Namespace) -> tuple[int, int, int]:
     env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
     env_rank = int(os.environ.get("RANK", "0"))
@@ -3109,7 +3098,7 @@ def _max_sequence_llm_kwargs(
     mode = _max_sequence_mode_config(args, scenarios)
     if mode.requested_override is None:
         return {}
-    return {"max_seq_len_override": mode.requested_override}
+    return {"context_length": mode.requested_override}
 
 
 def _max_extend_tokens(scenarios: Sequence[Scenario]) -> int:
@@ -3380,7 +3369,7 @@ def _max_sequence_runtime_report(
     return {
         "model_config_max_seq_len": model_config_max,
         "max_seq_len_mode": mode.mode,
-        "requested_max_seq_len_override": mode.requested_override,
+        "requested_context_length": mode.requested_override,
         "scenario_required_total_seq_len": mode.scenario_required_total_seq_len,
         "effective_engine_max_seq_len": effective_max,
         "effective_rope_cache_len": effective_rope_cache_len,
@@ -3673,7 +3662,7 @@ def _rank_memory_report(torch, llm) -> dict[str, int]:
     }
 
 
-def _estimate_kv_cache_bytes_from_config(llm, *, page_size: int, dtype, tp_size: int) -> int:
+def _estimate_kv_cache_bytes_from_config(llm, *, page_size: int, tp_size: int) -> int:
     from minisgl.kvcache import estimate_kvcache_bytes_per_page
 
     model_config = llm.engine.attn_backend.config
@@ -3683,7 +3672,6 @@ def _estimate_kv_cache_bytes_from_config(llm, *, page_size: int, dtype, tp_size:
         * estimate_kvcache_bytes_per_page(
             model_config,
             page_size=page_size,
-            dtype=dtype,
             tp_size=tp_size,
         )
     )
@@ -4449,7 +4437,6 @@ def run_case(
     load_init: dict[str, Any],
     runtime_environment: dict[str, Any],
     git: dict[str, Any],
-    dtype,
 ) -> dict[str, Any] | None:
     case_name = f"{case_index:03d}_{scenario.name}__{variant.name}"
     report_path = output_dir / "reports" / f"{case_name}.json"
@@ -4522,14 +4509,8 @@ def run_case(
     kv_cache_memory_bytes = _estimate_kv_cache_bytes_from_config(
         llm,
         page_size=args.page_size,
-        dtype=dtype,
         tp_size=tp_size,
     )
-    replayed_padded_sizes = [
-        int(size)
-        for size, count in graph_status_case.get("replay_count_by_padded_size", {}).items()
-        if int(count) > 0
-    ]
     if error is None:
         case_boundary_debug.append(
             _case_boundary_debug_snapshot(llm, f"{case_name}:before_final_prefix_metrics")
@@ -4599,7 +4580,6 @@ def run_case(
             "scenario_required_total_seq_len": scenario.max_seq_len,
             "scheduler_supports_interleaved_arrivals": False,
             "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
-            "swa_tail_retention_v1_requested": bool(args.enable_dsv4_swa_tail_retention_v1),
             "component_loc_ownership_enabled": runtime_options[
                 "enable_dsv4_component_loc_ownership"
             ],
@@ -4632,7 +4612,7 @@ def run_case(
             "page_size": args.page_size,
             "num_pages": args.num_pages,
             "memory_ratio": args.memory_ratio,
-            "dtype": args.dtype,
+            "activation_dtype": str(llm.engine.dtype).removeprefix("torch."),
             "max_seq_len": args.max_seq_len,
             "max_sequence": load_init.get("max_sequence_rank0", {}),
             "max_extend_tokens": (
@@ -4643,7 +4623,6 @@ def run_case(
             "max_running_req": load_init.get("max_running_req_rank0", {}),
             "token_id_range": args.token_id_range,
             "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
-            "enable_dsv4_swa_tail_retention_v1": args.enable_dsv4_swa_tail_retention_v1,
             "enable_dsv4_component_loc_ownership": runtime_options[
                 "enable_dsv4_component_loc_ownership"
             ],
@@ -4690,7 +4669,6 @@ def _init_llm(
     from minisgl.distributed import DistributedInfo
 
     BenchmarkLLM = make_benchmark_llm_class()
-    dtype = _dtype_from_name(args.dtype)
     max_extend_tokens = args.max_extend_tokens
     if max_extend_tokens is None and not args.use_serving_max_extend_tokens:
         max_extend_tokens = _max_extend_tokens(scenarios)
@@ -4705,7 +4683,6 @@ def _init_llm(
     tic = time.perf_counter()
     llm = BenchmarkLLM(
         args.model_path,
-        dtype=dtype,
         tp_info=DistributedInfo(rank, tp_size),
         dsv4_runtime_mode="optimized",
         dsv4_sm80_recipe=args.dsv4_sm80_recipe,
@@ -4718,7 +4695,6 @@ def _init_llm(
         cuda_graph_max_bs=runtime_options["cuda_graph_max_bs"],
         cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
         enable_dsv4_radix_prefix_cache=runtime_options["enable_dsv4_radix_prefix_cache"],
-        enable_dsv4_swa_tail_retention_v1=args.enable_dsv4_swa_tail_retention_v1,
         enable_dsv4_component_loc_ownership=runtime_options[
             "enable_dsv4_component_loc_ownership"
         ],
@@ -4751,7 +4727,6 @@ def _init_llm(
     return (
         llm,
         torch,
-        dtype,
         {
             "seconds": load_init_s,
             "rank": rank,
@@ -4795,7 +4770,7 @@ def run_matrix(args: argparse.Namespace) -> int:
     reports: list[dict[str, Any]] = []
     failures = 0
     try:
-        llm, torch, dtype, local_load_init = _init_llm(
+        llm, torch, local_load_init = _init_llm(
             args=args,
             scenarios=scenarios,
             rank=rank,
@@ -4869,9 +4844,6 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "enable_dsv4_radix_prefix_cache": runtime_options[
                             "enable_dsv4_radix_prefix_cache"
                         ],
-                        "enable_dsv4_swa_tail_retention_v1": (
-                            args.enable_dsv4_swa_tail_retention_v1
-                        ),
                         "enable_dsv4_component_loc_ownership": (
                             runtime_options["enable_dsv4_component_loc_ownership"]
                         ),
@@ -4918,7 +4890,6 @@ def run_matrix(args: argparse.Namespace) -> int:
                     load_init=load_init,
                     runtime_environment=runtime_environment,
                     git=git,
-                    dtype=dtype,
                 )
                 case_index += 1
                 if rank == 0 and report is not None:
@@ -4974,7 +4945,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tensor-parallel-size", type=int, default=None)
     parser.add_argument("--tp-rank", type=int, default=None)
     parser.add_argument("--distributed-init-method", default=None)
-    parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--page-size", type=int, default=256)
     parser.add_argument("--num-pages", type=int, default=None)
     parser.add_argument("--memory-ratio", type=float, default=0.9)
@@ -5037,14 +5007,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--enable-dsv4-radix-prefix-cache",
         action="store_true",
         help="Explicitly opt in to DeepSeek V4 radix prefix cache.",
-    )
-    parser.add_argument(
-        "--enable-dsv4-swa-tail-retention-v1",
-        action="store_true",
-        help=(
-            "Explicitly request TARGET 08.20 DSV4 SWA tail/component retention V1. "
-            "The runtime currently fails closed; see the target DESIGN.md."
-        ),
     )
     parser.add_argument(
         "--enable-dsv4-component-loc-ownership",

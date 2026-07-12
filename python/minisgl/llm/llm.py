@@ -36,7 +36,6 @@ class LLM(Scheduler):
     def __init__(
         self,
         model_path: str,
-        dtype: torch.dtype = torch.bfloat16,
         tp_info: DistributedInfo | None = None,
         dsv4_runtime_mode: DSV4RuntimeMode = "optimized",
         **kwargs,
@@ -53,7 +52,6 @@ class LLM(Scheduler):
         config = SchedulerConfig(
             model_path=model_path,
             tp_info=tp_info,
-            dtype=dtype,
             dsv4_runtime_mode=dsv4_runtime_mode,
             offline_mode=True,
             **kwargs,

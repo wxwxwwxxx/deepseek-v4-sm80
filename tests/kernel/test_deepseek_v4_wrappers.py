@@ -2088,7 +2088,6 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
         _tiny_dsv4_cache_config([4, 128]),
         num_pages=64,
         page_size=4,
-        dtype=torch.float16,
         device=torch.device("cpu"),
     )
     assert isinstance(pool, DeepSeekV4KVCache)

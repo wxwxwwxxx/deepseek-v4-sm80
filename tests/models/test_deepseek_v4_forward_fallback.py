@@ -119,7 +119,6 @@ def _install_dsv4_context(cfg: ModelConfig, *, max_len: int) -> Context:
         cfg,
         num_pages=max_len + 8,
         page_size=1,
-        dtype=torch.float16,
         device=torch.device("cpu"),
     )
     ctx.page_table = torch.arange(max_len + 8, dtype=torch.int32).unsqueeze(0)

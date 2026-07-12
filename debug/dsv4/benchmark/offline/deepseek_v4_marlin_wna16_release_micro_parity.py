@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import torch
-
 from minisgl.distributed import DistributedInfo
 
 
@@ -175,11 +174,10 @@ def run(args: argparse.Namespace) -> int:
         llm_kwargs["distributed_init_method"] = distributed_init_method
     llm = LLM(
         args.model_path,
-        dtype=torch.bfloat16,
         tp_info=DistributedInfo(rank, tp_size),
         dsv4_runtime_mode="fallback",
         max_running_req=1,
-        max_seq_len_override=args.max_seq_len,
+        context_length=args.max_seq_len,
         max_extend_tokens=args.max_extend_tokens,
         num_page_override=args.num_pages,
         page_size=args.page_size,

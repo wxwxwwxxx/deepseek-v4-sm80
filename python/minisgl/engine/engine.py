@@ -109,7 +109,9 @@ class Engine:
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
-        self.dtype = config.dtype
+        # DeepSeek V4 SM80 uses BF16 activations while preserving model-defined
+        # FP32 state and quantized checkpoint weights.
+        self.dtype = torch.bfloat16
         self._marlin_wna16_release_done = False
         self.ctx = Context(config.page_size)
         set_global_ctx(self.ctx)
@@ -120,7 +122,7 @@ class Engine:
         logger.info_rank0(f"Free memory before loading model: {mem_GB(init_free_memory)}")
 
         # ======================= Model initialization ========================
-        with torch.device("meta"), torch_dtype(config.dtype):
+        with torch.device("meta"), torch_dtype(self.dtype):
             self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
         prepare_for_cuda_graph_capture = getattr(self.model, "prepare_for_cuda_graph_capture", None)
@@ -142,7 +144,6 @@ class Engine:
             num_pages=self.num_pages + 1,  # +1 for dummy page
             page_size=config.page_size,
             device=self.device,
-            dtype=self.dtype,
             enable_dsv4_component_loc_ownership=bool(
                 getattr(config, "enable_dsv4_component_loc_ownership", False)
             ),
@@ -244,7 +245,7 @@ class Engine:
             )
             tp_cpu_group = torch.distributed.group.WORLD
             assert tp_cpu_group is not None
-            max_bytes = _pynccl_max_buffer_bytes(config, self.dtype)
+            max_bytes = _pynccl_max_buffer_bytes(config)
             enable_pynccl_distributed(config.tp_info, tp_cpu_group, max_bytes)
         else:
             torch.distributed.init_process_group(
@@ -285,7 +286,6 @@ class Engine:
         cache_per_page = estimate_kvcache_bytes_per_page(
             config.model_config,
             page_size=config.page_size,
-            dtype=self.dtype,
             tp_size=config.tp_info.size,
         )
         fixed_swa_cache_bytes = 0
@@ -655,8 +655,12 @@ def _marlin_wna16_credit_ineligible_reason(
     return "unknown"
 
 
-def _pynccl_max_buffer_bytes(config: EngineConfig, dtype: torch.dtype) -> int:
-    max_bytes = config.max_forward_len * config.model_config.hidden_size * dtype.itemsize
+def _pynccl_max_buffer_bytes(config: EngineConfig) -> int:
+    max_bytes = (
+        config.max_forward_len
+        * config.model_config.hidden_size
+        * torch.bfloat16.itemsize
+    )
     if _use_dsv4_sm80_default_pynccl_threshold(config):
         return min(max_bytes, _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES)
     return max_bytes
@@ -751,20 +755,20 @@ def _adjust_config(config: EngineConfig):
                 manual_overrides.append(f"cuda_graph_bs={config.cuda_graph_bs}")
             elif config.cuda_graph_max_bs is not None:
                 manual_overrides.append(f"cuda_graph_max_bs={config.cuda_graph_max_bs}")
-            if getattr(config, "max_seq_len_override", None) is not None:
-                manual_overrides.append(f"max_seq_len_override={config.max_seq_len_override}")
+            if getattr(config, "context_length", None) is not None:
+                manual_overrides.append(f"context_length={config.context_length}")
             if not bool(getattr(config, "max_running_req_explicit", False)):
                 override("max_running_req", recipe_max_req)
             if config.cuda_graph_bs is None and config.cuda_graph_max_bs is None:
                 override("cuda_graph_max_bs", min(recipe_graph_max, config.max_running_req))
-            if recipe_max_seq is not None and getattr(config, "max_seq_len_override", None) is None:
-                override("max_seq_len_override", recipe_max_seq)
+            if recipe_max_seq is not None and getattr(config, "context_length", None) is None:
+                override("context_length", recipe_max_seq)
             logger.warning_rank0(
                 f"Applying DeepSeek V4 recipe {recipe_name!r}, validated on one "
                 "DGX A100 8x80GB system: "
                 f"max_running_req={recipe_max_req}, "
                 f"cuda_graph_max_bs={recipe_graph_max}, "
-                f"max_seq_len_override={recipe_max_seq}. "
+                f"context_length={recipe_max_seq}. "
                 + (
                     "Explicit settings override recipe fields: " + ", ".join(manual_overrides) + "."
                     if manual_overrides

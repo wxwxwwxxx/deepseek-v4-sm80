@@ -7,8 +7,8 @@ from minisgl.core import Req, SamplingParams
 from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
 from minisgl.kvcache.deepseek_v4_pool import (
-    DSV4SWAPageHandles,
     DeepSeekV4KVCache,
+    DSV4SWAPageHandles,
     _clear_allocated_kv_modes,
 )
 from minisgl.models.config import ModelConfig, RotaryConfig
@@ -81,7 +81,6 @@ def _make_dsv4_pool(
         _tiny_dsv4_config(compress_ratios),
         num_pages=num_pages,
         page_size=page_size,
-        dtype=torch.float16,
         device=torch.device("cpu"),
         enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
         enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
@@ -221,7 +220,6 @@ def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
         estimate_kvcache_bytes_per_page(
             cfg,
             page_size=1,
-            dtype=torch.float16,
             tp_size=1,
         )
         == 4919
@@ -231,7 +229,6 @@ def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
         estimate_kvcache_bytes_per_page(
             cfg,
             page_size=1,
-            dtype=torch.float16,
             tp_size=1,
         )
         == 4921

@@ -13,7 +13,6 @@ def _config(
     page_size: int = 256,
     window_size: int = 128,
     enable_radix: bool = False,
-    enable_swa_tail_v1: bool = False,
     enable_component_loc_ownership: bool = False,
     enable_swa_independent_lifecycle: bool = False,
 ):
@@ -22,16 +21,9 @@ def _config(
         cache_type=cache_type,
         page_size=page_size,
         enable_dsv4_radix_prefix_cache=enable_radix,
-        enable_dsv4_swa_tail_retention_v1=enable_swa_tail_v1,
         enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
         enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
     )
-
-
-def test_dsv4_swa_tail_retention_v1_fails_closed_before_runtime_cache_use():
-    with pytest.raises(RuntimeError, match="fail-closed.*DESIGN.md"):
-        resolve_dsv4_cache_type(_config(enable_swa_tail_v1=True))
-
 
 def test_dsv4_cache_type_resolution_preserves_phase1_radix_guardrails():
     assert resolve_dsv4_cache_type(_config(enable_radix=False)) == "naive"

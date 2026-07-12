@@ -10,7 +10,6 @@ from minisgl.attention import create_attention_backend
 from minisgl.attention.deepseek_v4 import (
     DSV4AttentionBackend,
     DSV4AttentionMetadata,
-    DSV4CoreAttentionMetadata,
 )
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
@@ -110,7 +109,6 @@ def _install_context(
         cfg,
         num_pages=512,
         page_size=page_size,
-        dtype=torch.float16,
         device=torch.device("cpu"),
         enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
         enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
@@ -660,7 +658,6 @@ def test_dsv4_release_eager_metadata_calls_native_c128_one_surface(monkeypatch):
         cfg,
         num_pages=8,
         page_size=page_size,
-        dtype=torch.float16,
         device=device,
         enable_dsv4_component_loc_ownership=True,
     )

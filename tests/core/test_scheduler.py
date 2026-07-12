@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import torch
 import multiprocessing as mp
-from transformers import AutoTokenizer
 
+import torch
+from minisgl.core import SamplingParams
 from minisgl.distributed import DistributedInfo
 from minisgl.message import BaseBackendMsg, BaseTokenizerMsg, DetokenizeMsg, ExitMsg, UserMsg
 from minisgl.scheduler import Scheduler, SchedulerConfig
 from minisgl.utils import ZmqPullQueue, ZmqPushQueue, call_if_main, init_logger
-from minisgl.core import SamplingParams
+from transformers import AutoTokenizer
 
 logger = init_logger(__name__)
 
@@ -29,7 +29,6 @@ def main():
     config = SchedulerConfig(
         model_path=model_path,
         tp_info=DistributedInfo(0, 1),
-        dtype=torch.bfloat16,
         max_running_req=4,
         cuda_graph_bs=[2, 4, 8],
     )
