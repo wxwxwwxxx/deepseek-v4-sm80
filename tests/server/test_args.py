@@ -30,6 +30,16 @@ def test_server_args_expose_typed_dsv4_runtime_mode():
     assert fallback_config.dsv4_runtime_mode == "fallback"
 
 
+def test_server_args_expose_concise_recipe_option():
+    base = ["--model-path", "/tmp/nonexistent-model"]
+
+    config, _ = parse_args(base + ["--recipe", "dsv4_sm80_low_m64"])
+
+    assert config.dsv4_sm80_recipe == "dsv4_sm80_low_m64"
+    with pytest.raises(SystemExit):
+        parse_args(base + ["--dsv4-sm80-recipe", "dsv4_sm80_low_m64"])
+
+
 def test_server_args_expose_sglang_aligned_context_length_aliases():
     base = ["--model-path", "/tmp/nonexistent-model"]
 
@@ -103,6 +113,8 @@ def test_server_help_has_no_removed_backend_or_model_source_options(capsys):
 
     assert exc.value.code == 0
     help_text = capsys.readouterr().out
+    assert "--recipe" in help_text
+    assert "--dsv4-sm80-recipe" not in help_text
     assert "--context-length" in help_text
     assert "--max-model-len" in help_text
     assert "config.json" in help_text

@@ -114,7 +114,7 @@ for long-context modes, maximum sequence length:
 
 All recipes retain the optimized runtime's page size 256, prefill chunk size
 8,192, and memory ratio 0.9 unless explicitly overridden. Select a recipe with
-`--dsv4-sm80-recipe NAME`. These settings were measured on a DGX A100 8x80GB
+`--recipe NAME`. These settings were measured on a DGX A100 8x80GB
 system and are templates rather than universal sm80 defaults. Explicit
 command-line settings take precedence over the corresponding recipe fields.
 

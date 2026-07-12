@@ -138,7 +138,8 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
-        "--dsv4-sm80-recipe",
+        "--recipe",
+        dest="dsv4_sm80_recipe",
         default=ServerArgs.dsv4_sm80_recipe,
         choices=[
             "dsv4_sm80_low_m64",

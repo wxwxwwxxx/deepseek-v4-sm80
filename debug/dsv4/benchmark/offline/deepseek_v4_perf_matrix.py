@@ -4923,7 +4923,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model-path", default="/models/DeepSeek-V4-Flash")
     parser.add_argument(
-        "--dsv4-sm80-recipe",
+        "--recipe",
+        dest="dsv4_sm80_recipe",
         choices=(
             "dsv4_sm80_low_m64",
             "dsv4_sm80_mid_m128",

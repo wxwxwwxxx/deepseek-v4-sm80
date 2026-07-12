@@ -307,7 +307,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model-path", default="/models/DeepSeek-V4-Flash")
     parser.add_argument("--dsv4-runtime", choices=("optimized", "fallback"), default="optimized")
-    parser.add_argument("--dsv4-sm80-recipe", default=None)
+    parser.add_argument("--recipe", dest="dsv4_sm80_recipe", default=None)
     parser.add_argument("--prompt", action="append")
     parser.add_argument("--output", default="/tmp/dsv4_text_smoke.json")
     parser.add_argument("--tensor-parallel-size", type=int, default=8)

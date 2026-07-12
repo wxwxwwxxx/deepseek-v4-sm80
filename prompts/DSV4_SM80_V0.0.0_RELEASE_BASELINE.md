@@ -73,7 +73,7 @@ The no-env DSV4 A100/sm80 path resolves to `dsv4_sm80_balanced`.
 | `dsv4_sm80_1m_smoke` | 1 | 1 | 1 Mi-token capability smoke only |
 
 Named recipes are selected with `dsv4_sm80_recipe=` or server option
-`--dsv4-sm80-recipe`. Explicit request-capacity, graph, max-sequence, KV,
+`--recipe`. Explicit request-capacity, graph, max-sequence, KV,
 memory-ratio, and chunk-budget settings remain authoritative. A legal active M
 above the selected graph maximum runs eagerly and is observable in telemetry.
 
