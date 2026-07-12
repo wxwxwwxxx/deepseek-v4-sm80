@@ -1,0 +1,9 @@
+{
+  "model": "deepseek-v4-flash",
+  "messages": [
+    {"role": "developer", "content": "Answer briefly and accurately."},
+    {"role": "user", "content": "Reply with only 4: 2+2="}
+  ],
+  "max_tokens": 16,
+  "temperature": 0.0
+}

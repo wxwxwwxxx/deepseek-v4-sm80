@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Tuple
 
 import torch
@@ -11,12 +12,35 @@ from minisgl.scheduler import SchedulerConfig
 from minisgl.utils import init_logger
 
 
+def _is_local_model_path(model_path: str) -> bool:
+    """Distinguish filesystem paths from Hugging Face repo IDs without loading config."""
+    return (
+        model_path.endswith("/")
+        or Path(model_path).is_absolute()
+        or model_path.startswith(("./", "../", "~"))
+        or Path(model_path).exists()
+    )
+
+
 @dataclass(frozen=True)
 class ServerArgs(SchedulerConfig):
     server_host: str = "127.0.0.1"
     server_port: int = 1919
     num_tokenizer: int = 0
     silent_output: bool = False
+    served_model_name: str | None = None
+
+    @property
+    def resolved_served_model_name(self) -> str:
+        if self.served_model_name:
+            return self.served_model_name
+        model_path = self.model_path.rstrip("/")
+        if not _is_local_model_path(self.model_path):
+            return model_path
+        return Path(model_path).name or model_path
+
+    def accepts_model(self, model: str) -> bool:
+        return model in {self.resolved_served_model_name, self.model_path}
 
     @property
     def share_tokenizer(self) -> bool:
@@ -81,6 +105,16 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         type=str,
         required=True,
         help="The path of the model weights. This can be a local folder or a Hugging Face repo ID.",
+    )
+
+    parser.add_argument(
+        "--served-model-name",
+        default=ServerArgs.served_model_name,
+        help=(
+            "Public model ID exposed by /v1/models and chat responses. "
+            "Defaults to the input repo ID for Hugging Face models and the path basename "
+            "for local models."
+        ),
     )
 
     parser.add_argument(

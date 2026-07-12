@@ -1,0 +1,14 @@
+{
+  "model": "deepseek-v4-flash",
+  "messages": [
+    {
+      "role": "user",
+      "content": [{"type": "text", "text": "benchmark prompt"}]
+    }
+  ],
+  "temperature": 0.0,
+  "max_completion_tokens": 32,
+  "stream": true,
+  "stream_options": {"include_usage": true},
+  "ignore_eos": true
+}

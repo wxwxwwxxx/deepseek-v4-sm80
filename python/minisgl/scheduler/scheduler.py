@@ -34,6 +34,12 @@ Indice2D: TypeAlias = Tuple[torch.Tensor, torch.Tensor]
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
+def _processed_prompt_tokens(batch: Batch) -> int:
+    """Count this prefill forward after request lengths have advanced."""
+    assert batch.is_prefill
+    return int(batch.input_ids.numel())
+
+
 # For overlap scheduling, we also need to cache some other data to avoid IMA
 class ForwardInput(NamedTuple):
     batch: Batch
@@ -281,7 +287,7 @@ class Scheduler(SchedulerIOMixin):
         self.engine.release_copy_done_event(copy_done)
         if self._stats_tracker is not None:
             if batch.is_prefill:
-                self._stats_tracker.record(prompt_tokens=sum(req.extend_len for req in batch.reqs))
+                self._stats_tracker.record(prompt_tokens=_processed_prompt_tokens(batch))
             else:
                 self._stats_tracker.record(generation_tokens=len(batch.reqs))
         reply: List[DetokenizeMsg] = []
@@ -295,9 +301,27 @@ class Scheduler(SchedulerIOMixin):
                 req.append_host(next_token.unsqueeze(0))
                 next_token = int(next_token.item())
                 finished = not req.can_decode
+                reached_eos = False
                 if not req.sampling_params.ignore_eos:
-                    finished |= next_token == self.eos_token_id
-                reply.append(DetokenizeMsg(uid=req.uid, next_token=next_token, finished=finished))
+                    reached_eos = next_token == self.eos_token_id
+                    finished |= reached_eos
+                prompt_tokens = None
+                completion_tokens = None
+                if finished:
+                    prompt_tokens = req.max_device_len - req.output_len
+                    completion_tokens = len(req.input_ids) - prompt_tokens
+                reply.append(
+                    DetokenizeMsg(
+                        uid=req.uid,
+                        next_token=next_token,
+                        finished=finished,
+                        finish_reason=(
+                            "stop" if finished and reached_eos else "length" if finished else None
+                        ),
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+                )
 
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in self.finished_reqs:
@@ -337,6 +361,8 @@ class Scheduler(SchedulerIOMixin):
                             finished=True,
                             finish_reason="length_rejected",
                             error=reason,
+                            prompt_tokens=len(msg.input_ids),
+                            completion_tokens=0,
                         )
                     ]
                 )

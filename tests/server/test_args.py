@@ -30,6 +30,33 @@ def test_server_args_expose_typed_dsv4_runtime_mode():
     assert fallback_config.dsv4_runtime_mode == "fallback"
 
 
+def test_server_args_resolve_public_served_model_name():
+    local_config, _ = parse_args(
+        ["--model-path", "/models/DeepSeek-V4-Flash", "--dtype", "bfloat16"]
+    )
+    trailing_config, _ = parse_args(
+        ["--model-path", "/models/DeepSeek-V4-Flash/", "--dtype", "bfloat16"]
+    )
+    repo_config, _ = parse_args(
+        ["--model-path", "deepseek-ai/DeepSeek-V4-Flash", "--dtype", "bfloat16"]
+    )
+    explicit_config, _ = parse_args(
+        [
+            "--model-path",
+            "/models/DeepSeek-V4-Flash",
+            "--dtype",
+            "bfloat16",
+            "--served-model-name",
+            "deepseek-v4-flash",
+        ]
+    )
+
+    assert local_config.resolved_served_model_name == "DeepSeek-V4-Flash"
+    assert trailing_config.resolved_served_model_name == "DeepSeek-V4-Flash"
+    assert repo_config.resolved_served_model_name == "deepseek-ai/DeepSeek-V4-Flash"
+    assert explicit_config.resolved_served_model_name == "deepseek-v4-flash"
+
+
 def test_server_args_expose_periodic_stats_controls():
     base = ["--model-path", "/tmp/nonexistent-model", "--dtype", "bfloat16"]
 

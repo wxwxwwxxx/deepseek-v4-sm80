@@ -41,15 +41,39 @@ validated on the DGX A100 platform above; no DSV4 tuning environment variables
 or named recipe are required.
 
 ```bash
-python -m minisgl --model /models/DeepSeek-V4-Flash --tp-size 8 --host 0.0.0.0 --port 1919
+python -m minisgl --model /models/DeepSeek-V4-Flash --tp-size 8 --served-model-name deepseek-v4-flash --host 0.0.0.0 --port 1919
 ```
 
 Query the OpenAI-compatible API from another terminal with the installed
 OpenAI client:
 
 ```bash
-python -c "from openai import OpenAI; c=OpenAI(base_url='http://127.0.0.1:1919/v1', api_key='dummy'); print(c.chat.completions.create(model='/models/DeepSeek-V4-Flash', messages=[{'role':'user','content':'Reply with only 4: 2+2='}], max_tokens=16, temperature=0).choices[0].message.content)"
+python -c "from openai import OpenAI; c=OpenAI(base_url='http://127.0.0.1:1919/v1', api_key='dummy'); print(c.chat.completions.create(model='deepseek-v4-flash', messages=[{'role':'user','content':'Reply with only 4: 2+2='}], max_tokens=16, temperature=0).choices[0].message.content)"
 ```
+
+The server provides an OpenAI-compatible, text-only `/v1/chat/completions`
+endpoint with streaming and non-streaming responses. It supports string
+content, arrays of text content parts, the `system`, `developer`, `user`, and
+`assistant` roles, and the sampling fields `max_tokens`,
+`max_completion_tokens`, `temperature`, and `top_p`. The minisgl extensions
+`top_k` and `ignore_eos` are also supported. When both output-limit spellings
+are present, `max_completion_tokens` takes precedence.
+
+For a public service, set an explicit model identity, for example
+`--served-model-name deepseek-v4-flash`, and use the ID returned by
+`/v1/models`. Without the option, a Hugging Face repo ID remains unchanged and
+a local path resolves to its basename (`DeepSeek-V4-Flash` here). Requests may
+use only that public ID or the complete configured model path as a compatibility
+alias; responses always report the public ID. Authentication is not enabled,
+so SDKs may use any non-empty dummy API key.
+
+Custom stop sequences, multiple choices, nonzero presence/frequency
+penalties, logprobs, tool/function calling, structured output, multimodal
+content, and unknown request options return an OpenAI-style HTTP 400 error;
+they are never silently ignored. `stream_options.include_usage` emits an exact
+final usage chunk, and non-streaming responses contain the same exact counts.
+This endpoint does not claim full OpenAI API parity, and `/metrics` is not
+provided.
 
 Interactive shell:
 

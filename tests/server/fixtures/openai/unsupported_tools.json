@@ -1,0 +1,10 @@
+{
+  "model": "deepseek-v4-flash",
+  "messages": [{"role": "user", "content": "What is the weather?"}],
+  "tools": [
+    {
+      "type": "function",
+      "function": {"name": "get_weather", "parameters": {"type": "object"}}
+    }
+  ]
+}

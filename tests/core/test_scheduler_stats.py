@@ -4,8 +4,9 @@ import time
 from types import SimpleNamespace
 
 import pytest
+import torch
 from minisgl.scheduler import scheduler as scheduler_module
-from minisgl.scheduler.scheduler import Scheduler
+from minisgl.scheduler.scheduler import Scheduler, _processed_prompt_tokens
 from minisgl.scheduler.stats import SchedulerStatsTracker
 
 
@@ -37,6 +38,16 @@ def test_scheduler_stats_excludes_idle_time_between_workloads():
 def test_scheduler_stats_interval_must_be_positive():
     with pytest.raises(ValueError, match="must be positive"):
         SchedulerStatsTracker(interval=0.0)
+
+
+def test_prefill_stats_use_forward_input_shape_after_request_state_advance():
+    batch = SimpleNamespace(
+        is_prefill=True,
+        input_ids=torch.empty(4 * 4096, dtype=torch.int32),
+        reqs=[SimpleNamespace(extend_len=1) for _ in range(4)],
+    )
+
+    assert _processed_prompt_tokens(batch) == 4 * 4096
 
 
 def test_scheduler_stats_log_uses_cpu_owned_state(monkeypatch):

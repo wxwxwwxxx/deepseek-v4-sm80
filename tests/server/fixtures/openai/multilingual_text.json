@@ -1,0 +1,8 @@
+{
+  "model": "deepseek-v4-flash",
+  "messages": [
+    {"role": "user", "content": "请用一句中文和一句英文回答：东京是哪个国家的首都？"}
+  ],
+  "max_tokens": 64,
+  "temperature": 0.0
+}

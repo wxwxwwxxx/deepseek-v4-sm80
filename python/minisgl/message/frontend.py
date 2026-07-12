@@ -29,3 +29,5 @@ class UserReply(BaseFrontendMsg):
     finished: bool
     finish_reason: str | None = None
     error: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None

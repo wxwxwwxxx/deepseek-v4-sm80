@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import re
 import time
-from contextlib import asynccontextmanager
+import uuid
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Literal, Tuple
+from typing import Any, Callable, Dict, List, Literal, Tuple
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from minisgl.core import SamplingParams
 from minisgl.env import ENV
 from minisgl.message import (
@@ -23,7 +28,7 @@ from minisgl.message import (
 from minisgl.utils import ZmqAsyncPullQueue, ZmqAsyncPushQueue, init_logger
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
 
 from .args import ServerArgs
@@ -57,28 +62,64 @@ class GenerateRequest(BaseModel):
 
 
 class TextContentPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["text"]
     text: str
 
 
 class Message(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: str | List[TextContentPart]
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["system", "developer", "user", "assistant"]
+    content: str | List[Dict[str, Any]]
+
+    @model_validator(mode="after")
+    def validate_text_content(self):
+        if isinstance(self.content, str):
+            return self
+        text_parts: List[Dict[str, Any]] = []
+        for index, part in enumerate(self.content):
+            part_type = part.get("type")
+            if part_type != "text":
+                raise ValueError(
+                    f"unsupported content part type {part_type!r} at index {index}; "
+                    "only text parts are supported"
+                )
+            unknown = set(part) - {"type", "text"}
+            if unknown:
+                raise ValueError(
+                    f"unsupported fields in text content part at index {index}: "
+                    f"{', '.join(sorted(unknown))}"
+                )
+            if not isinstance(part.get("text"), str):
+                raise ValueError(f"text content part at index {index} requires a string 'text'")
+            text_parts.append(part)
+        self.content = text_parts
+        return self
 
     def to_prompt_message(self) -> dict[str, str]:
         content = self.content
         if not isinstance(content, str):
-            content = "".join(part.text for part in content)
+            content = "".join(part["text"] for part in content)
         return {"role": self.role, "content": content}
+
+
+class StreamOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    include_usage: bool = False
 
 
 class OpenAICompletionRequest(BaseModel):
     """Unified request model for OpenAI-style completions and chat-completions."""
 
-    model: str
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(min_length=1)
 
     prompt: str | None = None
-    messages: List[Message] | None = None
+    messages: List[Message] = Field(min_length=1)
 
     max_tokens: int = 16
     max_completion_tokens: int | None = None
@@ -88,17 +129,83 @@ class OpenAICompletionRequest(BaseModel):
     top_p: float = 1.0
     n: int = 1
     stream: bool = False
-    stop: List[str] = []
+    stream_options: StreamOptions | None = None
+    stop: str | List[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
 
     ignore_eos: bool = False
+    user: str | None = None
+    metadata: Dict[str, Any] | None = None
+
+    tools: Any = None
+    tool_choice: Any = None
+    parallel_tool_calls: Any = None
+    functions: Any = None
+    function_call: Any = None
+    response_format: Any = None
+    logprobs: Any = None
+    top_logprobs: Any = None
+    logit_bias: Any = None
+    modalities: Any = None
+    audio: Any = None
+    prediction: Any = None
+    seed: Any = None
+
+    @model_validator(mode="after")
+    def validate_supported_contract(self):
+        if self.prompt is not None:
+            raise ValueError("'prompt' is not supported by /v1/chat/completions; use 'messages'")
+        if self.output_token_limit <= 0:
+            raise ValueError("max_tokens/max_completion_tokens must be greater than zero")
+        if self.n != 1:
+            raise ValueError("multiple choices are not supported; 'n' must be 1")
+        stop = [self.stop] if isinstance(self.stop, str) else self.stop or []
+        if any(value for value in stop):
+            raise ValueError(
+                "custom stop sequences are not supported; 'stop' must be null or empty"
+            )
+        if self.presence_penalty != 0:
+            raise ValueError("presence_penalty is not implemented and must be 0")
+        if self.frequency_penalty != 0:
+            raise ValueError("frequency_penalty is not implemented and must be 0")
+        if not math.isfinite(self.temperature) or self.temperature < 0:
+            raise ValueError("temperature must be a finite non-negative number")
+        if not math.isfinite(self.top_p) or not 0 <= self.top_p <= 1:
+            raise ValueError("top_p must be between 0 and 1")
+        if self.top_k == 0 or self.top_k < -1:
+            raise ValueError("top_k must be -1 or a positive integer")
+
+        unsupported = {
+            "tools": self.tools,
+            "tool_choice": self.tool_choice,
+            "parallel_tool_calls": self.parallel_tool_calls,
+            "functions": self.functions,
+            "function_call": self.function_call,
+            "response_format": self.response_format,
+            "top_logprobs": self.top_logprobs,
+            "logit_bias": self.logit_bias,
+            "modalities": self.modalities,
+            "audio": self.audio,
+            "prediction": self.prediction,
+            "seed": self.seed,
+        }
+        for name, value in unsupported.items():
+            if value is not None:
+                raise ValueError(f"'{name}' is not supported by this text-only endpoint")
+        if self.logprobs not in (None, False):
+            raise ValueError("'logprobs' is not supported by this endpoint")
+        return self
 
     @property
     def output_token_limit(self) -> int:
         if self.max_completion_tokens is not None:
             return self.max_completion_tokens
         return self.max_tokens
+
+    @property
+    def include_usage(self) -> bool:
+        return bool(self.stream_options and self.stream_options.include_usage)
 
 
 class ModelCard(BaseModel):
@@ -112,6 +219,82 @@ class ModelCard(BaseModel):
 class ModelList(BaseModel):
     object: str = "list"
     data: List[ModelCard] = Field(default_factory=list)
+
+
+def _error_body(
+    message: str,
+    *,
+    param: str | None = None,
+    code: str = "invalid_request",
+    error_type: str = "invalid_request_error",
+) -> Dict[str, Any]:
+    return {
+        "error": {
+            "message": message,
+            "type": error_type,
+            "param": param,
+            "code": code,
+        }
+    }
+
+
+def _usage_from_reply(reply: UserReply | None) -> Dict[str, int] | None:
+    if reply is None or reply.prompt_tokens is None or reply.completion_tokens is None:
+        return None
+    return {
+        "prompt_tokens": reply.prompt_tokens,
+        "completion_tokens": reply.completion_tokens,
+        "total_tokens": reply.prompt_tokens + reply.completion_tokens,
+    }
+
+
+def _map_finish_reason(reason: str | None) -> str:
+    if reason == "length":
+        return "length"
+    return "stop"
+
+
+def _new_completion_id() -> str:
+    return f"chatcmpl-{uuid.uuid4().hex}"
+
+
+def _infer_error_param(message: str, fallback: str | None) -> str | None:
+    if fallback and not fallback.rsplit(".", 1)[-1].isdigit():
+        return fallback
+    parameter_names = (
+        "max_completion_tokens",
+        "max_tokens",
+        "parallel_tool_calls",
+        "presence_penalty",
+        "frequency_penalty",
+        "response_format",
+        "top_logprobs",
+        "tool_choice",
+        "function_call",
+        "logit_bias",
+        "stream_options",
+        "modalities",
+        "prediction",
+        "messages",
+        "content",
+        "logprobs",
+        "functions",
+        "metadata",
+        "temperature",
+        "top_k",
+        "top_p",
+        "tools",
+        "audio",
+        "model",
+        "prompt",
+        "stop",
+        "seed",
+        "n",
+    )
+    for name in parameter_names:
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", message):
+            return name
+    return fallback
 
 
 @dataclass
@@ -150,68 +333,106 @@ class FrontendManager:
         await self.send_tokenizer.put(msg)
 
     async def wait_for_ack(self, uid: int):
-        event = self.event_map[uid]
+        try:
+            event = self.event_map[uid]
 
-        while True:
-            await event.wait()
-            event.clear()
+            while True:
+                await event.wait()
+                event.clear()
 
-            pending = self.ack_map[uid]
-            self.ack_map[uid] = []
-            ack = None
-            for ack in pending:
-                yield ack
-            if ack and ack.finished:
-                break
-
-        del self.ack_map[uid]
-        del self.event_map[uid]
+                pending = self.ack_map[uid]
+                self.ack_map[uid] = []
+                ack = None
+                for ack in pending:
+                    yield ack
+                if ack and ack.finished:
+                    break
+        finally:
+            self.ack_map.pop(uid, None)
+            self.event_map.pop(uid, None)
 
     async def stream_generate(self, uid: int):
-        async for ack in self.wait_for_ack(uid):
-            yield f"data: {ack.incremental_output}\n".encode()
-            if ack.finished:
-                break
+        async with aclosing(self.wait_for_ack(uid)) as replies:
+            async for ack in replies:
+                yield f"data: {ack.incremental_output}\n".encode()
+                if ack.finished:
+                    break
         yield "data: [DONE]\n".encode()
         logger.debug("Finished streaming response for user %s", uid)
 
-    async def stream_chat_completions(self, uid: int):
+    async def stream_chat_completions(
+        self,
+        uid: int,
+        *,
+        completion_id: str,
+        created: int,
+        model: str,
+        include_usage: bool,
+    ):
         first_chunk = True
-        finish_reason = "stop"
-        finish_error = None
-        async for ack in self.wait_for_ack(uid):
-            delta = {}
-            if first_chunk:
-                delta["role"] = "assistant"
-                first_chunk = False
-            if ack.incremental_output:
-                delta["content"] = ack.incremental_output
+        final_reply = None
+        async with aclosing(self.wait_for_ack(uid)) as replies:
+            async for ack in replies:
+                if ack.error:
+                    error = _error_body(
+                        ack.error,
+                        code="backend_error",
+                        error_type=(
+                            "invalid_request_error"
+                            if ack.finish_reason == "length_rejected"
+                            else "server_error"
+                        ),
+                    )
+                    yield f"data: {json.dumps(error)}\n\n".encode()
+                    final_reply = ack
+                    break
 
-            chunk = {
-                "id": f"cmpl-{uid}",
-                "object": "text_completion.chunk",
-                "choices": [{"delta": delta, "index": 0, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n".encode()
+                delta = {}
+                if first_chunk:
+                    delta["role"] = "assistant"
+                    first_chunk = False
+                if ack.incremental_output:
+                    delta["content"] = ack.incremental_output
 
-            if ack.finished:
-                finish_reason = ack.finish_reason or "stop"
-                finish_error = ack.error
-                break
-
-        # send final finish_reason
-        end_chunk = {
-            "id": f"cmpl-{uid}",
-            "object": "text_completion.chunk",
-            "choices": [
-                {
-                    "delta": ({"error": finish_error} if finish_error else {}),
-                    "index": 0,
-                    "finish_reason": finish_reason,
+                chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"delta": delta, "index": 0, "finish_reason": None}],
                 }
-            ],
-        }
-        yield f"data: {json.dumps(end_chunk)}\n\n".encode()
+                yield f"data: {json.dumps(chunk)}\n\n".encode()
+
+                if ack.finished:
+                    final_reply = ack
+                    break
+
+        if final_reply is not None and not final_reply.error:
+            end_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "delta": {},
+                        "index": 0,
+                        "finish_reason": _map_finish_reason(final_reply.finish_reason),
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(end_chunk)}\n\n".encode()
+            usage = _usage_from_reply(final_reply)
+            if include_usage and usage is not None:
+                usage_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [],
+                    "usage": usage,
+                }
+                yield f"data: {json.dumps(usage_chunk)}\n\n".encode()
         yield b"data: [DONE]\n\n"
         logger.debug("Finished streaming response for user %s", uid)
 
@@ -229,10 +450,8 @@ class FrontendManager:
 
     async def abort_user(self, uid: int):
         await asyncio.sleep(0.1)
-        if uid in self.ack_map:
-            del self.ack_map[uid]
-        if uid in self.event_map:
-            del self.event_map[uid]
+        self.ack_map.pop(uid, None)
+        self.event_map.pop(uid, None)
         logger.warning("Aborting request for user %s", uid)
         await self.send_one(AbortMsg(uid=uid))
 
@@ -251,6 +470,23 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="MiniSGL API Server", version="0.0.1", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def openai_validation_error(request: Request, exc: RequestValidationError):
+    if not request.url.path.startswith("/v1/"):
+        return await request_validation_exception_handler(request, exc)
+    first_error = exc.errors()[0] if exc.errors() else {}
+    location = [str(item) for item in first_error.get("loc", ()) if item != "body"]
+    param = ".".join(location) or None
+    message = first_error.get("msg", "Invalid request")
+    if message.startswith("Value error, "):
+        message = message[len("Value error, ") :]
+    param = _infer_error_param(message, param)
+    return JSONResponse(
+        status_code=400,
+        content=_error_body(message, param=param, code=first_error.get("type", "invalid_request")),
+    )
 
 
 @app.post("/generate")
@@ -283,11 +519,19 @@ async def v1_root():
 @app.post("/v1/chat/completions")
 async def v1_completions(req: OpenAICompletionRequest, request: Request):
     state = get_global_state()
-    if req.messages:
-        prompt = [msg.to_prompt_message() for msg in req.messages]
-    else:
-        assert req.prompt is not None, "Either 'messages' or 'prompt' must be provided"
-        prompt = req.prompt
+    if not state.config.accepts_model(req.model):
+        return JSONResponse(
+            status_code=404,
+            content=_error_body(
+                f"The model {req.model!r} does not exist.",
+                param="model",
+                code="model_not_found",
+            ),
+        )
+    prompt = [msg.to_prompt_message() for msg in req.messages]
+    completion_id = _new_completion_id()
+    created = int(time.time())
+    served_model = state.config.resolved_served_model_name
 
     # TODO: support more sampling parameters
     uid = state.new_user()
@@ -307,51 +551,84 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
 
     if req.stream:
         return StreamingResponse(
-            state.stream_with_cancellation(state.stream_chat_completions(uid), request, uid),
+            state.stream_with_cancellation(
+                state.stream_chat_completions(
+                    uid,
+                    completion_id=completion_id,
+                    created=created,
+                    model=served_model,
+                    include_usage=req.include_usage,
+                ),
+                request,
+                uid,
+            ),
             media_type="text/event-stream",
         )
 
     # Non-streaming: collect all chunks and return a single JSON response
     full_content = ""
-    finish_reason = "stop"
-    finish_error = None
-    async for ack in state.wait_for_ack(uid):
-        full_content += ack.incremental_output
-        if ack.finished:
-            finish_reason = ack.finish_reason or "stop"
-            finish_error = ack.error
-            break
+    final_reply = None
+    async with aclosing(state.wait_for_ack(uid)) as replies:
+        async for ack in replies:
+            full_content += ack.incremental_output
+            if ack.finished:
+                final_reply = ack
+                break
 
-    return {
-        "id": f"chatcmpl-{uid}",
+    if final_reply is None:
+        return JSONResponse(
+            status_code=500,
+            content=_error_body(
+                "backend ended the request without a final response",
+                code="backend_error",
+                error_type="server_error",
+            ),
+        )
+    if final_reply.error:
+        is_invalid_request = final_reply.finish_reason == "length_rejected"
+        return JSONResponse(
+            status_code=400 if is_invalid_request else 500,
+            content=_error_body(
+                final_reply.error,
+                code="backend_error",
+                error_type="invalid_request_error" if is_invalid_request else "server_error",
+            ),
+        )
+
+    response = {
+        "id": completion_id,
         "object": "chat.completion",
-        "created": int(time.time()),
-        "model": req.model,
+        "created": created,
+        "model": served_model,
         "choices": [
             {
                 "index": 0,
                 "message": {"role": "assistant", "content": full_content},
-                "finish_reason": finish_reason,
-                **({"error": finish_error} if finish_error else {}),
+                "finish_reason": _map_finish_reason(final_reply.finish_reason),
             }
         ],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
     }
+    usage = _usage_from_reply(final_reply)
+    if usage is not None:
+        response["usage"] = usage
+    return response
 
 
 @app.get("/v1/models")
 async def available_models():
     state = get_global_state()
-    return ModelList(data=[ModelCard(id=state.config.model_path, root=state.config.model_path)])
+    return ModelList(
+        data=[
+            ModelCard(
+                id=state.config.resolved_served_model_name,
+                root=state.config.model_path,
+            )
+        ]
+    )
 
 
 async def shell_completion(req: OpenAICompletionRequest):
     state = get_global_state()
-    assert req.messages is not None, "Shell completion only supports chat-completions"
     prompt = [msg.to_prompt_message() for msg in req.messages]
 
     # TODO: support more sampling parameters
@@ -380,7 +657,6 @@ async def shell_completion(req: OpenAICompletionRequest):
     )
 
 
-
 async def shell():
     commands = ["/exit", "/reset"]
     completer = WordCompleter(commands)
@@ -405,7 +681,7 @@ async def shell():
                 history_messages.append(Message(role="assistant", content=assistant_msg))
             # send to server
             req = OpenAICompletionRequest(
-                model="",
+                model="shell",
                 messages=history_messages + [Message(role="user", content=cmd)],
                 max_tokens=ENV.SHELL_MAX_TOKENS.value,
                 top_k=ENV.SHELL_TOP_K.value,
@@ -478,6 +754,12 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], None], run_sh
     # start the backend here
     start_backend()
 
+    logger.info(
+        "Served model name: %s; configured model path: %s; model-path compatibility "
+        "alias accepted: yes",
+        config.resolved_served_model_name,
+        config.model_path,
+    )
     logger.info(f"API server is ready to serve on {host}:{port}")
     if not run_shell:
         uvicorn.run(app, host=host, port=port)
