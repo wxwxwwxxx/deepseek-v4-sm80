@@ -40,6 +40,7 @@ class TokenizeMsg(BaseTokenizerMsg):
     uid: int
     text: str | List[Dict[str, str]]
     sampling_params: SamplingParams
+    reasoning_effort: str | None = None
 
 
 @dataclass

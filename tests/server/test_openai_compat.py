@@ -227,9 +227,7 @@ def test_real_frontend_cleans_cancellation_abort_race_and_disconnect() -> None:
             model="deepseek-v4-flash",
             include_usage=False,
         )
-        wrapped = frontend.stream_with_cancellation(
-            source, DisconnectedRequest(), disconnect_uid
-        )
+        wrapped = frontend.stream_with_cancellation(source, DisconnectedRequest(), disconnect_uid)
         try:
             await anext(wrapped)
         except asyncio.CancelledError:
@@ -277,6 +275,161 @@ def test_chat_completion_default_output_limit_is_2048() -> None:
 
     assert request.max_tokens == 2048
     assert request.output_token_limit == 2048
+    assert request.reasoning_effort == "none"
+
+
+def test_reasoning_message_and_effort_reach_tokenizer_contract() -> None:
+    client, frontend = make_client()
+    with client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "deepseek-v4-flash",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "reasoning_content": "earlier reasoning",
+                        "content": "earlier answer",
+                    },
+                    {"role": "user", "content": "continue"},
+                ],
+                "reasoning_effort": "high",
+            },
+        )
+
+    assert response.status_code == 200
+    sent = frontend.sent[0]
+    assert isinstance(sent, TokenizeMsg)
+    assert sent.reasoning_effort == "high"
+    assert sent.text[0] == {
+        "role": "assistant",
+        "content": "earlier answer",
+        "reasoning_content": "earlier reasoning",
+    }
+
+
+def test_reasoning_non_stream_and_stream_split_content() -> None:
+    class ThinkingFrontend(FakeFrontend):
+        async def wait_for_ack(self, uid: int):
+            yield UserReply(uid=uid, incremental_output="plan</thi", finished=False)
+            yield UserReply(
+                uid=uid,
+                incremental_output="nk>answer",
+                finished=True,
+                finish_reason="stop",
+                prompt_tokens=7,
+                completion_tokens=4,
+            )
+
+    payload = {
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "solve it"}],
+        "reasoning_effort": "max",
+    }
+    non_stream_client, non_stream_frontend = make_client(ThinkingFrontend())
+    with non_stream_client:
+        non_stream = non_stream_client.post("/v1/chat/completions", json=payload)
+
+    assert non_stream.status_code == 200
+    assert non_stream.json()["choices"][0]["message"] == {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "plan",
+    }
+    sent = non_stream_frontend.sent[0]
+    assert isinstance(sent, TokenizeMsg)
+    assert sent.reasoning_effort == "max"
+
+    stream_client, _ = make_client(ThinkingFrontend())
+    with stream_client:
+        with stream_client.stream(
+            "POST", "/v1/chat/completions", json={**payload, "stream": True}
+        ) as response:
+            events = parse_sse(response)
+
+    assert response.status_code == 200
+    deltas = [event["choices"][0]["delta"] for event in events[:-1] if event["choices"]]
+    assert deltas[:2] == [
+        {"role": "assistant", "reasoning_content": "plan"},
+        {"content": "answer"},
+    ]
+    assert events[-2]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_truncated_reasoning_is_not_misreported_as_final_content() -> None:
+    class TruncatedThinkingFrontend(FakeFrontend):
+        async def wait_for_ack(self, uid: int):
+            yield UserReply(
+                uid=uid,
+                incremental_output="unfinished reasoning",
+                finished=True,
+                finish_reason="length",
+                prompt_tokens=4,
+                completion_tokens=2,
+            )
+
+    client, _ = make_client(TruncatedThinkingFrontend())
+    with client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "solve"}],
+                "reasoning_effort": "high",
+                "max_completion_tokens": 2,
+            },
+        )
+
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "length"
+    assert choice["message"] == {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "unfinished reasoning",
+    }
+
+
+def test_reasoning_stop_without_delimiter_remains_reasoning_only() -> None:
+    class MalformedThinkingFrontend(FakeFrontend):
+        async def wait_for_ack(self, uid: int):
+            yield UserReply(uid=uid, incremental_output="analysis ", finished=False)
+            yield UserReply(
+                uid=uid,
+                incremental_output="and final answer",
+                finished=True,
+                finish_reason="stop",
+                prompt_tokens=4,
+                completion_tokens=4,
+            )
+
+    payload = {
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "solve"}],
+        "reasoning_effort": "high",
+    }
+    client, _ = make_client(MalformedThinkingFrontend())
+    with client:
+        non_stream = client.post("/v1/chat/completions", json=payload)
+
+    message = non_stream.json()["choices"][0]["message"]
+    assert message == {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "analysis and final answer",
+    }
+
+    stream_client, _ = make_client(MalformedThinkingFrontend())
+    with stream_client:
+        with stream_client.stream(
+            "POST", "/v1/chat/completions", json={**payload, "stream": True}
+        ) as response:
+            events = parse_sse(response)
+
+    deltas = [event["choices"][0]["delta"] for event in events[:-1] if event["choices"]]
+    assert deltas[:2] == [
+        {"role": "assistant", "reasoning_content": "analysis "},
+        {"reasoning_content": "and final answer"},
+    ]
 
 
 def test_legacy_content_output_limit_precedence_and_developer_role() -> None:

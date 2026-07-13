@@ -74,6 +74,7 @@ class Message(BaseModel):
 
     role: Literal["system", "developer", "user", "assistant"]
     content: str | List[Dict[str, Any]]
+    reasoning_content: str | None = None
 
     @model_validator(mode="after")
     def validate_text_content(self):
@@ -103,7 +104,10 @@ class Message(BaseModel):
         content = self.content
         if not isinstance(content, str):
             content = "".join(part["text"] for part in content)
-        return {"role": self.role, "content": content}
+        message = {"role": self.role, "content": content}
+        if self.reasoning_content is not None:
+            message["reasoning_content"] = self.reasoning_content
+        return message
 
 
 class StreamOptions(BaseModel):
@@ -124,6 +128,7 @@ class OpenAICompletionRequest(BaseModel):
 
     max_tokens: int = 2048
     max_completion_tokens: int | None = None
+    reasoning_effort: Literal["none", "high", "max"] = "none"
     temperature: float = 1.0
 
     top_k: int = -1
@@ -259,12 +264,73 @@ def _new_completion_id() -> str:
     return f"chatcmpl-{uuid.uuid4().hex}"
 
 
+@dataclass
+class _ReasoningStreamParser:
+    enabled: bool
+    pending: str = ""
+    reasoning_finished: bool = False
+
+    _DELIMITER = "</think>"
+
+    def feed(
+        self,
+        text: str,
+        *,
+        finished: bool = False,
+    ) -> tuple[str, str]:
+        if not self.enabled or self.reasoning_finished:
+            return "", text
+
+        self.pending += text
+        delimiter_index = self.pending.find(self._DELIMITER)
+        if delimiter_index >= 0:
+            reasoning = self.pending[:delimiter_index]
+            content = self.pending[delimiter_index + len(self._DELIMITER) :]
+            self.pending = ""
+            self.reasoning_finished = True
+            return reasoning, content
+
+        if finished:
+            reasoning = self.pending
+            self.pending = ""
+            return reasoning, ""
+
+        keep = 0
+        max_prefix = min(len(self.pending), len(self._DELIMITER) - 1)
+        for size in range(max_prefix, 0, -1):
+            if self.pending.endswith(self._DELIMITER[:size]):
+                keep = size
+                break
+        if keep:
+            reasoning = self.pending[:-keep]
+            self.pending = self.pending[-keep:]
+        else:
+            reasoning = self.pending
+            self.pending = ""
+        return reasoning, ""
+
+
+def _split_reasoning_content(
+    text: str,
+    enabled: bool,
+) -> tuple[str | None, str]:
+    if not enabled:
+        return None, text
+    parser = _ReasoningStreamParser(enabled=True)
+    reasoning, content = parser.feed(
+        text,
+        finished=True,
+    )
+    return reasoning, content
+
+
 def _infer_error_param(message: str, fallback: str | None) -> str | None:
     if fallback and not fallback.rsplit(".", 1)[-1].isdigit():
         return fallback
     parameter_names = (
         "max_completion_tokens",
         "max_tokens",
+        "reasoning_effort",
         "parallel_tool_calls",
         "presence_penalty",
         "frequency_penalty",
@@ -369,9 +435,11 @@ class FrontendManager:
         created: int,
         model: str,
         include_usage: bool,
+        reasoning: bool = False,
     ):
         first_chunk = True
         final_reply = None
+        reasoning_parser = _ReasoningStreamParser(enabled=reasoning)
         async with aclosing(self.wait_for_ack(uid)) as replies:
             async for ack in replies:
                 if ack.error:
@@ -388,21 +456,30 @@ class FrontendManager:
                     final_reply = ack
                     break
 
-                delta = {}
-                if first_chunk:
-                    delta["role"] = "assistant"
-                    first_chunk = False
-                if ack.incremental_output:
-                    delta["content"] = ack.incremental_output
+                reasoning_delta, content_delta = reasoning_parser.feed(
+                    ack.incremental_output,
+                    finished=ack.finished,
+                )
+                deltas = []
+                if reasoning_delta:
+                    deltas.append({"reasoning_content": reasoning_delta})
+                if content_delta:
+                    deltas.append({"content": content_delta})
+                if not deltas and first_chunk:
+                    deltas.append({})
 
-                chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"delta": delta, "index": 0, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n".encode()
+                for delta in deltas:
+                    if first_chunk:
+                        delta = {"role": "assistant", **delta}
+                        first_chunk = False
+                    chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"delta": delta, "index": 0, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n".encode()
 
                 if ack.finished:
                     final_reply = ack
@@ -536,6 +613,7 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
             ),
         )
     prompt = [msg.to_prompt_message() for msg in req.messages]
+    reasoning_effort = None if req.reasoning_effort == "none" else req.reasoning_effort
     completion_id = _new_completion_id()
     created = int(time.time())
     served_model = state.config.resolved_served_model_name
@@ -553,6 +631,7 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
                 top_k=req.top_k,
                 top_p=req.top_p,
             ),
+            reasoning_effort=reasoning_effort,
         )
     )
 
@@ -565,6 +644,7 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
                     created=created,
                     model=served_model,
                     include_usage=req.include_usage,
+                    reasoning=reasoning_effort is not None,
                 ),
                 request,
                 uid,
@@ -602,6 +682,14 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
             ),
         )
 
+    reasoning_content, response_content = _split_reasoning_content(
+        full_content,
+        enabled=reasoning_effort is not None,
+    )
+    response_message = {"role": "assistant", "content": response_content}
+    if reasoning_content is not None:
+        response_message["reasoning_content"] = reasoning_content
+
     response = {
         "id": completion_id,
         "object": "chat.completion",
@@ -610,7 +698,7 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": full_content},
+                "message": response_message,
                 "finish_reason": _map_finish_reason(final_reply.finish_reason),
             }
         ],

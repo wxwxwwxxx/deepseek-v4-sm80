@@ -13,7 +13,7 @@ class TokenizeManager:
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
-        dsv4_chat_formatter: Callable[[list[dict]], str] | None = None,
+        dsv4_chat_formatter: Callable[[list[dict], str | None], str] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.dsv4_chat_formatter = dsv4_chat_formatter
@@ -24,8 +24,10 @@ class TokenizeManager:
         for msg in msgs:
             if isinstance(msg.text, list):
                 if self.dsv4_chat_formatter is not None:
-                    prompt = self.dsv4_chat_formatter(msg.text)
+                    prompt = self.dsv4_chat_formatter(msg.text, msg.reasoning_effort)
                 else:
+                    if msg.reasoning_effort is not None:
+                        raise ValueError("reasoning_effort requires the DeepSeek V4 chat formatter")
                     prompt = self.tokenizer.apply_chat_template(
                         msg.text,
                         tokenize=False,
@@ -41,7 +43,9 @@ class TokenizeManager:
         return results
 
 
-def load_dsv4_chat_formatter(model_path: str) -> Callable[[list[dict]], str] | None:
+def load_dsv4_chat_formatter(
+    model_path: str,
+) -> Callable[[list[dict], str | None], str] | None:
     encoding_path = Path(model_path) / "encoding" / "encoding_dsv4.py"
     if not encoding_path.is_file():
         return None
@@ -50,4 +54,13 @@ def load_dsv4_chat_formatter(model_path: str) -> Callable[[list[dict]], str] | N
         raise RuntimeError(f"failed to load DeepSeek V4 encoding from {encoding_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return lambda messages: module.encode_messages(messages, thinking_mode="chat")
+
+    def format_messages(messages: list[dict], reasoning_effort: str | None) -> str:
+        thinking_mode = "thinking" if reasoning_effort is not None else "chat"
+        return module.encode_messages(
+            messages,
+            thinking_mode=thinking_mode,
+            reasoning_effort=reasoning_effort,
+        )
+
+    return format_messages
