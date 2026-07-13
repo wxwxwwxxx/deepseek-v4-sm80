@@ -60,10 +60,8 @@ and M4 are capability-oriented configurations for very long contexts.
 | 512K prompt + 8 output, BS1 | 591.63 s | 908.36 | 46.10 | 73.38 GiB | Passed with 64 prefill chunks |
 | Exact 1M total, BS1 | 2,066.48 s | 513.86 | 36.43 | 73.76 GiB | Passed with 128 prefill chunks |
 
-The exact 1M run used 1,048,568 prompt tokens plus eight output tokens. An
-aggregate 512K workload across batch size 4 is planner-runnable, while four
-independent 512K sequences do not fit the validated capacity. Long-context
-numbers are single-run reference measurements.
+The exact 1M run used 1,048,568 prompt tokens plus eight output tokens.
+Long-context numbers are single-run reference measurements.
 
 ## Notes
 
