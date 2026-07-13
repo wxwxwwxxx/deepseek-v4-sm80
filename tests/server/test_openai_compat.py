@@ -362,6 +362,26 @@ def test_models_identity_is_coherent() -> None:
     assert body["data"][0]["root"] == "/models/DeepSeek-V4-Flash"
 
 
+def test_chat_completions_accepts_browser_cors_preflight() -> None:
+    client, _ = make_client()
+    with client:
+        response = client.options(
+            "/v1/chat/completions",
+            headers={
+                "Origin": "https://client.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "authorization,content-type",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert "POST" in response.headers["access-control-allow-methods"]
+    allowed_headers = response.headers["access-control-allow-headers"].lower()
+    assert "authorization" in allowed_headers
+    assert "content-type" in allowed_headers
+
+
 def test_model_validation_accepts_public_name_and_full_path_alias() -> None:
     client, frontend = make_client()
     base_payload = {"messages": [{"role": "user", "content": "hello"}]}
