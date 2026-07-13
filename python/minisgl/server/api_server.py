@@ -122,7 +122,7 @@ class OpenAICompletionRequest(BaseModel):
     prompt: str | None = None
     messages: List[Message] = Field(min_length=1)
 
-    max_tokens: int = 16
+    max_tokens: int = 2048
     max_completion_tokens: int | None = None
     temperature: float = 1.0
 

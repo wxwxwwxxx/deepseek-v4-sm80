@@ -269,6 +269,16 @@ def test_vllm_openai_chat_benchmark_payload_is_supported() -> None:
     }
 
 
+def test_chat_completion_default_output_limit_is_2048() -> None:
+    request = OpenAICompletionRequest(
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert request.max_tokens == 2048
+    assert request.output_token_limit == 2048
+
+
 def test_legacy_content_output_limit_precedence_and_developer_role() -> None:
     request = OpenAICompletionRequest(
         model="deepseek-v4-flash",
