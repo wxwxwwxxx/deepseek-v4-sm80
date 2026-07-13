@@ -13,6 +13,7 @@ from minisgl.message import (
     DetokenizeMsg,
     UserMsg,
 )
+from minisgl.reasoning import initial_reasoning_state
 from minisgl.scheduler import Scheduler, SchedulerConfig
 from minisgl.scheduler.scheduler import MaxSequenceAdmission
 
@@ -58,6 +59,7 @@ class LLM(Scheduler):
         )
         super().__init__(config)
         self.pending_requests: List[Tuple[List[int] | str, SamplingParams]] = []
+        self.pending_reasoning_efforts: List[str | None] = []
         self.status_map: Dict[int, RequestStatus] = {}
         self.counter = 0
 
@@ -67,18 +69,48 @@ class LLM(Scheduler):
         else:
             return torch.tensor(prompt, dtype=torch.int32, device="cpu")
 
+    def _validate_offline_reasoning_prompt(
+        self,
+        prompt: List[int] | str,
+        reasoning_effort: str | None,
+    ) -> None:
+        if (
+            not self.reasoning_sampler_contract_enabled
+            or reasoning_effort not in ("high", "max")
+        ):
+            return
+        token_ids = self.engine.reasoning_token_ids
+        assert token_ids is not None
+        input_ids = self._tokenize_one(prompt)
+        if input_ids.numel() == 0 or int(input_ids[-1].item()) != token_ids.think_start:
+            raise ValueError(
+                "LLM.generate reasoning_effort='high'/'max' requires an input already "
+                "formatted by the official DeepSeek V4 thinking formatter; the last "
+                "token must be <think>. MiniSGL does not apply a chat template "
+                "implicitly."
+            )
+
     def offline_receive_msg(self, blocking: bool = False) -> List[BaseBackendMsg]:
         if blocking and len(self.pending_requests) == 0:
             raise RequestAllFinished()
         results: List[BaseBackendMsg] = []
         added, sum_input_len = 0, 0
-        for tokens_or_prompt, sampling_params in self.pending_requests:
+        for request_index, (tokens_or_prompt, sampling_params) in enumerate(
+            self.pending_requests
+        ):
             if sum_input_len >= self.prefill_budget:
                 break
             input_ids = self._tokenize_one(tokens_or_prompt)
             sum_input_len += len(input_ids)
             uid, added = self.counter + added, added + 1
-            results.append(UserMsg(uid=uid, input_ids=input_ids, sampling_params=sampling_params))
+            results.append(
+                UserMsg(
+                    uid=uid,
+                    input_ids=input_ids,
+                    sampling_params=sampling_params,
+                    reasoning_effort=self.pending_reasoning_efforts[request_index],
+                )
+            )
             self.status_map[uid] = RequestStatus(
                 uid=uid,
                 input_ids=(
@@ -89,6 +121,7 @@ class LLM(Scheduler):
             )
         self.counter += added
         self.pending_requests = self.pending_requests[added:]
+        self.pending_reasoning_efforts = self.pending_reasoning_efforts[added:]
         return results
 
     def offline_send_result(self, reply: List[DetokenizeMsg]) -> None:
@@ -111,14 +144,31 @@ class LLM(Scheduler):
         self,
         prompts: List[str] | List[List[int]],
         sampling_params: List[SamplingParams] | SamplingParams,
+        reasoning_effort: List[str | None] | str | None = None,
     ) -> List[Dict[str, Any]]:
         self.pending_requests = []
+        self.pending_reasoning_efforts = []
         self.status_map = {}
         self.counter = 0
         if isinstance(sampling_params, SamplingParams):
             sampling_params = [sampling_params] * len(prompts)
-        for prompt, sp in zip(prompts, sampling_params):
+        if not isinstance(reasoning_effort, list):
+            reasoning_efforts = [reasoning_effort] * len(prompts)
+        else:
+            reasoning_efforts = reasoning_effort
+        if len(reasoning_efforts) != len(prompts):
+            raise ValueError("reasoning_effort list length must match prompts")
+        for prompt, effort in zip(prompts, reasoning_efforts, strict=True):
+            initial_reasoning_state(effort)
+            self._validate_offline_reasoning_prompt(prompt, effort)
+        for prompt, sp, effort in zip(
+            prompts,
+            sampling_params,
+            reasoning_efforts,
+            strict=True,
+        ):
             self.pending_requests.append((prompt, sp))
+            self.pending_reasoning_efforts.append(effort)
         try:
             self.run_forever()
         except RequestAllFinished:

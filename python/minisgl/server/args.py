@@ -138,6 +138,16 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
+        "--disable-reasoning-sampler-contract",
+        action="store_true",
+        help=(
+            "Disable the DeepSeek V4 reasoning grammar mask in the optimized runtime "
+            "for raw-logit and numerical-equivalence investigations. The fallback "
+            "runtime is always an unmodified-logits oracle."
+        ),
+    )
+
+    parser.add_argument(
         "--recipe",
         dest="dsv4_sm80_recipe",
         default=ServerArgs.dsv4_sm80_recipe,
@@ -288,5 +298,13 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
 
     result = ServerArgs(**kwargs)
     logger = init_logger(__name__)
-    logger.info(f"Parsed arguments:\n{result}")
+    logger.info(
+        "Starting server: "
+        f"model={result.model_path!r}, "
+        f"served_model_name={result.resolved_served_model_name!r}, "
+        f"tp_size={result.tp_info.size}, "
+        f"runtime={result.dsv4_runtime_mode!r}, "
+        f"recipe={result.dsv4_sm80_recipe!r}, "
+        f"listen={result.server_host}:{result.server_port}."
+    )
     return result, run_shell

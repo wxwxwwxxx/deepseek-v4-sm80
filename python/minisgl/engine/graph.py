@@ -15,6 +15,7 @@ from tqdm import tqdm
 if TYPE_CHECKING:
     from minisgl.attention import BaseAttnBackend
     from minisgl.models import BaseLLMModel
+    from minisgl.reasoning import ReasoningTokenIds
 
 logger = init_logger(__name__)
 
@@ -25,6 +26,7 @@ class GraphCaptureBuffer:
     out_loc: torch.Tensor
     positions: torch.Tensor
     num_token_non_padded: torch.Tensor
+    reasoning_states: torch.Tensor | None
     logits: torch.Tensor
     next_tokens: torch.Tensor | None
 
@@ -36,12 +38,18 @@ class GraphCaptureBuffer:
         device: torch.device,
         *,
         capture_greedy_sample: bool = False,
+        reasoning_sampler_contract_enabled: bool = False,
     ) -> GraphCaptureBuffer:
         return GraphCaptureBuffer(
             input_ids=torch.zeros(bs, dtype=torch.int32, device=device),
             out_loc=torch.zeros(bs, dtype=torch.int32, device=device),
             positions=torch.zeros(bs, dtype=torch.int32, device=device),
             num_token_non_padded=torch.zeros(1, dtype=torch.int32, device=device),
+            reasoning_states=(
+                torch.zeros(bs, dtype=torch.int32, device=device)
+                if reasoning_sampler_contract_enabled
+                else None
+            ),
             logits=torch.empty(bs, vocab_size, dtype=torch.float32, device=device),
             next_tokens=(
                 torch.empty(bs, dtype=torch.int32, device=device) if capture_greedy_sample else None
@@ -55,6 +63,8 @@ class GraphCaptureBuffer:
         batch.positions = self.positions[_slice]
         self.num_token_non_padded.fill_(batch.size)
         batch.num_token_non_padded = self.num_token_non_padded
+        if self.reasoning_states is not None:
+            batch.reasoning_states = self.reasoning_states[_slice]
 
     def nbytes(self) -> int:
         total = (
@@ -64,18 +74,25 @@ class GraphCaptureBuffer:
             + self.num_token_non_padded.numel() * self.num_token_non_padded.element_size()
             + self.logits.numel() * self.logits.element_size()
         )
+        if self.reasoning_states is not None:
+            total += self.reasoning_states.numel() * self.reasoning_states.element_size()
         if self.next_tokens is not None:
             total += self.next_tokens.numel() * self.next_tokens.element_size()
         return int(total)
 
     def copy_from(self, batch: Batch) -> int:
         _slice = slice(batch.padded_size)
+        copied_items = int(batch.padded_size)
         self.num_token_non_padded.fill_(batch.size)
         batch.num_token_non_padded = self.num_token_non_padded
+        reasoning_copy_bytes = 0
+        if self.reasoning_states is not None:
+            self.reasoning_states[_slice].zero_()
+            self.reasoning_states[: batch.size] = batch.reasoning_states
+            reasoning_copy_bytes = copied_items * self.reasoning_states.element_size()
         self.input_ids[_slice] = batch.input_ids
         self.out_loc[_slice] = batch.out_loc
         self.positions[_slice] = batch.positions
-        copied_items = int(batch.padded_size)
         return (
             copied_items
             * (
@@ -84,6 +101,7 @@ class GraphCaptureBuffer:
                 + self.positions.element_size()
             )
             + self.num_token_non_padded.element_size()
+            + reasoning_copy_bytes
         )
 
 
@@ -109,6 +127,7 @@ class GraphRunner:
         dummy_req: Req,
         capture_fail_open: bool = False,
         capture_greedy_sample: bool = False,
+        reasoning_token_ids: ReasoningTokenIds | None = None,
     ) -> None:
         cuda_graph_bs = resolved_graph_bs
         self.attn_backend = attn_backend
@@ -120,6 +139,7 @@ class GraphRunner:
         self.device = device
         self.capture_fail_open = capture_fail_open
         self.capture_greedy_sample = capture_greedy_sample
+        self.reasoning_token_ids = reasoning_token_ids
         self.exact_bs_only = False
         self.capture_status = {
             "enabled": bool(cuda_graph_bs),
@@ -128,6 +148,8 @@ class GraphRunner:
             "requested_bs": list(self.graph_bs_list),
             "captured_bs": [],
             "capture_greedy_sample": bool(capture_greedy_sample),
+            "reasoning_sampler_contract_enabled": reasoning_token_ids is not None,
+            "reasoning_state_buffer_bytes": 0,
             "capture_elapsed_s": None,
             "capture_free_memory_before_bytes": None,
             "capture_free_memory_after_bytes": None,
@@ -211,8 +233,14 @@ class GraphRunner:
             vocab_size,
             self.device,
             capture_greedy_sample=self.capture_greedy_sample,
+            reasoning_sampler_contract_enabled=self.reasoning_token_ids is not None,
         )
         self.capture_status["capture_buffer_bytes"] = self.buffer.nbytes()
+        if self.buffer.reasoning_states is not None:
+            self.capture_status["reasoning_state_buffer_bytes"] = (
+                self.buffer.reasoning_states.numel()
+                * self.buffer.reasoning_states.element_size()
+            )
         bind_capture_graph_inputs = getattr(self.attn_backend, "bind_capture_graph_inputs", None)
         if bind_capture_graph_inputs is not None:
             bind_capture_graph_inputs(
@@ -274,6 +302,15 @@ class GraphRunner:
                 self.buffer.logits[:bs] = model.forward()
                 if self.capture_greedy_sample:
                     assert self.buffer.next_tokens is not None
+                    if self.reasoning_token_ids is not None:
+                        from .sample import mask_reasoning_logits_
+
+                        mask_reasoning_logits_(
+                            self.buffer.logits[:bs],
+                            batch.reasoning_states,
+                            self.reasoning_token_ids,
+                            current_input_ids=batch.input_ids,
+                        )
                     self.buffer.next_tokens[:bs] = torch.argmax(self.buffer.logits[:bs], dim=-1).to(
                         torch.int32
                     )
@@ -283,6 +320,15 @@ class GraphRunner:
                     self.buffer.logits[:bs] = model.forward()
                     if self.capture_greedy_sample:
                         assert self.buffer.next_tokens is not None
+                        if self.reasoning_token_ids is not None:
+                            from .sample import mask_reasoning_logits_
+
+                            mask_reasoning_logits_(
+                                self.buffer.logits[:bs],
+                                batch.reasoning_states,
+                                self.reasoning_token_ids,
+                                current_input_ids=batch.input_ids,
+                            )
                         self.buffer.next_tokens[:bs] = torch.argmax(
                             self.buffer.logits[:bs], dim=-1
                         ).to(torch.int32)

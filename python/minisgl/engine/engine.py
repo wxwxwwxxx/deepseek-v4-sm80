@@ -15,8 +15,10 @@ from minisgl.dsv4_runtime import (
 )
 from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
 from minisgl.models import create_model, load_weight
+from minisgl.reasoning import ReasoningTokenIds, resolve_reasoning_token_ids
 from minisgl.utils import (
     init_logger,
+    load_tokenizer,
     torch_dtype,
 )
 
@@ -33,7 +35,7 @@ from .graph_policy import (
     ResolvedCudaGraphBucketPolicy,
     resolve_cuda_graph_bucket_policy,
 )
-from .sample import BatchSamplingArgs, Sampler
+from .sample import BatchSamplingArgs, ReasoningSampler, Sampler
 
 logger = init_logger(__name__)
 
@@ -97,6 +99,14 @@ def validate_graph_bucket_contract(
         )
 
 
+def resolve_engine_reasoning_token_ids(config: EngineConfig) -> ReasoningTokenIds | None:
+    """Load protocol tokens only for the enabled production contract."""
+
+    if not config.reasoning_sampler_contract_enabled:
+        return None
+    return resolve_reasoning_token_ids(load_tokenizer(config.model_path))
+
+
 class Engine:
     def __init__(self, config: EngineConfig):
         assert not torch.cuda.is_initialized()
@@ -109,6 +119,12 @@ class Engine:
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
+        # The oracle/disabled path deliberately avoids this extra tokenizer
+        # load and matches the pre-Target13 Engine initialization surface.
+        self.reasoning_sampler_contract_enabled = (
+            config.reasoning_sampler_contract_enabled
+        )
+        self.reasoning_token_ids = resolve_engine_reasoning_token_ids(config)
         # DeepSeek V4 SM80 uses BF16 activations while preserving model-defined
         # FP32 state and quantized checkpoint weights.
         self.dtype = torch.bfloat16
@@ -191,7 +207,15 @@ class Engine:
         )
 
         # ======================= Sampler initialization ========================
-        self.sampler = Sampler(self.device, config.model_config.vocab_size)
+        self.sampler = (
+            ReasoningSampler(
+                self.device,
+                config.model_config.vocab_size,
+                self.reasoning_token_ids,
+            )
+            if self.reasoning_token_ids is not None
+            else Sampler(self.device, config.model_config.vocab_size)
+        )
         self._copy_done_event_pool = [torch.cuda.Event() for _ in range(2)]
         self._copy_done_event_pool_ids = {id(event) for event in self._copy_done_event_pool}
 
@@ -223,6 +247,7 @@ class Engine:
             dummy_req=self.dummy_req,
             capture_fail_open=config.cuda_graph_capture_fail_open,
             capture_greedy_sample=config.cuda_graph_capture_greedy_sample,
+            reasoning_token_ids=self.reasoning_token_ids,
         )
         post_kv_prepare_report = self.graph_runner.capture_status.get(
             "post_kv_model_cache_prepare_report", {}
@@ -417,6 +442,9 @@ class Engine:
             metadata_width=int(config.max_seq_len),
             page_size=int(config.page_size),
             capture_greedy_sample=bool(config.cuda_graph_capture_greedy_sample),
+            reasoning_sampler_contract_enabled=(
+                config.reasoning_sampler_contract_enabled
+            ),
         )
         estimate_bytes = self._sync_max_int(estimate.estimate_bytes)
         margin_bytes = self._sync_max_int(estimate.safety_margin_bytes)
@@ -619,7 +647,7 @@ class Engine:
 
         if next_tokens_gpu is None:
             assert logits is not None
-            next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
+            next_tokens_gpu = self.sampler.sample(logits[: batch.size], args, batch).to(torch.int32)
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
         copy_done_event = self._acquire_copy_done_event()
         copy_done_event.record(self.stream)
@@ -840,6 +868,22 @@ def _adjust_config(config: EngineConfig):
                 f"max_prefill_tokens={config.max_extend_tokens}, communication={communication}. "
                 "Use dsv4_runtime_mode='fallback' for the reference path."
             )
+            reasoning_contract_enabled = bool(
+                getattr(
+                    config,
+                    "reasoning_sampler_contract_enabled",
+                    not bool(
+                        getattr(config, "disable_reasoning_sampler_contract", False)
+                    ),
+                )
+            )
+            if not reasoning_contract_enabled:
+                logger.warning_rank0(
+                    "DeepSeek V4 reasoning sampler contract is DISABLED for raw-logit "
+                    "comparison. Reasoning may terminate before </think>, return "
+                    "stop-with-empty-content, emit multiple </think> delimiters, or "
+                    "repeat answers in CHAT mode."
+                )
         else:
             override("page_size", 256)
             override("disable_cuda_graph", True)
@@ -856,7 +900,8 @@ def _adjust_config(config: EngineConfig):
                     override(attr, False)
             logger.info_rank0(
                 "DeepSeek V4 fallback runtime: page_size=256, CUDA graph=off, "
-                "PyNCCL=off, cache=naive."
+                "PyNCCL=off, cache=naive. The reasoning sampler contract is "
+                "disabled to preserve oracle logits and sampling distributions."
             )
         if config.attention_backend == "auto":
             override("attention_backend", "dsv4")

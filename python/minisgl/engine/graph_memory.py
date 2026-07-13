@@ -48,6 +48,7 @@ def estimate_dsv4_sm80_graph_memory(
     metadata_width: int,
     page_size: int,
     capture_greedy_sample: bool,
+    reasoning_sampler_contract_enabled: bool = False,
 ) -> GraphMemoryEstimate:
     """Return the TARGET 12.603 conservative repaired-graph estimate.
 
@@ -83,6 +84,8 @@ def estimate_dsv4_sm80_graph_memory(
     remaining = (count - 1) * DSV4_SM80_PER_GRAPH_BYTES
     pages_per_request = (width + page - 1) // page
     metadata = max_bs * pages_per_request * 4 * 4
+    if reasoning_sampler_contract_enabled:
+        metadata += max_bs * 4
     if capture_greedy_sample:
         metadata += max_bs * 4
     estimate = shared + remaining + metadata

@@ -192,7 +192,15 @@ class Scheduler(SchedulerIOMixin):
         # some alias for easy access
         self.finished_reqs: Set[Req] = set()
         self.tokenizer = load_tokenizer(config.model_path)
-        self.eos_token_id = self.tokenizer.eos_token_id
+        self.reasoning_sampler_contract_enabled = (
+            self.engine.reasoning_sampler_contract_enabled
+        )
+        if self.engine.reasoning_token_ids is None:
+            self.eos_token_id = self.tokenizer.eos_token_id
+            self.think_end_token_id = None
+        else:
+            self.eos_token_id = self.engine.reasoning_token_ids.eos
+            self.think_end_token_id = self.engine.reasoning_token_ids.think_end
         self.token_pool = self.table_manager.token_pool
         self.prefill_budget = config.max_extend_tokens
         self._stats_tracker = (
@@ -290,6 +298,12 @@ class Scheduler(SchedulerIOMixin):
                 next_token = next_tokens_cpu[i]
                 req.append_host(next_token.unsqueeze(0))
                 next_token = int(next_token.item())
+                if self.reasoning_sampler_contract_enabled:
+                    assert self.think_end_token_id is not None
+                    req.observe_generated_token(
+                        next_token,
+                        think_end_token_id=self.think_end_token_id,
+                    )
                 finished = not req.can_decode
                 reached_eos = False
                 if not req.sampling_params.ignore_eos:

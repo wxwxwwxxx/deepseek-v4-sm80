@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Literal
 
 import torch
+from minisgl.reasoning import (
+    ReasoningState,
+    advance_reasoning_state,
+    initial_reasoning_state,
+)
 
 if TYPE_CHECKING:
     from minisgl.attention import BaseAttnBackend, BaseAttnMetadata
@@ -33,7 +38,9 @@ class Req:
     uid: int
     sampling_params: SamplingParams
     cache_handle: BaseCacheHandle
+    reasoning_effort: str | None = None
     swa_evicted_seqlen: int = 0
+    reasoning_state: ReasoningState = field(init=False)
 
     def __post_init__(self) -> None:
         assert self.input_ids.is_cpu
@@ -41,6 +48,14 @@ class Req:
         self.max_device_len = len(self.input_ids) + self.output_len
         assert 0 <= self.cached_len < self.device_len <= self.max_device_len
         self.swa_evicted_seqlen = max(0, int(self.swa_evicted_seqlen))
+        self.reasoning_state = initial_reasoning_state(self.reasoning_effort)
+
+    def observe_generated_token(self, token_id: int, *, think_end_token_id: int) -> None:
+        self.reasoning_state = advance_reasoning_state(
+            self.reasoning_state,
+            token_id,
+            think_end_token_id=think_end_token_id,
+        )
 
     @property
     def remain_len(self) -> int:
@@ -82,6 +97,9 @@ class Batch:
     # token rows.  CUDA graph replay binds this to a stable capture-buffer
     # address; eager execution materializes an exact-sized scalar.
     num_token_non_padded: torch.Tensor = field(init=False)
+    # One graph-visible generation state per real request row.  Graph padding
+    # owns separate capture-buffer rows and never aliases request-local state.
+    reasoning_states: torch.Tensor = field(init=False)
     # this field should be set by attention backend
     attn_metadata: BaseAttnMetadata = field(init=False)
 

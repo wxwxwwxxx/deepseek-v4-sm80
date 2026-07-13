@@ -15,6 +15,7 @@ def _fake_config(**overrides):
     config = SimpleNamespace(
         model_config=SimpleNamespace(is_deepseek_v4=True, is_moe=True),
         dsv4_runtime_mode="optimized",
+        disable_reasoning_sampler_contract=False,
         dsv4_sm80_recipe=None,
         max_running_req=256,
         max_running_req_explicit=False,
@@ -112,6 +113,46 @@ def test_deepseek_v4_typed_fallback_contract(monkeypatch):
     assert runtime.moe_expert_backend == "grouped_fp4"
     assert runtime.release_raw_expert_weights is False
     assert runtime.marlin_prebuild is False
+
+
+def test_optimized_explicit_contract_disable_emits_rank0_warning(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        engine_module.logger,
+        "warning_rank0",
+        lambda message, *args, **kwargs: warnings.append(message),
+    )
+    config = _fake_config(disable_reasoning_sampler_contract=True)
+
+    engine_module._adjust_config(config)
+
+    assert len(warnings) == 1
+    assert "DISABLED" in warnings[0]
+    assert "stop-with-empty-content" in warnings[0]
+    assert "multiple </think>" in warnings[0]
+    assert "CHAT mode" in warnings[0]
+
+
+def test_fallback_logs_oracle_disable_without_warning(monkeypatch):
+    infos = []
+    warnings = []
+    monkeypatch.setattr(
+        engine_module.logger,
+        "info_rank0",
+        lambda message, *args, **kwargs: infos.append(message),
+    )
+    monkeypatch.setattr(
+        engine_module.logger,
+        "warning_rank0",
+        lambda message, *args, **kwargs: warnings.append(message),
+    )
+    config = _fake_config(dsv4_runtime_mode="fallback")
+
+    engine_module._adjust_config(config)
+
+    assert warnings == []
+    assert any("oracle logits and sampling distributions" in message for message in infos)
 
 
 def test_deepseek_v4_release_defaults_honor_explicit_max_extend_tokens(monkeypatch):

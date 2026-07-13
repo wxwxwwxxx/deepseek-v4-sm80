@@ -207,6 +207,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             use_pynccl=use_pynccl,
             allow_dsv4_cuda_graph=allow_graph,
             disable_cuda_graph=not allow_graph,
+            disable_reasoning_sampler_contract=args.disable_reasoning_sampler_contract,
             **llm_kwargs,
         )
         generated = llm.generate(
@@ -217,6 +218,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 ignore_eos=False,
                 max_tokens=args.max_tokens,
             ),
+            reasoning_effort="high" if args.thinking_mode == "thinking" else None,
         )
         torch.cuda.synchronize(llm.device)
         if rank == 0:
@@ -277,6 +279,9 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 "max_running_req": args.max_running_req or max(len(prompts), 1),
                 "max_extend_tokens": args.max_extend_tokens,
                 "max_tokens": args.max_tokens,
+                "reasoning_sampler_contract_enabled": (
+                    llm.engine.reasoning_sampler_contract_enabled if llm else None
+                ),
                 "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}) if llm else {},
                 "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}) if llm else {},
                 "kv_capacity_plan_report": getattr(llm.engine, "kv_capacity_plan_report", {}) if llm else {},
@@ -320,6 +325,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--disable-pynccl", action="store_true")
     parser.add_argument("--disable-cuda-graph", action="store_true")
+    parser.add_argument("--disable-reasoning-sampler-contract", action="store_true")
     parser.add_argument("--thinking-mode", choices=("chat", "thinking"), default="chat")
     parser.add_argument(
         "--system-prompt",
