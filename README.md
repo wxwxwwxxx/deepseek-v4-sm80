@@ -8,8 +8,8 @@ Many optimized kernels used by modern DeepSeek serving stacks target newer GPU
 architectures and are unavailable on sm80. This project adapts Mini-SGLang for
 DeepSeek V4 Flash on A100, supplies sm80-compatible kernels and runtime paths,
 and applies practical performance tuning for tensor-parallel serving. It also
-supports chunked prefill and single-request contexts up to the model's 1M-token
-limit on the validated DGX A100 platform.
+supports chunked prefill and validated single-request contexts through 512K
+tokens on the DGX A100 platform.
 
 See the [DGX A100 performance results](PERFORMANCE.md) for measured throughput,
 CUDA graph memory tradeoffs, and long-context capacity.
@@ -27,8 +27,8 @@ CUDA graph memory tradeoffs, and long-context capacity.
   prefill.
 - **Model-aligned precision:** BF16 activations and primary compute, while
   preserving the model's FP32 state and quantized FP8/FP4 weights.
-- **Long-context support:** 512K and 1M single-sequence capability has been
-  validated with page size 256 and bounded prefill chunks.
+- **Long-context support:** 512K single-sequence capability has been validated
+  with page size 256 and bounded prefill chunks.
 - **Simple public surface:** an optimized default path and an explicit slow
   fallback/oracle path for diagnosis.
 
@@ -95,42 +95,72 @@ An interactive shell is also available:
 python -m minisgl.shell --model /models/DeepSeek-V4-Flash --tp-size 8
 ```
 
+### Reasoning
+
+Set `reasoning_effort` to `high` or `max` to request model reasoning. The API
+returns reasoning in `reasoning_content` and the final answer in `content`:
+
+```bash
+curl http://127.0.0.1:1919/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "messages": [{"role": "user", "content": "Design a fault-tolerant distributed queue."}],
+    "reasoning_effort": "high",
+    "max_completion_tokens": 16384,
+    "temperature": 1.0,
+    "top_p": 1.0
+  }'
+```
+
+The optional `--enable-reasoning-sampler-contract` server flag enforces a
+three-state delimiter/EOS grammar. It is disabled by default so ordinary and
+reasoning requests retain the model's raw sampling distribution.
+
 ## Runtime Settings
 
 Ordinary DGX A100 use requires no DeepSeek-specific tuning flags. The optimized
-runtime defaults to page size 256, chunked prefill, up to 256 running requests,
-and CUDA graph buckets through M=256.
+runtime defaults to page size 256, chunked prefill, up to 128 running requests,
+and CUDA graph buckets through M=128.
 
-Optional recipes set the request capacity, maximum captured decode batch, and,
-for long-context modes, maximum sequence length:
+The default and optional recipes pair request capacity with CUDA Graph coverage;
+the long-context recipe also limits the requested sequence length:
 
-| Recipe | Max running requests | CUDA graph max M | Context length | Intended use |
-| --- | ---: | ---: | ---: | --- |
-| `dsv4_sm80_low_m64` | 256 | 64 | Model config | More KV capacity; batches above M=64 run eagerly. |
-| `dsv4_sm80_mid_m128` | 256 | 128 | Model config | Capacity/throughput balance through M=128. |
-| `dsv4_sm80_balanced` | 256 | 256 | Model config | DGX A100 throughput-oriented default. |
-| `dsv4_sm80_long_context_512k` | 4 | 4 | 524,288 | Low-concurrency 512K context serving. |
-| `dsv4_sm80_1m_smoke` | 1 | 1 | 1,048,576 | Single-request 1M capability smoke. |
+| Configuration | Max running / graph M | KV capacity (tokens) | Intended use |
+| --- | ---: | ---: | --- |
+| `default_m128` (default) | 128 | 682,240 | General serving with balanced graph coverage and KV capacity. |
+| `low_m64` | 64 | 811,008 | More KV capacity for low-concurrency serving. |
+| `high_m256` | 256 | 424,704 | Higher-throughput serving with graph replay through M=256. |
+| `long_context_m4` | 4 | 930,816 | Low-concurrency long-context serving, validated through 512K. |
 
-All recipes retain the optimized runtime's page size 256, prefill chunk size
-8,192, and memory ratio 0.9 unless explicitly overridden. Select a recipe with
-`--recipe NAME`. These settings were measured on a DGX A100 8x80GB
-system and are templates rather than universal sm80 defaults. Explicit
-command-line settings take precedence over the corresponding recipe fields.
+These configurations retain the optimized runtime's page size 256, prefill
+chunk size 8,192, and memory ratio 0.9 unless explicitly overridden. Select an
+optional recipe with `--recipe NAME`. The effective context limit is constrained
+by available KV-cache capacity even when the model configuration permits a
+larger value.
+These settings were measured on a DGX A100 8x80GB system and are templates
+rather than universal sm80 defaults. Explicit command-line settings take
+precedence over the corresponding recipe fields.
 
-### Performance and memory arguments
+### Key arguments
 
-Most users should start with the defaults or a recipe. The following options
-are the useful controls when adapting them to another workload or sm80 system:
+Most users should start with the defaults or a recipe. These options cover the
+main serving behavior and the useful controls for adapting the runtime to
+another workload or sm80 system:
 
-| Argument | What it controls | Main tradeoff |
+| Argument | What it controls | Notes |
 | --- | --- | --- |
 | `--tp-size N` | Number of tensor-parallel GPU workers. | This release is validated with TP8; changing it alters per-GPU weights, cache capacity, and communication. |
+| `--served-model-name NAME` | Model ID exposed by the OpenAI-compatible API. | Clients must send this exact ID in the request's `model` field. By default, it is derived from the model path. |
+| `--enable-reasoning-sampler-contract` | Enables the optional three-state reasoning delimiter/EOS grammar. | Disabled by default; enabling it changes the model's raw sampling distribution and is unavailable in fallback mode. |
 | `--max-running-requests N` | Maximum number of simultaneously active request slots. | Higher values allow more concurrency but increase request metadata and independent SWA reservation. |
 | `--cuda-graph-max-bs N` | Largest decode batch captured by CUDA Graph. | Larger values cover higher active M but consume more graph memory, reduce KV capacity, and increase startup time. Batches above this value remain legal and run eagerly. |
 | `--context-length N` | Maximum prompt plus generated tokens for one sequence, overriding the model config. | Larger values widen request/page tables; actual admission is still limited by available KV capacity. |
 | `--memory-ratio R` | Fraction of GPU memory made available to the runtime capacity planner. | Raising it can provide more KV pages but leaves less safety headroom for allocations outside the planned budget. |
 | `--max-prefill-length N` | Maximum number of tokens processed by one chunked-prefill forward. | Larger chunks may improve prefill efficiency but increase activation/workspace peaks; smaller chunks reduce peak memory. |
+
+`--max-running-requests` may exceed `--cuda-graph-max-bs`; published recipes
+keep them equal for clear performance and capacity comparisons.
 
 Low-level page-count and page-size overrides are intentionally omitted here;
 the release defaults are part of the validated DeepSeek V4 cache layout and

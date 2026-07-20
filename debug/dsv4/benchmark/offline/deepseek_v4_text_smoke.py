@@ -207,7 +207,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             use_pynccl=use_pynccl,
             allow_dsv4_cuda_graph=allow_graph,
             disable_cuda_graph=not allow_graph,
-            disable_reasoning_sampler_contract=args.disable_reasoning_sampler_contract,
+            enable_reasoning_sampler_contract=args.enable_reasoning_sampler_contract,
             **llm_kwargs,
         )
         generated = llm.generate(
@@ -325,7 +325,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--disable-pynccl", action="store_true")
     parser.add_argument("--disable-cuda-graph", action="store_true")
-    parser.add_argument("--disable-reasoning-sampler-contract", action="store_true")
+    parser.add_argument("--enable-reasoning-sampler-contract", action="store_true")
     parser.add_argument("--thinking-mode", choices=("chat", "thinking"), default="chat")
     parser.add_argument(
         "--system-prompt",

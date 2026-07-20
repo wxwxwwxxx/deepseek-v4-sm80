@@ -17,10 +17,10 @@ if TYPE_CHECKING:
 class EngineConfig:
     model_path: str
     tp_info: DistributedInfo
-    max_running_req: int = 256
+    max_running_req: int = 128
     max_running_req_explicit: bool = False
     dsv4_runtime_mode: DSV4RuntimeMode = "optimized"
-    disable_reasoning_sampler_contract: bool = False
+    enable_reasoning_sampler_contract: bool = False
     dsv4_sm80_recipe: str | None = None
     attention_backend: str = "auto"
     cuda_graph_bs: List[int] | None = None
@@ -63,17 +63,13 @@ class EngineConfig:
 
     @property
     def reasoning_sampler_contract_enabled(self) -> bool:
-        """Return the immutable effective grammar mode for this engine.
+        """Return whether the optional reasoning grammar mask is active.
 
-        Fallback is a numerical oracle and therefore cannot enable grammar
-        masking.  Optimized enables it unless the comparison-only disable flag
-        was explicitly requested.
+        Fallback is a numerical oracle and therefore never enables grammar
+        masking. The optimized runtime only enables it when explicitly asked.
         """
 
-        return (
-            self.dsv4_runtime_mode == "optimized"
-            and not self.disable_reasoning_sampler_contract
-        )
+        return self.dsv4_runtime_mode == "optimized" and self.enable_reasoning_sampler_contract
 
     @property
     def distributed_addr(self) -> str:

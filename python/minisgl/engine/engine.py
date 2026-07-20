@@ -40,14 +40,13 @@ from .sample import BatchSamplingArgs, ReasoningSampler, Sampler
 logger = init_logger(__name__)
 
 _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES = 32 * 1024 * 1024
-_DSV4_SM80_DEFAULT_CUDA_GRAPH_MAX_BS = 256
+_DSV4_SM80_DEFAULT_CUDA_GRAPH_MAX_BS = 128
 _DSV4_SM80_FALLBACK_CUDA_GRAPH_BS = (1, 2, 4, 8, 16)
 _DSV4_SM80_RECIPES = {
-    "dsv4_sm80_low_m64": (256, 64, None),
-    "dsv4_sm80_mid_m128": (256, 128, None),
-    "dsv4_sm80_balanced": (256, 256, None),
-    "dsv4_sm80_long_context_512k": (4, 4, 524_288),
-    "dsv4_sm80_1m_smoke": (1, 1, 1_048_576),
+    "default_m128": (128, 128, None),
+    "low_m64": (64, 64, None),
+    "high_m256": (256, 256, None),
+    "long_context_m4": (4, 4, 524_288),
 }
 _GENERIC_DEFAULT_MAX_EXTEND_TOKENS = 8192
 _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS = 8192
@@ -790,6 +789,14 @@ def _adjust_config(config: EngineConfig):
                 f"dsv4_sm80_recipe={requested_recipe!r} conflicts with "
                 "dsv4_runtime_mode='fallback'."
             )
+        if not runtime.optimized and bool(
+            getattr(config, "enable_reasoning_sampler_contract", False)
+        ):
+            raise ValueError(
+                "enable_reasoning_sampler_contract conflicts with "
+                "dsv4_runtime_mode='fallback'; fallback preserves raw logits "
+                "and sampling behavior."
+            )
         recipe_name = requested_recipe
         if recipe_name is not None:
             recipe_max_req, recipe_graph_max, recipe_max_seq = _DSV4_SM80_RECIPES[recipe_name]
@@ -808,18 +815,21 @@ def _adjust_config(config: EngineConfig):
                 override("cuda_graph_max_bs", min(recipe_graph_max, config.max_running_req))
             if recipe_max_seq is not None and getattr(config, "context_length", None) is None:
                 override("context_length", recipe_max_seq)
-            logger.warning_rank0(
-                f"Applying DeepSeek V4 recipe {recipe_name!r}, validated on one "
-                "DGX A100 8x80GB system: "
-                f"max_running_req={recipe_max_req}, "
-                f"cuda_graph_max_bs={recipe_graph_max}, "
-                f"context_length={recipe_max_seq}. "
-                + (
-                    "Explicit settings override recipe fields: " + ", ".join(manual_overrides) + "."
-                    if manual_overrides
-                    else "No explicit field overrides were detected."
+            if recipe_name != "default_m128":
+                logger.warning_rank0(
+                    f"Applying DeepSeek V4 recipe {recipe_name!r}, validated on one "
+                    "DGX A100 8x80GB system: "
+                    f"max_running_req={recipe_max_req}, "
+                    f"cuda_graph_max_bs={recipe_graph_max}, "
+                    f"context_length={recipe_max_seq}. "
+                    + (
+                        "Explicit settings override recipe fields: "
+                        + ", ".join(manual_overrides)
+                        + "."
+                        if manual_overrides
+                        else "No explicit field overrides were detected."
+                    )
                 )
-            )
         elif (
             runtime.optimized and config.cuda_graph_bs is None and config.cuda_graph_max_bs is None
         ):
@@ -872,17 +882,14 @@ def _adjust_config(config: EngineConfig):
                 getattr(
                     config,
                     "reasoning_sampler_contract_enabled",
-                    not bool(
-                        getattr(config, "disable_reasoning_sampler_contract", False)
-                    ),
+                    getattr(config, "enable_reasoning_sampler_contract", False),
                 )
             )
-            if not reasoning_contract_enabled:
+            if reasoning_contract_enabled:
                 logger.warning_rank0(
-                    "DeepSeek V4 reasoning sampler contract is DISABLED for raw-logit "
-                    "comparison. Reasoning may terminate before </think>, return "
-                    "stop-with-empty-content, emit multiple </think> delimiters, or "
-                    "repeat answers in CHAT mode."
+                    "DeepSeek V4 reasoning sampler contract is ENABLED. It masks "
+                    "protocol delimiters and EOS according to request state, changing "
+                    "the model's raw sampling distribution."
                 )
         else:
             override("page_size", 256)

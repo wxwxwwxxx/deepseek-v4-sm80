@@ -263,10 +263,14 @@ def test_graph_padding_rows_are_separate_and_do_not_change_real_request_state() 
 
 def test_effective_config_and_server_flag_select_production_or_oracle() -> None:
     base = {"model_path": "unused", "tp_info": DistributedInfo(0, 1)}
-    assert EngineConfig(**base).reasoning_sampler_contract_enabled
+    assert not EngineConfig(**base).reasoning_sampler_contract_enabled
+    assert EngineConfig(
+        **base,
+        enable_reasoning_sampler_contract=True,
+    ).reasoning_sampler_contract_enabled
     assert not EngineConfig(
         **base,
-        disable_reasoning_sampler_contract=True,
+        enable_reasoning_sampler_contract=False,
     ).reasoning_sampler_contract_enabled
     assert not EngineConfig(
         **base,
@@ -275,14 +279,12 @@ def test_effective_config_and_server_flag_select_production_or_oracle() -> None:
     assert not EngineConfig(
         **base,
         dsv4_runtime_mode="fallback",
-        disable_reasoning_sampler_contract=False,
+        enable_reasoning_sampler_contract=True,
     ).reasoning_sampler_contract_enabled
 
-    args, _ = parse_args(
-        ["--model-path", "unused", "--disable-reasoning-sampler-contract"]
-    )
-    assert args.disable_reasoning_sampler_contract
-    assert not args.reasoning_sampler_contract_enabled
+    args, _ = parse_args(["--model-path", "unused", "--enable-reasoning-sampler-contract"])
+    assert args.enable_reasoning_sampler_contract
+    assert args.reasoning_sampler_contract_enabled
 
 
 def test_disabled_sampler_preserves_release_logits_and_creates_no_state_metadata(
@@ -649,15 +651,12 @@ def test_engine_skips_extra_tokenizer_load_for_disabled_and_fallback(monkeypatch
 
     monkeypatch.setattr("minisgl.engine.engine.load_tokenizer", fake_load_tokenizer)
     base = {"model_path": "checkpoint", "tp_info": DistributedInfo(0, 1)}
-    disabled = EngineConfig(
-        **base,
-        disable_reasoning_sampler_contract=True,
-    )
+    disabled = EngineConfig(**base)
     fallback = EngineConfig(
         **base,
         dsv4_runtime_mode="fallback",
     )
-    enabled = EngineConfig(**base)
+    enabled = EngineConfig(**base, enable_reasoning_sampler_contract=True)
 
     assert resolve_engine_reasoning_token_ids(disabled) is None
     assert resolve_engine_reasoning_token_ids(fallback) is None

@@ -4926,14 +4926,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--recipe",
         dest="dsv4_sm80_recipe",
         choices=(
-            "dsv4_sm80_low_m64",
-            "dsv4_sm80_mid_m128",
-            "dsv4_sm80_balanced",
-            "dsv4_sm80_long_context_512k",
-            "dsv4_sm80_1m_smoke",
+            "default_m128",
+            "low_m64",
+            "high_m256",
+            "long_context_m4",
         ),
-        default=None,
-        help="Select a public DSV4 A100/sm80 recipe; omitted uses the no-env default.",
+        default="default_m128",
+        help="Select a DSV4 A100/sm80 recipe; defaults to default_m128.",
     )
     parser.add_argument(
         "--variants",

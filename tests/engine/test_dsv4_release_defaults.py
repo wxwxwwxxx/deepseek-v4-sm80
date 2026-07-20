@@ -15,9 +15,9 @@ def _fake_config(**overrides):
     config = SimpleNamespace(
         model_config=SimpleNamespace(is_deepseek_v4=True, is_moe=True),
         dsv4_runtime_mode="optimized",
-        disable_reasoning_sampler_contract=False,
+        enable_reasoning_sampler_contract=False,
         dsv4_sm80_recipe=None,
-        max_running_req=256,
+        max_running_req=128,
         max_running_req_explicit=False,
         attention_backend="auto",
         allow_dsv4_cuda_graph=False,
@@ -56,10 +56,10 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
     assert config.max_extend_tokens == 8192
     assert config.allow_dsv4_cuda_graph is True
     assert config.dsv4_sm80_recipe is None
-    assert config.max_running_req == 256
-    assert config.cuda_graph_max_bs == 256
+    assert config.max_running_req == 128
+    assert config.cuda_graph_max_bs == 128
     assert config.cuda_graph_policy.source_mode == "explicit_max"
-    assert config.cuda_graph_policy.resolved_bs[-1] == 256
+    assert config.cuda_graph_policy.resolved_bs[-1] == 128
     assert config.cuda_graph_capture_fail_open is True
     runtime = resolve_dsv4_runtime_config(config.dsv4_runtime_mode)
     assert runtime.moe_expert_backend == "marlin_wna16"
@@ -115,7 +115,7 @@ def test_deepseek_v4_typed_fallback_contract(monkeypatch):
     assert runtime.marlin_prebuild is False
 
 
-def test_optimized_explicit_contract_disable_emits_rank0_warning(monkeypatch):
+def test_optimized_explicit_contract_enable_emits_rank0_warning(monkeypatch):
     warnings = []
     monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -123,15 +123,25 @@ def test_optimized_explicit_contract_disable_emits_rank0_warning(monkeypatch):
         "warning_rank0",
         lambda message, *args, **kwargs: warnings.append(message),
     )
-    config = _fake_config(disable_reasoning_sampler_contract=True)
+    config = _fake_config(enable_reasoning_sampler_contract=True)
 
     engine_module._adjust_config(config)
 
     assert len(warnings) == 1
-    assert "DISABLED" in warnings[0]
-    assert "stop-with-empty-content" in warnings[0]
-    assert "multiple </think>" in warnings[0]
-    assert "CHAT mode" in warnings[0]
+    assert "ENABLED" in warnings[0]
+    assert "masks protocol delimiters and EOS" in warnings[0]
+    assert "raw sampling distribution" in warnings[0]
+
+
+def test_fallback_rejects_reasoning_sampler_contract(monkeypatch):
+    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    config = _fake_config(
+        dsv4_runtime_mode="fallback",
+        enable_reasoning_sampler_contract=True,
+    )
+
+    with pytest.raises(ValueError, match="fallback preserves raw logits"):
+        engine_module._adjust_config(config)
 
 
 def test_fallback_logs_oracle_disable_without_warning(monkeypatch):
@@ -184,11 +194,10 @@ def test_deepseek_v4_release_defaults_honor_explicit_generic_max_extend_tokens(m
 @pytest.mark.parametrize(
     "recipe,max_req,graph_max,max_seq",
     [
-        ("dsv4_sm80_low_m64", 256, 64, None),
-        ("dsv4_sm80_mid_m128", 256, 128, None),
-        ("dsv4_sm80_balanced", 256, 256, None),
-        ("dsv4_sm80_long_context_512k", 4, 4, 524_288),
-        ("dsv4_sm80_1m_smoke", 1, 1, 1_048_576),
+        ("default_m128", 128, 128, None),
+        ("low_m64", 64, 64, None),
+        ("high_m256", 256, 256, None),
+        ("long_context_m4", 4, 4, 524_288),
     ],
 )
 def test_public_dsv4_sm80_recipes_resolve_through_one_graph_policy(
@@ -207,6 +216,25 @@ def test_public_dsv4_sm80_recipes_resolve_through_one_graph_policy(
     assert config.context_length == max_seq
 
 
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "dsv4_sm80_low_m64",
+        "dsv4_sm80_high_m256",
+        "dsv4_sm80_long_context_512k",
+        "dsv4_sm80_mid_m128",
+        "dsv4_sm80_balanced",
+        "dsv4_sm80_1m_smoke",
+    ],
+)
+def test_removed_dsv4_sm80_recipe_names_fail(monkeypatch, recipe):
+    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    config = _fake_config(dsv4_sm80_recipe=recipe)
+
+    with pytest.raises(ValueError, match="Unknown dsv4_sm80_recipe"):
+        engine_module._adjust_config(config)
+
+
 def test_recipe_preserves_explicit_request_graph_and_sequence_overrides(monkeypatch):
     monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
     warnings = []
@@ -217,7 +245,7 @@ def test_recipe_preserves_explicit_request_graph_and_sequence_overrides(monkeypa
     )
     monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
     config = _fake_config(
-        dsv4_sm80_recipe="dsv4_sm80_long_context_512k",
+        dsv4_sm80_recipe="long_context_m4",
         max_running_req=8,
         max_running_req_explicit=True,
         cuda_graph_max_bs=2,

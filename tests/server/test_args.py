@@ -27,17 +27,34 @@ def test_server_args_expose_typed_dsv4_runtime_mode():
     fallback_config, _ = parse_args(base + ["--dsv4-runtime", "fallback"])
 
     assert default_config.dsv4_runtime_mode == "optimized"
+    assert default_config.dsv4_sm80_recipe == "default_m128"
     assert fallback_config.dsv4_runtime_mode == "fallback"
+    assert fallback_config.dsv4_sm80_recipe is None
 
 
 def test_server_args_expose_concise_recipe_option():
     base = ["--model-path", "/tmp/nonexistent-model"]
 
-    config, _ = parse_args(base + ["--recipe", "dsv4_sm80_low_m64"])
+    default_config, _ = parse_args(base)
+    config, _ = parse_args(base + ["--recipe", "low_m64"])
 
-    assert config.dsv4_sm80_recipe == "dsv4_sm80_low_m64"
+    assert default_config.max_running_req == 128
+    assert default_config.dsv4_sm80_recipe == "default_m128"
+    assert config.dsv4_sm80_recipe == "low_m64"
     with pytest.raises(SystemExit):
-        parse_args(base + ["--dsv4-sm80-recipe", "dsv4_sm80_low_m64"])
+        parse_args(base + ["--dsv4-sm80-recipe", "low_m64"])
+
+
+def test_server_args_make_reasoning_sampler_contract_opt_in() -> None:
+    base = ["--model-path", "/tmp/nonexistent-model"]
+
+    default_config, _ = parse_args(base)
+    enabled_config, _ = parse_args(base + ["--enable-reasoning-sampler-contract"])
+
+    assert not default_config.reasoning_sampler_contract_enabled
+    assert enabled_config.reasoning_sampler_contract_enabled
+    with pytest.raises(SystemExit):
+        parse_args(base + ["--disable-reasoning-sampler-contract"])
 
 
 def test_server_args_expose_sglang_aligned_context_length_aliases():

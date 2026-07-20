@@ -104,7 +104,5 @@ def test_readme_referenced_repository_paths_exist():
         "benchmark/online/bench_qwen.py",
         "debug/dsv4/README.md",
         "examples/offline_dsv4.py",
-        "docs/features.md",
-        "docs/structures.md",
     ):
         assert (ROOT / relative).exists(), relative

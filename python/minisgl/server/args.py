@@ -93,6 +93,7 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     max_running_req_explicit = any(
         arg == "--max-running-requests" or arg.startswith("--max-running-requests=") for arg in args
     )
+    recipe_explicit = any(arg == "--recipe" or arg.startswith("--recipe=") for arg in args)
     parser = argparse.ArgumentParser(description="MiniSGL Server Arguments")
 
     parser.add_argument(
@@ -138,29 +139,29 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
-        "--disable-reasoning-sampler-contract",
+        "--enable-reasoning-sampler-contract",
         action="store_true",
         help=(
-            "Disable the DeepSeek V4 reasoning grammar mask in the optimized runtime "
-            "for raw-logit and numerical-equivalence investigations. The fallback "
-            "runtime is always an unmodified-logits oracle."
+            "Enable a request-state grammar mask for DeepSeek V4 reasoning output. "
+            "This changes the raw sampling distribution and is unavailable in the "
+            "fallback/oracle runtime."
         ),
     )
 
     parser.add_argument(
         "--recipe",
         dest="dsv4_sm80_recipe",
-        default=ServerArgs.dsv4_sm80_recipe,
+        default="default_m128",
         choices=[
-            "dsv4_sm80_low_m64",
-            "dsv4_sm80_mid_m128",
-            "dsv4_sm80_balanced",
-            "dsv4_sm80_long_context_512k",
-            "dsv4_sm80_1m_smoke",
+            "default_m128",
+            "low_m64",
+            "high_m256",
+            "long_context_m4",
         ],
         help=(
-            "Optionally apply a request/graph/context recipe validated on DGX A100 "
-            "8x80GB. Explicit request, graph, and sequence settings override its fields."
+            "Apply a default M128, low-M64, high-throughput M256, or long-context "
+            "M4 recipe validated on DGX A100 8x80GB. Defaults to default_m128. "
+            "Explicit request, graph, and sequence settings override recipe fields."
         ),
     )
 
@@ -281,9 +282,14 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     kwargs["max_extend_tokens_explicit"] = max_extend_tokens_explicit
     kwargs["max_running_req_explicit"] = max_running_req_explicit
 
+    if kwargs["dsv4_runtime_mode"] == "fallback" and not recipe_explicit:
+        kwargs["dsv4_sm80_recipe"] = None
+
     # resolve some arguments
     run_shell |= kwargs.pop("shell_mode")
     if run_shell:
+        if not recipe_explicit:
+            kwargs["dsv4_sm80_recipe"] = None
         kwargs["cuda_graph_max_bs"] = 1
         kwargs["max_running_req"] = 1
         kwargs["max_running_req_explicit"] = True
