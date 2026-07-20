@@ -41,6 +41,16 @@ def download_if_missing() -> Path:
     return path
 
 
+def encode_messages(tokenizer, chat_formatter, messages):
+    if chat_formatter is not None:
+        return tokenizer.encode(chat_formatter(messages, None))
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+
+
 def iter_prompt_ids(tokenizer, chat_formatter):
     try:
         import pyarrow.parquet as pq
@@ -66,14 +76,7 @@ def iter_prompt_ids(tokenizer, chat_formatter):
             ):
                 continue
             messages = [{"role": "user", "content": text}]
-            if chat_formatter is not None:
-                yield tokenizer.encode(chat_formatter(messages))
-            else:
-                yield tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                )
+            yield encode_messages(tokenizer, chat_formatter, messages)
 
 
 def print_len_stats(name: str, lengths: list[int]) -> None:
@@ -111,6 +114,7 @@ def main():
     if get_tp_info().is_primary():
         output_lengths = [len(result["token_ids"]) for result in results]
         total_tokens = sum(output_lengths)
+        print("Workload: WildChat prompts with EOS enabled; request lengths vary naturally")
         print_len_stats("Input length", [len(prompt) for prompt in prompts])
         print_len_stats("Output length", output_lengths)
         print(
@@ -120,4 +124,5 @@ def main():
 
 
 if __name__ == "__main__":
+    download_if_missing()
     launch_tensor_parallel(TP_SIZE, main)

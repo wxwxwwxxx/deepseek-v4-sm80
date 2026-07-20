@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 logger = init_logger(__name__)
 
 PORT = 1919
+TOKENIZER = "/models/DeepSeek-V4-Flash"
 NUM_REQUESTS = 1000
 SCALES = [0.4, 0.5, 0.6, 0.7, 0.8, 1.6]
 TRACE_PATH = Path("~/.cache/minisgl/benchmarks/qwen_traceA_blksz_16.jsonl").expanduser()
@@ -39,10 +40,14 @@ async def main():
     random.seed(42)
     async with OpenAI(base_url=f"http://127.0.0.1:{PORT}/v1", api_key="dummy") as client:
         model = await get_model_name(client)
-        tokenizer = AutoTokenizer.from_pretrained(model)
+        tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
         traces = read_qwen_trace(download_trace(), tokenizer, n=NUM_REQUESTS, dummy=True)
-        logger.info(f"Benchmarking {NUM_REQUESTS} requests with model {model}")
+        logger.info(
+            f"Benchmarking {NUM_REQUESTS} arrival-paced requests with served model {model}; "
+            f"tokenizer={TOKENIZER}; GPU utilization depends on trace scale"
+        )
         for scale in SCALES:
+            logger.info(f"Replaying Qwen trace at scale={scale}")
             results = await benchmark_trace(client, scale_traces(traces, scale), model)
             process_benchmark_results(results)
 

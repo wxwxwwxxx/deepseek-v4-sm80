@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -53,8 +54,85 @@ def test_public_defaults_point_to_dsv4_release_surfaces():
     assert offline.MODEL == wildchat.MODEL == DEFAULT_MODEL
     assert offline.TP_SIZE == wildchat.TP_SIZE == 8
     assert simple.PORT == trace.PORT == 1919
+    assert simple.TOKENIZER == trace.TOKENIZER == DEFAULT_MODEL
     assert str(wildchat.CACHE_DIR).startswith(str(Path.home() / ".cache"))
     assert str(trace.TRACE_PATH).startswith(str(Path.home() / ".cache"))
+
+
+def test_synthetic_benchmarks_use_fixed_saturation_workloads():
+    prompts, sampling_params = offline.make_workload()
+
+    assert offline.NUM_SEQS == 128
+    assert {len(prompt) for prompt in prompts} == {offline.INPUT_LEN}
+    assert {params.max_tokens for params in sampling_params} == {offline.OUTPUT_LEN}
+    assert all(params.is_greedy and params.ignore_eos for params in sampling_params)
+    assert simple.TEST_BATCH_SIZES == [64]
+    assert simple.INPUT_LEN == simple.OUTPUT_LEN == 1024
+
+
+def test_wildchat_uses_non_reasoning_dsv4_formatter_contract():
+    calls = []
+
+    class Tokenizer:
+        @staticmethod
+        def encode(prompt):
+            return [prompt]
+
+    def formatter(messages, reasoning_effort):
+        calls.append((messages, reasoning_effort))
+        return "formatted"
+
+    messages = [{"role": "user", "content": "hello"}]
+    assert wildchat.encode_messages(Tokenizer(), formatter, messages) == ["formatted"]
+    assert calls == [(messages, None)]
+
+
+def test_online_benchmark_does_not_send_internal_input_length_override():
+    class Response:
+        def __init__(self):
+            self.done = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.done:
+                raise StopAsyncIteration
+            self.done = True
+            return object()
+
+    class Completions:
+        kwargs = None
+
+        async def create(self, **kwargs):
+            self.kwargs = kwargs
+            return Response()
+
+    class Chat:
+        completions = Completions()
+
+    class Client:
+        chat = Chat()
+
+    async def run_benchmark():
+        client = Client()
+        result = await simple.benchmark_one(
+            client,
+            "hello",
+            2,
+            "DeepSeek-V4-Flash",
+            pbar=False,
+            input_length=128,
+        )
+        return client, result
+
+    client, result = asyncio.run(run_benchmark())
+
+    assert result.input_len == 128
+    assert client.chat.completions.kwargs["extra_body"] == {
+        "ignore_eos": True,
+        "top_k": 1,
+    }
 
 
 @pytest.mark.parametrize("module", [offline, wildchat])
@@ -89,7 +167,7 @@ def test_llm_uses_launcher_environment(monkeypatch):
 def test_all_moved_debug_scripts_exist_and_compile():
     scripts = sorted(DEBUG_DIR.glob("deepseek_v4_*.py"))
     scripts += [DEBUG_DIR / "dsv4_graph_reserve_lifecycle.py"]
-    assert len(scripts) == 20
+    assert len(scripts) == 18
     for script in scripts:
         assert script.is_file()
         compile(script.read_text(encoding="utf-8"), str(script), "exec")

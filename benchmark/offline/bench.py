@@ -7,35 +7,43 @@ from minisgl.llm import LLM
 
 MODEL = "/models/DeepSeek-V4-Flash"
 TP_SIZE = 8
-NUM_SEQS = 256
-MAX_INPUT_LEN = 1024
-MAX_OUTPUT_LEN = 1024
+NUM_SEQS = 128
+INPUT_LEN = 1024
+OUTPUT_LEN = 1024
+
+
+def make_workload():
+    seed(0)
+    prompts = [[randint(0, 10000) for _ in range(INPUT_LEN)] for _ in range(NUM_SEQS)]
+    sampling_params = [
+        SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=OUTPUT_LEN)
+        for _ in range(NUM_SEQS)
+    ]
+    return prompts, sampling_params
 
 
 def main():
-    seed(0)
     llm = LLM(MODEL)
-    prompts = [
-        [randint(0, 10000) for _ in range(randint(100, MAX_INPUT_LEN))] for _ in range(NUM_SEQS)
-    ]
-    sampling_params = [
-        SamplingParams(
-            temperature=0.6,
-            ignore_eos=True,
-            max_tokens=randint(100, MAX_OUTPUT_LEN),
-        )
-        for _ in range(NUM_SEQS)
-    ]
+    prompts, sampling_params = make_workload()
 
-    llm.generate(["Benchmark: "], SamplingParams(temperature=0.1, max_tokens=2))
+    llm.generate(
+        ["Benchmark: "],
+        SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=2),
+    )
     start = time.time()
     results = llm.generate(prompts, sampling_params)
     duration = time.time() - start
-    total_tokens = sum(len(result["token_ids"]) for result in results)
+    input_tokens = sum(len(prompt) for prompt in prompts)
+    output_tokens = sum(len(result["token_ids"]) for result in results)
     if get_tp_info().is_primary():
         print(
-            f"Total: {total_tokens}tok, Time: {duration:.2f}s, "
-            f"Throughput: {total_tokens / duration:.2f}tok/s"
+            f"Workload: M={NUM_SEQS}, input={INPUT_LEN}tok, output={OUTPUT_LEN}tok, "
+            "greedy, ignore_eos=True"
+        )
+        print(
+            f"Input: {input_tokens}tok, Output: {output_tokens}tok, "
+            f"Time: {duration:.2f}s, Requests: {NUM_SEQS / duration:.2f}req/s, "
+            f"Output throughput: {output_tokens / duration:.2f}tok/s"
         )
 
 

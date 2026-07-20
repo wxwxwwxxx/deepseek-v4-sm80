@@ -16,8 +16,10 @@ from transformers import AutoTokenizer
 logger = init_logger(__name__)
 
 PORT = 1919
+TOKENIZER = "/models/DeepSeek-V4-Flash"
 TEST_BATCH_SIZES = [64]
-MAX_INPUT_LEN = 8192
+INPUT_LEN = 1024
+OUTPUT_LEN = 1024
 
 
 async def main():
@@ -26,15 +28,14 @@ async def main():
     async def generate_tasks(max_batch_size: int) -> List[str]:
         result = []
         for _ in range(max_batch_size):
-            length = random.randint(1, MAX_INPUT_LEN)
-            result.append(generate_prompt(tokenizer, length))
+            result.append(generate_prompt(tokenizer, INPUT_LEN))
             await asyncio.sleep(0)
         return result
 
     async with OpenAI(base_url=f"http://127.0.0.1:{PORT}/v1", api_key="dummy") as client:
         model = await get_model_name(client)
-        tokenizer = AutoTokenizer.from_pretrained(model)
-        logger.info(f"Loaded tokenizer from {model}")
+        tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+        logger.info(f"Using served model {model}; loaded tokenizer from {TOKENIZER}")
 
         tasks = asyncio.create_task(generate_tasks(max(TEST_BATCH_SIZES)))
         test_message = generate_prompt(tokenizer, 100)
@@ -43,12 +44,15 @@ async def main():
             raise RuntimeError("Server connection test produced no output")
 
         messages = await tasks
-        output_lengths = [random.randint(16, 1024) for _ in messages]
         for batch_size in TEST_BATCH_SIZES:
+            logger.info(
+                f"Benchmarking fixed batch M={batch_size}, input={INPUT_LEN}tok, "
+                f"output={OUTPUT_LEN}tok"
+            )
             results = await benchmark_one_batch(
                 client,
                 messages[:batch_size],
-                output_lengths[:batch_size],
+                OUTPUT_LEN,
                 model,
             )
             process_benchmark_results(results)

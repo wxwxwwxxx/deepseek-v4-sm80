@@ -207,7 +207,7 @@ async def benchmark_one(
     *,
     pbar: Console | bool = True,
     extra_body: Dict[str, Any] | None = None,
-    input_length: int | None = None,  # a hack to force input length
+    input_length: int | None = None,
 ) -> RawResult:
     if isinstance(pbar, bool):
         pbar = make_console(1, output_length, use_pbar=pbar)
@@ -216,9 +216,6 @@ async def benchmark_one(
             "ignore_eos": True,
             "top_k": 1,
         }
-        # this is an internal kwargs that might work for our system
-        if input_length is not None:
-            kwargs["input_length_override"] = input_length
         kwargs.update(extra_body or {})  # can override kwargs
         response = await client.chat.completions.create(
             model=model,
@@ -377,8 +374,8 @@ def process_benchmark_results(
         f" p99: {_fmt(p99_tpot)} ms, max: {_fmt(max_tpot)} ms)"
     )
     logger.info(
-        f"E2E:  {_fmt(avg_e2e) }  s (p50: {_fmt(p50_e2e) }  s, p90: {_fmt(p90_e2e) }  s,"
-        f" p99: {_fmt(p99_e2e) }  s, max: {_fmt(max_e2e) }  s)"
+        f"E2E:  {_fmt(avg_e2e)}  s (p50: {_fmt(p50_e2e)}  s, p90: {_fmt(p90_e2e)}  s,"
+        f" p99: {_fmt(p99_e2e)}  s, max: {_fmt(max_e2e)}  s)"
     )
     logger.info(f"Duration: {_fmt(dur)} s")
     logger.info(f"Throughput: {_fmt(num_tokens / dur)} token/s, {_fmt(num_requests / dur)} req/s")
