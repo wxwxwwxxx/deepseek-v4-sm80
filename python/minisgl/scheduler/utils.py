@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List
 
 import torch
+from minisgl.core import RequestLifecycle
 
 if TYPE_CHECKING:
     from minisgl.core import SamplingParams
@@ -17,6 +18,7 @@ class PendingReq:
     input_ids: torch.Tensor
     sampling_params: SamplingParams
     reasoning_effort: str | None = None
+    lifecycle: RequestLifecycle = field(default_factory=RequestLifecycle)
     chunked_req: ChunkedReq | None = None
 
     @property

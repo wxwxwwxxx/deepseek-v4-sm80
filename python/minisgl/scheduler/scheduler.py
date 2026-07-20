@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
+from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Tuple, TypeAlias
 
 import torch
-from minisgl.core import Batch, Req
+from minisgl.core import Batch, Req, RequestLifecycle, RequestLifecycleState
 from minisgl.env import ENV
 from minisgl.message import (
     AbortBackendMsg,
@@ -41,11 +41,18 @@ def _processed_prompt_tokens(batch: Batch) -> int:
 
 
 # For overlap scheduling, we also need to cache some other data to avoid IMA
+class IssuedReqRef(NamedTuple):
+    req: Req
+    generation_id: int
+    issue_epoch: int
+
+
 class ForwardInput(NamedTuple):
     batch: Batch
     sample_args: BatchSamplingArgs
     input_tuple: Indice2D  # (token_mapping, positions)
     write_tuple: Indice2D  # (req_mapping, seq_lens or -1)
+    issued_refs: Tuple[IssuedReqRef, ...]
 
 
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
@@ -190,11 +197,11 @@ class Scheduler(SchedulerIOMixin):
         )
 
         # some alias for easy access
-        self.finished_reqs: Set[Req] = set()
+        self._next_request_generation = 0
+        self._live_reqs: dict[int, Req] = {}
+        self._retirement_owners: dict[int, Req] = {}
         self.tokenizer = load_tokenizer(config.model_path)
-        self.reasoning_sampler_contract_enabled = (
-            self.engine.reasoning_sampler_contract_enabled
-        )
+        self.reasoning_sampler_contract_enabled = self.engine.reasoning_sampler_contract_enabled
         if self.engine.reasoning_token_ids is None:
             self.eos_token_id = self.tokenizer.eos_token_id
             self.think_end_token_id = None
@@ -280,22 +287,35 @@ class Scheduler(SchedulerIOMixin):
         if last_data is None:
             return
 
-        batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
+        forward_input, (_, next_tokens_cpu, copy_done) = last_data
+        batch = forward_input.batch
+        if len(forward_input.issued_refs) != len(batch.reqs):
+            raise RuntimeError("issued request references do not match forward batch rows")
         copy_done.synchronize()
         self.engine.release_copy_done_event(copy_done)
-        if self._stats_tracker is not None:
-            if batch.is_prefill:
-                self._stats_tracker.record(prompt_tokens=_processed_prompt_tokens(batch))
-            else:
-                self._stats_tracker.record(generation_tokens=len(batch.reqs))
         reply: List[DetokenizeMsg] = []
-        new_finished_reqs: Set[Req] = set()
+        accepted_generation_tokens = 0
         with self.cache_manager.lazy_free_region():
-            for i, req in enumerate(batch.reqs):
+            for i, (req, issued_ref) in enumerate(
+                zip(batch.reqs, forward_input.issued_refs, strict=True)
+            ):
+                if req is not issued_ref.req:
+                    raise RuntimeError("issued request identity does not match batch row")
+                lifecycle = req.lifecycle
+                if issued_ref.generation_id != lifecycle.generation_id:
+                    raise RuntimeError("issued request generation changed before completion")
+                if not lifecycle.accepts_completion:
+                    self._complete_issued_ref(issued_ref)
+                    continue
                 if isinstance(req, ChunkedReq):
+                    self._complete_issued_ref(issued_ref)
                     self.cache_manager.release_active_dsv4_swa_out_of_window(req)
                     continue
                 next_token = next_tokens_cpu[i]
+                if not req.can_commit_token:
+                    raise RuntimeError(
+                        f"active request {req.uid} has no remaining host token capacity"
+                    )
                 req.append_host(next_token.unsqueeze(0))
                 next_token = int(next_token.item())
                 if self.reasoning_sampler_contract_enabled:
@@ -304,7 +324,7 @@ class Scheduler(SchedulerIOMixin):
                         next_token,
                         think_end_token_id=self.think_end_token_id,
                     )
-                finished = not req.can_decode
+                finished = not req.can_commit_token
                 reached_eos = False
                 if not req.sampling_params.ignore_eos:
                     reached_eos = next_token == self.eos_token_id
@@ -327,18 +347,24 @@ class Scheduler(SchedulerIOMixin):
                     )
                 )
 
-                # NOTE: overlap scheduling may make the request freed twice, skip second free
-                if finished and req not in self.finished_reqs:
-                    self.decode_manager.remove_req(req)
-                    self._free_req_resources(req)
-                    new_finished_reqs.add(req)
+                if finished:
+                    finish_reason = "stop" if reached_eos else "length"
+                    self._commit_terminal(req, finish_reason)
                 elif batch.is_prefill:  # for prefill, non-chunk req, cache the prefix
                     self.cache_manager.cache_req(req, finished=False)
                 else:
                     self.cache_manager.release_active_dsv4_swa_out_of_window(req)
+                self._complete_issued_ref(issued_ref)
+                if batch.is_decode:
+                    accepted_generation_tokens += 1
 
-        self.finished_reqs = new_finished_reqs
-        self.send_result(reply)
+        if self._stats_tracker is not None:
+            if batch.is_prefill:
+                self._stats_tracker.record(prompt_tokens=_processed_prompt_tokens(batch))
+            elif accepted_generation_tokens:
+                self._stats_tracker.record(generation_tokens=accepted_generation_tokens)
+        if reply:
+            self.send_result(reply)
 
     def _process_one_msg(self, msg: BaseBackendMsg) -> None:
         if isinstance(msg, BatchBackendMsg):
@@ -380,13 +406,18 @@ class Scheduler(SchedulerIOMixin):
                     f"{admission.max_seq_len}."
                 )
             self._record_max_sequence_admission(msg.uid, admission)
-            self.prefill_manager.add_one_req(msg)
+            generation_id = self._next_request_generation
+            self._next_request_generation += 1
+            self.prefill_manager.add_one_req(msg, generation_id=generation_id)
         elif isinstance(msg, AbortBackendMsg):
             logger.debug_rank0("Aborting request %d", msg.uid)
             req_to_free = self.prefill_manager.abort_req(msg.uid)
             req_to_free = req_to_free or self.decode_manager.abort_req(msg.uid)
+            req_to_free = req_to_free or self._live_reqs.get(msg.uid)
             if req_to_free is not None:
-                self._free_req_resources(req_to_free)
+                if req_to_free.lifecycle.state is RequestLifecycleState.ACTIVE:
+                    self._commit_terminal(req_to_free, "abort")
+                self._maybe_release_terminal_resources(req_to_free.lifecycle)
         else:
             logger.error(f"Unknown message type: {type(msg)}")
             raise NotImplementedError
@@ -398,6 +429,32 @@ class Scheduler(SchedulerIOMixin):
     def _free_req_resources(self, req: Req) -> None:
         self.table_manager.free(req.table_idx)
         self.cache_manager.cache_req(req, finished=True)
+
+    def _commit_terminal(self, req: Req, finish_reason: str) -> None:
+        lifecycle = req.lifecycle
+        lifecycle.commit_terminal(finish_reason)
+        self.decode_manager.remove_req(req)
+        self._retirement_owners[id(lifecycle)] = req
+
+    def _complete_issued_ref(self, issued_ref: IssuedReqRef) -> None:
+        lifecycle = issued_ref.req.lifecycle
+        lifecycle.complete(
+            generation_id=issued_ref.generation_id,
+            issue_epoch=issued_ref.issue_epoch,
+        )
+        self._maybe_release_terminal_resources(lifecycle)
+
+    def _maybe_release_terminal_resources(self, lifecycle: RequestLifecycle) -> None:
+        if not lifecycle.ready_to_release_resources:
+            return
+        owner = self._retirement_owners.pop(id(lifecycle), None)
+        if owner is None:
+            raise RuntimeError("terminal request has no resource-retirement owner")
+        self._free_req_resources(owner)
+        lifecycle.mark_resources_released()
+        live = self._live_reqs.get(owner.uid)
+        if live is not None and live.lifecycle is lifecycle:
+            self._live_reqs.pop(owner.uid)
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
         self.engine.graph_runner.pad_batch(batch)
@@ -422,47 +479,35 @@ class Scheduler(SchedulerIOMixin):
 
         sample_args = self.engine.sampler.prepare(batch)
 
+        issued_refs = self._issue_batch_refs(batch)
         return ForwardInput(
             batch=batch,
             sample_args=sample_args,
             input_tuple=input_mapping,
             write_tuple=write_mapping,
+            issued_refs=issued_refs,
         )
 
-        timing_metadata = {
-            "phase": batch.phase,
-            "batch_size": int(batch.size),
-            "padded_size": int(getattr(batch, "padded_size", batch.size)),
-        }
-        self.engine.graph_runner.pad_batch(batch)
-
-        timing_metadata["padded_size"] = int(batch.padded_size)
-        self.cache_manager.allocate_paged(batch.reqs)
-
-        batch.positions = _make_positions(batch, self.device)
-        validate_model_position_bound(
-            max_device_len=max((req.device_len for req in batch.reqs), default=0),
-            rope_cache_len=int(
-                getattr(self.engine, "effective_rope_cache_len", self.engine.max_seq_len)
-            ),
-        )
-
-        input_mapping = _make_input_tuple(batch, self.device)
-
-        write_mapping = _make_write_tuple(batch, self.device)
-
-        batch.out_loc = self.engine.page_table[input_mapping]
-
-        self.engine.attn_backend.prepare_metadata(batch)
-
-        sample_args = self.engine.sampler.prepare(batch)
-
-        return ForwardInput(
-            batch=batch,
-            sample_args=sample_args,
-            input_tuple=input_mapping,
-            write_tuple=write_mapping,
-        )
+    def _issue_batch_refs(self, batch: Batch) -> Tuple[IssuedReqRef, ...]:
+        refs: list[IssuedReqRef] = []
+        for req in batch.reqs:
+            lifecycle = req.lifecycle
+            if lifecycle.generation_id < 0:
+                lifecycle.generation_id = self._next_request_generation
+                self._next_request_generation += 1
+            existing = self._live_reqs.get(req.uid)
+            if (
+                existing is not None
+                and existing.lifecycle is not lifecycle
+                and existing.lifecycle.state is not RequestLifecycleState.RETIRED
+            ):
+                raise RuntimeError(
+                    f"request uid {req.uid} was reused before its prior generation retired"
+                )
+            self._live_reqs[req.uid] = req
+            issue_epoch = lifecycle.issue()
+            refs.append(IssuedReqRef(req, lifecycle.generation_id, issue_epoch))
+        return tuple(refs)
 
     def _schedule_next_batch(self) -> ForwardInput | None:
         # TODO: support other policies: e.g. DECODE first
@@ -473,7 +518,10 @@ class Scheduler(SchedulerIOMixin):
         return self._prepare_batch(batch) if batch else None
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
-        batch, sample_args, input_mapping, output_mapping = forward_input
+        batch = forward_input.batch
+        sample_args = forward_input.sample_args
+        input_mapping = forward_input.input_tuple
+        output_mapping = forward_input.write_tuple
         batch.input_ids = self.token_pool[input_mapping]
         forward_output = self.engine.forward_batch(batch, sample_args)
         self.token_pool[output_mapping] = forward_output.next_tokens_gpu

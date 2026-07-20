@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
-from minisgl.core import Batch, Req
+from minisgl.core import Batch, Req, RequestLifecycle
 from minisgl.utils import init_logger
 
 from .utils import PendingReq
@@ -80,6 +80,10 @@ class PrefillAdder:
         device_ids = self.table_manager.token_pool[table_idx, _slice]
         device_ids.copy_(pending_req.input_ids[_slice].pin_memory(), non_blocking=True)
         previous_chunk = pending_req.chunked_req
+        lifecycle = (
+            previous_chunk.lifecycle if previous_chunk is not None else pending_req.lifecycle
+        )
+        pending_req.lifecycle = lifecycle
         return CLS(
             input_ids=pending_req.input_ids[: cached_len + chunk_size],
             table_idx=table_idx,
@@ -89,6 +93,7 @@ class PrefillAdder:
             cache_handle=cache_handle,
             sampling_params=pending_req.sampling_params,
             reasoning_effort=pending_req.reasoning_effort,
+            lifecycle=lifecycle,
             swa_evicted_seqlen=(
                 0
                 if previous_chunk is None
@@ -127,13 +132,14 @@ class PrefillManager:
     decode_manager: DecodeManager
     pending_list: List[PendingReq] = field(default_factory=list)
 
-    def add_one_req(self, req: UserMsg) -> None:
+    def add_one_req(self, req: UserMsg, *, generation_id: int = -1) -> None:
         self.pending_list.append(
             PendingReq(
                 req.uid,
                 req.input_ids,
                 req.sampling_params,
                 reasoning_effort=req.reasoning_effort,
+                lifecycle=RequestLifecycle(generation_id=generation_id),
             )
         )
 
