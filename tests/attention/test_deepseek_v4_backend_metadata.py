@@ -899,7 +899,7 @@ def test_dsv4_component_loc_ownership_capture_replay_copies_direct_component_met
     assert backend.capture.indexer_metadata.page_table is capture.c4_indexer_page_table
 
 
-def test_dsv4_graph_replay_clamps_compressed_reads_to_materialized_prompt():
+def test_dsv4_graph_replay_exposes_online_c4_and_c128_current_boundaries():
     cfg = _tiny_dsv4_config([4, 128])
     page_size = 128
     ctx = _install_context(
@@ -936,12 +936,12 @@ def test_dsv4_graph_replay_clamps_compressed_reads_to_materialized_prompt():
 
     assert backend.capture is not None
     capture = backend.capture.core_metadata
-    assert src.c4_topk_lengths_raw.tolist() == [64]
-    assert src.c4_sparse_raw_indices[0, :2].tolist() == [62, 63]
-    assert capture.c4_topk_lengths_raw.tolist() == [64]
-    assert capture.c4_sparse_raw_indices[0, :2].tolist() == [62, 63]
-    assert capture.c4_sparse_page_indices[0, :2].tolist() == [62, 63]
-    assert capture.c128_raw_indices[0, :3].tolist() == [0, 1, -1]
+    assert src.c4_topk_lengths_raw.tolist() == [96]
+    assert src.c4_sparse_raw_indices[0, :2].tolist() == [94, 95]
+    assert capture.c4_topk_lengths_raw.tolist() == [96]
+    assert capture.c4_sparse_raw_indices[0, :2].tolist() == [94, 95]
+    assert capture.c4_sparse_page_indices[0, :2].tolist() == [94, 95]
+    assert capture.c128_raw_indices[0, :3].tolist() == [0, 1, 2]
 
 
 

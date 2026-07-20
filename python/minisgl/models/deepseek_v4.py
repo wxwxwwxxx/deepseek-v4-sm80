@@ -716,6 +716,7 @@ class DSV4Attention(BaseOP):
         self.num_local_heads = div_even(config.num_qo_heads, tp.size)
         self.head_dim = config.head_dim
         self.rope_head_dim = config.rope_head_dim
+        self._produce_swa_qat = self.head_dim - self.rope_head_dim == 448
         self.window_size = config.window_size
         self.softmax_scale = config.head_dim**-0.5
         self.o_groups = config.o_groups
@@ -1005,6 +1006,7 @@ class DSV4Attention(BaseOP):
                 else self.wkv.forward(x)
             )
         q_kv_norm_rope_cache_written = False
+        kv_qat_completed = False
         if fused_q_kv_norm_rope_store and kv is not None:
             q_kv_norm_rope_cache_written = dsv4_kernel.q_kv_norm_rope_cache_fallback(
                 q,
@@ -1020,7 +1022,9 @@ class DSV4Attention(BaseOP):
                 factor=self.rope_factor,
                 beta_fast=self.beta_fast,
                 beta_slow=self.beta_slow,
+                publish_swa_qat=self._produce_swa_qat,
             )
+            kv_qat_completed = q_kv_norm_rope_cache_written and self._produce_swa_qat
         if not q_kv_norm_rope_cache_written:
             dsv4_kernel.q_norm_rope_fallback(
                 q,
@@ -1056,7 +1060,9 @@ class DSV4Attention(BaseOP):
                     factor=self.rope_factor,
                     beta_fast=self.beta_fast,
                     beta_slow=self.beta_slow,
+                    publish_swa_qat=self._produce_swa_qat,
                 )
+                kv_qat_completed = self._produce_swa_qat
             kv_cache_written = True
         else:
             if not fused_q_kv_rmsnorm:
@@ -1071,7 +1077,7 @@ class DSV4Attention(BaseOP):
                 beta_fast=self.beta_fast,
                 beta_slow=self.beta_slow,
             )
-        if self.rope_head_dim < kv.shape[-1]:
+        if self.rope_head_dim < kv.shape[-1] and not kv_qat_completed:
             kv[..., : -self.rope_head_dim] = dsv4_kernel.quantize_fp8_activation_ref(
                 kv[..., : -self.rope_head_dim], block_size=64
             )
@@ -1121,13 +1127,31 @@ class DSV4Attention(BaseOP):
                     beta_fast=self.beta_fast,
                     beta_slow=self.beta_slow,
                 )
-            indexer_kv = self.indexer.forward(
-                x,
-                q_lora,
-                positions,
-                apply_norm=not compress_store_fuses_norm,
-                touch_projections=not (indexer_select_bf16 or indexer_select_fp8),
+            online_c4 = (
+                use_dsv4_backend
+                and attn_backend is not None
+                and hasattr(attn_backend, "forward_compress")
+                and dsv4_kernel.dsv4_optimized_triton_enabled()
             )
+            if online_c4:
+                indexer_kv = attn_backend.forward_compress(
+                    self.layer_id,
+                    x,
+                    batch,
+                    self.indexer.compressor,
+                    component="indexer",
+                )
+                if not (indexer_select_bf16 or indexer_select_fp8):
+                    self.indexer._wq_b_forward(q_lora)
+                    self.indexer.weights_proj.forward(x)
+            else:
+                indexer_kv = self.indexer.forward(
+                    x,
+                    q_lora,
+                    positions,
+                    apply_norm=not compress_store_fuses_norm,
+                    touch_projections=not (indexer_select_bf16 or indexer_select_fp8),
+                )
             if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
                 indexer_store_norm_weight = None
                 if compress_store_fuses_norm:
@@ -1148,7 +1172,7 @@ class DSV4Attention(BaseOP):
                     factor=self.rope_factor,
                     beta_fast=self.beta_fast,
                     beta_slow=self.beta_slow,
-                    apply_hadamard=indexer_select_bf16,
+                    apply_hadamard=online_c4 or indexer_select_bf16,
                 )
             if indexer_select_fp8 and indexer_fp8_query is not None:
                 if not hasattr(attn_backend, "select_indexer_fp8"):
@@ -1175,11 +1199,27 @@ class DSV4Attention(BaseOP):
                     batch,
                 )
         if hasattr(self, "compressor"):
-            compressed_kv = self.compressor.forward(
-                x,
-                positions,
-                apply_norm=not compress_store_fuses_norm,
+            online_compress = (
+                self.compress_ratio in (4, 128)
+                and use_dsv4_backend
+                and attn_backend is not None
+                and hasattr(attn_backend, "forward_compress")
+                and dsv4_kernel.dsv4_optimized_triton_enabled()
             )
+            if online_compress:
+                compressed_kv = attn_backend.forward_compress(
+                    self.layer_id,
+                    x,
+                    batch,
+                    self.compressor,
+                    component="attention",
+                )
+            else:
+                compressed_kv = self.compressor.forward(
+                    x,
+                    positions,
+                    apply_norm=not compress_store_fuses_norm,
+                )
             if use_dsv4_backend and hasattr(attn_backend, "store_compressed"):
                 attn_backend.store_compressed(
                     self.layer_id,

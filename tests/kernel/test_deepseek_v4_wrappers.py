@@ -51,12 +51,12 @@ def _assert_full_topk_transform(
     full = out.full_indices.detach().cpu()
     for row, seq_len in enumerate(cpu_lens):
         valid_raw = [int(x) for x in raw[row].tolist() if x >= 0]
-        if seq_len <= width:
-            assert raw[row, :seq_len].tolist() == list(range(seq_len))
-            assert raw[row, seq_len:].eq(-1).all()
-        else:
-            expected = torch.topk(cpu_scores[row, :seq_len], width, sorted=False).indices.tolist()
-            assert sorted(valid_raw) == sorted(int(x) for x in expected)
+        expected = sorted(
+            range(seq_len),
+            key=lambda raw_idx: (-float(cpu_scores[row, raw_idx]), raw_idx),
+        )[: min(seq_len, width)]
+        assert valid_raw == expected
+        assert raw[row, len(expected) :].eq(-1).all()
         for raw_idx, page_idx, full_idx in zip(
             raw[row].tolist(),
             pages[row].tolist(),
@@ -854,7 +854,10 @@ def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(mon
     table_indices = torch.arange(rows, dtype=torch.int32, device=device)
     positions = torch.tensor([127, 130, 383], dtype=torch.int32, device=device)
     raw_out_loc = torch.tensor([127, dummy_token_start, 2048 + 383], dtype=torch.int32, device=device)
-    materialized_seq_lens = positions + 1
+    # The scheduler watermark intentionally trails the decode token.  Online
+    # C4 and C128 producers still make current-boundary rows readable inside
+    # the captured graph before attention consumes this metadata.
+    materialized_seq_lens = positions
     c4_page_table = torch.tensor(
         [[10, 11, 12, 13], [14, -1, 16, 17], [18, 19, 20, 21]],
         dtype=torch.int32,
@@ -1469,6 +1472,294 @@ def test_q_kv_norm_rope_cache_accepts_strided_kv_view(monkeypatch):
     assert torch.allclose(actual_cache, expected_cache, atol=5e-3, rtol=5e-3)
 
 
+@pytest.mark.parametrize("tokens", [1, 4, 16])
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_q_kv_norm_rope_cache_publishes_official_swa_fp8_qat(monkeypatch, tokens):
+    if getattr(torch, "float8_e4m3fn", None) is None:
+        pytest.skip("torch.float8_e4m3fn is required for FP8 activation quantization")
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(14486 + tokens)
+
+    q = torch.randn(tokens, 16, 512, device=device, dtype=torch.bfloat16)
+    kv = torch.randn(tokens, 512, device=device, dtype=torch.bfloat16)
+    weight = torch.randn(512, device=device, dtype=torch.bfloat16)
+    positions = torch.arange(tokens, device=device, dtype=torch.long) + 699
+    out_loc = torch.arange(tokens, device=device, dtype=torch.long) * 2 + 1
+    sentinel = torch.tensor(-91.0, device=device, dtype=torch.bfloat16)
+    cache = torch.full((tokens * 2 + 3, 512), sentinel, device=device, dtype=torch.bfloat16)
+    reference_q = q.clone()
+    reference_kv = kv.clone()
+    reference_cache = torch.full_like(cache, sentinel)
+
+    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+        reference_q,
+        reference_kv,
+        positions,
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=reference_cache,
+        out_loc=out_loc,
+        rotary_dim=64,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=40.0,
+        publish_swa_qat=False,
+    )
+    expected = reference_kv.clone()
+    expected[:, :448] = dsv4_kernel.quantize_fp8_activation_ref(
+        expected[:, :448], block_size=64
+    )
+
+    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+        q,
+        kv,
+        positions,
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=cache,
+        out_loc=out_loc,
+        rotary_dim=64,
+        base=10000.0,
+        original_seq_len=4096,
+        factor=40.0,
+        publish_swa_qat=True,
+    )
+
+    assert torch.equal(kv, expected)
+    assert torch.equal(cache[out_loc], expected)
+    assert torch.equal(cache[out_loc], kv)
+    assert torch.equal(cache[out_loc, 448:], kv[:, 448:])
+    all_rows = torch.arange(cache.shape[0], device=device)
+    unowned = all_rows[~torch.isin(all_rows, out_loc)]
+    assert torch.all(cache[unowned] == sentinel)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_q_kv_norm_rope_cache_qat_preserves_strides_masking_and_repeated_owner(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(14502)
+
+    q = torch.randn(4, 16, 512, device=device, dtype=torch.bfloat16)
+    merged = torch.randn(4, 640, device=device, dtype=torch.bfloat16)
+    kv = merged[:, 128:]
+    assert kv.stride(-1) == 1 and not kv.is_contiguous()
+    weight = torch.randn(512, device=device, dtype=torch.bfloat16)
+    positions = torch.arange(4, device=device, dtype=torch.long) + 700
+    out_loc = torch.tensor([7, -1, 3, 1], device=device, dtype=torch.long)
+    sentinel = torch.tensor(-91.0, device=device, dtype=torch.bfloat16)
+    cache = torch.full((10, 512), sentinel, device=device, dtype=torch.bfloat16)
+
+    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+        q,
+        kv,
+        positions,
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=cache,
+        out_loc=out_loc,
+        rotary_dim=64,
+        base=10000.0,
+        publish_swa_qat=True,
+    )
+    valid = out_loc >= 0
+    expected = kv[valid].clone()
+    expected[:, :448] = dsv4_kernel.quantize_fp8_activation_ref(
+        expected[:, :448], block_size=64
+    )
+    assert torch.equal(cache[out_loc[valid]], expected)
+    assert torch.all(cache[torch.tensor([0, 2, 4, 5, 6, 8, 9], device=device)] == sentinel)
+
+    # A later owner of the same physical row must replace that row completely
+    # without disturbing any other row.
+    next_q = torch.randn(1, 16, 512, device=device, dtype=torch.bfloat16)
+    next_kv = torch.randn(1, 512, device=device, dtype=torch.bfloat16)
+    before_other_rows = cache[torch.tensor([1, 7], device=device)].clone()
+    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+        next_q,
+        next_kv,
+        torch.tensor([704], device=device, dtype=torch.long),
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=cache,
+        out_loc=torch.tensor([3], device=device, dtype=torch.long),
+        rotary_dim=64,
+        base=10000.0,
+        publish_swa_qat=True,
+    )
+    next_expected = next_kv.clone()
+    next_expected[:, :448] = dsv4_kernel.quantize_fp8_activation_ref(
+        next_expected[:, :448], block_size=64
+    )
+    assert torch.equal(cache[3], next_expected[0])
+    assert torch.equal(cache[torch.tensor([1, 7], device=device)], before_other_rows)
+
+
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_q_kv_norm_rope_cache_qat_graph_replay_matches_eager(monkeypatch):
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(14503)
+    tokens = 4
+    base_q = torch.randn(tokens, 16, 512, device=device, dtype=torch.bfloat16)
+    base_kv = torch.randn(tokens, 512, device=device, dtype=torch.bfloat16)
+    weight = torch.randn(512, device=device, dtype=torch.bfloat16)
+    positions = torch.arange(tokens, device=device, dtype=torch.long) + 699
+    out_loc = torch.tensor([7, 1, 5, 3], device=device, dtype=torch.long)
+
+    def run(q, kv, cache):
+        assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+            q,
+            kv,
+            positions,
+            norm_weight=weight,
+            rms_norm_eps=1e-6,
+            cache=cache,
+            out_loc=out_loc,
+            rotary_dim=64,
+            base=10000.0,
+            publish_swa_qat=True,
+        )
+
+    eager_q, eager_kv = base_q.clone(), base_kv.clone()
+    eager_cache = torch.full((10, 512), -91.0, device=device, dtype=torch.bfloat16)
+    run(eager_q, eager_kv, eager_cache)
+
+    graph_q, graph_kv = base_q.clone(), base_kv.clone()
+    graph_cache = torch.full_like(eager_cache, -91.0)
+    run(graph_q, graph_kv, graph_cache)
+    torch.cuda.synchronize(device)
+    graph_q.copy_(base_q)
+    graph_kv.copy_(base_kv)
+    graph_cache.fill_(-91.0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run(graph_q, graph_kv, graph_cache)
+
+    graph_q.copy_(base_q)
+    graph_kv.copy_(base_kv)
+    graph_cache.fill_(-91.0)
+    graph.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(graph_q, eager_q)
+    assert torch.equal(graph_kv, eager_kv)
+    assert torch.equal(graph_cache, eager_cache)
+
+
+@pytest.mark.parametrize("compress_ratio", [0, 4, 128])
+@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
+def test_q_kv_norm_rope_cache_qat_chunked_prefill_matches_single_production(
+    monkeypatch, compress_ratio
+):
+    """A chunk boundary must not change local or published SWA QAT values."""
+    device = torch.device("cuda")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(14504 + compress_ratio)
+    tokens = 16
+    base_q = torch.randn(tokens, 16, 512, device=device, dtype=torch.bfloat16)
+    base_kv = torch.randn(tokens, 512, device=device, dtype=torch.bfloat16)
+    weight = torch.randn(512, device=device, dtype=torch.bfloat16)
+    positions = torch.arange(tokens, device=device, dtype=torch.long) + 4090
+    out_loc = torch.tensor(
+        [19, 3, 17, 1, 15, 5, 13, 7, 18, 2, 16, 0, 14, 4, 12, 6],
+        device=device,
+        dtype=torch.long,
+    )
+    rope = {
+        "base": 10000.0 if compress_ratio == 0 else 160000.0,
+        "original_seq_len": 0 if compress_ratio == 0 else 4096,
+        "factor": 40.0,
+    }
+
+    def produce(q, kv, cache, token_slice):
+        assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+            q[token_slice],
+            kv[token_slice],
+            positions[token_slice],
+            norm_weight=weight,
+            rms_norm_eps=1e-6,
+            cache=cache,
+            out_loc=out_loc[token_slice],
+            rotary_dim=64,
+            beta_fast=32,
+            beta_slow=1,
+            publish_swa_qat=True,
+            **rope,
+        )
+
+    single_q, single_kv = base_q.clone(), base_kv.clone()
+    single_cache = torch.full((21, 512), -91.0, device=device, dtype=torch.bfloat16)
+    produce(single_q, single_kv, single_cache, slice(None))
+
+    chunked_q, chunked_kv = base_q.clone(), base_kv.clone()
+    chunked_cache = torch.full_like(single_cache, -91.0)
+    produce(chunked_q, chunked_kv, chunked_cache, slice(0, 9))
+    produce(chunked_q, chunked_kv, chunked_cache, slice(9, None))
+
+    assert torch.equal(chunked_q, single_q)
+    assert torch.equal(chunked_kv, single_kv)
+    assert torch.equal(chunked_cache, single_cache)
+    assert torch.equal(chunked_cache[out_loc], chunked_kv)
+
+
+def test_k_norm_rope_cache_torch_fallback_publishes_swa_qat(monkeypatch):
+    if getattr(torch, "float8_e4m3fn", None) is None:
+        pytest.skip("torch.float8_e4m3fn is required for FP8 activation quantization")
+    _clear_dsv4_sm80_env(monkeypatch)
+    torch.manual_seed(14504)
+    kv = torch.randn(4, 512, dtype=torch.bfloat16)
+    weight = torch.randn(512, dtype=torch.bfloat16)
+    positions = torch.arange(4, dtype=torch.long) + 699
+    out_loc = torch.tensor([7, -1, 3, 1], dtype=torch.long)
+    cache = torch.full((10, 512), -91.0, dtype=torch.bfloat16)
+    reference_kv = kv.clone()
+    reference_cache = torch.full_like(cache, -91.0)
+
+    dsv4_kernel.k_norm_rope_cache_fallback(
+        reference_kv,
+        positions,
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=reference_cache,
+        out_loc=out_loc,
+        rotary_dim=64,
+        base=10000.0,
+        publish_swa_qat=False,
+    )
+    expected = reference_kv.clone()
+    expected[:, :448] = dsv4_kernel.quantize_fp8_activation_ref(
+        expected[:, :448], block_size=64
+    )
+
+    dsv4_kernel.k_norm_rope_cache_fallback(
+        kv,
+        positions,
+        norm_weight=weight,
+        rms_norm_eps=1e-6,
+        cache=cache,
+        out_loc=out_loc,
+        rotary_dim=64,
+        base=10000.0,
+        publish_swa_qat=True,
+    )
+    valid = out_loc >= 0
+    assert torch.equal(kv, expected)
+    assert torch.equal(cache[out_loc[valid]], expected[valid])
+    assert torch.equal(cache[out_loc[valid]], kv[valid])
+    assert torch.all(cache[torch.tensor([0, 2, 4, 5, 6, 8, 9])] == -91.0)
+
+
+def test_attention_uses_classwide_single_production_swa_qat_contract():
+    init_source = inspect.getsource(dsv4_model.DSV4Attention.__init__)
+    forward_source = inspect.getsource(dsv4_model.DSV4Attention.forward)
+
+    assert "self.head_dim - self.rope_head_dim == 448" in init_source
+    assert "self.layer_id == 0" not in forward_source
+    assert "kv_qat_completed =" in forward_source
+    assert "and not kv_qat_completed" in forward_source
+
+
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_fp8_activation_quant_triton_matches_torch_reference(monkeypatch):
     if getattr(torch, "float8_e4m3fn", None) is None:
@@ -2050,8 +2341,11 @@ def test_indexer_bf16_query_logits_and_topk_are_fallback_clean():
         ratio=4,
     )
     for row in range(seq_lens.numel()):
-        expected_raw = torch.topk(expected_logits[row, : seq_lens[row]], 2, sorted=False).indices
-        assert sorted(selected.topk.raw_indices[row].tolist()) == sorted(expected_raw.tolist())
+        expected_raw = sorted(
+            range(int(seq_lens[row])),
+            key=lambda raw_idx: (-float(expected_logits[row, raw_idx]), raw_idx),
+        )[:2]
+        assert selected.topk.raw_indices[row].tolist() == expected_raw
     assert selected.topk.topk_lens is not None
     assert selected.topk.topk_lens.tolist() == [2, 2]
 

@@ -68,6 +68,23 @@ __device__ __forceinline__ uint32_t convert_to_uint32(float x) {
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
+// Candidate B canonical key.  FP32 score is descending and raw logical index
+// is ascending.  Positive and negative zero are one exact-score tie class.
+// Non-finite valid scores are rejected by canonical_topk before key creation.
+__device__ __forceinline__ uint32_t canonical_score_key(float x) {
+  uint32_t bits = __float_as_uint(x);
+  if ((bits & 0x7fffffffu) == 0) {
+    bits = 0;
+  }
+  return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+}
+
+__device__ __forceinline__ uint64_t canonical_total_key(float score,
+                                                         uint32_t raw_index) {
+  return (static_cast<uint64_t>(canonical_score_key(score)) << 32) |
+         static_cast<uint64_t>(~raw_index);
+}
+
 __device__ __forceinline__ int32_t
 page_to_indices(const int32_t *__restrict__ page_table, uint32_t i,
                 uint32_t page_bits) {
@@ -256,6 +273,157 @@ __device__ void radix_topk(const float *__restrict__ input,
 }
 
 template <uint32_t kTopK>
+__device__ bool canonical_topk(const float *__restrict__ input,
+                               int32_t *__restrict__ selected,
+                               const uint32_t length) {
+  constexpr uint32_t BLOCK_SIZE = TopKConfig<kTopK>::kBlockSize;
+  static_assert(kTopK == BLOCK_SIZE);
+
+  __shared__ uint32_t s_nonfinite;
+  __shared__ uint32_t s_threshold_score_key;
+  __shared__ uint32_t s_greater_count;
+  __shared__ uint32_t s_tie_need;
+  __shared__ uint32_t s_selected_count;
+  __shared__ uint32_t s_valid;
+  __shared__ uint32_t s_scan[kTopK];
+  __shared__ uint64_t s_sort_keys[kTopK];
+
+  const uint32_t tx = threadIdx.x;
+  if (tx == 0) {
+    s_nonfinite = 0;
+    s_valid = 1;
+  }
+  __syncthreads();
+  for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
+    if (!::isfinite(input[idx])) {
+      ::atomicExch(&s_nonfinite, 1u);
+    }
+  }
+  __syncthreads();
+  if (s_nonfinite != 0) {
+    selected[tx] = -1;
+    return false;
+  }
+
+  if (length <= kTopK) {
+    selected[tx] = tx < length ? static_cast<int32_t>(tx) : -1;
+  } else {
+    // Preserve the proven v1 threshold finder, then replace both its
+    // scheduler-dependent cutoff-tie subset and its atomic slot order.
+    radix_topk<kTopK>(input, selected, length);
+    const int32_t provisional_idx = selected[tx];
+    s_scan[tx] = provisional_idx >= 0
+                     ? canonical_score_key(input[provisional_idx])
+                     : 0xffffffffu;
+    __syncthreads();
+    for (uint32_t stride = kTopK / 2; stride > 0; stride >>= 1) {
+      if (tx < stride) {
+        s_scan[tx] = min(s_scan[tx], s_scan[tx + stride]);
+      }
+      __syncthreads();
+    }
+    if (tx == 0) {
+      s_threshold_score_key = s_scan[0];
+      s_greater_count = 0;
+    }
+    __syncthreads();
+
+    // Contiguous per-thread chunks make the exact-score prefix scan follow
+    // raw logical-index order rather than warp or atomic scheduling order.
+    const uint32_t items_per_thread =
+        (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const uint32_t begin = min(tx * items_per_thread, length);
+    const uint32_t end = min(begin + items_per_thread, length);
+    uint32_t local_equal = 0;
+    uint32_t local_greater = 0;
+    for (uint32_t idx = begin; idx < end; ++idx) {
+      const uint32_t key = canonical_score_key(input[idx]);
+      local_greater += key > s_threshold_score_key;
+      local_equal += key == s_threshold_score_key;
+    }
+    if (local_greater != 0) {
+      ::atomicAdd(&s_greater_count, local_greater);
+    }
+    s_scan[tx] = local_equal;
+    __syncthreads();
+
+    // Inclusive Hillis-Steele scan over chunk tie counts.  Each thread keeps
+    // its predecessor total as the deterministic exclusive prefix.
+    for (uint32_t offset = 1; offset < BLOCK_SIZE; offset <<= 1) {
+      const uint32_t addend = tx >= offset ? s_scan[tx - offset] : 0;
+      __syncthreads();
+      if (tx >= offset) {
+        s_scan[tx] += addend;
+      }
+      __syncthreads();
+    }
+    const uint32_t equal_prefix = tx == 0 ? 0 : s_scan[tx - 1];
+    if (tx == 0) {
+      s_tie_need = kTopK - s_greater_count;
+      s_selected_count = 0;
+      if (s_greater_count > kTopK || s_scan[kTopK - 1] < s_tie_need) {
+        s_valid = 0;
+      }
+    }
+    __syncthreads();
+
+    uint32_t equal_ordinal = equal_prefix;
+    if (s_valid != 0) {
+      for (uint32_t idx = begin; idx < end; ++idx) {
+        const uint32_t key = canonical_score_key(input[idx]);
+        const bool equal_selected =
+            key == s_threshold_score_key && equal_ordinal < s_tie_need;
+        if (key > s_threshold_score_key || equal_selected) {
+          const auto slot = ::atomicAdd(&s_selected_count, 1u);
+          if (slot < kTopK) {
+            selected[slot] = static_cast<int32_t>(idx);
+          }
+        }
+        equal_ordinal += key == s_threshold_score_key;
+      }
+    }
+    __syncthreads();
+    if (tx == 0 && s_selected_count != kTopK) {
+      s_valid = 0;
+    }
+    __syncthreads();
+    if (s_valid == 0) {
+      selected[tx] = -1;
+      return false;
+    }
+  }
+
+  const int32_t raw_index = selected[tx];
+  s_sort_keys[tx] = raw_index >= 0
+                        ? canonical_total_key(input[raw_index], raw_index)
+                        : 0;
+  __syncthreads();
+
+  // In-block bitonic order over the selected set.  Keys are unique because
+  // the raw-index tie-break is embedded in the low 32 bits.
+  for (uint32_t size = 2; size <= kTopK; size <<= 1) {
+    for (uint32_t stride = size >> 1; stride > 0; stride >>= 1) {
+      const uint32_t peer = tx ^ stride;
+      if (peer > tx) {
+        const bool descending = (tx & size) == 0;
+        const uint64_t lhs_key = s_sort_keys[tx];
+        const uint64_t rhs_key = s_sort_keys[peer];
+        const bool swap = descending ? lhs_key < rhs_key : lhs_key > rhs_key;
+        if (swap) {
+          s_sort_keys[tx] = rhs_key;
+          s_sort_keys[peer] = lhs_key;
+          const int32_t lhs_index = selected[tx];
+          selected[tx] = selected[peer];
+          selected[peer] = lhs_index;
+        }
+      }
+      __syncthreads();
+    }
+  }
+  return true;
+}
+
+template <uint32_t kTopK>
 __global__ __launch_bounds__(TopKConfig<kTopK>::kBlockSize) void
 topk_transform_kernel(const __grid_constant__ TopKParams<kTopK> params) {
   const uint32_t work_id = blockIdx.x;
@@ -265,18 +433,15 @@ topk_transform_kernel(const __grid_constant__ TopKParams<kTopK> params) {
   const auto indices_ptr = params.page_indices + work_id * kTopK;
   const auto raw_indices_ptr = params.raw_indices + work_id * kTopK;
 
-  if (seq_len <= kTopK) {
-    naive_transform<kTopK>(page_ptr, indices_ptr, raw_indices_ptr, seq_len,
-                           params.page_bits);
-  } else {
-    __shared__ int32_t s_topk_indices[kTopK];
-    radix_topk<kTopK>(score_ptr, s_topk_indices, seq_len);
-    const auto tx = threadIdx.x;
-    if (tx < kTopK) {
-      indices_ptr[tx] =
-          page_to_indices(page_ptr, s_topk_indices[tx], params.page_bits);
-      raw_indices_ptr[tx] = s_topk_indices[tx];
-    }
+  __shared__ int32_t s_topk_indices[kTopK];
+  const bool valid = canonical_topk<kTopK>(score_ptr, s_topk_indices, seq_len);
+  const auto tx = threadIdx.x;
+  if (tx < kTopK) {
+    const auto raw_index = valid ? s_topk_indices[tx] : -1;
+    indices_ptr[tx] = raw_index >= 0
+                          ? page_to_indices(page_ptr, raw_index, params.page_bits)
+                          : -1;
+    raw_indices_ptr[tx] = raw_index;
   }
 }
 
@@ -293,33 +458,23 @@ topk_transform_global_lens_kernel(
   const auto full_indices_ptr = params.full_indices + work_id * kTopK;
   const auto tx = threadIdx.x;
 
+  __shared__ int32_t s_topk_indices[kTopK];
+  const bool valid = canonical_topk<kTopK>(score_ptr, s_topk_indices, seq_len);
   if (tx == 0) {
-    params.topk_lens[work_id] =
-        static_cast<int32_t>(seq_len < kTopK ? seq_len : kTopK);
+    params.topk_lens[work_id] = valid
+                                    ? static_cast<int32_t>(
+                                          seq_len < kTopK ? seq_len : kTopK)
+                                    : -1;
   }
-
-  if (seq_len <= kTopK) {
-    if (tx < seq_len) {
-      const auto page_index = page_to_indices(page_ptr, tx, params.page_bits);
-      indices_ptr[tx] = page_index;
-      raw_indices_ptr[tx] = tx;
-      full_indices_ptr[tx] = full_from_page_index(page_index, params.ratio);
-    } else if (kTopK == TopKConfig<kTopK>::kBlockSize || tx < kTopK) {
-      indices_ptr[tx] = -1;
-      raw_indices_ptr[tx] = -1;
-      full_indices_ptr[tx] = -1;
-    }
-  } else {
-    __shared__ int32_t s_topk_indices[kTopK];
-    radix_topk<kTopK>(score_ptr, s_topk_indices, seq_len);
-    if (tx < kTopK) {
-      const auto raw_index = s_topk_indices[tx];
-      const auto page_index =
-          page_to_indices(page_ptr, raw_index, params.page_bits);
-      indices_ptr[tx] = page_index;
-      raw_indices_ptr[tx] = raw_index;
-      full_indices_ptr[tx] = full_from_page_index(page_index, params.ratio);
-    }
+  if (tx < kTopK) {
+    const auto raw_index = valid ? s_topk_indices[tx] : -1;
+    const auto page_index = raw_index >= 0
+                                ? page_to_indices(page_ptr, raw_index,
+                                                  params.page_bits)
+                                : -1;
+    indices_ptr[tx] = page_index;
+    raw_indices_ptr[tx] = raw_index;
+    full_indices_ptr[tx] = full_from_page_index(page_index, params.ratio);
   }
 }
 

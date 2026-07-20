@@ -469,11 +469,20 @@ class DSV4AttentionBackend(BaseAttnBackend):
         positions = compress_metadata.positions
         if loc.numel() == positions.numel():
             n = min(loc.numel(), positions.numel(), kv.shape[0])
-            compressed_positions = positions[:n]
+            compressed_positions = positions[:n] + 1 - compress_ratio
+            compressed_kv = kv[:n]
         else:
-            n = min(loc.numel(), kv.shape[0])
             boundary = (positions + 1) % compress_ratio == 0
-            compressed_positions = positions[boundary]
+            compressed_positions = positions[boundary] + 1 - compress_ratio
+            if kv.shape[0] == positions.numel():
+                # Online C4 returns one fixed row per input token so graph
+                # pointers stay stable; eager write locations remain compact.
+                compressed_kv = kv[boundary]
+            else:
+                # The retained stateless path (currently C128) returns only
+                # completed groups.
+                compressed_kv = kv
+            n = min(loc.numel(), compressed_kv.shape[0])
             if compressed_positions.numel() < n:
                 n = compressed_positions.numel()
         if n == 0:
@@ -481,7 +490,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         dsv4_kernel.compress_norm_rope_store_fallback(
             self.kvcache,
             layer_id,
-            kv[:n],
+            compressed_kv[:n],
             loc[:n],
             positions=compressed_positions[:n],
             norm_weight=norm_weight,
@@ -493,6 +502,64 @@ class DSV4AttentionBackend(BaseAttnBackend):
             beta_fast=beta_fast,
             beta_slow=beta_slow,
             cache_type="compressed",
+        )
+
+    def forward_compress(
+        self,
+        layer_id: int,
+        x: torch.Tensor,
+        batch: Batch,
+        compressor,
+        *,
+        component: Literal["attention", "indexer"] = "attention",
+    ) -> torch.Tensor:
+        """Project, update paged carry state, and reduce fixed compressor rows.
+
+        Publication remains ordered after this call: the caller applies the
+        accepted norm/RoPE/cache transform to the returned fixed-row buffer,
+        using ``-1`` write locations for non-boundary rows.
+        """
+
+        if (compressor.ratio, compressor.overlap) not in ((4, True), (128, False)):
+            raise ValueError(
+                "DSV4 online producer requires C4 overlap or C128 non-overlap"
+            )
+        metadata = batch.attn_metadata
+        if not isinstance(metadata, DSV4AttentionMetadata):
+            raise RuntimeError("DSV4 online C4 producer requires DSV4 attention metadata")
+        core = metadata.core_metadata
+        state_pool = (
+            self.kvcache.indexer_compress_state(layer_id)
+            if component == "indexer"
+            else self.kvcache.attention_compress_state(layer_id)
+        )
+        projected = dsv4_kernel.linear_bf16_fp32_fallback(
+            x,
+            compressor.wkv_gate.weight,
+        ).contiguous()
+        rows = int(projected.shape[0])
+        if compressor.ratio == 4:
+            return dsv4_kernel.c4_online_pool_and_update_fallback(
+                projected,
+                state_pool.kv_score_buffer.kv_score,
+                compressor.ape,
+                core.positions[:rows],
+                core.req_table_indices[:rows],
+                core.raw_out_loc[:rows],
+                get_global_ctx().page_table,
+                self.kvcache.compress_state_page_mapping(4, component=component),
+                page_size=self.page_size,
+            )
+        return dsv4_kernel.c128_online_pool_and_update_fallback(
+            projected,
+            state_pool.kv_score_buffer.kv_score,
+            compressor.ape,
+            core.positions[:rows],
+            core.req_table_indices[:rows],
+            core.raw_out_loc[:rows],
+            get_global_ctx().page_table,
+            self.kvcache.compress_state_page_mapping(128, component=component),
+            page_size=self.page_size,
         )
 
     def store_indexer(
@@ -523,11 +590,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
         positions = compress_metadata.positions
         if loc.numel() == positions.numel():
             n = min(loc.numel(), positions.numel(), kv.shape[0])
-            compressed_positions = positions[:n]
+            compressed_positions = positions[:n] + 1 - compress_metadata.ratio
+            compressed_kv = kv[:n]
         else:
-            n = min(loc.numel(), kv.shape[0])
             boundary = (positions + 1) % compress_metadata.ratio == 0
-            compressed_positions = positions[boundary]
+            compressed_positions = (
+                positions[boundary] + 1 - compress_metadata.ratio
+            )
+            if kv.shape[0] == positions.numel():
+                compressed_kv = kv[boundary]
+            else:
+                compressed_kv = kv
+            n = min(loc.numel(), compressed_kv.shape[0])
             if compressed_positions.numel() < n:
                 n = compressed_positions.numel()
         if n == 0:
@@ -535,7 +609,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         dsv4_kernel.compress_norm_rope_store_fallback(
             self.kvcache,
             layer_id,
-            kv[:n],
+            compressed_kv[:n],
             loc[:n],
             positions=compressed_positions[:n],
             norm_weight=norm_weight,
@@ -1007,18 +1081,16 @@ class DSV4AttentionBackend(BaseAttnBackend):
         )
         if not clamp_needed:
             return
-        materialized_seq_lens = torch.tensor(
-            materialized_values[:rows],
-            dtype=torch.long,
-            device=self.device,
-        )
         seq_lens = metadata.seq_lens[:rows].to(device=self.device, dtype=torch.long)
-        capped_seq_lens = torch.minimum(seq_lens, materialized_seq_lens[:rows])
 
         table_indices = metadata.req_table_indices[:rows]
         has_c4 = any(mapping.compress_ratio == 4 for mapping in self.kvcache.layer_mapping)
         if has_c4:
-            c4_lengths = capped_seq_lens.div(4, rounding_mode="floor").to(torch.int32)
+            # C4 has an ordered graph-internal producer: every replay updates
+            # carry state and publishes a completed boundary before either the
+            # indexer or attention consumer runs.  Its readable length is thus
+            # the current sequence length.
+            c4_lengths = seq_lens.div(4, rounding_mode="floor").to(torch.int32)
             metadata.c4_topk_lengths_raw[:rows].copy_(c4_lengths)
             metadata.c4_topk_lengths_clamp1[:rows].copy_(c4_lengths.clamp_min(1))
             metadata.c4_sparse_topk_lengths[:rows].copy_(
@@ -1036,7 +1108,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
 
         has_c128 = any(mapping.compress_ratio == 128 for mapping in self.kvcache.layer_mapping)
         if has_c128:
-            c128_lengths = capped_seq_lens.div(128, rounding_mode="floor").to(torch.int32)
+            # C128 now has the same producer-before-consumer ordering.  Only a
+            # completed 128-token boundary advances this current-sequence
+            # readable length; the prior materialization watermark described
+            # the old stateless producer and would hide the just-published row.
+            c128_lengths = seq_lens.div(128, rounding_mode="floor").to(torch.int32)
             metadata.c128_topk_lengths_clamp1[:rows].copy_(c128_lengths.clamp_min(1))
             raw, page, full = self._make_all_compressed_indices(
                 table_indices,

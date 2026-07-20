@@ -205,6 +205,10 @@ def test_deepseek_v4_pool_factory_defaults_to_bf16_and_maps_layers():
     assert pool.attention_compress_state(1).last_dim == 32
     assert pool.indexer_compress_state(1).last_dim == 16
     assert pool.attention_compress_state(2).last_dim == 16
+    assert (
+        pool.attention_compress_state(2).kv_score_buffer.kv_score.dtype
+        is torch.float32
+    )
 
     max_swa_loc = torch.tensor([pool.num_tokens - 1], dtype=torch.int32)
     state_loc = pool.attention_compress_state(1).translate_from_swa_loc_to_state_loc(max_swa_loc)
@@ -222,7 +226,7 @@ def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
             page_size=1,
             tp_size=1,
         )
-        == 4919
+        == 9783
     )
     configure_dsv4_runtime("optimized")
     assert (
@@ -231,7 +235,7 @@ def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
             page_size=1,
             tp_size=1,
         )
-        == 4921
+        == 9785
     )
 
 
@@ -305,9 +309,31 @@ def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_sl
     assert torch.all(fp8_values[64:] == 11)
     assert torch.all(fp8_scales[:64] == 0)
     assert torch.all(fp8_scales[64:] == 12)
-    assert torch.all(c4_state == 7)
-    assert torch.all(c128_state == 8)
-    assert torch.all(indexer_state == 9)
+    if enable_component_loc_ownership:
+        assert torch.all(c4_state[:8, : 2 * pool._head_dim] == 0)
+        assert torch.all(torch.isneginf(c4_state[:8, 2 * pool._head_dim :]))
+        assert torch.all(c4_state[8:-1] == 7)
+        assert torch.all(c4_state[-1, : 2 * pool._head_dim] == 0)
+        assert torch.all(torch.isneginf(c4_state[-1, 2 * pool._head_dim :]))
+    else:
+        assert torch.all(c4_state == 7)
+    if enable_component_loc_ownership:
+        assert torch.all(c128_state[:128, : pool._head_dim] == 0)
+        assert torch.all(torch.isneginf(c128_state[:128, pool._head_dim :]))
+        assert torch.all(c128_state[128:-1] == 8)
+        assert torch.all(c128_state[-1, : pool._head_dim] == 0)
+        assert torch.all(torch.isneginf(c128_state[-1, pool._head_dim :]))
+    else:
+        assert torch.all(c128_state == 8)
+    if enable_component_loc_ownership:
+        index_dim = pool._index_head_dim
+        assert torch.all(indexer_state[:8, : 2 * index_dim] == 0)
+        assert torch.all(torch.isneginf(indexer_state[:8, 2 * index_dim :]))
+        assert torch.all(indexer_state[8:-1] == 9)
+        assert torch.all(indexer_state[-1, : 2 * index_dim] == 0)
+        assert torch.all(torch.isneginf(indexer_state[-1, 2 * index_dim :]))
+    else:
+        assert torch.all(indexer_state == 9)
 
 
 def test_deepseek_v4_allocated_page_fallback_does_not_clear_live_buffers():

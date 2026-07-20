@@ -453,13 +453,25 @@ def dequant_fp4_weight(
     return (unpacked * expanded).to(out_dtype)
 
 
-def quantize_fp8_activation_ref(x: torch.Tensor, *, block_size: int = 128) -> torch.Tensor:
+def quantize_fp8_activation_ref(
+    x: torch.Tensor,
+    *,
+    block_size: int = 128,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
     fp8 = getattr(torch, "float8_e4m3fn", None)
     if fp8 is None or x.numel() == 0 or x.shape[-1] % block_size != 0:
+        if out is not None:
+            out.copy_(x)
+            return out
         return x
     if dsv4_optimized_triton_enabled():
         try:
-            y = _triton_dsv4_ops().fp8_activation_quantize(x, block_size=block_size)
+            y = _triton_dsv4_ops().fp8_activation_quantize(
+                x,
+                block_size=block_size,
+                out=out,
+            )
             if y is not None:
                 return y
         except Exception as exc:
@@ -473,7 +485,11 @@ def quantize_fp8_activation_ref(x: torch.Tensor, *, block_size: int = 128) -> to
     scale = groups.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4) / 448.0
     scale = torch.pow(2.0, torch.ceil(torch.log2(scale)))
     y = (groups / scale).clamp(-448.0, 448.0).to(fp8).float() * scale
-    return y.reshape_as(flat).reshape_as(x).to(dtype)
+    y = y.reshape_as(flat).reshape_as(x).to(dtype)
+    if out is not None:
+        out.copy_(y)
+        return out
+    return y
 
 
 def quantize_indexer_fp8_cache_ref(kv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -932,6 +948,7 @@ def k_norm_rope_cache_fallback(
     factor: float = 1.0,
     beta_fast: int = 32,
     beta_slow: int = 1,
+    publish_swa_qat: bool = False,
 ) -> torch.Tensor:
     if (norm_weight is None) != (rms_norm_eps is None):
         raise ValueError(
@@ -966,6 +983,7 @@ def k_norm_rope_cache_fallback(
                     factor=factor,
                     beta_fast=beta_fast,
                     beta_slow=beta_slow,
+                    publish_swa_qat=publish_swa_qat,
                 ):
                     return kv
             except Exception:
@@ -995,6 +1013,11 @@ def k_norm_rope_cache_fallback(
                 "DSV4 K cache loc count must match kv rows, "
                 f"got loc={loc.numel()} rows={flat.shape[0]}"
             )
+        non_rope = dim - rotary_dim
+        if publish_swa_qat and non_rope == 448:
+            flat[:, :non_rope] = quantize_fp8_activation_ref(
+                flat[:, :non_rope], block_size=64
+            )
         valid = loc >= 0
         if bool(torch.any(valid)):
             cache[loc[valid]] = flat[valid].to(cache.dtype)
@@ -1016,6 +1039,7 @@ def q_kv_norm_rope_cache_fallback(
     factor: float = 1.0,
     beta_fast: int = 32,
     beta_slow: int = 1,
+    publish_swa_qat: bool = False,
 ) -> bool:
     if not dsv4_optimized_triton_enabled():
         return False
@@ -1035,6 +1059,7 @@ def q_kv_norm_rope_cache_fallback(
                 factor=factor,
                 beta_fast=beta_fast,
                 beta_slow=beta_slow,
+                publish_swa_qat=publish_swa_qat,
             )
         )
     except Exception:
@@ -1109,6 +1134,80 @@ def compress_forward_fallback(
     if not rows:
         return x.new_empty((0, head_dim))
     return torch.cat(rows, dim=0)
+
+
+def c4_online_pool_and_update_fallback(
+    projected: torch.Tensor,
+    state: torch.Tensor,
+    ape: torch.Tensor,
+    positions: torch.Tensor,
+    table_indices: torch.Tensor,
+    raw_out_loc: torch.Tensor,
+    ctx_page_table: torch.Tensor,
+    state_page_mapping: torch.Tensor,
+    *,
+    page_size: int,
+) -> torch.Tensor:
+    """Run the fixed-row online C4 producer qualified for the Mini SM80 ABI."""
+
+    if not dsv4_optimized_triton_enabled():
+        raise RuntimeError("DSV4 online C4 compression requires the Triton backend")
+    try:
+        output = _triton_dsv4_ops().c4_online_pool_and_update(
+            projected,
+            state,
+            ape,
+            positions,
+            table_indices,
+            raw_out_loc,
+            ctx_page_table,
+            state_page_mapping,
+            page_size=int(page_size),
+        )
+    except Exception as exc:
+        raise RuntimeError("DSV4 online C4 SM80 bridge failed") from exc
+    if output is None:
+        raise RuntimeError(
+            "DSV4 online C4 SM80 bridge rejected the projection/state ABI"
+        )
+    return output
+
+
+def c128_online_pool_and_update_fallback(
+    projected: torch.Tensor,
+    state: torch.Tensor,
+    ape: torch.Tensor,
+    positions: torch.Tensor,
+    table_indices: torch.Tensor,
+    raw_out_loc: torch.Tensor,
+    ctx_page_table: torch.Tensor,
+    state_page_mapping: torch.Tensor,
+    *,
+    page_size: int,
+) -> torch.Tensor:
+    """Run the fixed-row online C128 producer on its paged FP32 carry."""
+
+    if not dsv4_optimized_triton_enabled():
+        raise RuntimeError("DSV4 online C128 compression requires the Triton backend")
+    try:
+        output = _triton_dsv4_ops().c128_online_pool_and_update(
+            projected,
+            state,
+            ape,
+            positions,
+            table_indices,
+            raw_out_loc,
+            ctx_page_table,
+            state_page_mapping,
+            page_size=int(page_size),
+        )
+    except Exception as exc:
+        raise RuntimeError("DSV4 online C128 SM80 bridge failed") from exc
+    if output is None:
+        raise RuntimeError(
+            "DSV4 online C128 SM80 bridge rejected the projection/state ABI"
+        )
+    return output
 
 
 def get_paged_mqa_logits_metadata_fallback(
@@ -2622,22 +2721,29 @@ def _topk_transform_512_full_torch(
         return DSV4TopKTransformOutput(raw_indices, page_indices, full_indices, "torch", topk_lens)
 
     lens = seq_lens.to(device=device, dtype=torch.long).clamp(min=0, max=max_seq_len)
-    topk_lens = lens.clamp(max=width).to(torch.int32)
+    positions = torch.arange(max_seq_len, dtype=torch.long, device=device)
+    valid_scores = positions[None, :] < lens[:, None]
+    row_finite = torch.isfinite(scores.float()) | ~valid_scores
+    row_finite = row_finite.all(dim=1)
+    topk_lens = torch.where(
+        row_finite,
+        lens.clamp(max=width).to(torch.int32),
+        torch.full((batch,), -1, dtype=torch.int32, device=device),
+    )
     actual_k = min(width, max_seq_len)
     if actual_k > 0:
-        positions = torch.arange(max_seq_len, dtype=torch.long, device=device)
         masked_scores = scores.float().clone()
-        masked_scores.masked_fill_(positions[None, :] >= lens[:, None], float("-inf"))
-        _values, topk_raw = torch.topk(masked_scores, k=actual_k, dim=1, largest=True, sorted=False)
-        raw_indices[:, :actual_k] = topk_raw.to(torch.int32)
-
-    sequential = torch.arange(width, dtype=torch.int32, device=device).expand(batch, -1)
-    sequential_valid = sequential.to(torch.long) < lens[:, None]
-    raw_indices = torch.where(
-        (lens <= width)[:, None],
-        torch.where(sequential_valid, sequential, torch.full_like(sequential, -1)),
-        raw_indices,
-    )
+        # This allocation-tolerant fallback is also the explicit Candidate-B
+        # reference: stable descending score order preserves ascending raw
+        # logical index for exact ties, including positive/negative zero.
+        masked_scores.masked_fill_(~valid_scores, float("-inf"))
+        topk_raw = torch.argsort(masked_scores, dim=1, descending=True, stable=True)
+        topk_raw = topk_raw[:, :actual_k].to(torch.int32)
+        valid_slots = torch.arange(actual_k, device=device)[None, :] < lens.clamp(max=width)[:, None]
+        valid_slots = valid_slots & row_finite[:, None]
+        raw_indices[:, :actual_k] = torch.where(
+            valid_slots, topk_raw, torch.full_like(topk_raw, -1)
+        )
 
     page_bits = (page_size - 1).bit_length()
     page_mask = page_size - 1
@@ -3617,6 +3723,8 @@ __all__ = [
     "direct_decode_index_metadata_for_replay",
     "compress_norm_rope_store_fallback",
     "compress_forward_fallback",
+    "c4_online_pool_and_update_fallback",
+    "c128_online_pool_and_update_fallback",
     "get_paged_mqa_logits_metadata_fallback",
     "dequant_fp4_weight",
     "dequant_fp8_weight",

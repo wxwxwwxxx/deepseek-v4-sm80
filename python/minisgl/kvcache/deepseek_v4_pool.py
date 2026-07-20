@@ -34,13 +34,18 @@ def _clear_allocated_kv_modes() -> set[str]:
 class DSV4CacheLayoutPolicy:
     """Storage policy for the first DSV4 KV-cache implementation.
 
-    The v1 runtime stores everything as plain BF16 tensors.  The layout name is
-    kept explicit so TARGET 05 can swap selected buffers to FlashMLA packed FP8
-    without changing the scheduler-facing pool API.
+    Published cache tensors default to BF16, while online C4 carry follows the
+    official FP32 state contract.  The layout name remains explicit so selected
+    buffers can use packed FP8 without changing the scheduler-facing pool API.
     """
 
     storage_dtype: torch.dtype = torch.bfloat16
-    compress_state_dtype: torch.dtype = torch.bfloat16
+    # Official DeepSeek and SGLang keep compressor KV/score carry in FP32;
+    # only the completed, normalized publication crosses the BF16 cache cast.
+    compress_state_dtype: torch.dtype = torch.float32
+    # C128 uses the same official FP32 projected-KV/score carry contract as
+    # C4, with a distinct 128-token non-overlap ring.
+    c128_compress_state_dtype: torch.dtype = torch.float32
     layout: DSV4CacheLayout = "bf16_flat"
     indexer_layout: DSV4CacheLayout = "bf16_flat"
 
@@ -640,7 +645,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                     overlap=False,
                     head_dim=self._head_dim,
                     ratio=128,
-                    dtype=self._policy.compress_state_dtype,
+                    dtype=self._policy.c128_compress_state_dtype,
                     device=device,
                     page_size=page_size,
                 )
@@ -794,6 +799,24 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         pool = self._indexer_compress_state_pools[layer_id]
         assert pool is not None, f"Layer {layer_id} has no indexer compress state."
         return pool
+
+    def compress_state_page_mapping(
+        self,
+        ratio: Literal[4, 128],
+        *,
+        component: Literal["attention", "indexer"] = "attention",
+    ) -> torch.Tensor:
+        """Return the scheduler-owned full-page -> compressor-state-page map."""
+
+        if ratio == 4:
+            return (
+                self._full_to_c4_indexer_state_page
+                if component == "indexer"
+                else self._full_to_c4_state_page
+            )
+        if component == "indexer":
+            raise ValueError("DSV4 C128 has no indexer compression state")
+        return self._full_to_c128_state_page
 
     def component_cache(self, layer_id: int) -> torch.Tensor:
         mapping = self.get_layer_mapping(layer_id)
@@ -1073,7 +1096,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         c4_indexer_state_slots = c4_state_slots if self._c4_layer_count else 0
 
         dtype_size = self._dtype.itemsize
-        state_dtype_size = self._policy.compress_state_dtype.itemsize
+        c4_state_dtype_size = self._policy.compress_state_dtype.itemsize
+        c128_state_dtype_size = self._policy.c128_compress_state_dtype.itemsize
         legacy_swa_bytes = self._num_layers * retained_full_tokens * self._head_dim * dtype_size
         if self._swa_independent_lifecycle_enabled:
             runtime_swa_pages = self.runtime_swa_counters()["current_swa_tail_pages"]
@@ -1098,7 +1122,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             * self.C4_STATE_RING_SIZE
             * 4
             * self._head_dim
-            * state_dtype_size
+            * c4_state_dtype_size
         )
         c4_indexer_state_bytes = (
             self._c4_layer_count
@@ -1106,7 +1130,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             * self.C4_STATE_RING_SIZE
             * 4
             * self._index_head_dim
-            * state_dtype_size
+            * c4_state_dtype_size
         )
         c128_state_bytes = (
             self._c128_layer_count
@@ -1114,7 +1138,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             * self.C128_STATE_RING_SIZE
             * 2
             * self._head_dim
-            * state_dtype_size
+            * c128_state_dtype_size
         )
         retained_memory_bytes = (
             swa_bytes
@@ -1683,8 +1707,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
             self._c4_state_refcount[c4_state_locs] += 1
             self._full_to_c4_state_page[full_pages] = c4_state_pages
-            if "state" in clear_modes:
-                self._clear_c4_state_locs(c4_state_locs)
+            # A newly assigned carry page must never expose data from its prior
+            # owner.  Online C4 reads valid prefix positions immediately, so
+            # initialization is part of allocation rather than a debug mode.
+            self._clear_c4_state_locs(c4_state_locs)
 
             indexer_state_pages = self._alloc_component_pages(
                 "_free_c4_indexer_state_pages",
@@ -1697,8 +1723,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
             self._c4_indexer_state_refcount[indexer_state_locs] += 1
             self._full_to_c4_indexer_state_page[full_pages] = indexer_state_pages
-            if "state" in clear_modes:
-                self._clear_c4_indexer_state_locs(indexer_state_locs)
+            self._clear_c4_indexer_state_locs(indexer_state_locs)
 
         if self._c128_layer_count:
             c128_pages = self._alloc_component_pages("_free_c128_pages", count, "C128")
@@ -1722,8 +1747,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             )
             self._c128_state_refcount[c128_state_locs] += 1
             self._full_to_c128_state_page[full_pages] = c128_state_pages
-            if "state" in clear_modes:
-                self._clear_c128_state_locs(c128_state_locs)
+            # C128 is an online carry owner: allocation must clear recycled KV
+            # and score slots before any prefix or boundary reduction can read
+            # the page, independent of optional diagnostic clear modes.
+            self._clear_c128_state_locs(c128_state_locs)
 
     def _release_component_pages_for_full_pages(
         self,
@@ -2028,6 +2055,8 @@ def _build_layer_mapping(
 
 def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) -> int:
     dtype_size = torch.bfloat16.itemsize
+    c4_state_dtype_size = torch.float32.itemsize
+    c128_state_dtype_size = torch.float32.itemsize
     head_dim = model_config.head_dim
     index_head_dim = model_config.index_head_dim or head_dim
     ratios = model_config.compress_ratios or [0] * model_config.num_layers
@@ -2048,12 +2077,26 @@ def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) ->
         if _indexer_fp8_cache_enabled()
         else 0
     )
-    c4_state_bytes = c4_layers * DeepSeekV4KVCache.C4_STATE_RING_SIZE * 4 * head_dim * dtype_size
+    c4_state_bytes = (
+        c4_layers
+        * DeepSeekV4KVCache.C4_STATE_RING_SIZE
+        * 4
+        * head_dim
+        * c4_state_dtype_size
+    )
     c4_indexer_state_bytes = (
-        c4_layers * DeepSeekV4KVCache.C4_STATE_RING_SIZE * 4 * index_head_dim * dtype_size
+        c4_layers
+        * DeepSeekV4KVCache.C4_STATE_RING_SIZE
+        * 4
+        * index_head_dim
+        * c4_state_dtype_size
     )
     c128_state_bytes = (
-        c128_layers * DeepSeekV4KVCache.C128_STATE_RING_SIZE * 2 * head_dim * dtype_size
+        c128_layers
+        * DeepSeekV4KVCache.C128_STATE_RING_SIZE
+        * 2
+        * head_dim
+        * c128_state_dtype_size
     )
     return (
         swa_bytes
