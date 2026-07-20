@@ -8,11 +8,7 @@ import torch
 from minisgl.attention import create_attention_backend
 from minisgl.core import Batch, Context, Req, set_global_ctx
 from minisgl.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
-from minisgl.dsv4_runtime import (
-    configure_dsv4_runtime,
-    get_dsv4_runtime_config,
-    resolve_dsv4_runtime_config,
-)
+from minisgl.dsv4_release import DSV4_RELEASE
 from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
 from minisgl.models import create_model, load_weight
 from minisgl.reasoning import ReasoningTokenIds, resolve_reasoning_token_ids
@@ -39,9 +35,8 @@ from .sample import BatchSamplingArgs, ReasoningSampler, Sampler
 
 logger = init_logger(__name__)
 
-_DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES = 32 * 1024 * 1024
 _DSV4_SM80_DEFAULT_CUDA_GRAPH_MAX_BS = 128
-_DSV4_SM80_FALLBACK_CUDA_GRAPH_BS = (1, 2, 4, 8, 16)
+_DSV4_SM80_RELEASE_CUDA_GRAPH_BS = (1, 2, 4, 8, 16)
 _DSV4_SM80_RECIPES = {
     "default_m128": (128, 128, None),
     "low_m64": (64, 64, None),
@@ -111,15 +106,12 @@ class Engine:
         assert not torch.cuda.is_initialized()
         set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
         _adjust_config(config)
-        configure_dsv4_runtime(config.dsv4_runtime_mode)
 
         self.device = torch.device(f"cuda:{config.tp_info.rank}")
         torch.cuda.set_device(self.device)
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
-        # The oracle/disabled path deliberately avoids this extra tokenizer
-        # load and matches the pre-Target13 Engine initialization surface.
         self.reasoning_sampler_contract_enabled = (
             config.reasoning_sampler_contract_enabled
         )
@@ -288,12 +280,12 @@ class Engine:
         return tp_cpu_group
 
     def _marlin_wna16_release_timing(self) -> str:
-        return get_dsv4_runtime_config().marlin_release_timing or "disabled"
+        return DSV4_RELEASE.marlin_release_timing
 
     def _maybe_release_marlin_wna16_for_timing(self, *, timing: str, stage_label: str) -> None:
         if self._marlin_wna16_release_done:
             return
-        if not get_dsv4_runtime_config().release_raw_expert_weights:
+        if not DSV4_RELEASE.release_raw_expert_weights:
             return
         if self._marlin_wna16_release_timing() != timing:
             return
@@ -543,9 +535,8 @@ class Engine:
         config: EngineConfig,
         cache_per_page: int,
     ) -> dict[str, Any]:
-        runtime = get_dsv4_runtime_config()
-        requested = runtime.marlin_capacity_credit
-        release_requested = runtime.release_raw_expert_weights
+        requested = DSV4_RELEASE.marlin_capacity_credit
+        release_requested = DSV4_RELEASE.release_raw_expert_weights
         timing = self._marlin_wna16_release_timing()
         moe_report = {}
         if isinstance(self.model_prepare_report, dict):
@@ -706,7 +697,7 @@ def _pynccl_max_buffer_bytes(config: EngineConfig) -> int:
         * torch.bfloat16.itemsize
     )
     if _use_dsv4_sm80_default_pynccl_threshold(config):
-        return min(max_bytes, _DSV4_SM80_DEFAULT_PYNCCL_MAX_BYTES)
+        return min(max_bytes, DSV4_RELEASE.pynccl_max_buffer_bytes)
     return max_bytes
 
 
@@ -745,7 +736,7 @@ def _resolve_cuda_graph_policy(
         effective_max_running_req=int(getattr(config, "max_running_req", 256)),
         graph_disabled=disabled,
         release_default_bs=(
-            _DSV4_SM80_FALLBACK_CUDA_GRAPH_BS
+            _DSV4_SM80_RELEASE_CUDA_GRAPH_BS
             if is_dsv4
             and bool(config.allow_dsv4_cuda_graph)
             and getattr(config, "dsv4_sm80_recipe", None) is None
@@ -777,25 +768,11 @@ def _adjust_config(config: EngineConfig):
         )
 
     if config.model_config.is_deepseek_v4:
-        runtime = resolve_dsv4_runtime_config(config.dsv4_runtime_mode)
         requested_recipe = getattr(config, "dsv4_sm80_recipe", None)
         if requested_recipe is not None and requested_recipe not in _DSV4_SM80_RECIPES:
             raise ValueError(
                 f"Unknown dsv4_sm80_recipe={requested_recipe!r}; supported recipes are "
                 f"{sorted(_DSV4_SM80_RECIPES)}."
-            )
-        if not runtime.optimized and requested_recipe is not None:
-            raise ValueError(
-                f"dsv4_sm80_recipe={requested_recipe!r} conflicts with "
-                "dsv4_runtime_mode='fallback'."
-            )
-        if not runtime.optimized and bool(
-            getattr(config, "enable_reasoning_sampler_contract", False)
-        ):
-            raise ValueError(
-                "enable_reasoning_sampler_contract conflicts with "
-                "dsv4_runtime_mode='fallback'; fallback preserves raw logits "
-                "and sampling behavior."
             )
         recipe_name = requested_recipe
         if recipe_name is not None:
@@ -830,85 +807,62 @@ def _adjust_config(config: EngineConfig):
                         else "No explicit field overrides were detected."
                     )
                 )
-        elif (
-            runtime.optimized and config.cuda_graph_bs is None and config.cuda_graph_max_bs is None
-        ):
+        elif config.cuda_graph_bs is None and config.cuda_graph_max_bs is None:
             override(
                 "cuda_graph_max_bs",
                 min(_DSV4_SM80_DEFAULT_CUDA_GRAPH_MAX_BS, config.max_running_req),
             )
-        if runtime.optimized:
-            if config.page_size == 1:
-                override("page_size", 256)
-            if hasattr(config, "cache_type") and getattr(config, "cache_type") != "radix":
-                override("cache_type", "radix")
-            if hasattr(config, "enable_dsv4_radix_prefix_cache") and not getattr(
-                config, "enable_dsv4_radix_prefix_cache"
-            ):
-                override("enable_dsv4_radix_prefix_cache", True)
-            if hasattr(config, "enable_dsv4_component_loc_ownership") and not getattr(
-                config, "enable_dsv4_component_loc_ownership"
-            ):
-                override("enable_dsv4_component_loc_ownership", True)
-            if hasattr(config, "enable_dsv4_swa_independent_lifecycle") and not getattr(
-                config, "enable_dsv4_swa_independent_lifecycle"
-            ):
-                override("enable_dsv4_swa_independent_lifecycle", True)
-            max_extend_tokens = getattr(config, "max_extend_tokens", None)
-            max_extend_tokens_explicit = bool(getattr(config, "max_extend_tokens_explicit", False))
-            if max_extend_tokens is None or (
-                max_extend_tokens == _GENERIC_DEFAULT_MAX_EXTEND_TOKENS
-                and not max_extend_tokens_explicit
-            ):
-                override("max_extend_tokens", _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS)
-            graph_explicitly_disabled = (
-                bool(getattr(config, "disable_cuda_graph", False))
-                or config.cuda_graph_bs == []
-                or config.cuda_graph_max_bs == 0
-            )
-            if not graph_explicitly_disabled and not config.allow_dsv4_cuda_graph:
-                override("allow_dsv4_cuda_graph", True)
-            communication = (
-                "PyNCCL threshold=32 MiB" if bool(getattr(config, "use_pynccl", True)) else "NCCL"
-            )
-            logger.info_rank0(
-                "DeepSeek V4 optimized runtime: "
-                f"page_size={config.page_size}, max_running_req={config.max_running_req}, "
-                f"cuda_graph_max_bs={config.cuda_graph_max_bs}, "
-                f"max_prefill_tokens={config.max_extend_tokens}, communication={communication}. "
-                "Use dsv4_runtime_mode='fallback' for the reference path."
-            )
-            reasoning_contract_enabled = bool(
-                getattr(
-                    config,
-                    "reasoning_sampler_contract_enabled",
-                    getattr(config, "enable_reasoning_sampler_contract", False),
-                )
-            )
-            if reasoning_contract_enabled:
-                logger.warning_rank0(
-                    "DeepSeek V4 reasoning sampler contract is ENABLED. It masks "
-                    "protocol delimiters and EOS according to request state, changing "
-                    "the model's raw sampling distribution."
-                )
-        else:
+        if config.page_size == 1:
             override("page_size", 256)
-            override("disable_cuda_graph", True)
-            override("allow_dsv4_cuda_graph", False)
-            override("use_pynccl", False)
-            if hasattr(config, "cache_type"):
-                override("cache_type", "naive")
-            for attr in (
-                "enable_dsv4_radix_prefix_cache",
-                "enable_dsv4_component_loc_ownership",
-                "enable_dsv4_swa_independent_lifecycle",
-            ):
-                if hasattr(config, attr):
-                    override(attr, False)
-            logger.info_rank0(
-                "DeepSeek V4 fallback runtime: page_size=256, CUDA graph=off, "
-                "PyNCCL=off, cache=naive. The reasoning sampler contract is "
-                "disabled to preserve oracle logits and sampling distributions."
+        if hasattr(config, "cache_type") and getattr(config, "cache_type") != "radix":
+            override("cache_type", "radix")
+        if hasattr(config, "enable_dsv4_radix_prefix_cache") and not getattr(
+            config, "enable_dsv4_radix_prefix_cache"
+        ):
+            override("enable_dsv4_radix_prefix_cache", True)
+        if hasattr(config, "enable_dsv4_component_loc_ownership") and not getattr(
+            config, "enable_dsv4_component_loc_ownership"
+        ):
+            override("enable_dsv4_component_loc_ownership", True)
+        if hasattr(config, "enable_dsv4_swa_independent_lifecycle") and not getattr(
+            config, "enable_dsv4_swa_independent_lifecycle"
+        ):
+            override("enable_dsv4_swa_independent_lifecycle", True)
+        max_extend_tokens = getattr(config, "max_extend_tokens", None)
+        max_extend_tokens_explicit = bool(getattr(config, "max_extend_tokens_explicit", False))
+        if max_extend_tokens is None or (
+            max_extend_tokens == _GENERIC_DEFAULT_MAX_EXTEND_TOKENS
+            and not max_extend_tokens_explicit
+        ):
+            override("max_extend_tokens", _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS)
+        graph_explicitly_disabled = (
+            bool(getattr(config, "disable_cuda_graph", False))
+            or config.cuda_graph_bs == []
+            or config.cuda_graph_max_bs == 0
+        )
+        if not graph_explicitly_disabled and not config.allow_dsv4_cuda_graph:
+            override("allow_dsv4_cuda_graph", True)
+        communication = (
+            "PyNCCL threshold=32 MiB" if bool(getattr(config, "use_pynccl", True)) else "NCCL"
+        )
+        logger.info_rank0(
+            "Resolved DeepSeek V4 runtime parameters: "
+            f"page_size={config.page_size}, max_running_req={config.max_running_req}, "
+            f"cuda_graph_max_bs={config.cuda_graph_max_bs}, "
+            f"max_prefill_tokens={config.max_extend_tokens}, communication={communication}."
+        )
+        reasoning_contract_enabled = bool(
+            getattr(
+                config,
+                "reasoning_sampler_contract_enabled",
+                getattr(config, "enable_reasoning_sampler_contract", False),
+            )
+        )
+        if reasoning_contract_enabled:
+            logger.warning_rank0(
+                "DeepSeek V4 reasoning sampler contract is ENABLED. It masks "
+                "protocol delimiters and EOS according to request state, changing "
+                "the model's raw sampling distribution."
             )
         if config.attention_backend == "auto":
             override("attention_backend", "dsv4")

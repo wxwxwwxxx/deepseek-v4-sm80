@@ -5,7 +5,6 @@ from functools import cached_property
 from typing import TYPE_CHECKING, List
 
 from minisgl.distributed import DistributedInfo
-from minisgl.dsv4_runtime import DSV4RuntimeMode
 from minisgl.utils import cached_load_hf_config
 
 if TYPE_CHECKING:
@@ -19,7 +18,6 @@ class EngineConfig:
     tp_info: DistributedInfo
     max_running_req: int = 128
     max_running_req_explicit: bool = False
-    dsv4_runtime_mode: DSV4RuntimeMode = "optimized"
     enable_reasoning_sampler_contract: bool = False
     dsv4_sm80_recipe: str | None = None
     attention_backend: str = "auto"
@@ -65,11 +63,10 @@ class EngineConfig:
     def reasoning_sampler_contract_enabled(self) -> bool:
         """Return whether the optional reasoning grammar mask is active.
 
-        Fallback is a numerical oracle and therefore never enables grammar
-        masking. The optimized runtime only enables it when explicitly asked.
+        The release runtime enables it only when explicitly requested.
         """
 
-        return self.dsv4_runtime_mode == "optimized" and self.enable_reasoning_sampler_contract
+        return self.enable_reasoning_sampler_contract
 
     @property
     def distributed_addr(self) -> str:

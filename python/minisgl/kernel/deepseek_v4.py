@@ -1,10 +1,4 @@
-"""DeepSeek V4 fused-kernel wrapper boundary.
-
-The functions in this module are correctness-first fallbacks with the same
-semantic boundaries as SGLang's DSV4 fused kernels.  High-performance sm80
-ports should replace internals here instead of leaking optional kernel imports
-into model or attention code.
-"""
+"""DeepSeek V4 fused-kernel wrapper and bounded operator-reference boundary."""
 
 from __future__ import annotations
 
@@ -16,31 +10,21 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
-from minisgl.dsv4_runtime import get_dsv4_runtime_config
 from minisgl.kernel.utils import load_jit
 from minisgl.utils import div_ceil
 
 WeightKind = Literal["bf16", "fp8", "fp4"]
-KernelStatus = Literal["native", "fallback", "unsupported", "todo"]
-DSV4KernelMode = Literal["fallback", "bf16_direct", "fp8_act", "fp4_act"]
 
 
-DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4 = "grouped_fp4"
 DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
 DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT = 512
 
 
-DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR = (
+DSV4_MARLIN_WNA16_RELEASE_ERROR = (
     "Marlin WNA16 release preset has released raw routed expert weights; "
-    "fallback/grouped_fp4 backend is unavailable in this Engine. Use the "
-    "non-release preset or recreate the Engine with release disabled."
+    "the required prepacked Marlin cache is unavailable in this Engine."
 )
 DSV4_INDEXER_CAPTURE_WIDTH_MODES = ("current", "table_width", "seq_len_aligned")
-DSV4_SM80_MOE_EXPERT_BACKENDS: tuple[str, ...] = (
-    DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4,
-    DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
-)
-DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES = 512
 
 
 @dataclass(frozen=True)
@@ -119,37 +103,6 @@ class DSV4MoEExecutionPlan:
     final_reduce_label: str
 
 
-class DSV4MoEWorkspace:
-    """Reusable per-layer temporary buffers for the exact grouped MoE path."""
-
-    def __init__(self) -> None:
-        self._buffers: dict[str, torch.Tensor] = {}
-
-    def tensor(
-        self,
-        name: str,
-        shape: tuple[int, ...],
-        dtype: torch.dtype,
-        device: torch.device,
-        *,
-        zero: bool = False,
-    ) -> torch.Tensor:
-        numel = math.prod(shape)
-        buffer = self._buffers.get(name)
-        if (
-            buffer is None
-            or buffer.dtype != dtype
-            or buffer.device != device
-            or buffer.numel() < numel
-        ):
-            buffer = torch.empty((numel,), dtype=dtype, device=device)
-            self._buffers[name] = buffer
-        out = buffer[:numel].view(shape)
-        if zero:
-            out.zero_()
-        return out
-
-
 def _module_available(name: str) -> tuple[bool, str | None]:
     try:
         spec = importlib.util.find_spec(name)
@@ -188,36 +141,19 @@ def detect_dsv4_kernel_capabilities() -> DSV4KernelCapability:
     )
 
 
-def dsv4_optimized_enabled() -> bool:
-    return get_dsv4_runtime_config().optimized
-
-
-def dsv4_optimized_triton_enabled() -> bool:
-    if not dsv4_optimized_enabled():
-        return False
+def dsv4_triton_available() -> bool:
     cap = detect_dsv4_kernel_capabilities()
     return bool(cap.is_sm80 and cap.triton_available)
 
 
 def warmup_indexer_fp8_backend(device: torch.device) -> None:
-    if not dsv4_optimized_triton_enabled():
+    if not dsv4_triton_available():
         return
     if torch.device(device).type != "cuda":
         return
     warmup = getattr(_triton_dsv4_ops(), "warmup_indexer_fp8_lut", None)
     if callable(warmup):
         warmup(device)
-
-
-def dsv4_moe_expert_backend() -> str:
-    return get_dsv4_runtime_config().moe_expert_backend
-
-
-def require_supported_moe_expert_backend() -> str:
-    backend = dsv4_moe_expert_backend()
-    if backend not in DSV4_SM80_MOE_EXPERT_BACKENDS:
-        raise RuntimeError(f"Unsupported typed DSV4 MoE backend: {backend!r}")
-    return backend
 
 
 def moe_route_dispatch_bf16_marlin_wna16(
@@ -358,15 +294,13 @@ def _run_moe_bf16_marlin_wna16_prepacked(
     return output
 
 
-def dsv4_optimized_cuda_enabled() -> bool:
-    if not dsv4_optimized_enabled():
-        return False
+def dsv4_cuda_available() -> bool:
     cap = detect_dsv4_kernel_capabilities()
     return bool(cap.is_sm80 and cap.cuda_available)
 
 
 def linear_bf16_fp32_upstream_enabled() -> bool:
-    return dsv4_optimized_cuda_enabled()
+    return dsv4_cuda_available()
 
 
 def _triton_dsv4_ops():
@@ -465,7 +399,7 @@ def quantize_fp8_activation_ref(
             out.copy_(x)
             return out
         return x
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             y = _triton_dsv4_ops().fp8_activation_quantize(
                 x,
@@ -658,7 +592,7 @@ def indexer_q_rope_fp8_fallback(
     )
     q_values = None
     weights_out = None
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             triton_quant = _triton_dsv4_ops().indexer_fp8_quantize_fold(
                 q_work,
@@ -741,7 +675,7 @@ def linear_bf16_fp32_fallback(x: torch.Tensor, weight: torch.Tensor) -> torch.Te
 
 
 def rms_norm_fallback(x: torch.Tensor, weight: torch.Tensor, *, eps: float) -> torch.Tensor:
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         y = _triton_dsv4_ops().rms_norm_bf16(x, weight, eps=eps)
         if y is not None:
             return y
@@ -818,7 +752,7 @@ def apply_rotary_tail(
         return x
     if rotary_dim % 2 != 0:
         raise ValueError(f"DeepSeek V4 rotary_dim must be even, got {rotary_dim}")
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             if _triton_dsv4_ops().apply_rotary_tail(
                 x,
@@ -887,7 +821,7 @@ def q_norm_rope_fallback(
     beta_fast: int = 32,
     beta_slow: int = 1,
 ) -> torch.Tensor:
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             if _triton_dsv4_ops().q_norm_rope(
                 q,
@@ -968,7 +902,7 @@ def k_norm_rope_cache_fallback(
                 "DSV4 K norm weight must match kv dim, "
                 f"got weight={norm_weight.numel()} dim={kv.shape[-1]}"
             )
-        if has_cache and dsv4_optimized_triton_enabled():
+        if has_cache and dsv4_triton_available():
             try:
                 if _triton_dsv4_ops().k_norm_rope_cache_bf16(
                     kv,
@@ -1041,7 +975,7 @@ def q_kv_norm_rope_cache_fallback(
     beta_slow: int = 1,
     publish_swa_qat: bool = False,
 ) -> bool:
-    if not dsv4_optimized_triton_enabled():
+    if not dsv4_triton_available():
         return False
     try:
         return bool(
@@ -1086,7 +1020,7 @@ def compress_forward_fallback(
         positions = torch.arange(x.shape[0], device=x.device, dtype=torch.long)
     else:
         positions = positions.to(device=x.device, dtype=torch.long)
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         fast = _compress_forward_vectorized(
             x,
             positions,
@@ -1150,7 +1084,7 @@ def c4_online_pool_and_update_fallback(
 ) -> torch.Tensor:
     """Run the fixed-row online C4 producer qualified for the Mini SM80 ABI."""
 
-    if not dsv4_optimized_triton_enabled():
+    if not dsv4_triton_available():
         raise RuntimeError("DSV4 online C4 compression requires the Triton backend")
     try:
         output = _triton_dsv4_ops().c4_online_pool_and_update(
@@ -1187,7 +1121,7 @@ def c128_online_pool_and_update_fallback(
 ) -> torch.Tensor:
     """Run the fixed-row online C128 producer on its paged FP32 carry."""
 
-    if not dsv4_optimized_triton_enabled():
+    if not dsv4_triton_available():
         raise RuntimeError("DSV4 online C128 compression requires the Triton backend")
     try:
         output = _triton_dsv4_ops().c128_online_pool_and_update(
@@ -1292,7 +1226,7 @@ def dsv4_sparse_attention_two_source_bf16(
     softmax_scale: float,
     attn_sink: torch.Tensor | None,
 ) -> torch.Tensor | None:
-    if not (dsv4_optimized_enabled() and detect_dsv4_kernel_capabilities().is_sm80):
+    if not detect_dsv4_kernel_capabilities().is_sm80:
         return None
     if (
         q.ndim != 3
@@ -1398,8 +1332,6 @@ def dsv4_sparse_attention_two_source_splitk_bf16(
     softmax_scale: float,
     attn_sink: torch.Tensor | None,
 ) -> torch.Tensor | None:
-    if not dsv4_optimized_enabled():
-        return None
     try:
         out = _triton_dsv4_ops().sparse_attention_splitk_bf16(
             q,
@@ -1590,7 +1522,7 @@ def indexer_bf16_logits_fallback(
         page_size,
         capture_active,
     )
-    if dsv4_optimized_triton_enabled() and weights is not None:
+    if dsv4_triton_available() and weights is not None:
         try:
             logits = _triton_dsv4_ops().indexer_bf16_logits(
                 q,
@@ -1711,7 +1643,7 @@ def indexer_fp8_paged_logits_fallback(
         page_size,
         capture_active,
     )
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             logits = _triton_dsv4_ops().indexer_fp8_paged_logits(
                 q_values,
@@ -1932,7 +1864,7 @@ def remap_indexer_topk_locs(
     ratio: int,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Map compressed raw top-k indices without int64 matrix temporaries."""
-    if not dsv4_optimized_triton_enabled():
+    if not dsv4_triton_available():
         return None
     try:
         return _triton_dsv4_ops().remap_indexer_topk_locs(
@@ -2063,7 +1995,7 @@ def hc_pre_fallback(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     shape = x.shape
     flat = x.flatten(1)
-    if dsv4_optimized_triton_enabled() and dsv4_optimized_triton_enabled():
+    if dsv4_triton_available() and dsv4_triton_available():
         mixes = linear_bf16_fp32_fallback(flat, fn)
         fused = _triton_dsv4_ops().hc_prenorm_split_pre(
             mixes.contiguous(),
@@ -2080,7 +2012,7 @@ def hc_pre_fallback(
     flat_float = flat.float()
     rsqrt = torch.rsqrt(flat_float.square().mean(-1, keepdim=True) + norm_eps)
     mixes = linear_bf16_fp32_fallback(flat, fn) * rsqrt
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         fused = _triton_dsv4_ops().hc_split_pre(
             mixes.contiguous(),
             x,
@@ -2103,7 +2035,7 @@ def hc_post_fallback(
     post: torch.Tensor,
     comb: torch.Tensor,
 ) -> torch.Tensor:
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         fused = _triton_dsv4_ops().hc_post(x, residual, post, comb)
         if fused is not None:
             return fused
@@ -2123,7 +2055,7 @@ def hc_head_fallback(
 ) -> torch.Tensor:
     shape = x.shape
     flat = x.flatten(1)
-    if dsv4_optimized_triton_enabled() and dsv4_optimized_triton_enabled():
+    if dsv4_triton_available() and dsv4_triton_available():
         mixes = linear_bf16_fp32_fallback(flat, fn)
         fused = _triton_dsv4_ops().hc_prenorm_head(
             mixes.contiguous(),
@@ -2143,34 +2075,6 @@ def hc_head_fallback(
     return torch.sum(pre.to(x.dtype).unsqueeze(-1) * x.view(shape), dim=1)
 
 
-def sequence_mqa_attention_fallback(
-    q: torch.Tensor,
-    kv: torch.Tensor,
-    spans: list[tuple[int, int]],
-    *,
-    window_size: int,
-    softmax_scale: float,
-    attn_sink: torch.Tensor,
-) -> torch.Tensor:
-    out = torch.empty_like(q)
-    sink = attn_sink[: q.shape[1]].to(device=q.device, dtype=torch.float32)
-    for start, end in spans:
-        q_seq = q[start:end].float()
-        kv_seq = kv[start:end].float()
-        seq_len = end - start
-        for local_idx in range(seq_len):
-            ctx_start = max(0, local_idx - window_size + 1) if window_size else 0
-            candidates = kv_seq[ctx_start : local_idx + 1]
-            scores = torch.einsum("hd,td->ht", q_seq[local_idx], candidates)
-            scores = scores * softmax_scale
-            max_score = torch.maximum(scores.max(dim=-1).values, sink)
-            exp_scores = torch.exp(scores - max_score[:, None])
-            denom = exp_scores.sum(dim=-1) + torch.exp(sink - max_score)
-            attn = exp_scores / denom[:, None]
-            out[start + local_idx] = torch.einsum("ht,td->hd", attn, candidates).to(q.dtype)
-    return out
-
-
 def paged_mqa_attention_fallback(
     q: torch.Tensor,
     cache: torch.Tensor,
@@ -2187,7 +2091,7 @@ def paged_mqa_attention_fallback(
             "DSV4 paged MQA metadata row count must match q tokens, "
             f"got {metadata.row_count} rows for {q.shape[0]} tokens"
         )
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             out = _triton_dsv4_ops().paged_mqa_attention_bf16(
                 q,
@@ -2263,7 +2167,7 @@ def build_moe_route_plan(
     route_count = indices.numel()
     topk = indices.shape[1]
     device = indices.device
-    if route_count and indices.is_cuda and dsv4_optimized_triton_enabled():
+    if route_count and indices.is_cuda and dsv4_triton_available():
         try:
             route_plan = _triton_dsv4_ops().build_moe_route_plan(
                 indices,
@@ -2380,16 +2284,14 @@ def build_moe_v2_execution_plan(
 
 def moe_execution_block_size(*, tokens: int, topk: int, num_experts: int) -> int:
     """Use the production backend's route blocking for the authoritative plan."""
-    if dsv4_moe_expert_backend() == DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16:
-        from minisgl.kernel import marlin_wna16
+    from minisgl.kernel import marlin_wna16
 
-        return marlin_wna16.choose_block_size(
-            tokens=tokens,
-            topk=topk,
-            experts=num_experts,
-            input_dtype=None,
-        )
-    return 16
+    return marlin_wna16.choose_block_size(
+        tokens=tokens,
+        topk=topk,
+        experts=num_experts,
+        input_dtype=None,
+    )
 
 
 def mask_moe_routes_live_rows(
@@ -2493,7 +2395,7 @@ def silu_and_mul_clamp_fallback(
     swiglu_limit: float = 0.0,
     weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             out = _triton_dsv4_ops().silu_and_mul_clamp(
                 gate,
@@ -2514,74 +2416,6 @@ def silu_and_mul_clamp_fallback(
     if weights is not None:
         out = out * weights
     return out
-
-
-def moe_route_dispatch_bf16_grouped(
-    hidden_states: torch.Tensor,
-    weights: torch.Tensor,
-    indices: torch.Tensor,
-    w13_weight: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_weight: torch.Tensor,
-    w2_scale: torch.Tensor,
-    *,
-    swiglu_limit: float = 0.0,
-    moe_plan: DSV4MoEExecutionPlan | None = None,
-    workspace: DSV4MoEWorkspace | None = None,
-) -> torch.Tensor | None:
-    if not dsv4_optimized_triton_enabled():
-        return None
-    if hidden_states.dtype is not torch.bfloat16 or not hidden_states.is_cuda:
-        return None
-    if hidden_states.ndim != 2 or weights.shape != indices.shape or indices.ndim != 2:
-        return None
-    if w13_weight.ndim != 4 or w13_weight.shape[1] != 2 or w2_weight.ndim != 3:
-        return None
-    if w13_weight.shape[0] != w2_weight.shape[0]:
-        return None
-    if hidden_states.shape[1] != w13_weight.shape[-1] * 2:
-        return None
-
-    try:
-        if moe_plan is None:
-            route_plan = build_moe_route_plan(
-                indices,
-                num_experts=w13_weight.shape[0],
-                block_size_m=16,
-            )
-            route_weights = weights.to(
-                device=hidden_states.device,
-                dtype=torch.float32,
-            ).contiguous()
-        else:
-            if (
-                moe_plan.tokens != hidden_states.shape[0]
-                or moe_plan.hidden != hidden_states.shape[1]
-                or moe_plan.num_experts != w13_weight.shape[0]
-                or moe_plan.route_plan.route_count != weights.numel()
-                or moe_plan.route_plan.topk != indices.shape[1]
-            ):
-                return None
-            route_plan = moe_plan.route_plan
-            route_weights = moe_plan.route_weights
-        return _triton_dsv4_ops().grouped_fp4_moe(
-            hidden_states.contiguous(),
-            route_weights,
-            w13_weight.contiguous(),
-            w13_scale,
-            w2_weight.contiguous(),
-            w2_scale,
-            route_plan.sorted_route_ids,
-            route_plan.expert_ids,
-            route_plan.num_tokens_post_padded,
-            route_count=route_plan.route_count,
-            topk=route_plan.topk,
-            block_size_m=route_plan.block_size_m,
-            swiglu_limit=swiglu_limit,
-            workspace=workspace,
-        )
-    except Exception:
-        return None
 
 
 @lru_cache(maxsize=1)
@@ -2610,8 +2444,7 @@ def _run_local_cuda_topk_transform_512(
     width: int,
 ) -> bool:
     if not (
-        dsv4_optimized_enabled()
-        and scores.is_cuda
+        scores.is_cuda
         and detect_dsv4_kernel_capabilities().is_sm80
         and width in (512, 1024)
     ):
@@ -2644,8 +2477,7 @@ def _run_local_cuda_global_topk_lens_512(
     ratio: int,
 ) -> bool:
     if not (
-        dsv4_optimized_enabled()
-        and scores.is_cuda
+        scores.is_cuda
         and detect_dsv4_kernel_capabilities().is_sm80
         and width in (512, 1024)
         and ratio > 0
@@ -2811,7 +2643,7 @@ def topk_transform_512_full_fallback(
             "local_cuda_global_topk_lens",
             topk_lens,
         )
-    if dsv4_optimized_enabled() and _cuda_graph_capture_active(scores.device):
+    if _cuda_graph_capture_active(scores.device):
         raise RuntimeError(
             "Optimized DSV4 CUDA graph capture requires the global topk/lens JIT path."
         )
@@ -2875,7 +2707,7 @@ def store_compressed_fallback(
     loc: torch.Tensor,
 ) -> None:
     loc_flat = loc.reshape(-1)
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             if _triton_dsv4_ops().store_cache(kvcache.component_cache(layer_id), kv, loc):
                 return
@@ -2892,7 +2724,7 @@ def store_compressed_fallback(
 
 def store_indexer_fallback(kvcache, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
     loc_flat = loc.reshape(-1)
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             if _triton_dsv4_ops().store_cache(kvcache.indexer_cache(layer_id), kv, loc):
                 return
@@ -2913,8 +2745,6 @@ def store_indexer_fp8_cache_fallback(
     kv: torch.Tensor,
     loc: torch.Tensor,
 ) -> bool:
-    if not dsv4_optimized_enabled():
-        return False
     if not hasattr(kvcache, "has_indexer_fp8_cache") or not kvcache.has_indexer_fp8_cache():
         raise RuntimeError(
             "Optimized DSV4 requires DeepSeekV4KVCache to be allocated with an "
@@ -2939,7 +2769,7 @@ def store_indexer_fp8_cache_fallback(
                 f"cache page bytes={packed_cache.shape[-1]} kv dim={flat.shape[-1]} "
                 f"page_size={page_size}"
             )
-        if dsv4_optimized_triton_enabled():
+        if dsv4_triton_available():
             try:
                 if _triton_dsv4_ops().indexer_fp8_paged_quant_store(
                     flat,
@@ -2984,7 +2814,7 @@ def store_indexer_fp8_cache_fallback(
             f"DSV4 FP8 indexer cache dim mismatch: cache dim={values.shape[-1]} kv dim={flat.shape[-1]}"
         )
 
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             if _triton_dsv4_ops().indexer_fp8_quant_store(flat, loc_flat, values, scales):
                 return True
@@ -3013,7 +2843,7 @@ def copy_masked_compressed_locs(
     c128_out_loc: torch.Tensor | None,
     rows: int,
 ) -> None:
-    if c4_out_loc is not None and c128_out_loc is not None and dsv4_optimized_triton_enabled():
+    if c4_out_loc is not None and c128_out_loc is not None and dsv4_triton_available():
         try:
             if _triton_dsv4_ops().copy_masked_compressed_locs(
                 raw_out_loc,
@@ -3055,8 +2885,6 @@ def direct_decode_index_metadata_for_replay(
     swa_dummy_page: int = -1,
     swa_independent: bool = False,
 ) -> bool:
-    if not dsv4_optimized_enabled():
-        return False
     if rows < 0 or page_size <= 0 or window_size <= 0 or index_topk <= 0:
         return False
     if rows == 0:
@@ -3186,8 +3014,6 @@ def copy_decode_metadata_for_replay(
     skip_c4_sparse_indices: bool = False,
     skip_c128_indices: bool = False,
 ) -> bool:
-    if not dsv4_optimized_enabled():
-        return False
     tensors = (
         dst_raw_out_loc,
         src_raw_out_loc,
@@ -3320,8 +3146,6 @@ def copy_component_write_locs_for_replay(
     rows: int,
     page_size: int,
 ) -> bool:
-    if not dsv4_optimized_enabled():
-        return False
     tensors = (
         c4_page_table,
         c128_page_table,
@@ -3416,8 +3240,6 @@ def prep_decode_metadata_in_graph(
     swa_dummy_page: int = -1,
     swa_independent: bool = False,
 ) -> bool:
-    if not dsv4_optimized_enabled():
-        return False
     if rows < 0 or page_size <= 0 or window_size <= 0 or index_topk <= 0:
         return False
     if page_size & (page_size - 1):
@@ -3635,10 +3457,10 @@ def compress_norm_rope_store_fallback(
         )
 
     if (
-        dsv4_optimized_triton_enabled()
+        dsv4_triton_available()
         and not apply_hadamard
         and positions_flat is not None
-        and not (cache_type == "indexer" and dsv4_optimized_enabled())
+        and cache_type != "indexer"
     ):
         try:
             if _triton_dsv4_ops().compress_norm_rope_store_bf16(
@@ -3678,11 +3500,11 @@ def compress_norm_rope_store_fallback(
     if apply_hadamard:
         indexer_kv_hadamard_fallback(flat)
 
-    if cache_type == "indexer" and dsv4_optimized_enabled():
+    if cache_type == "indexer":
         store_indexer_fp8_cache_fallback(kvcache, layer_id, flat, loc_flat)
         return
 
-    if dsv4_optimized_triton_enabled():
+    if dsv4_triton_available():
         try:
             if _triton_dsv4_ops().store_cache(cache, flat, loc_flat):
                 return
@@ -3698,18 +3520,13 @@ def compress_norm_rope_store_fallback(
 
 __all__ = [
     "DSV4KernelCapability",
-    "DSV4KernelMode",
     "DSV4IndexerFP8Query",
     "DSV4IndexerSelectOutput",
     "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT",
-    "DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4",
     "DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16",
-    "DSV4_SM80_MOE_EXPERT_BACKENDS",
-    "DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR",
-    "DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES",
+    "DSV4_MARLIN_WNA16_RELEASE_ERROR",
     "DSV4MoEExecutionPlan",
     "DSV4MoERoutePlan",
-    "DSV4MoEWorkspace",
     "DSV4PagedMQAMetadata",
     "DSV4TopKTransformOutput",
     "DSV4TwoSourceAttentionMetadata",
@@ -3731,10 +3548,8 @@ __all__ = [
     "dequantize_indexer_fp8_cache_ref",
     "dequantize_indexer_fp8_paged_cache_ref",
     "detect_dsv4_kernel_capabilities",
-    "dsv4_moe_expert_backend",
-    "dsv4_optimized_cuda_enabled",
-    "dsv4_optimized_enabled",
-    "dsv4_optimized_triton_enabled",
+    "dsv4_cuda_available",
+    "dsv4_triton_available",
     "dsv4_sparse_attention_two_source_bf16",
     "dsv4_sparse_attention_two_source_splitk_bf16",
     "e8m0_dtype",
@@ -3756,7 +3571,6 @@ __all__ = [
     "linear_bf16_fp32_fallback",
     "linear_bf16_fp32_upstream_enabled",
     "moe_gate_fallback",
-    "moe_route_dispatch_bf16_grouped",
     "moe_route_dispatch_bf16_marlin_wna16",
     "moe_route_dispatch_bf16_marlin_wna16_prepacked",
     "norm_rope_inplace_fallback",
@@ -3770,9 +3584,7 @@ __all__ = [
     "quantized_linear_fp8_pair_shared_activation_ref",
     "quantized_linear_ref",
     "remap_indexer_topk_locs",
-    "require_supported_moe_expert_backend",
     "scale_dim",
-    "sequence_mqa_attention_fallback",
     "silu_and_mul_clamp_fallback",
     "store_compressed_fallback",
     "store_indexer_fp8_cache_fallback",

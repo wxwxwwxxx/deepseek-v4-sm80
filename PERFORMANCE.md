@@ -58,6 +58,4 @@ Long-context numbers are single-run reference measurements.
 
 - CUDA graph decode replay, radix prefix caching, independent SWA lifetime,
   chunked prefill, Marlin WNA16 MoE, and PyNCCL were enabled.
-- Optimized uses cached BF16 projection weights through ordinary `F.linear`;
-  no duplicate pretransposed BF16 weight cache is retained.
 - Chinese, English, code, arithmetic, and exact-instruction text smoke passed.

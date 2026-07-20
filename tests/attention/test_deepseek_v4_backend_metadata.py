@@ -13,17 +13,9 @@ from minisgl.attention.deepseek_v4 import (
 )
 from minisgl.core import Batch, Context, Req, SamplingParams
 from minisgl.distributed import set_tp_info
-from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
-
-
-@pytest.fixture(autouse=True)
-def _optimized_runtime_mode():
-    configure_dsv4_runtime("optimized")
-    yield
-    configure_dsv4_runtime("optimized")
 
 
 def _tiny_dsv4_config(compress_ratios: list[int]) -> ModelConfig:
@@ -328,7 +320,7 @@ def test_dsv4_capture_replay_can_defer_compressed_locs_to_graph_hook(monkeypatch
             dst[:rows].copy_(values)
             dst[rows:].fill_(-1)
 
-    monkeypatch.setattr(dsv4_kernel, "dsv4_optimized_triton_enabled", fake_triton_enabled)
+    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", fake_triton_enabled)
     monkeypatch.setattr(
         dsv4_kernel,
         "copy_masked_compressed_locs",
@@ -377,38 +369,6 @@ def test_dsv4_masked_compressed_store_ignores_negative_locs():
 
     assert cache[2, 0].item() == pytest.approx(22.0)
     assert cache[-1, 0].item() == pytest.approx(0.0)
-
-
-def test_dsv4_fallback_attention_reads_compressed_cache_as_separate_source():
-    configure_dsv4_runtime("fallback")
-    cfg = _tiny_dsv4_config([4])
-    ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=16)
-    batch = _prepare_decode_batch([_req(0, 0, 8, cached_len=7)])
-    backend = ctx.attn_backend
-    backend.prepare_metadata(batch)
-
-    ctx.kv_cache.swa_cache(0).zero_()
-    ctx.kv_cache.c4_cache(0).zero_()
-    ctx.kv_cache.c4_cache(0)[0, 0] = 10.0
-    ctx.kv_cache.c4_cache(0)[1, 0] = 20.0
-
-    q = torch.zeros(1, cfg.num_qo_heads, cfg.head_dim, dtype=torch.bfloat16)
-    q[..., 0] = 8.0
-    kv = torch.zeros(1, cfg.head_dim, dtype=torch.bfloat16)
-
-    out = backend.forward(
-        q,
-        kv,
-        kv,
-        0,
-        batch,
-        compress_ratio=4,
-        attn_sink=None,
-        swa_cache_written=True,
-    )
-
-    assert out[..., 0].float().mean().item() > 15.0
-    assert torch.allclose(out[..., 1:].float(), torch.zeros_like(out[..., 1:].float()))
 
 
 def test_dsv4_indexer_select_updates_c4_sparse_metadata():
@@ -1022,7 +982,7 @@ def test_dsv4_component_loc_ownership_capture_locs_graph_hook_is_guarded(monkeyp
     backend = ctx.attn_backend
     monkeypatch.setattr(
         dsv4_kernel,
-        "dsv4_optimized_triton_enabled",
+        "dsv4_triton_available",
         lambda: True,
     )
 

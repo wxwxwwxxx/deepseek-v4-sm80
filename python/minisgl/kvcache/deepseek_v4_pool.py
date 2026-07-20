@@ -5,7 +5,7 @@ from math import gcd
 from typing import Literal
 
 import torch
-from minisgl.dsv4_runtime import get_dsv4_runtime_config
+from minisgl.dsv4_release import DSV4_RELEASE
 from minisgl.utils import div_ceil
 
 from .base import BaseKVCachePool
@@ -14,7 +14,7 @@ DSV4CacheLayout = Literal["bf16_flat", "flashmla_fp8_packed"]
 
 
 def _indexer_fp8_cache_enabled() -> bool:
-    return get_dsv4_runtime_config().optimized
+    return True
 
 
 def _lcm(a: int, b: int) -> int:
@@ -26,8 +26,7 @@ def _align_up(value: int, alignment: int) -> int:
 
 
 def _clear_allocated_kv_modes() -> set[str]:
-    scope = get_dsv4_runtime_config().clear_allocated_page_scope
-    return {scope} if scope is not None else set()
+    return {DSV4_RELEASE.clear_allocated_page_scope}
 
 
 @dataclass(frozen=True)

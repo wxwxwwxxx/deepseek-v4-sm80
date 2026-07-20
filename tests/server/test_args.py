@@ -20,16 +20,15 @@ def test_server_args_mark_explicit_max_extend_tokens():
     assert equals_config.max_extend_tokens_explicit is True
 
 
-def test_server_args_expose_typed_dsv4_runtime_mode():
+def test_server_args_remove_dsv4_runtime_selector():
     base = ["--model-path", "/tmp/nonexistent-model"]
 
     default_config, _ = parse_args(base)
-    fallback_config, _ = parse_args(base + ["--dsv4-runtime", "fallback"])
 
-    assert default_config.dsv4_runtime_mode == "optimized"
+    assert not hasattr(default_config, "dsv4_runtime_mode")
     assert default_config.dsv4_sm80_recipe == "default_m128"
-    assert fallback_config.dsv4_runtime_mode == "fallback"
-    assert fallback_config.dsv4_sm80_recipe is None
+    with pytest.raises(SystemExit):
+        parse_args(base + ["--dsv4-runtime", "fallback"])
 
 
 def test_server_args_expose_concise_recipe_option():

@@ -8,18 +8,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 from minisgl.distributed import set_tp_info
-from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
 from minisgl.models.config import ModelConfig, RotaryConfig
-
-
-@pytest.fixture(autouse=True)
-def _optimized_runtime_mode():
-    configure_dsv4_runtime("optimized")
-    yield
-    configure_dsv4_runtime("optimized")
 
 
 def _has_sm80_cuda() -> bool:
@@ -432,25 +424,8 @@ def _tiny_dsv4_cache_config(compress_ratios: list[int]) -> ModelConfig:
 
 
 
-def test_dsv4_sm80_moe_expert_backend_follows_typed_runtime():
-    assert (
-        dsv4_kernel.dsv4_moe_expert_backend()
-        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
-    )
-    assert (
-        dsv4_kernel.require_supported_moe_expert_backend()
-        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
-    )
-
-    configure_dsv4_runtime("fallback")
-    assert (
-        dsv4_kernel.dsv4_moe_expert_backend()
-        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4
-    )
-    assert (
-        dsv4_kernel.require_supported_moe_expert_backend()
-        == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_GROUPED_FP4
-    )
+def test_dsv4_sm80_marlin_is_the_only_expert_backend():
+    assert dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 == "marlin_wna16"
 
 
 def test_dsv4_capability_detection_keeps_sm80_gates_explicit():
@@ -1774,7 +1749,6 @@ def test_fp8_activation_quant_triton_matches_torch_reference(monkeypatch):
 
     actual = dsv4_kernel.quantize_fp8_activation_ref(x, block_size=128)
 
-    assert dsv4_kernel.dsv4_optimized_enabled()
     assert actual.dtype is torch.bfloat16
     assert torch.allclose(actual, expected, atol=1e-2, rtol=0.0)
 
@@ -1907,8 +1881,7 @@ def test_fused_wqa_wkv_cached_weight_matches_shared_activation(monkeypatch):
         )
 
 
-def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
-    configure_dsv4_runtime("fallback")
+def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
     x = torch.randn(2, 4, dtype=torch.float32)
     weight = torch.randn(3, 4, dtype=torch.float32)
     y = dsv4_kernel.quantized_linear_ref(x, weight, None, weight_kind="bf16")
@@ -2086,19 +2059,13 @@ def test_dsv4_fallback_wrappers_preserve_shape_dtype_and_values():
     expected_indexer_cache.indexer[indexer_loc.long()] = expected_indexer_kv.to(
         expected_indexer_cache.indexer.dtype
     )
-    actual_indexer_kv = indexer_kv.clone()
     actual_indexer_cache = FakeCompressedCache()
-    dsv4_kernel.compress_norm_rope_store_fallback(
+    dsv4_kernel.store_indexer_fallback(
         actual_indexer_cache,
         0,
-        actual_indexer_kv,
+        expected_indexer_kv,
         indexer_loc,
-        positions=indexer_positions,
-        rotary_dim=2,
-        base=10000.0,
-        cache_type="indexer",
     )
-    assert torch.allclose(actual_indexer_kv, expected_indexer_kv, atol=1e-5, rtol=1e-5)
     assert torch.equal(actual_indexer_cache.indexer, expected_indexer_cache.indexer)
 
     scores = torch.tensor(
@@ -2521,7 +2488,7 @@ def test_dsv4_moe_route_plan_groups_and_pads_routes():
     assert pairs == [(2, 0), (5, 0), (1, 1), (0, 2), (4, 2)]
 
 
-def test_dsv4_moe_v2_execution_plan_and_workspace_reuse_cpu():
+def test_dsv4_moe_v2_execution_plan_cpu():
     hidden = torch.zeros(3, 8, dtype=torch.bfloat16)
     weights = torch.tensor(
         [
@@ -2556,16 +2523,6 @@ def test_dsv4_moe_v2_execution_plan_and_workspace_reuse_cpu():
     assert plan.route_weights.shape == (6,)
     assert torch.allclose(plan.route_weights.cpu(), weights.float().reshape(-1))
     assert plan.route_plan.sorted_route_ids.tolist() == [2, 5, 1, 6, 0, 4]
-
-    workspace = dsv4_kernel.DSV4MoEWorkspace()
-    first = workspace.tensor("tmp", (2, 4), torch.float32, torch.device("cpu"), zero=True)
-    first.fill_(3.0)
-    second = workspace.tensor("tmp", (1, 8), torch.float32, torch.device("cpu"))
-    assert second.data_ptr() == first.data_ptr()
-    assert second.shape == (1, 8)
-    larger = workspace.tensor("tmp", (4, 4), torch.float32, torch.device("cpu"))
-    assert larger.numel() == 16
-
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_swiglu_bf16_output_matches_fp32_then_cast():
@@ -2915,7 +2872,6 @@ def test_dsv4_sparse_attention_splitk_bf16_matches_legacy_cases(
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
-    configure_dsv4_runtime("fallback")
     device = torch.device("cuda")
     torch.manual_seed(23)
 
@@ -2959,7 +2915,7 @@ def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
         c4_indexer_out_loc=None,
         c4_topk_lengths_raw=empty,
         c4_topk_lengths_clamp1=empty,
-        c4_sparse_topk_lengths=empty,
+        c4_sparse_topk_lengths=torch.tensor([2, 1], device=device, dtype=torch.int32),
         c4_sparse_raw_indices=empty,
         c4_sparse_page_indices=compressed_indices,
         c4_sparse_full_indices=empty,
@@ -3216,7 +3172,7 @@ def test_dsv4_sparse_attention_backend_compressed_boundary_fast_path(monkeypatch
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     _clear_dsv4_sm80_env(monkeypatch)
-    configure_dsv4_runtime("fallback")
+    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", lambda: False)
     device = torch.device("cuda")
     torch.manual_seed(37)
 
@@ -3401,7 +3357,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         attn_sink=sparse_sink,
     )
 
-    configure_dsv4_runtime("optimized")
+    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", lambda: True)
 
     actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
         gate,
@@ -3533,7 +3489,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_dsv4_sm80_optimized_kernels_match_typed_fallback_oracles():
+def test_dsv4_sm80_optimized_kernels_match_local_torch_references(monkeypatch):
     device = torch.device("cuda")
     torch.manual_seed(5)
     gate = torch.randn(17, 513, device=device, dtype=torch.bfloat16)
@@ -3547,7 +3503,7 @@ def test_dsv4_sm80_optimized_kernels_match_typed_fallback_oracles():
         torch.arange(3 * 16, device=device, dtype=torch.int32).reshape(3, 16) + 100
     )
 
-    configure_dsv4_runtime("fallback")
+    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", lambda: False)
     expected_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
         gate, up, swiglu_limit=2.0, weights=weights
     )
@@ -3564,7 +3520,7 @@ def test_dsv4_sm80_optimized_kernels_match_typed_fallback_oracles():
         scores, seq_lens, page_table, page_size=64, width=512, ratio=4
     )
 
-    configure_dsv4_runtime("optimized")
+    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", lambda: True)
     actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
         gate, up, swiglu_limit=2.0, weights=weights
     )

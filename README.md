@@ -29,8 +29,6 @@ CUDA graph memory tradeoffs, and long-context capacity.
   preserving the model's FP32 state and quantized FP8/FP4 weights.
 - **Long-context support:** 512K single-sequence capability has been validated
   with page size 256 and bounded prefill chunks.
-- **Simple public surface:** an optimized default path and an explicit slow
-  fallback/oracle path for diagnosis.
 
 This release serves **DeepSeek V4 Flash only**. The validated platform is one
 DGX with **8x NVIDIA A100-SXM4-80GB**, TP8, CUDA 12.8.2, and NCCL 2.26.2-1.
@@ -152,7 +150,7 @@ another workload or sm80 system:
 | --- | --- | --- |
 | `--tp-size N` | Number of tensor-parallel GPU workers. | This release is validated with TP8; changing it alters per-GPU weights, cache capacity, and communication. |
 | `--served-model-name NAME` | Model ID exposed by the OpenAI-compatible API. | Clients must send this exact ID in the request's `model` field. By default, it is derived from the model path. |
-| `--enable-reasoning-sampler-contract` | Enables the optional three-state reasoning delimiter/EOS grammar. | Disabled by default; enabling it changes the model's raw sampling distribution and is unavailable in fallback mode. |
+| `--enable-reasoning-sampler-contract` | Enables the optional three-state reasoning delimiter/EOS grammar. | Disabled by default; enabling it changes the model's raw sampling distribution. |
 | `--max-running-requests N` | Maximum number of simultaneously active request slots. | Higher values allow more concurrency but increase request metadata and independent SWA reservation. |
 | `--cuda-graph-max-bs N` | Largest decode batch captured by CUDA Graph. | Larger values cover higher active M but consume more graph memory, reduce KV capacity, and increase startup time. Batches above this value remain legal and run eagerly. |
 | `--context-length N` | Maximum prompt plus generated tokens for one sequence, overriding the model config. | Larger values widen request/page tables; actual admission is still limited by available KV capacity. |
@@ -165,15 +163,6 @@ keep them equal for clear performance and capacity comparisons.
 Low-level page-count and page-size overrides are intentionally omitted here;
 the release defaults are part of the validated DeepSeek V4 cache layout and
 normally should not be changed.
-
-For a slow correctness reference, use the fallback runtime:
-
-```bash
-python -m minisgl \
-  --model /models/DeepSeek-V4-Flash \
-  --tp-size 8 \
-  --dsv4-runtime fallback
-```
 
 ## Benchmarks
 

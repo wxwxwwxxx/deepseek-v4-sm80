@@ -10,9 +10,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 from minisgl.attention import create_attention_backend
-from minisgl.core import Batch, Context, Req, SamplingParams
+from minisgl.core import Context
 from minisgl.distributed import set_tp_info
-from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
@@ -25,14 +24,6 @@ from minisgl.models.deepseek_v4 import (
     DSV4MoEGate,
     DSV4SharedExperts,
 )
-from minisgl.models.register import get_model_class
-
-
-@pytest.fixture(autouse=True)
-def _optimized_runtime_mode():
-    configure_dsv4_runtime("optimized")
-    yield
-    configure_dsv4_runtime("optimized")
 
 
 def _tiny_dsv4_config() -> ModelConfig:
@@ -82,8 +73,7 @@ def _reset_globals(*, tp_rank: int = 0, tp_size: int = 1) -> None:
     set_tp_info(tp_rank, tp_size)
 
 
-def test_fallback_fp8_linear_preserves_loaded_scale(monkeypatch):
-    configure_dsv4_runtime("fallback")
+def test_reference_fp8_linear_preserves_loaded_scale(monkeypatch):
     _reset_globals()
     linear = DSV4Linear(
         128,
@@ -122,7 +112,6 @@ def test_cached_bf16_small_gemm_uses_linear(monkeypatch):
 
 
 def test_optimized_bf16_weight_cache_has_no_pretransposed_copy():
-    configure_dsv4_runtime("optimized")
     _reset_globals()
     linear = DSV4Linear(
         128,
@@ -218,113 +207,6 @@ def _fill_forward_weights(model) -> None:
                 tensor.zero_()
 
 
-def test_deepseek_v4_small_prefill_forward_fallback_reaches_logits():
-    configure_dsv4_runtime("fallback")
-    _reset_globals()
-    cfg = _tiny_dsv4_config()
-    model = get_model_class(cfg.architectures[0], cfg)
-    _fill_forward_weights(model)
-
-    input_ids = torch.tensor([1, 2, 3], dtype=torch.int32)
-    ctx = _install_dsv4_context(cfg, max_len=input_ids.numel())
-    req = Req(
-        input_ids=input_ids,
-        table_idx=0,
-        cached_len=0,
-        output_len=1,
-        uid=0,
-        sampling_params=SamplingParams(max_tokens=1),
-        cache_handle=None,  # type: ignore[arg-type]
-    )
-    batch = Batch(reqs=[req], phase="prefill")
-    batch.padded_reqs = batch.reqs
-    batch.input_ids = input_ids
-    batch.positions = torch.arange(input_ids.numel(), dtype=torch.int32)
-    batch.out_loc = torch.arange(input_ids.numel(), dtype=torch.int32)
-    ctx.attn_backend.prepare_metadata(batch)
-
-    with ctx.forward_batch(batch):
-        logits = model.forward()
-
-    assert logits.shape == (1, cfg.vocab_size)
-    assert torch.isfinite(logits).all()
-
-
-def test_deepseek_v4_ratio4_prefill_forward_fallback_reaches_logits():
-    configure_dsv4_runtime("fallback")
-    _reset_globals()
-    cfg = replace(
-        _tiny_dsv4_config(),
-        compress_ratios=[4],
-        compress_rope_theta=10000.0,
-        index_head_dim=4,
-    )
-    model = get_model_class(cfg.architectures[0], cfg)
-    _fill_forward_weights(model)
-
-    input_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
-    ctx = _install_dsv4_context(cfg, max_len=input_ids.numel())
-    req = Req(
-        input_ids=input_ids,
-        table_idx=0,
-        cached_len=0,
-        output_len=1,
-        uid=0,
-        sampling_params=SamplingParams(max_tokens=1),
-        cache_handle=None,  # type: ignore[arg-type]
-    )
-    batch = Batch(reqs=[req], phase="prefill")
-    batch.padded_reqs = batch.reqs
-    batch.input_ids = input_ids
-    batch.positions = torch.arange(input_ids.numel(), dtype=torch.int32)
-    batch.out_loc = torch.arange(input_ids.numel(), dtype=torch.int32)
-    ctx.attn_backend.prepare_metadata(batch)
-
-    with ctx.forward_batch(batch):
-        logits = model.forward()
-
-    assert logits.shape == (1, cfg.vocab_size)
-    assert torch.isfinite(logits).all()
-
-
-def test_deepseek_v4_ratio4_prefill_forward_with_indexer_bf16_toggle(monkeypatch):
-    configure_dsv4_runtime("fallback")
-    _reset_globals()
-    cfg = replace(
-        _tiny_dsv4_config(),
-        compress_ratios=[4],
-        compress_rope_theta=10000.0,
-        index_head_dim=4,
-    )
-    model = get_model_class(cfg.architectures[0], cfg)
-    _fill_forward_weights(model)
-
-    input_ids = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
-    ctx = _install_dsv4_context(cfg, max_len=input_ids.numel())
-    req = Req(
-        input_ids=input_ids,
-        table_idx=0,
-        cached_len=0,
-        output_len=1,
-        uid=0,
-        sampling_params=SamplingParams(max_tokens=1),
-        cache_handle=None,  # type: ignore[arg-type]
-    )
-    batch = Batch(reqs=[req], phase="prefill")
-    batch.padded_reqs = batch.reqs
-    batch.input_ids = input_ids
-    batch.positions = torch.arange(input_ids.numel(), dtype=torch.int32)
-    batch.out_loc = torch.arange(input_ids.numel(), dtype=torch.int32)
-    ctx.attn_backend.prepare_metadata(batch)
-
-    with ctx.forward_batch(batch):
-        logits = model.forward()
-
-    assert logits.shape == (1, cfg.vocab_size)
-    assert torch.isfinite(logits).all()
-    assert batch.attn_metadata.core_metadata.c4_sparse_raw_indices[3, 0].item() == 0
-
-
 def test_deepseek_v4_moe_gate_matches_sqrtsoftplus_oracle():
     _reset_globals()
     cfg = _tiny_dsv4_config()
@@ -364,79 +246,6 @@ def test_deepseek_v4_moe_gate_matches_sqrtsoftplus_oracle():
     assert torch.allclose(weights, expected_weights)
 
 
-def test_deepseek_v4_routed_experts_all_reduce_tp_sharded_output(monkeypatch):
-    configure_dsv4_runtime("fallback")
-    _reset_globals(tp_rank=0, tp_size=2)
-    cfg = _tiny_dsv4_config()
-    experts = DSV4FusedRoutedExperts(cfg)
-
-    class FakeComm:
-        def __init__(self) -> None:
-            self.calls: list[torch.Tensor] = []
-
-        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
-            del label
-            self.calls.append(x.clone())
-            return x + 10.0
-
-    fake_comm = FakeComm()
-    experts._comm = fake_comm
-
-    def fake_expert_forward(local_idx, x, weights):
-        del weights
-        return torch.full_like(x, float(local_idx + 1), dtype=x.dtype)
-
-    monkeypatch.setattr(experts, "_expert_forward", fake_expert_forward)
-    monkeypatch.setattr(dsv4_kernel, "moe_route_dispatch_bf16_grouped", lambda *_, **__: None)
-
-    hidden = torch.zeros(3, cfg.hidden_size, dtype=torch.bfloat16)
-    weights = torch.ones(3, 1, dtype=torch.float32)
-    indices = torch.tensor([[0], [1], [0]], dtype=torch.long)
-
-    out = experts.forward(hidden, weights, indices)
-
-    expected_local = torch.tensor([1.0, 2.0, 1.0], dtype=torch.float32).view(3, 1)
-    expected = (expected_local + 10.0).expand_as(hidden).to(torch.bfloat16)
-    assert len(fake_comm.calls) == 1
-    assert fake_comm.calls[0].dtype is torch.float32
-    assert torch.equal(out, expected)
-
-
-def test_deepseek_v4_grouped_routed_experts_all_reduce_tp_sharded_output(monkeypatch):
-    configure_dsv4_runtime("fallback")
-    _reset_globals(tp_rank=0, tp_size=2)
-    cfg = _tiny_dsv4_config()
-    experts = DSV4FusedRoutedExperts(cfg)
-
-    class FakeComm:
-        def __init__(self) -> None:
-            self.calls: list[torch.Tensor] = []
-
-        def all_reduce(self, x: torch.Tensor, *, label: str | None = None) -> torch.Tensor:
-            del label
-            self.calls.append(x.clone())
-            return x + 20.0
-
-    fake_comm = FakeComm()
-    experts._comm = fake_comm
-
-    hidden = torch.zeros(2, cfg.hidden_size, dtype=torch.bfloat16)
-    weights = torch.ones(2, 1, dtype=torch.float32)
-    indices = torch.tensor([[0], [1]], dtype=torch.long)
-    grouped_local = torch.full_like(hidden, 3.0)
-    monkeypatch.setattr(
-        dsv4_kernel,
-        "moe_route_dispatch_bf16_grouped",
-        lambda *_, **__: grouped_local,
-    )
-
-    out = experts.forward(hidden, weights, indices)
-
-    assert len(fake_comm.calls) == 1
-    assert fake_comm.calls[0].dtype is torch.float32
-    assert torch.equal(out, torch.full_like(hidden, 23.0))
-
-
 class _FakeMarlinWNA16Cache:
     def __init__(self, experts: DSV4FusedRoutedExperts) -> None:
         self.w13 = torch.empty(experts.w13_weight.shape[0], 1, dtype=torch.int8)
@@ -472,7 +281,7 @@ def test_deepseek_v4_marlin_release_report_is_idempotent():
     assert report["released_original_this_call_bytes"] == expected_source_bytes
     assert report["raw_weights_available_after"] is False
     assert report["runtime_policy"] == "marlin_wna16_prepacked_only"
-    assert dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR in report["fallback_error"]
+    assert dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ERROR in report["missing_cache_error"]
     assert all(not hasattr(experts, name) for name in experts._raw_expert_weight_names())
     state = experts.state_dict(prefix="experts")
     assert all(name not in state for name in ("experts.w13_weight", "experts.w2_weight"))
@@ -485,13 +294,13 @@ def test_deepseek_v4_marlin_release_report_is_idempotent():
     assert second["raw_weights_available_after"] is False
 
 
-def test_deepseek_v4_marlin_release_fail_closed_for_grouped_backend():
+def test_deepseek_v4_marlin_release_fails_closed_without_prepacked_cache():
     _reset_globals()
     cfg = _tiny_dsv4_config()
     experts = DSV4FusedRoutedExperts(cfg)
     experts._marlin_wna16_weights = _FakeMarlinWNA16Cache(experts)
     experts.release_marlin_wna16_original_expert_weights()
-    configure_dsv4_runtime("fallback")
+    experts._marlin_wna16_weights = None
 
     hidden = torch.zeros(2, cfg.hidden_size, dtype=torch.bfloat16)
     weights = torch.ones(2, 1, dtype=torch.float32)
@@ -507,7 +316,6 @@ def test_deepseek_v4_marlin_release_fail_closed_for_grouped_backend():
 
 
 def test_deepseek_v4_prepare_defers_release_until_before_kv_alloc():
-    configure_dsv4_runtime("optimized")
     _reset_globals()
     cfg = replace(_tiny_dsv4_config(), num_layers=3)
     model = DeepseekV4Model(cfg)
@@ -552,7 +360,6 @@ def test_deepseek_v4_prepare_defers_release_until_before_kv_alloc():
 
 
 def test_deepseek_v4_fused_cache_prepare_is_separate_and_idempotent():
-    configure_dsv4_runtime("optimized")
     _reset_globals()
     model = DeepseekV4Model(replace(_tiny_dsv4_config(), num_layers=3))
     cached_entries = []
@@ -587,17 +394,7 @@ def test_deepseek_v4_fused_cache_prepare_is_separate_and_idempotent():
     }
 
 
-def test_fallback_does_not_prepare_fused_wqa_wkv_cache():
-    configure_dsv4_runtime("fallback")
-    _reset_globals()
-    attention = DSV4Attention(_tiny_dsv4_config(), layer_id=0)
-
-    assert attention.prepare_fused_wqa_wkv_bf16_weight_cache() is None
-    assert not hasattr(attention, "_cached_fused_wqa_wkv_bf16_weight")
-
-
 def test_deepseek_v4_prepare_does_not_release_after_prebuild_failure():
-    configure_dsv4_runtime("optimized")
     _reset_globals()
     cfg = replace(_tiny_dsv4_config(), num_layers=3)
     model = DeepseekV4Model(cfg)
@@ -632,59 +429,7 @@ def test_deepseek_v4_prepare_does_not_release_after_prebuild_failure():
     assert calls == [("prebuild", 0), ("prebuild", 1)]
 
 
-def test_deepseek_v4_moe_v2_workspace_is_decode_sized(monkeypatch):
-    configure_dsv4_runtime("fallback")
-    _reset_globals()
-    cfg = _tiny_dsv4_config()
-    experts = DSV4FusedRoutedExperts(cfg)
-    seen_workspaces: list[object | None] = []
-
-    def fake_grouped_dispatch(hidden_states, *args, workspace=None, **kwargs):
-        del args, kwargs
-        seen_workspaces.append(workspace)
-        return torch.zeros_like(hidden_states)
-
-    monkeypatch.setattr(
-        dsv4_kernel,
-        "moe_route_dispatch_bf16_grouped",
-        fake_grouped_dispatch,
-    )
-
-    small_hidden = torch.zeros(4, cfg.hidden_size, dtype=torch.bfloat16)
-    small_weights = torch.ones(4, 1, dtype=torch.float32)
-    small_indices = torch.zeros(4, 1, dtype=torch.long)
-    small_plan = dsv4_kernel.build_moe_v2_execution_plan(
-        small_hidden,
-        small_weights,
-        small_indices,
-        num_experts=cfg.n_routed_experts,
-    )
-    experts.forward(small_hidden, small_weights, small_indices, moe_plan=small_plan)
-
-    large_tokens = dsv4_kernel.DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES + 1
-    large_hidden = torch.zeros(large_tokens, cfg.hidden_size, dtype=torch.bfloat16)
-    large_weights = torch.ones(large_tokens, 1, dtype=torch.float32)
-    large_indices = torch.zeros(large_tokens, 1, dtype=torch.long)
-    large_plan = dsv4_kernel.build_moe_v2_execution_plan(
-        large_hidden,
-        large_weights,
-        large_indices,
-        num_experts=cfg.n_routed_experts,
-    )
-    experts.forward(large_hidden, large_weights, large_indices, moe_plan=large_plan)
-
-    assert seen_workspaces[0] is experts._moe_v2_workspace
-    assert seen_workspaces[1] is None
-
-
-
-
-
-
-
-
 def test_deepseek_v4_vllm_runner_sums_routed_and_shared_before_late_reduce(monkeypatch):
-    configure_dsv4_runtime("optimized")
     _reset_globals(tp_rank=0, tp_size=2)
     cfg = _tiny_dsv4_config()
     moe = DSV4MoE(cfg, layer_id=0)
@@ -902,7 +647,6 @@ def test_deepseek_v4_vllm_runner_correction_bias_routing(monkeypatch):
 
 
 def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
-    configure_dsv4_runtime("fallback")
     _reset_globals()
     _clear_dsv4_sm80_env(monkeypatch)
     cfg = _tiny_dsv4_config()
@@ -930,10 +674,15 @@ def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
         )
 
     hidden = torch.randn(3, cfg.hidden_size, dtype=torch.bfloat16)
-    expected = shared.forward(hidden, reduce=False)
+    gate_up = shared.gate_up_proj.forward(hidden)
+    gate, up = gate_up.chunk(2, dim=-1)
+    expected_hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
+        gate,
+        up,
+        swiglu_limit=shared.swiglu_limit,
+    ).to(up.dtype)
+    expected = shared.down_proj.forward(expected_hidden, reduce=False)
 
-    assert shared.prepare_bf16_weight_cache() == []
-    configure_dsv4_runtime("optimized")
     reports = shared.prepare_bf16_weight_cache()
     actual = shared.forward(hidden, reduce=False)
 

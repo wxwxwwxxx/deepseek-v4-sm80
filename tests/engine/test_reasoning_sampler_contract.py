@@ -261,7 +261,7 @@ def test_graph_padding_rows_are_separate_and_do_not_change_real_request_state() 
     assert real_states.tolist() == [ReasoningState.THINKING, ReasoningState.ANSWER]
 
 
-def test_effective_config_and_server_flag_select_production_or_oracle() -> None:
+def test_effective_config_and_server_flag_select_sampler_opt_in() -> None:
     base = {"model_path": "unused", "tp_info": DistributedInfo(0, 1)}
     assert not EngineConfig(**base).reasoning_sampler_contract_enabled
     assert EngineConfig(
@@ -272,16 +272,6 @@ def test_effective_config_and_server_flag_select_production_or_oracle() -> None:
         **base,
         enable_reasoning_sampler_contract=False,
     ).reasoning_sampler_contract_enabled
-    assert not EngineConfig(
-        **base,
-        dsv4_runtime_mode="fallback",
-    ).reasoning_sampler_contract_enabled
-    assert not EngineConfig(
-        **base,
-        dsv4_runtime_mode="fallback",
-        enable_reasoning_sampler_contract=True,
-    ).reasoning_sampler_contract_enabled
-
     args, _ = parse_args(["--model-path", "unused", "--enable-reasoning-sampler-contract"])
     assert args.enable_reasoning_sampler_contract
     assert args.reasoning_sampler_contract_enabled
@@ -642,7 +632,7 @@ def test_token_ids_are_resolved_from_tokenizer_and_mismatch_fails_clearly() -> N
         resolve_reasoning_token_ids(broken)
 
 
-def test_engine_skips_extra_tokenizer_load_for_disabled_and_fallback(monkeypatch) -> None:
+def test_engine_skips_extra_tokenizer_load_when_sampler_contract_is_disabled(monkeypatch) -> None:
     calls = []
 
     def fake_load_tokenizer(model_path):
@@ -652,14 +642,9 @@ def test_engine_skips_extra_tokenizer_load_for_disabled_and_fallback(monkeypatch
     monkeypatch.setattr("minisgl.engine.engine.load_tokenizer", fake_load_tokenizer)
     base = {"model_path": "checkpoint", "tp_info": DistributedInfo(0, 1)}
     disabled = EngineConfig(**base)
-    fallback = EngineConfig(
-        **base,
-        dsv4_runtime_mode="fallback",
-    )
     enabled = EngineConfig(**base, enable_reasoning_sampler_contract=True)
 
     assert resolve_engine_reasoning_token_ids(disabled) is None
-    assert resolve_engine_reasoning_token_ids(fallback) is None
     assert calls == []
     assert resolve_engine_reasoning_token_ids(enabled) == ReasoningTokenIds(10, 11, 12, 13)
     assert calls == ["checkpoint"]
@@ -680,7 +665,7 @@ def test_offline_thinking_prompt_requires_official_formatter_boundary(effort) ->
     llm._validate_offline_reasoning_prompt([9, IDS.think_start], effort)
 
 
-def test_offline_prompt_validation_is_absent_in_disabled_oracle_mode() -> None:
+def test_offline_prompt_validation_is_absent_when_sampler_contract_is_disabled() -> None:
     llm = object.__new__(LLM)
     llm.reasoning_sampler_contract_enabled = False
     llm.engine = SimpleNamespace(reasoning_token_ids=None)

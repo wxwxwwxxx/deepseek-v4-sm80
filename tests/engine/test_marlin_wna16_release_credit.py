@@ -3,7 +3,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import torch
-from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.engine import engine as engine_module
 from minisgl.engine.graph_memory import empty_graph_memory_estimate
 from minisgl.engine.graph_policy import resolve_cuda_graph_bucket_policy
@@ -40,7 +39,6 @@ def _fake_engine(*, source_bytes: int):
 
 
 def test_marlin_wna16_before_kv_release_credit_adds_net_pages(monkeypatch):
-    configure_dsv4_runtime("optimized")
     monkeypatch.setattr(engine_module, "estimate_kvcache_bytes_per_page", lambda *a, **k: 1024)
     monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
 

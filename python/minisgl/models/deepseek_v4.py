@@ -10,7 +10,7 @@ from minisgl.attention import BaseAttnMetadata
 from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata
 from minisgl.core import Batch, get_global_ctx
 from minisgl.distributed import DistributedCommunicator, get_tp_info
-from minisgl.dsv4_runtime import get_dsv4_runtime_config
+from minisgl.dsv4_release import DSV4_RELEASE
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.layers import BaseOP, OPList
 from minisgl.utils import (
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 
 def _marlin_wna16_release_timing() -> str:
-    return get_dsv4_runtime_config().marlin_release_timing or "disabled"
+    return DSV4_RELEASE.marlin_release_timing
 
 
 def _marlin_wna16_release_deferred_from_model_prepare() -> bool:
@@ -70,10 +70,7 @@ def _cuda_graph_capture_active() -> bool:
 
 
 def _cached_hc_bf16_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
-    if not (
-        dsv4_kernel.dsv4_optimized_enabled()
-        and weight.is_cuda
-    ):
+    if not weight.is_cuda:
         return weight
     meta_name = f"{cache_name}_meta"
     meta = (
@@ -97,9 +94,7 @@ def _cached_fp32_weight(
     cache_name: str,
     weight: torch.Tensor,
 ) -> torch.Tensor:
-    if not (
-        dsv4_kernel.dsv4_optimized_enabled() and weight.is_cuda and weight.dtype == torch.bfloat16
-    ):
+    if not (weight.is_cuda and weight.dtype == torch.bfloat16):
         return weight
     meta_name = f"{cache_name}_meta"
     meta = (
@@ -341,8 +336,7 @@ def _cached_fused_wqa_wkv_fp8_weight(
     allow_build: bool,
 ) -> torch.Tensor | None:
     if not (
-        dsv4_kernel.dsv4_optimized_enabled()
-        and weight_q.is_cuda
+        weight_q.is_cuda
         and weight_kv.is_cuda
         and weight_q.dtype is dsv4_kernel.fp8_dtype()
         and weight_kv.dtype is dsv4_kernel.fp8_dtype()
@@ -620,21 +614,17 @@ class DSV4Indexer(BaseOP):
         return f"layer{self.layer_id}.attn.indexer.wq_b"
 
     def prepare_wq_b_bf16_weight_cache(self) -> dict[str, object] | None:
-        if not dsv4_kernel.dsv4_optimized_enabled():
-            return None
         return self.wq_b.prepare_fp8_bf16_weight_cache(
             self._wq_b_bf16_weight_cache_name,
             owner_label=self._wq_b_owner_label,
         )
 
     def _wq_b_forward(self, q_lora: torch.Tensor) -> torch.Tensor:
-        if dsv4_kernel.dsv4_optimized_enabled():
-            return self.wq_b.forward_fp8_cached_bf16_weight(
-                q_lora,
-                cache_name=self._wq_b_bf16_weight_cache_name,
-                owner_label=self._wq_b_owner_label,
-            )
-        return self.wq_b.forward(q_lora)
+        return self.wq_b.forward_fp8_cached_bf16_weight(
+            q_lora,
+            cache_name=self._wq_b_bf16_weight_cache_name,
+            owner_label=self._wq_b_owner_label,
+        )
 
     def prepare_bf16_query(
         self,
@@ -825,8 +815,6 @@ class DSV4Attention(BaseOP):
         return self.num_local_heads * self.head_dim // self.num_local_groups
 
     def prepare_q_wqb_bf16_weight_cache(self) -> dict[str, object] | None:
-        if not dsv4_kernel.dsv4_optimized_enabled():
-            return None
         return self.wq_b.prepare_fp8_bf16_weight_cache(
             self._q_wqb_bf16_weight_cache_name,
             owner_label=self._q_wqb_owner_label,
@@ -834,8 +822,6 @@ class DSV4Attention(BaseOP):
 
 
     def prepare_wo_b_bf16_weight_cache(self) -> dict[str, object] | None:
-        if not dsv4_kernel.dsv4_optimized_enabled():
-            return None
         return self.wo_b.prepare_fp8_bf16_weight_cache(
             self._wo_b_bf16_weight_cache_name,
             owner_label=self._wo_b_owner_label,
@@ -843,8 +829,6 @@ class DSV4Attention(BaseOP):
 
 
     def prepare_wo_a_bf16_bmm_cache(self) -> dict[str, object] | None:
-        if not dsv4_kernel.dsv4_optimized_enabled():
-            return None
         scale = getattr(self.wo_a, "weight_scale_inv", None)
         d_per_group = self._wo_a_d_per_group()
         cached = _cached_wo_a_bf16_bmm_weight(
@@ -873,15 +857,11 @@ class DSV4Attention(BaseOP):
         }
 
     def prepare_indexer_wq_b_bf16_weight_cache(self) -> dict[str, object] | None:
-        if not dsv4_kernel.dsv4_optimized_enabled():
-            return None
         if not hasattr(self, "indexer"):
             return None
         return self.indexer.prepare_wq_b_bf16_weight_cache()
 
     def prepare_fused_wqa_wkv_bf16_weight_cache(self) -> dict[str, object] | None:
-        if not dsv4_kernel.dsv4_optimized_enabled():
-            return None
         cached = _cached_fused_wqa_wkv_fp8_weight(
             self,
             "_cached_fused_wqa_wkv_bf16_weight",
@@ -903,29 +883,6 @@ class DSV4Attention(BaseOP):
             "bytes": int(cached.numel() * cached.element_size()),
         }
 
-    def _sequence_spans(self, batch: Batch, total_tokens: int) -> list[tuple[int, int]]:
-        reqs = getattr(batch, "padded_reqs", batch.reqs)
-        spans = []
-        offset = 0
-        for req in reqs:
-            length = req.extend_len if batch.is_prefill else 1
-            spans.append((offset, offset + length))
-            offset += length
-        if offset != total_tokens:
-            return [(0, total_tokens)]
-        return spans
-
-    def _fallback_attention(self, q: torch.Tensor, kv: torch.Tensor, batch: Batch) -> torch.Tensor:
-        spans = self._sequence_spans(batch, q.shape[0])
-        return dsv4_kernel.sequence_mqa_attention_fallback(
-            q,
-            kv,
-            spans,
-            window_size=self.window_size,
-            softmax_scale=self.softmax_scale,
-            attn_sink=self.attn_sink,
-        )
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = get_global_ctx().batch
         positions = batch.positions.to(device=x.device, dtype=torch.long)
@@ -936,7 +893,7 @@ class DSV4Attention(BaseOP):
             use_dsv4_backend
             and attn_backend is not None
             and x.is_cuda
-            and dsv4_kernel.dsv4_optimized_triton_enabled()
+            and dsv4_kernel.dsv4_triton_available()
         )
         fused_q_kv_rmsnorm = (
             False
@@ -944,11 +901,11 @@ class DSV4Attention(BaseOP):
         )
         fused_q_kv_norm_rope_store = (
             kv_norm_rope_store_enabled
-            and dsv4_kernel.dsv4_optimized_triton_enabled()
+            and dsv4_kernel.dsv4_triton_available()
         )
         kv_from_shared_wqa_wkv = None
         kv = None
-        fused_wqa_wkv_shared_act = dsv4_kernel.dsv4_optimized_triton_enabled()
+        fused_wqa_wkv_shared_act = dsv4_kernel.dsv4_triton_available()
         if fused_wqa_wkv_shared_act:
             cached_fused_weight = _cached_fused_wqa_wkv_fp8_weight(
                 self,
@@ -991,14 +948,12 @@ class DSV4Attention(BaseOP):
                 else self.wkv.forward(x)
             )
             q_lora, kv = None
-        elif dsv4_kernel.dsv4_optimized_enabled():
+        else:
             q = self.wq_b.forward_fp8_cached_bf16_weight(
                 q_lora,
                 cache_name=self._q_wqb_bf16_weight_cache_name,
                 owner_label=self._q_wqb_owner_label,
             ).view(-1, self.num_local_heads, self.head_dim)
-        else:
-            q = self.wq_b.forward(q_lora).view(-1, self.num_local_heads, self.head_dim)
         if fused_q_kv_norm_rope_store and kv is None:
             kv = (
                 kv_from_shared_wqa_wkv
@@ -1085,20 +1040,19 @@ class DSV4Attention(BaseOP):
         compress_store_fuses_norm = (
             use_dsv4_backend
             and attn_backend is not None
-            and dsv4_kernel.dsv4_optimized_triton_enabled()
+            and dsv4_kernel.dsv4_triton_available()
         )
 
         if hasattr(self, "indexer"):
             indexer_select_fp8 = (
                 use_dsv4_backend
                 and attn_backend is not None
-                and dsv4_kernel.dsv4_optimized_enabled()
             )
             indexer_select_bf16 = (
                 not indexer_select_fp8
                 and use_dsv4_backend
                 and attn_backend is not None
-                and dsv4_kernel.dsv4_optimized_triton_enabled()
+                and dsv4_kernel.dsv4_triton_available()
             )
             indexer_q = None
             indexer_weights = None
@@ -1131,7 +1085,7 @@ class DSV4Attention(BaseOP):
                 use_dsv4_backend
                 and attn_backend is not None
                 and hasattr(attn_backend, "forward_compress")
-                and dsv4_kernel.dsv4_optimized_triton_enabled()
+                and dsv4_kernel.dsv4_triton_available()
             )
             if online_c4:
                 indexer_kv = attn_backend.forward_compress(
@@ -1204,7 +1158,7 @@ class DSV4Attention(BaseOP):
                 and use_dsv4_backend
                 and attn_backend is not None
                 and hasattr(attn_backend, "forward_compress")
-                and dsv4_kernel.dsv4_optimized_triton_enabled()
+                and dsv4_kernel.dsv4_triton_available()
             )
             if online_compress:
                 compressed_kv = attn_backend.forward_compress(
@@ -1250,7 +1204,7 @@ class DSV4Attention(BaseOP):
                 swa_cache_written=kv_cache_written,
             )
         else:
-            o = self._fallback_attention(q, kv, batch)
+            raise RuntimeError("The DeepSeek V4 release requires the DSV4 attention backend.")
         dsv4_kernel.apply_rotary_tail(
             o,
             positions,
@@ -1264,45 +1218,31 @@ class DSV4Attention(BaseOP):
         )
         d_per_group = self._wo_a_d_per_group()
         o = o.reshape(x.shape[0], self.num_local_groups, d_per_group)
-        if dsv4_kernel.dsv4_optimized_enabled():
-            wo_a_scale = getattr(self.wo_a, "weight_scale_inv", None)
-            cached_wo_a = _cached_wo_a_bf16_bmm_weight(
-                self.wo_a,
-                self._wo_a_bf16_bmm_cache_name,
-                self.wo_a.weight,
-                wo_a_scale,
-                out_dtype=o.dtype,
-                num_local_groups=self.num_local_groups,
-                o_lora_rank=self.o_lora_rank,
-                d_per_group=d_per_group,
-                allow_build=False,
-                owner_label=self._wo_a_owner_label,
-            )
-            o = _wo_a_bf16_bmm_projection(
-                o,
-                cached_wo_a,
-                owner_label=self._wo_a_owner_label,
-            )
-        else:
-            wo_a_scale = getattr(self.wo_a, "weight_scale_inv", None)
-            o = dsv4_kernel.wo_a_grouped_projection_fallback(
-                o,
-                self.wo_a.weight,
-                wo_a_scale,
-                num_local_groups=self.num_local_groups,
-                o_lora_rank=self.o_lora_rank,
-            )
-        if dsv4_kernel.dsv4_optimized_enabled():
-            out = self.wo_b.forward_fp8_cached_bf16_weight(
-                o,
-                cache_name=self._wo_b_bf16_weight_cache_name,
-                owner_label=self._wo_b_owner_label,
-                reduce=True,
-                reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
-            )
-            return out
-        out = self.wo_b.forward(o)
-        return out
+        wo_a_scale = getattr(self.wo_a, "weight_scale_inv", None)
+        cached_wo_a = _cached_wo_a_bf16_bmm_weight(
+            self.wo_a,
+            self._wo_a_bf16_bmm_cache_name,
+            self.wo_a.weight,
+            wo_a_scale,
+            out_dtype=o.dtype,
+            num_local_groups=self.num_local_groups,
+            o_lora_rank=self.o_lora_rank,
+            d_per_group=d_per_group,
+            allow_build=False,
+            owner_label=self._wo_a_owner_label,
+        )
+        o = _wo_a_bf16_bmm_projection(
+            o,
+            cached_wo_a,
+            owner_label=self._wo_a_owner_label,
+        )
+        return self.wo_b.forward_fp8_cached_bf16_weight(
+            o,
+            cache_name=self._wo_b_bf16_weight_cache_name,
+            owner_label=self._wo_b_owner_label,
+            reduce=True,
+            reduce_label="dsv4.attn.wo_b.row_parallel_projection_all_reduce",
+        )
 
 
 class DSV4TopK(BaseOP):
@@ -1382,7 +1322,6 @@ class DSV4FusedRoutedExperts(BaseOP):
             div_ceil(local_intermediate, 32),
             dtype=dsv4_kernel.e8m0_dtype(),
         )
-        self._moe_v2_workspace = dsv4_kernel.DSV4MoEWorkspace()
         self._marlin_wna16_weights = None
         self._marlin_wna16_released_original_expert_weights = False
         self._marlin_wna16_source_bytes = 0
@@ -1398,7 +1337,7 @@ class DSV4FusedRoutedExperts(BaseOP):
         suffix = f" owner={self._marlin_owner_label}."
         if missing:
             suffix = f" owner={self._marlin_owner_label}; missing={missing}."
-        return f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR}{suffix}"
+        return f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ERROR}{suffix}"
 
     def _raw_expert_weight_names(self) -> tuple[str, str, str, str]:
         return (
@@ -1477,8 +1416,8 @@ class DSV4FusedRoutedExperts(BaseOP):
                 if self._marlin_wna16_released_original_expert_weights
                 else "raw_weights_available"
             ),
-            "fallback_error": (
-                dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR
+            "missing_cache_error": (
+                dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ERROR
                 if self._marlin_wna16_released_original_expert_weights
                 else None
             ),
@@ -1643,35 +1582,6 @@ class DSV4FusedRoutedExperts(BaseOP):
 
 
 
-    def _expert_forward(
-        self, local_idx: int, x: torch.Tensor, weights: torch.Tensor
-    ) -> torch.Tensor:
-        w1 = dsv4_kernel.quantized_linear_ref(
-            x,
-            self.w13_weight[local_idx, 0],
-            self.w13_weight_scale_inv[local_idx, 0],
-            weight_kind="fp4",
-        ).float()
-        w3 = dsv4_kernel.quantized_linear_ref(
-            x,
-            self.w13_weight[local_idx, 1],
-            self.w13_weight_scale_inv[local_idx, 1],
-            weight_kind="fp4",
-        ).float()
-        hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
-            w1,
-            w3,
-            swiglu_limit=self.swiglu_limit,
-            weights=weights,
-        )
-        hidden_for_w2 = hidden.to(x.dtype)
-        return dsv4_kernel.quantized_linear_ref(
-            hidden_for_w2,
-            self.w2_weight[local_idx],
-            self.w2_weight_scale_inv[local_idx],
-            weight_kind="fp4",
-        )
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1681,96 +1591,46 @@ class DSV4FusedRoutedExperts(BaseOP):
         reduce: bool = True,
         moe_plan: dsv4_kernel.DSV4MoEExecutionPlan | None = None,
     ) -> torch.Tensor:
-        backend = dsv4_kernel.require_supported_moe_expert_backend()
         missing_raw_weights = self._missing_raw_expert_weights()
-        if missing_raw_weights and backend != dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16:
-            raise RuntimeError(
-                f"{self._released_raw_weight_error(missing=missing_raw_weights)} "
-                f"requested_backend={backend!r}."
+        if missing_raw_weights:
+            if self._marlin_wna16_weights is None:
+                raise RuntimeError(
+                    f"{self._released_raw_weight_error(missing=missing_raw_weights)} "
+                    "Marlin WNA16 prebuilt cache is missing."
+                )
+            grouped = dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16_prepacked(
+                hidden_states,
+                weights,
+                indices,
+                self._marlin_wna16_weights,
+                swiglu_limit=self.swiglu_limit,
+                moe_plan=moe_plan,
             )
-        if backend == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16:
-            if missing_raw_weights:
-                if self._marlin_wna16_weights is None:
-                    raise RuntimeError(
-                        f"{self._released_raw_weight_error(missing=missing_raw_weights)} "
-                        "Marlin WNA16 prebuilt cache is missing."
-                    )
-                grouped = dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16_prepacked(
+        else:
+            w13_weight, w13_scale, w2_weight, w2_scale = self._raw_expert_weight_tensors()
+            grouped, self._marlin_wna16_weights = (
+                dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16(
                     hidden_states,
                     weights,
                     indices,
-                    self._marlin_wna16_weights,
+                    w13_weight,
+                    w13_scale,
+                    w2_weight,
+                    w2_scale,
                     swiglu_limit=self.swiglu_limit,
+                    cache=self._marlin_wna16_weights,
+                    owner_label=self._marlin_owner_label,
                     moe_plan=moe_plan,
                 )
-            else:
-                w13_weight, w13_scale, w2_weight, w2_scale = self._raw_expert_weight_tensors()
-                grouped, self._marlin_wna16_weights = (
-                    dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16(
-                        hidden_states,
-                        weights,
-                        indices,
-                        w13_weight,
-                        w13_scale,
-                        w2_weight,
-                        w2_scale,
-                        swiglu_limit=self.swiglu_limit,
-                        cache=self._marlin_wna16_weights,
-                        owner_label=self._marlin_owner_label,
-                        moe_plan=moe_plan,
-                    )
-                )
-            if reduce and self._tp_size > 1:
-                grouped_for_reduce = grouped.float()
-                grouped_reduced = self._comm.all_reduce(
-                    grouped_for_reduce,
-                    label="dsv4.routed_expert_all_reduce",
-                )
-                grouped = grouped_reduced.to(grouped.dtype)
-            return grouped
-
-        workspace = None
-        if (
-            moe_plan is not None
-            and moe_plan.route_plan.route_count <= dsv4_kernel.DSV4_SM80_MOE_V2_WORKSPACE_MAX_ROUTES
-        ):
-            workspace = self._moe_v2_workspace
-        w13_weight, w13_scale, w2_weight, w2_scale = self._raw_expert_weight_tensors()
-        grouped = dsv4_kernel.moe_route_dispatch_bf16_grouped(
-            hidden_states,
-            weights,
-            indices,
-            w13_weight,
-            w13_scale,
-            w2_weight,
-            w2_scale,
-            swiglu_limit=self.swiglu_limit,
-            moe_plan=moe_plan,
-            workspace=workspace,
-        )
-        if grouped is not None:
-            if reduce and self._tp_size > 1:
-                grouped_for_reduce = grouped.float()
-                grouped_reduced = self._comm.all_reduce(
-                    grouped_for_reduce,
-                    label="dsv4.routed_expert_all_reduce",
-                )
-                grouped = grouped_reduced.to(grouped.dtype)
-            return grouped
-
-        y = torch.zeros_like(hidden_states, dtype=torch.float32)
-        for expert_idx in range(self.w13_weight.shape[0]):
-            token_idx, top_idx = torch.where(indices == expert_idx)
-            if token_idx.numel() == 0:
-                continue
-            y[token_idx] += self._expert_forward(
-                int(expert_idx),
-                hidden_states[token_idx],
-                weights[token_idx, top_idx, None],
-            ).float()
+            )
         if reduce and self._tp_size > 1:
-            y = self._comm.all_reduce(y, label="dsv4.routed_expert_all_reduce")
-        return y.to(hidden_states.dtype)
+            grouped_for_reduce = grouped.float()
+            grouped_reduced = self._comm.all_reduce(
+                grouped_for_reduce,
+                label="dsv4.routed_expert_all_reduce",
+            )
+            grouped = grouped_reduced.to(grouped.dtype)
+        return grouped
 
 
 class DSV4SharedExperts(BaseOP):
@@ -1814,8 +1674,6 @@ class DSV4SharedExperts(BaseOP):
         return f"layer{self.layer_id}.shared_experts.down_proj"
 
     def prepare_bf16_weight_cache(self) -> list[dict[str, object]]:
-        if not dsv4_kernel.dsv4_optimized_enabled():
-            return []
         reports = [
             self.gate_up_proj.prepare_fp8_bf16_weight_cache(
                 self._gate_up_bf16_weight_cache_name,
@@ -1838,15 +1696,11 @@ class DSV4SharedExperts(BaseOP):
         )
 
     def forward(self, hidden_states: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
-        use_bf16_weight_cache = dsv4_kernel.dsv4_optimized_enabled()
-        if use_bf16_weight_cache:
-            gate_up = self.gate_up_proj.forward_fp8_cached_bf16_weight(
-                hidden_states,
-                cache_name=self._gate_up_bf16_weight_cache_name,
-                owner_label=self._gate_up_owner_label,
-            )
-        else:
-            gate_up = self.gate_up_proj.forward(hidden_states)
+        gate_up = self.gate_up_proj.forward_fp8_cached_bf16_weight(
+            hidden_states,
+            cache_name=self._gate_up_bf16_weight_cache_name,
+            owner_label=self._gate_up_owner_label,
+        )
         gate, up = gate_up.chunk(2, dim=-1)
         hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
             gate,
@@ -1854,16 +1708,10 @@ class DSV4SharedExperts(BaseOP):
             swiglu_limit=self.swiglu_limit,
         )
         hidden_for_down = hidden.to(up.dtype)
-        if use_bf16_weight_cache:
-            return self.down_proj.forward_fp8_cached_bf16_weight(
-                hidden_for_down,
-                cache_name=self._down_bf16_weight_cache_name,
-                owner_label=self._down_owner_label,
-                reduce=reduce,
-                reduce_label="dsv4.shared_expert_all_reduce",
-            )
-        return self.down_proj.forward(
+        return self.down_proj.forward_fp8_cached_bf16_weight(
             hidden_for_down,
+            cache_name=self._down_bf16_weight_cache_name,
+            owner_label=self._down_owner_label,
             reduce=reduce,
             reduce_label="dsv4.shared_expert_all_reduce",
         )
@@ -1879,7 +1727,6 @@ def _dsv4_moe_reduce_once_input(
     if (
         hidden_dtype == torch.bfloat16
         and output.dtype != torch.bfloat16
-        and dsv4_kernel.dsv4_optimized_enabled()
     ):
         return output.to(torch.bfloat16)
     return output
@@ -1959,7 +1806,7 @@ class DSV4FusedMoERunner:
         else:
             raise RuntimeError(
                 f"layer{self.layer_id}.moe runner cannot build a route plan because "
-                f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR} "
+                f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ERROR} "
                 "Marlin WNA16 cache is missing."
             )
         moe_plan = dsv4_kernel.build_moe_v2_execution_plan(
@@ -1994,9 +1841,8 @@ class DSV4FusedMoERunner:
         )
 
     def finalize_routed(self, routed_output: torch.Tensor) -> torch.Tensor:
-        # The current grouped FP4 backend already applies top-k weights and
-        # sums routes to [tokens, hidden]. Keep the boundary explicit so a
-        # future exact backend can return per-route output here.
+        # Marlin applies top-k weights and sums routes to [tokens, hidden].
+        # Keep the boundary explicit for runner ownership.
         return routed_output.float()
 
     def apply_shared(self, flat: torch.Tensor) -> torch.Tensor | None:
@@ -2084,79 +1930,12 @@ class DSV4MoE(BaseOP):
         )
 
     def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
-        if dsv4_kernel.dsv4_optimized_enabled():
-            return self._runner.forward(
-                hidden_states,
-                input_ids,
-                comm=self._comm,
-                hash_topk=getattr(self, "topk", None),
-            )
-
-        flat = hidden_states.view(-1, hidden_states.shape[-1])
-        num_token_non_padded = _moe_num_token_non_padded(flat)
-        weights, indices = self.gate.forward(
-            flat,
-            input_ids=input_ids.view(-1),
-            topk=self.topk_count,
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
+        return self._runner.forward(
+            hidden_states,
+            input_ids,
+            comm=self._comm,
             hash_topk=getattr(self, "topk", None),
-            num_token_non_padded=num_token_non_padded,
         )
-        moe_v2 = dsv4_kernel.dsv4_optimized_enabled()
-        reduce_once = moe_v2 or dsv4_kernel.dsv4_optimized_enabled()
-        moe_plan = None
-        if moe_v2:
-            if hasattr(self.experts, "w13_weight"):
-                num_experts = self.experts.w13_weight.shape[0]
-            elif self.experts._marlin_wna16_weights is not None:
-                num_experts = self.experts._marlin_wna16_weights.w13.shape[0]
-            else:
-                raise RuntimeError(
-                    f"layer{self.layer_id}.moe cannot build a route plan because "
-                    f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR} "
-                    "Marlin WNA16 cache is missing."
-                )
-            moe_plan = dsv4_kernel.build_moe_v2_execution_plan(
-                flat,
-                weights,
-                indices,
-                num_experts=num_experts,
-                block_size_m=dsv4_kernel.moe_execution_block_size(
-                    tokens=flat.shape[0],
-                    topk=indices.shape[1],
-                    num_experts=num_experts,
-                ),
-                reduce_once=reduce_once,
-            )
-        if moe_plan is None:
-            y = self.experts.forward(
-                flat, weights, indices, reduce=not reduce_once
-            ).float()
-        else:
-            y = self.experts.forward(
-                flat,
-                weights,
-                indices,
-                reduce=not reduce_once,
-                moe_plan=moe_plan,
-            ).float()
-        if hasattr(self, "shared_experts"):
-            y = y + self.shared_experts.forward(
-                flat, reduce=not reduce_once
-            ).float()
-        y = dsv4_kernel.zero_moe_padded_rows(y, num_token_non_padded)
-        if reduce_once and self._tp_size > 1:
-            y = _dsv4_moe_reduce_once_input(
-                y,
-                hidden_dtype=flat.dtype,
-                layer_id=self.layer_id,
-                path="non_runner_output",
-            )
-            y = self._comm.all_reduce(
-                y, label="dsv4.v1_moe_reduce_once_all_reduce"
-            )
-        return y.to(flat.dtype).view_as(hidden_states)
 
 
 class DeepseekV4DecoderLayer(BaseOP):
@@ -2250,45 +2029,38 @@ class DeepseekV4Model(BaseOP):
 
     def prepare_for_cuda_graph_capture(self) -> dict[str, object]:
         q_wqb_reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_optimized_enabled():
-            for layer in self.layers.op_list:
-                report = layer.self_attn.prepare_q_wqb_bf16_weight_cache()
-                if report is not None:
-                    q_wqb_reports.append(report)
+        for layer in self.layers.op_list:
+            report = layer.self_attn.prepare_q_wqb_bf16_weight_cache()
+            if report is not None:
+                q_wqb_reports.append(report)
 
         wo_b_reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_optimized_enabled():
-            for layer in self.layers.op_list:
-                report = layer.self_attn.prepare_wo_b_bf16_weight_cache()
-                if report is not None:
-                    wo_b_reports.append(report)
+        for layer in self.layers.op_list:
+            report = layer.self_attn.prepare_wo_b_bf16_weight_cache()
+            if report is not None:
+                wo_b_reports.append(report)
 
         wo_a_reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_optimized_enabled():
-            for layer in self.layers.op_list:
-                report = layer.self_attn.prepare_wo_a_bf16_bmm_cache()
-                if report is not None:
-                    wo_a_reports.append(report)
+        for layer in self.layers.op_list:
+            report = layer.self_attn.prepare_wo_a_bf16_bmm_cache()
+            if report is not None:
+                wo_a_reports.append(report)
         indexer_wq_b_reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_optimized_enabled():
-            for layer in self.layers.op_list:
-                report = layer.self_attn.prepare_indexer_wq_b_bf16_weight_cache()
-                if report is not None:
-                    indexer_wq_b_reports.append(report)
+        for layer in self.layers.op_list:
+            report = layer.self_attn.prepare_indexer_wq_b_bf16_weight_cache()
+            if report is not None:
+                indexer_wq_b_reports.append(report)
         shared_expert_reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_optimized_enabled():
-            for layer in self.layers.op_list:
-                shared_experts = getattr(layer.mlp, "shared_experts", None)
-                if shared_experts is not None:
-                    shared_expert_reports.extend(shared_experts.prepare_bf16_weight_cache())
+        for layer in self.layers.op_list:
+            shared_experts = getattr(layer.mlp, "shared_experts", None)
+            if shared_experts is not None:
+                shared_expert_reports.extend(shared_experts.prepare_bf16_weight_cache())
 
         moe_marlin_wna16_reports: list[dict[str, object]] = []
         moe_marlin_wna16_prebuild_reports: list[dict[str, object]] = []
         moe_marlin_wna16_release_reports: list[dict[str, object]] = []
-        runtime = get_dsv4_runtime_config()
-        moe_marlin_backend = dsv4_kernel.dsv4_moe_expert_backend()
-        moe_marlin_prebuild_enabled = runtime.marlin_prebuild
-        moe_marlin_release_original = runtime.release_raw_expert_weights
+        moe_marlin_prebuild_enabled = DSV4_RELEASE.marlin_prebuild
+        moe_marlin_release_original = DSV4_RELEASE.release_raw_expert_weights
         moe_marlin_release_timing = _marlin_wna16_release_timing()
         moe_marlin_release_deferred = _marlin_wna16_release_deferred_from_model_prepare()
         if moe_marlin_release_original and not moe_marlin_prebuild_enabled:
@@ -2296,19 +2068,7 @@ class DeepseekV4Model(BaseOP):
                 "optimized raw-expert release requires Marlin WNA16 prebuild so the "
                 "Marlin WNA16 cache exists before original expert weights are released."
             )
-        if (
-            moe_marlin_release_original
-            and moe_marlin_backend != dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
-        ):
-            raise RuntimeError(
-                "optimized raw-expert release requires "
-                f"backend={dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16!r}, "
-                f"got {moe_marlin_backend!r}."
-            )
-        if (
-            moe_marlin_prebuild_enabled
-            and moe_marlin_backend == dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16
-        ):
+        if moe_marlin_prebuild_enabled:
             for layer in self.layers.op_list:
                 moe_marlin_wna16_prebuild_reports.append(
                     layer.mlp.experts.prepare_marlin_wna16_weight_cache(
@@ -2413,7 +2173,7 @@ class DeepseekV4Model(BaseOP):
             },
             "moe_marlin_wna16_cache": {
                 "enabled": bool(moe_marlin_wna16_reports),
-                "backend": moe_marlin_backend,
+                "backend": dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
                 "prebuild_requested": bool(moe_marlin_prebuild_enabled),
                 "release_original_requested": bool(moe_marlin_release_original),
                 "release_timing": moe_marlin_release_timing,
@@ -2432,7 +2192,7 @@ class DeepseekV4Model(BaseOP):
                     else None
                 ),
                 "fail_closed_error": (
-                    dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_FALLBACK_ERROR
+                    dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ERROR
                     if moe_marlin_release_original
                     else None
                 ),
@@ -2444,11 +2204,10 @@ class DeepseekV4Model(BaseOP):
 
     def prepare_fused_wqa_wkv_bf16_weight_cache(self) -> dict[str, object]:
         reports: list[dict[str, object]] = []
-        if dsv4_kernel.dsv4_optimized_enabled():
-            for layer in self.layers.op_list:
-                report = layer.self_attn.prepare_fused_wqa_wkv_bf16_weight_cache()
-                if report is not None:
-                    reports.append(report)
+        for layer in self.layers.op_list:
+            report = layer.self_attn.prepare_fused_wqa_wkv_bf16_weight_cache()
+            if report is not None:
+                reports.append(report)
         return {
             "enabled": bool(reports),
             "layers_cached": len(reports),

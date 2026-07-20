@@ -131,20 +131,11 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
-        "--dsv4-runtime",
-        dest="dsv4_runtime_mode",
-        choices=["optimized", "fallback"],
-        default=ServerArgs.dsv4_runtime_mode,
-        help="Select the DeepSeek V4 optimized release runtime or reference fallback.",
-    )
-
-    parser.add_argument(
         "--enable-reasoning-sampler-contract",
         action="store_true",
         help=(
             "Enable a request-state grammar mask for DeepSeek V4 reasoning output. "
-            "This changes the raw sampling distribution and is unavailable in the "
-            "fallback/oracle runtime."
+            "This changes the raw sampling distribution."
         ),
     )
 
@@ -282,9 +273,6 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     kwargs["max_extend_tokens_explicit"] = max_extend_tokens_explicit
     kwargs["max_running_req_explicit"] = max_running_req_explicit
 
-    if kwargs["dsv4_runtime_mode"] == "fallback" and not recipe_explicit:
-        kwargs["dsv4_sm80_recipe"] = None
-
     # resolve some arguments
     run_shell |= kwargs.pop("shell_mode")
     if run_shell:
@@ -309,7 +297,6 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         f"model={result.model_path!r}, "
         f"served_model_name={result.resolved_served_model_name!r}, "
         f"tp_size={result.tp_info.size}, "
-        f"runtime={result.dsv4_runtime_mode!r}, "
         f"recipe={result.dsv4_sm80_recipe!r}, "
         f"listen={result.server_host}:{result.server_port}."
     )

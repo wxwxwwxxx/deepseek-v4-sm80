@@ -17,36 +17,21 @@ sys.modules[SPEC.name] = smoke
 SPEC.loader.exec_module(smoke)
 
 
-def _parse_variant(variant: str):
+def _parse_smoke():
     return smoke._parse_args(
         [
             "--model-path",
             "/unused/model",
-            "--variant",
-            variant,
             "--output",
             "/unused/output.json",
         ]
     )
 
 
-@pytest.mark.parametrize("variant", ["optimized", "fallback"])
-def test_cli_accepts_canonical_variants(variant):
-    assert _parse_variant(variant).variant == variant
-
-
-def test_variants_map_to_typed_runtime_without_historical_kernel_access():
-    optimized = smoke._configure_variant("optimized")
-    fallback = smoke._configure_variant("fallback")
-
-    assert optimized.mode == "optimized"
-    assert optimized.moe_expert_backend == "marlin_wna16"
-    assert optimized.release_raw_expert_weights is True
-    assert fallback.mode == "fallback"
-    assert fallback.moe_expert_backend == "grouped_fp4"
-    assert fallback.release_raw_expert_weights is False
-    assert smoke._execution_settings(optimized, True) == (True, True)
-    assert smoke._execution_settings(fallback, True) == (False, False)
+def test_smoke_uses_only_optimized_release_without_historical_kernel_access():
+    assert _parse_smoke().model_path == "/unused/model"
+    assert smoke._execution_settings(True) == (True, True)
+    assert smoke._execution_settings(False) == (False, True)
     assert "dsv4_kernel" not in smoke.__dict__
 
     source = SCRIPT.read_text(encoding="utf-8")
@@ -58,9 +43,14 @@ def test_variants_map_to_typed_runtime_without_historical_kernel_access():
         "MINISGL_DSV4_",
     )
     assert all(name not in source for name in removed_names)
-
-
-@pytest.mark.parametrize("variant", ["v0_bf16", "v1_moe"])
-def test_cli_rejects_historical_variants(variant):
     with pytest.raises(SystemExit):
-        _parse_variant(variant)
+        smoke._parse_args(
+            [
+                "--model-path",
+                "/unused/model",
+                "--variant",
+                "fallback",
+                "--output",
+                "/unused/output.json",
+            ]
+        )

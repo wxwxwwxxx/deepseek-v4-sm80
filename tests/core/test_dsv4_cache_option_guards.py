@@ -25,8 +25,9 @@ def _config(
         enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
     )
 
-def test_dsv4_cache_type_resolution_preserves_phase1_radix_guardrails():
-    assert resolve_dsv4_cache_type(_config(enable_radix=False)) == "naive"
+def test_dsv4_cache_type_resolution_requires_release_radix_contract():
+    with pytest.raises(ValueError, match="release requires radix"):
+        resolve_dsv4_cache_type(_config(enable_radix=False))
     assert resolve_dsv4_cache_type(_config(enable_radix=True)) == "radix"
     with pytest.raises(ValueError, match="DeepSeek V4 Flash only"):
         resolve_dsv4_cache_type(_config(is_deepseek_v4=False, cache_type="radix"))

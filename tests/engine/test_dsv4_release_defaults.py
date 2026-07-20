@@ -3,18 +3,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from minisgl.dsv4_runtime import (
-    configure_dsv4_runtime,
-    get_dsv4_runtime_config,
-    resolve_dsv4_runtime_config,
-)
+from minisgl.dsv4_release import DSV4_RELEASE
 from minisgl.engine import engine as engine_module
 
 
 def _fake_config(**overrides):
     config = SimpleNamespace(
         model_config=SimpleNamespace(is_deepseek_v4=True, is_moe=True),
-        dsv4_runtime_mode="optimized",
         enable_reasoning_sampler_contract=False,
         dsv4_sm80_recipe=None,
         max_running_req=128,
@@ -61,13 +56,13 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
     assert config.cuda_graph_policy.source_mode == "explicit_max"
     assert config.cuda_graph_policy.resolved_bs[-1] == 128
     assert config.cuda_graph_capture_fail_open is True
-    runtime = resolve_dsv4_runtime_config(config.dsv4_runtime_mode)
-    assert runtime.moe_expert_backend == "marlin_wna16"
-    assert runtime.direct_graph_metadata_groups == frozenset({"swa", "c4"})
-    assert "c128" not in runtime.direct_graph_metadata_groups
-    assert runtime.marlin_release_timing == "before_kv_alloc"
-    assert runtime.clear_allocated_page_scope == "component"
-    assert runtime.pynccl_max_buffer_bytes == 32 * 1024 * 1024
+    assert DSV4_RELEASE.direct_graph_metadata_groups == frozenset({"swa", "c4"})
+    assert "c128" not in DSV4_RELEASE.direct_graph_metadata_groups
+    assert DSV4_RELEASE.marlin_release_timing == "before_kv_alloc"
+    assert DSV4_RELEASE.clear_allocated_page_scope == "component"
+    assert DSV4_RELEASE.pynccl_max_buffer_bytes == 32 * 1024 * 1024
+    assert DSV4_RELEASE.release_raw_expert_weights is True
+    assert DSV4_RELEASE.marlin_prebuild is True
 
 
 @pytest.mark.parametrize("backend", ["fa", "fi", "trtllm", "fa,fi"])
@@ -77,42 +72,6 @@ def test_removed_attention_backends_fail_instead_of_falling_back(monkeypatch, ba
 
     with pytest.raises(ValueError, match="DSV4 attention backend only"):
         engine_module._adjust_config(config)
-
-
-def test_deepseek_v4_mode_is_selected_only_by_typed_config(monkeypatch):
-    try:
-        configure_dsv4_runtime("optimized")
-        assert get_dsv4_runtime_config().optimized is True
-
-        configure_dsv4_runtime("fallback")
-        assert get_dsv4_runtime_config().optimized is False
-    finally:
-        configure_dsv4_runtime("optimized")
-
-
-def test_deepseek_v4_typed_fallback_contract(monkeypatch):
-    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
-    monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
-    config = _fake_config(dsv4_runtime_mode="fallback")
-
-    engine_module._adjust_config(config)
-
-    assert config.attention_backend == "dsv4"
-    assert config.page_size == 256
-    assert config.max_extend_tokens == 8192
-    assert config.enable_dsv4_radix_prefix_cache is False
-    assert config.enable_dsv4_component_loc_ownership is False
-    assert config.allow_dsv4_cuda_graph is False
-    assert config.cuda_graph_bs == []
-    assert config.cuda_graph_max_bs == 0
-    assert config.cuda_graph_policy.source_mode == "disabled"
-    assert config.cuda_graph_policy.resolved_bs == ()
-    assert config.use_pynccl is False
-    assert config.cache_type == "naive"
-    runtime = resolve_dsv4_runtime_config(config.dsv4_runtime_mode)
-    assert runtime.moe_expert_backend == "grouped_fp4"
-    assert runtime.release_raw_expert_weights is False
-    assert runtime.marlin_prebuild is False
 
 
 def test_optimized_explicit_contract_enable_emits_rank0_warning(monkeypatch):
@@ -131,38 +90,6 @@ def test_optimized_explicit_contract_enable_emits_rank0_warning(monkeypatch):
     assert "ENABLED" in warnings[0]
     assert "masks protocol delimiters and EOS" in warnings[0]
     assert "raw sampling distribution" in warnings[0]
-
-
-def test_fallback_rejects_reasoning_sampler_contract(monkeypatch):
-    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
-    config = _fake_config(
-        dsv4_runtime_mode="fallback",
-        enable_reasoning_sampler_contract=True,
-    )
-
-    with pytest.raises(ValueError, match="fallback preserves raw logits"):
-        engine_module._adjust_config(config)
-
-
-def test_fallback_logs_oracle_disable_without_warning(monkeypatch):
-    infos = []
-    warnings = []
-    monkeypatch.setattr(
-        engine_module.logger,
-        "info_rank0",
-        lambda message, *args, **kwargs: infos.append(message),
-    )
-    monkeypatch.setattr(
-        engine_module.logger,
-        "warning_rank0",
-        lambda message, *args, **kwargs: warnings.append(message),
-    )
-    config = _fake_config(dsv4_runtime_mode="fallback")
-
-    engine_module._adjust_config(config)
-
-    assert warnings == []
-    assert any("oracle logits and sampling distributions" in message for message in infos)
 
 
 def test_deepseek_v4_release_defaults_honor_explicit_max_extend_tokens(monkeypatch):

@@ -1587,22 +1587,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
-        name="dsv4_sm80_a100_victory_prefix_routeb_lifetime_groupedfp4",
-        env={
-            **DSV4_ROUTE_B_LIFETIME_ENV,
-            DSV4_MOE_EXPERT_BACKEND_ENV: "grouped_fp4",
-        },
-        description=(
-            "TARGET 08.34 diagnostic A/B preset: promoted Route B lifetime preset "
-            "with the routed expert backend forced to grouped_fp4 instead of "
-            "the A100 victory default marlin_wna16."
-        ),
-        allow_dsv4_cuda_graph=True,
-        cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
-    ),
-    Variant(
         name=DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT,
         env={**DSV4_ROUTE_B_LIFETIME_ENV, DSV4_MOE_REDUCE_BF16_TOGGLE: "1"},
         description=(
@@ -1781,7 +1765,7 @@ ALL_SCENARIOS: tuple[Scenario, ...] = (*DEFAULT_SCENARIOS, *TARGET08_SCENARIOS)
 ALL_VARIANTS: tuple[Variant, ...] = (*DEFAULT_VARIANTS, *RUNTIME_VARIANTS)
 
 
-FALLBACK_COUNTER_NAMES = {
+OPERATOR_REFERENCE_COUNTER_NAMES = {
     "apply_rotary_tail",
     "compress_forward_fallback",
     "compress_norm_rope_store_fallback",
@@ -1802,13 +1786,11 @@ FALLBACK_COUNTER_NAMES = {
     "linear_bf16_fp32_fallback",
     "mega_moe_pre_dispatch_fallback",
     "moe_gate_fallback",
-    "moe_route_dispatch_bf16_grouped",
     "norm_rope_inplace_fallback",
     "paged_mqa_attention_fallback",
     "plan_topk_v2_fallback",
     "q_norm_rope_fallback",
     "quantized_linear_ref",
-    "sequence_mqa_attention_fallback",
     "silu_and_mul_clamp_fallback",
     "store_compressed_fallback",
     "store_indexer_fallback",
@@ -1822,7 +1804,6 @@ FALLBACK_COUNTER_NAMES = {
 
 OPTIONAL_NONE_MEANS_SKIP = {
     "dsv4_sparse_attention_two_source_bf16",
-    "moe_route_dispatch_bf16_grouped",
 }
 
 
@@ -1834,19 +1815,16 @@ BOTTLENECK_COUNTER_GROUPS: dict[str, tuple[str, ...]] = {
         "indexer_select_bf16_fallback",
         "paged_mqa_attention_fallback",
         "q_norm_rope_fallback",
-        "sequence_mqa_attention_fallback",
         "topk_transform_512_full_fallback",
     ),
     "MoE / expert GEMM": (
         "mega_moe_pre_dispatch_fallback",
         "moe_gate_fallback",
-        "moe_route_dispatch_bf16_grouped",
         "quantized_linear_ref",
         "silu_and_mul_clamp_fallback",
     ),
     "fp4 expert handling": (
         "dequant_fp4_weight",
-        "moe_route_dispatch_bf16_grouped",
         "quantized_linear_ref",
     ),
     "KV cache writes": (
@@ -2661,7 +2639,7 @@ class KernelCallTracer:
         self.indexer_samples: list[dict[str, Any]] = []
 
     def install(self) -> None:
-        for name in sorted(FALLBACK_COUNTER_NAMES):
+        for name in sorted(OPERATOR_REFERENCE_COUNTER_NAMES):
             value = getattr(self.module, name, None)
             if callable(value):
                 self._wrap(name, value)
@@ -4684,7 +4662,6 @@ def _init_llm(
     llm = BenchmarkLLM(
         args.model_path,
         tp_info=DistributedInfo(rank, tp_size),
-        dsv4_runtime_mode="optimized",
         dsv4_sm80_recipe=args.dsv4_sm80_recipe,
         num_page_override=args.num_pages,
         page_size=args.page_size,

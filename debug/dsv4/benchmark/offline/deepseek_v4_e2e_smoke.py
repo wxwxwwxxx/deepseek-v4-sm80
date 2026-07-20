@@ -17,10 +17,7 @@ sys.path.insert(0, str(ROOT / "python"))
 
 os.environ.setdefault("MINISGL_DISABLE_OVERLAP_SCHEDULING", "1")
 
-from minisgl.dsv4_runtime import (  # noqa: E402
-    DSV4RuntimeConfig,
-    resolve_dsv4_runtime_config,
-)
+from minisgl.dsv4_release import DSV4_RELEASE  # noqa: E402
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -28,7 +25,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="Minimal DeepSeek V4 offline E2E generation smoke for mini-sglang."
     )
     parser.add_argument("--model-path", required=True)
-    parser.add_argument("--variant", required=True, choices=("optimized", "fallback"))
     parser.add_argument("--prompt-len", type=int, default=16)
     parser.add_argument("--decode-len", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -42,25 +38,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--use-pynccl",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Use PyNCCL in optimized mode (fallback always disables it).",
+        help="Use PyNCCL in the optimized release.",
     )
     return parser.parse_args(argv)
 
 
-def _configure_variant(variant: str) -> DSV4RuntimeConfig:
-    return resolve_dsv4_runtime_config(variant)
-
-
-def _execution_settings(
-    runtime: DSV4RuntimeConfig, requested_use_pynccl: bool
-) -> tuple[bool, bool]:
-    if not runtime.optimized:
-        return False, False
+def _execution_settings(requested_use_pynccl: bool) -> tuple[bool, bool]:
     return requested_use_pynccl, True
 
 
-def _jsonable_runtime(runtime: DSV4RuntimeConfig) -> dict[str, Any]:
-    payload = asdict(runtime)
+def _jsonable_release() -> dict[str, Any]:
+    payload = asdict(DSV4_RELEASE)
     payload["direct_graph_metadata_groups"] = sorted(
         payload["direct_graph_metadata_groups"]
     )
@@ -129,8 +117,7 @@ def main() -> int:
     _validate_args(args)
     tp_rank, tp_size = _tp_rank_size(args)
     is_primary = tp_rank == 0
-    runtime = _configure_variant(args.variant)
-    use_pynccl, allow_cuda_graph = _execution_settings(runtime, args.use_pynccl)
+    use_pynccl, allow_cuda_graph = _execution_settings(args.use_pynccl)
     start = time.perf_counter()
     llm = None
     expected_tokens = args.batch_size * args.decode_len
@@ -141,13 +128,12 @@ def main() -> int:
         distributed_addr = "env://"
     result: dict[str, Any] = {
         "status": "fail",
-        "variant": args.variant,
         "model_path": args.model_path,
         "prompt_len": args.prompt_len,
         "decode_len": args.decode_len,
         "batch_size": args.batch_size,
         "expected_generated_tokens": expected_tokens,
-        "dsv4_runtime": _jsonable_runtime(runtime),
+        "dsv4_release": _jsonable_release(),
         "torch_version": torch.__version__,
         "tp_rank": tp_rank,
         "tp_size": tp_size,
@@ -169,7 +155,6 @@ def main() -> int:
         llm = LLM(
             args.model_path,
             tp_info=DistributedInfo(tp_rank, tp_size),
-            dsv4_runtime_mode=runtime.mode,
             max_running_req=max(args.batch_size, 1),
             context_length=max_seq_len,
             max_extend_tokens=args.prompt_len * args.batch_size,

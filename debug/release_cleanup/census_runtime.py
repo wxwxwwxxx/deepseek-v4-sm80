@@ -5,7 +5,8 @@ The helper deliberately lives outside :mod:`minisgl`.  It never imports the
 production package and it does not mutate runtime state.  Its output is raw
 evidence: release-default values, environment readers, Python call/attribute
 edges, Triton ``kernel[grid](...)`` launches, custom-op/JIT registrations, and
-native include/source ownership.  Policy is applied by ``build_manifests.py``.
+native include/source ownership.  Policy is applied by milestone-specific
+consumers rather than this read-only collector.
 """
 
 from __future__ import annotations

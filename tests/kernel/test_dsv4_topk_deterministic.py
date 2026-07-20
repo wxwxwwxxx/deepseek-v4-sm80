@@ -4,8 +4,6 @@ import math
 
 import pytest
 import torch
-
-from minisgl.dsv4_runtime import configure_dsv4_runtime
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 
 
@@ -73,7 +71,6 @@ def _assert_contract(scores, seq_lens, page_table, *, width, page_size=64, ratio
 
 @pytest.mark.skipif(not _sm80(), reason="requires an sm80 CUDA device")
 def test_dsv4_topk_candidate_b_lengths_ties_and_noncontiguous_pages():
-    configure_dsv4_runtime("optimized")
     width = 512
     max_len = 1537
     lengths = torch.tensor([0, 1, 511, 512, 513, 514, 1537], dtype=torch.int32)
@@ -104,7 +101,6 @@ def test_dsv4_topk_candidate_b_lengths_ties_and_noncontiguous_pages():
 
 @pytest.mark.skipif(not _sm80(), reason="requires an sm80 CUDA device")
 def test_dsv4_topk_candidate_b_width_1024_and_nonfinite_reporting():
-    configure_dsv4_runtime("optimized")
     lengths = torch.tensor([1023, 1024, 1025, 1537], dtype=torch.int32)
     base = torch.arange(1537, dtype=torch.float32)
     scores = torch.stack([torch.sin(base * 0.013 + row) for row in range(4)])
@@ -125,7 +121,6 @@ def test_dsv4_topk_candidate_b_width_1024_and_nonfinite_reporting():
 @pytest.mark.skipif(not _sm80(), reason="requires an sm80 CUDA device")
 @pytest.mark.parametrize("rows", [1, 4, 16])
 def test_dsv4_topk_candidate_b_cuda_graph_replay(rows: int):
-    configure_dsv4_runtime("optimized")
     max_len = 1024
     base = torch.arange(max_len, dtype=torch.float32, device="cuda")
     scores = torch.stack([torch.sin(base * 0.019 + row) for row in range(rows)])

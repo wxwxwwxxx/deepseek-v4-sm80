@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Tuple
 import torch
 from minisgl.core import SamplingParams
 from minisgl.distributed import DistributedInfo
-from minisgl.engine import DSV4RuntimeMode
 from minisgl.message import (
     BaseBackendMsg,
     DetokenizeMsg,
@@ -38,7 +37,6 @@ class LLM(Scheduler):
         self,
         model_path: str,
         tp_info: DistributedInfo | None = None,
-        dsv4_runtime_mode: DSV4RuntimeMode = "optimized",
         **kwargs,
     ):
         if tp_info is None:
@@ -53,7 +51,6 @@ class LLM(Scheduler):
         config = SchedulerConfig(
             model_path=model_path,
             tp_info=tp_info,
-            dsv4_runtime_mode=dsv4_runtime_mode,
             offline_mode=True,
             **kwargs,
         )

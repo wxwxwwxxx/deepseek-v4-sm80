@@ -64,13 +64,6 @@ def estimate_kvcache_bytes_per_page(
     return estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size)
 
 
-@SUPPORTED_CACHE_MANAGER.register("naive")
-def create_naive_cache(device: torch.device):
-    from .naive_cache import NaivePrefixCache
-
-    return NaivePrefixCache(device=device)
-
-
 @SUPPORTED_CACHE_MANAGER.register("radix")
 def create_radix_cache(device: torch.device):
     from .radix_cache import RadixPrefixCache

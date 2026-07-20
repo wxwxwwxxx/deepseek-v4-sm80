@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, List, Literal
 import torch
 import torch.nn.functional as F
 from minisgl.core import Batch, get_global_ctx
-from minisgl.dsv4_runtime import get_dsv4_runtime_config
+from minisgl.dsv4_release import DSV4_RELEASE
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
 from minisgl.utils import (
@@ -25,19 +25,19 @@ _DIRECT_GRAPH_METADATA_ALL_GROUPS = frozenset({"swa", "c4", "c128"})
 
 
 def _direct_graph_metadata_groups() -> frozenset[str]:
-    return get_dsv4_runtime_config().direct_graph_metadata_groups
+    return DSV4_RELEASE.direct_graph_metadata_groups
 
 
 def _swa_metadata_page_table_cache_enabled() -> bool:
-    return dsv4_kernel.dsv4_optimized_enabled()
+    return True
 
 
 def _swa_direct_token_metadata_enabled() -> bool:
-    return dsv4_kernel.dsv4_optimized_enabled()
+    return True
 
 
 def _swa_direct_replay_metadata_fused_enabled() -> bool:
-    return dsv4_kernel.dsv4_optimized_enabled()
+    return True
 
 
 def _pad_last_dim(
@@ -305,7 +305,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             or core.materialized_seq_lens is None
         ):
             return unsupported("missing_capture_surfaces")
-        if not dsv4_kernel.dsv4_optimized_triton_enabled():
+        if not dsv4_kernel.dsv4_triton_available():
             return unsupported("triton_unavailable_or_not_sm80")
         self._prep_metadata_in_graph_unsupported_reason = None
         return True
@@ -368,16 +368,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
             offset += length
         assert offset == positions.numel()
         page_table = self._make_page_table(table_indices, max_seqlen_k)
-        if dsv4_kernel.dsv4_optimized_enabled():
-            component_tables = self._make_component_page_tables_cached(
-                reqs,
-                max_seqlen_k,
-                table_indices,
-                has_c4=True,
-                has_c128=True,
-            )
-        else:
-            component_tables = self._make_component_page_tables(reqs, max_seqlen_k)
+        component_tables = self._make_component_page_tables_cached(
+            reqs,
+            max_seqlen_k,
+            table_indices,
+            has_c4=True,
+            has_c128=True,
+        )
         oracle = None
         return DSV4RawDecodeGraphMetadata(
             raw_out_loc=raw_out_loc,
@@ -817,7 +814,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._capture_graph_inputs_bound = False
         self._capture_compressed_locs_in_graph = False
         self._capture_compressed_locs_in_graph_component_guarded = False
-        self._prep_metadata_in_graph_requested = dsv4_kernel.dsv4_optimized_enabled()
+        self._prep_metadata_in_graph_requested = True
         self._prep_metadata_in_graph = False
         self._prep_metadata_in_graph_unsupported_reason = None
         self._pending_prep_metadata_oracle = None
@@ -865,7 +862,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             and not component_guarded
             and out_loc.is_cuda
             and positions.is_cuda
-            and dsv4_kernel.dsv4_optimized_triton_enabled()
+            and dsv4_kernel.dsv4_triton_available()
         )
         self._prep_metadata_in_graph = self._compute_prep_metadata_in_graph_supported(core)
 
@@ -1209,7 +1206,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             and component_ownership
             and enabled
             and self.capture is not None
-            and dsv4_kernel.dsv4_optimized_enabled()
             and group in _direct_graph_metadata_groups()
         ):
             return False
@@ -1224,7 +1220,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         padded_size = int(getattr(batch, "padded_size", batch.size))
         if padded_size <= 0 or padded_size not in self.capture_bs:
             return False
-        return self.device.type == "cuda" and dsv4_kernel.dsv4_optimized_triton_enabled()
+        return self.device.type == "cuda" and dsv4_kernel.dsv4_triton_available()
 
     def _empty_index_source_placeholder(self, rows: int) -> torch.Tensor:
         return torch.full((int(rows), 1), -1, dtype=torch.int32, device=self.device)
@@ -1251,7 +1247,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             and has_c128
             and component_ownership
             and self.page_size == 256
-            and dsv4_kernel.dsv4_optimized_enabled()
             and not self._explicit_c128_raw_full_oracle_requested()
         )
 
@@ -1373,7 +1368,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             else None
         )
 
-        if component_ownership and batch.is_decode and dsv4_kernel.dsv4_optimized_enabled():
+        if component_ownership and batch.is_decode:
             component_tables = self._make_component_page_tables_cached(
                 reqs,
                 max_seqlen_k,
@@ -2477,14 +2472,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
                     device=q.device,
                     dtype=torch.int32,
                 )
-                if dsv4_kernel.dsv4_optimized_enabled():
-                    compressed_lengths = compressed_lengths_view.to(
-                        device=q.device,
-                        dtype=torch.int32,
-                    )
-                    compressed_lengths = compressed_lengths.clamp(max=compressed_indices.shape[-1])
-                else:
-                    compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+                compressed_lengths = compressed_lengths_view.to(
+                    device=q.device,
+                    dtype=torch.int32,
+                )
+                compressed_lengths = compressed_lengths.clamp(max=compressed_indices.shape[-1])
         elif compress_ratio == 128:
             compressed_cache = self.kvcache.c128_cache(layer_id).to(q.dtype)
             compressed_indices_view = metadata.c128_page_indices[:rows]
@@ -2881,11 +2873,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
         src_core: DSV4CoreAttentionMetadata,
         rows: int,
     ) -> tuple[bool, bool, bool]:
-        if not (
-            rows > 0 and src_core.component_loc_ownership and dsv4_kernel.dsv4_optimized_enabled()
-        ):
+        if not (rows > 0 and src_core.component_loc_ownership):
             return False, False, False
-        if self.device.type != "cuda" or not dsv4_kernel.dsv4_optimized_triton_enabled():
+        if self.device.type != "cuda" or not dsv4_kernel.dsv4_triton_available():
             return False, False, False
         groups = _direct_graph_metadata_groups()
         direct_swa = (

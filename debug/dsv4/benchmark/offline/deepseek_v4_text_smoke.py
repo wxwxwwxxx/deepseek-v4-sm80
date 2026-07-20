@@ -158,8 +158,8 @@ def _distributed_info(args: argparse.Namespace) -> tuple[int, int, str | None]:
     return rank, world_size, init_method
 
 
-def _jsonable_runtime(runtime) -> dict[str, Any]:
-    payload = asdict(runtime)
+def _jsonable_release(release) -> dict[str, Any]:
+    payload = asdict(release)
     payload["direct_graph_metadata_groups"] = sorted(payload["direct_graph_metadata_groups"])
     return payload
 
@@ -167,7 +167,7 @@ def _jsonable_runtime(runtime) -> dict[str, Any]:
 def run_text_smoke(args: argparse.Namespace) -> int:
     from minisgl.core import SamplingParams
     from minisgl.distributed import DistributedInfo
-    from minisgl.dsv4_runtime import resolve_dsv4_runtime_config
+    from minisgl.dsv4_release import DSV4_RELEASE
     from minisgl.llm import LLM
 
     rank, world_size, init_method = _distributed_info(args)
@@ -181,9 +181,8 @@ def run_text_smoke(args: argparse.Namespace) -> int:
         )
         for prompt in prompts
     ]
-    fallback = args.dsv4_runtime == "fallback"
-    use_pynccl = False if fallback else not args.disable_pynccl
-    allow_graph = False if fallback else not args.disable_cuda_graph
+    use_pynccl = not args.disable_pynccl
+    allow_graph = not args.disable_cuda_graph
     llm_kwargs: dict[str, Any] = {}
     if init_method is not None:
         llm_kwargs["distributed_init_method"] = init_method
@@ -196,7 +195,6 @@ def run_text_smoke(args: argparse.Namespace) -> int:
         llm = LLM(
             args.model_path,
             tp_info=DistributedInfo(rank, world_size),
-            dsv4_runtime_mode=args.dsv4_runtime,
             dsv4_sm80_recipe=args.dsv4_sm80_recipe,
             max_running_req=args.max_running_req or max(len(prompts), 1),
             context_length=args.max_seq_len,
@@ -260,11 +258,10 @@ def run_text_smoke(args: argparse.Namespace) -> int:
         status = "pass"
         if error or any(not output["sanity"]["looks_sane"] for output in outputs):
             status = "fail"
-        runtime = resolve_dsv4_runtime_config(args.dsv4_runtime)
         payload = {
             "status": status,
             "model_path": args.model_path,
-            "dsv4_runtime": _jsonable_runtime(runtime),
+            "dsv4_release": _jsonable_release(DSV4_RELEASE),
             "prompts": prompts,
             "outputs": outputs,
             "error": error,
@@ -308,10 +305,9 @@ def run_text_smoke(args: argparse.Namespace) -> int:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Canonical optimized/fallback DeepSeek V4 TP text correctness smoke."
+        description="Canonical optimized DeepSeek V4 TP text correctness smoke."
     )
     parser.add_argument("--model-path", default="/models/DeepSeek-V4-Flash")
-    parser.add_argument("--dsv4-runtime", choices=("optimized", "fallback"), default="optimized")
     parser.add_argument("--recipe", dest="dsv4_sm80_recipe", default=None)
     parser.add_argument("--prompt", action="append")
     parser.add_argument("--output", default="/tmp/dsv4_text_smoke.json")

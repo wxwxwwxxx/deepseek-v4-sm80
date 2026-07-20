@@ -17,15 +17,15 @@ SPEC.loader.exec_module(smoke)
 
 def test_defaults_are_canonical_optimized_tp8():
     args = smoke.parse_args([])
-    assert args.dsv4_runtime == "optimized"
+    assert not hasattr(args, "dsv4_runtime")
     assert args.tensor_parallel_size == 8
     assert args.page_size == 256
     assert args.max_tokens == 32
 
 
-def test_explicit_fallback_is_typed_and_preconstruction():
-    args = smoke.parse_args(["--dsv4-runtime", "fallback"])
-    assert args.dsv4_runtime == "fallback"
+def test_removed_runtime_selector_is_rejected():
+    with pytest.raises(SystemExit):
+        smoke.parse_args(["--dsv4-runtime", "fallback"])
 
 
 def test_semantic_sanity_requires_expected_substring():
@@ -66,8 +66,3 @@ def test_semantic_sanity_accepts_correct_nonloop_response():
     )
     assert report["looks_sane"] is True
     assert report["issues"] == []
-
-
-def test_invalid_runtime_is_rejected():
-    with pytest.raises(SystemExit):
-        smoke.parse_args(["--dsv4-runtime", "research"])

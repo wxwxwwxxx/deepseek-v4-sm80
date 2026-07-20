@@ -143,21 +143,19 @@ def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
                 f"must be <= page_size. Got window_size={window_size}, "
                 f"page_size={config.page_size}."
             )
-    if config.enable_dsv4_radix_prefix_cache:
-        if config.page_size % 128 != 0:
-            raise ValueError(
-                "DeepSeek V4 radix prefix cache requires a page size divisible "
-                f"by 128, got page_size={config.page_size}. Use --page-size 256 "
-                "for TARGET 08 runs."
-            )
-        if cache_type != "radix":
-            raise ValueError(
-                "DeepSeek V4 radix prefix cache opt-in requires "
-                f"cache_type='radix', got {cache_type!r}."
-            )
-        return cache_type
-
-    return "naive"
+    if not config.enable_dsv4_radix_prefix_cache:
+        raise ValueError("The DeepSeek V4 release requires radix prefix caching.")
+    if config.page_size % 128 != 0:
+        raise ValueError(
+            "DeepSeek V4 radix prefix cache requires a page size divisible "
+            f"by 128, got page_size={config.page_size}. Use --page-size 256."
+        )
+    if cache_type != "radix":
+        raise ValueError(
+            "The DeepSeek V4 release requires "
+            f"cache_type='radix', got {cache_type!r}."
+        )
+    return cache_type
 
 
 class Scheduler(SchedulerIOMixin):
@@ -165,9 +163,8 @@ class Scheduler(SchedulerIOMixin):
         from minisgl.engine import Engine
 
         self.engine = Engine(config)
-        # Engine resolves the immutable typed DSV4 mode into its cache/lifecycle
-        # ownership fields. Select the prefix-cache implementation afterwards so
-        # optimized cannot pair component ownership with NaivePrefixCache.
+        # Engine resolves the immutable DSV4 release cache/lifecycle ownership
+        # fields before the sole radix prefix-cache implementation is created.
         cache_type = resolve_dsv4_cache_type(config)
 
         # use another stream to overlap metadata processing with computation
