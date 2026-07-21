@@ -1,25 +1,26 @@
-# DeepSeek V4 Flash serving on NVIDIA A100/SM80, based on Mini-SGLang
+# DeepSeek V4 Flash serving on NVIDIA Ampere GPUs, based on Mini-SGLang
 
-High-performance **DeepSeek V4 Flash** serving for NVIDIA A100 and other sm80 GPUs,
-built as a specialized downstream release of
-[Mini-SGLang](https://github.com/sgl-project/mini-sglang).
+High-performance **DeepSeek V4 Flash** serving for NVIDIA Ampere GPUs,
+optimized and validated on A100/SM80 and built as a specialized downstream
+release of [Mini-SGLang](https://github.com/sgl-project/mini-sglang).
 
 Many optimized kernels used by modern DeepSeek serving stacks target newer GPU
-architectures and are unavailable on sm80. This project adapts Mini-SGLang for
-DeepSeek V4 Flash on A100, supplies sm80-compatible kernels and runtime paths,
-and applies practical performance tuning for tensor-parallel serving. It also
-supports chunked prefill and validated single-request contexts through 512K
-tokens on the DGX A100 platform.
+architectures and are unavailable on Ampere. This project adapts Mini-SGLang
+for DeepSeek V4 Flash on Ampere, supplies Ampere-compatible kernels and runtime
+paths, and applies practical performance tuning for tensor-parallel serving. It
+also supports chunked prefill and validated single-request contexts through
+512K tokens on the DGX A100 platform.
 
 See the [DGX A100 performance results](PERFORMANCE.md) for measured throughput,
 CUDA graph memory tradeoffs, and long-context capacity.
 
 ## Highlights
 
-- **DeepSeek V4 Flash on sm80:** a focused implementation for the model's sparse
-  attention, indexer, compression, hybrid-computation, and MoE architecture.
-- **A100-native MoE:** packed FP4 expert weights run through a ported Marlin
-  WNA16 backend with BF16 activations and BF16 tensor-parallel reduction.
+- **DeepSeek V4 Flash on Ampere:** a focused implementation for the model's
+  sparse attention, indexer, compression, hybrid-computation, and MoE
+  architecture.
+- **Ampere-native MoE:** packed FP4 expert weights run through a ported
+  Marlin WNA16 backend with BF16 activations and BF16 tensor-parallel reduction.
 - **Optimized projection and attention paths:** cached BF16 projection weights,
   fused Triton/CUDA kernels, and native C4/C128 sparse-attention metadata paths.
 - **Serving-oriented runtime:** CUDA graph decode replay, size-aware PyNCCL
@@ -32,7 +33,6 @@ CUDA graph memory tradeoffs, and long-context capacity.
 
 This release serves **DeepSeek V4 Flash only**. The validated platform is one
 DGX with **8x NVIDIA A100-SXM4-80GB**, TP8, CUDA 12.8.2, and NCCL 2.26.2-1.
-Other sm80 systems may require different memory and CUDA graph settings.
 
 ## Install
 
@@ -117,12 +117,8 @@ reasoning requests retain the model's raw sampling distribution.
 
 ## Runtime Settings
 
-Ordinary DGX A100 use requires no DeepSeek-specific tuning flags. The optimized
-runtime defaults to page size 256, chunked prefill, up to 128 running requests,
-and CUDA graph buckets through M=128.
-
-The default and optional recipes pair request capacity with CUDA Graph coverage;
-the long-context recipe also limits the requested sequence length:
+The release provides several serving recipes measured on a DGX A100 system
+with 8x A100-SXM4-80GB GPUs:
 
 | Configuration | Max running / graph M | KV capacity (tokens) | Intended use |
 | --- | ---: | ---: | --- |
@@ -131,20 +127,18 @@ the long-context recipe also limits the requested sequence length:
 | `high_m256` | 256 | 424,704 | Higher-throughput serving with graph replay through M=256. |
 | `long_context_m4` | 4 | 930,816 | Low-concurrency long-context serving, validated through 512K. |
 
-These configurations retain the optimized runtime's page size 256, prefill
-chunk size 8,192, and memory ratio 0.9 unless explicitly overridden. Select an
-optional recipe with `--recipe NAME`. The effective context limit is constrained
-by available KV-cache capacity even when the model configuration permits a
-larger value.
-These settings were measured on a DGX A100 8x80GB system and are templates
-rather than universal sm80 defaults. Explicit command-line settings take
-precedence over the corresponding recipe fields.
+These recipes use page size 256, prefill chunk size 8,192, and memory ratio 0.9
+unless explicitly overridden. Select one with `--recipe NAME`; explicit
+command-line settings take precedence over its fields. The listed KV capacities
+were measured on the DGX A100 platform and may differ on other Ampere systems.
+The effective context limit is constrained by the available KV-cache capacity
+even when the model configuration permits a larger value.
 
 ### Key arguments
 
 Most users should start with the defaults or a recipe. These options cover the
 main serving behavior and the useful controls for adapting the runtime to
-another workload or sm80 system:
+another workload or Ampere system:
 
 | Argument | What it controls | Notes |
 | --- | --- | --- |
