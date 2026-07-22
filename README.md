@@ -111,9 +111,13 @@ curl http://127.0.0.1:1919/v1/chat/completions \
   }'
 ```
 
-The optional `--enable-reasoning-sampler-contract` server flag enforces a
-three-state delimiter/EOS grammar. It is disabled by default so ordinary and
-reasoning requests retain the model's raw sampling distribution.
+For complex prompts that need long `max` reasoning, enabling the optional
+`--enable-reasoning-sampler-contract` server flag can improve answer quality
+and reduce malformed responses. The three-state sampler prevents EOS while
+reasoning, permits one transition through `</think>`, and then prevents
+additional reasoning delimiters after the answer begins. It is disabled by
+default and reduces, but does not guarantee the elimination of, malformed
+model output.
 
 ## Runtime Settings
 
@@ -144,7 +148,7 @@ another workload or Ampere system:
 | --- | --- | --- |
 | `--tp-size N` | Number of tensor-parallel GPU workers. | This release is validated with TP8; changing it alters per-GPU weights, cache capacity, and communication. |
 | `--served-model-name NAME` | Model ID exposed by the OpenAI-compatible API. | Clients must send this exact ID in the request's `model` field. By default, it is derived from the model path. |
-| `--enable-reasoning-sampler-contract` | Enables the optional three-state reasoning delimiter/EOS grammar. | Disabled by default; enabling it changes the model's raw sampling distribution. |
+| `--enable-reasoning-sampler-contract` | Enforces CHAT, THINKING, and ANSWER states during sampling. | Prevents premature EOS while reasoning and blocks repeated or misplaced reasoning delimiters after the answer begins; useful for long `max` reasoning and disabled by default. |
 | `--max-running-requests N` | Maximum number of simultaneously active request slots. | Higher values allow more concurrency but increase request metadata and independent SWA reservation. |
 | `--cuda-graph-max-bs N` | Largest decode batch captured by CUDA Graph. | Larger values cover higher active M but consume more graph memory, reduce KV capacity, and increase startup time. Batches above this value remain legal and run eagerly. |
 | `--context-length N` | Maximum prompt plus generated tokens for one sequence, overriding the model config. | Larger values widen request/page tables; actual admission is still limited by available KV capacity. |
