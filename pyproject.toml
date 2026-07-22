@@ -26,6 +26,7 @@ dependencies = [
     "msgpack",
     "safetensors",
     "torch<2.10.0",
+    "torch-c-dlpack-ext>=0.1.5",
     "tqdm",
     "transformers>=4.56.0,<=4.57.3",
     "flashinfer-python>=0.5.3",

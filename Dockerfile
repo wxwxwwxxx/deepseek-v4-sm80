@@ -28,8 +28,7 @@ COPY python/ ./python/
 # Create venv and install dependencies
 RUN uv venv --python=python${PYTHON_VERSION} /app/.venv \
     && . /app/.venv/bin/activate \
-    && uv pip install -e . \
-    && uv pip install torch-c-dlpack-ext
+    && uv pip install -e .
 
 # Runtime stage
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS runtime
