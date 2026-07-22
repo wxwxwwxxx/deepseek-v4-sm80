@@ -20,6 +20,7 @@ from .cache import CacheManager
 from .config import SchedulerConfig
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
+from .phase_policy import MixedPhaseFairPolicy
 from .prefill import ChunkedReq, PrefillManager
 from .stats import SchedulerStatsTracker
 from .table import TableManager
@@ -207,6 +208,9 @@ class Scheduler(SchedulerIOMixin):
             self.think_end_token_id = self.engine.reasoning_token_ids.think_end
         self.token_pool = self.table_manager.token_pool
         self.prefill_budget = config.max_extend_tokens
+        self.phase_policy = MixedPhaseFairPolicy(
+            isolated_prefill_budget=self.prefill_budget,
+        )
         self._stats_tracker = (
             None if config.disable_log_stats else SchedulerStatsTracker(config.stats_log_interval)
         )
@@ -507,10 +511,32 @@ class Scheduler(SchedulerIOMixin):
         return tuple(refs)
 
     def _schedule_next_batch(self) -> ForwardInput | None:
-        # TODO: support other policies: e.g. DECODE first
-        batch = (
-            self.prefill_manager.schedule_next_batch(self.prefill_budget)
-            or self.decode_manager.schedule_next_batch()
+        prefill_runnable = self.prefill_manager.runnable
+        decode_runnable = self.decode_manager.runnable
+        decision = self.phase_policy.choose(
+            prefill_runnable=prefill_runnable,
+            decode_runnable=decode_runnable,
+        )
+        batch = None
+        if decision.phase == "prefill":
+            batch = self.prefill_manager.schedule_next_batch(decision.prefill_budget)
+            # A pending request can be temporarily inadmissible.  Do not idle
+            # runnable decode or consume a prefill fairness opportunity.
+            if batch is None and decode_runnable:
+                batch = self.decode_manager.schedule_next_batch()
+        elif decision.phase == "decode":
+            batch = self.decode_manager.schedule_next_batch()
+            if batch is None and prefill_runnable:
+                budget = (
+                    self.phase_policy.mixed_prefill_budget
+                    if decode_runnable
+                    else self.prefill_budget
+                )
+                batch = self.prefill_manager.schedule_next_batch(budget)
+        self.phase_policy.record_scheduled(
+            batch.phase if batch is not None else None,
+            prefill_runnable=prefill_runnable,
+            decode_runnable=decode_runnable,
         )
         return self._prepare_batch(batch) if batch else None
 

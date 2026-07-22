@@ -53,3 +53,49 @@ def test_scenario_override_keeps_macro_shape_explicit():
     scenario = perf._select_scenarios(args)[0]
     assert scenario.repeats == 3
     assert (scenario.prompt_len, scenario.decode_len, scenario.batch_size) == (4096, 128, 4)
+
+
+def test_target15_delayed_arrival_workload_has_one_long_request():
+    scenario = perf._scenario_map()["target15_mixed_arrival_m4_64k"]
+    prompts, sampling_params = perf.build_workload(
+        scenario,
+        vocab_size=129280,
+        seed=0,
+        token_id_range=1024,
+    )
+    assert [len(prompt) for prompt in prompts] == [128, 128, 128, 128, 65536]
+    assert [params.max_tokens for params in sampling_params] == [160, 160, 160, 160, 8]
+    assert scenario.initial_requests == 4
+    assert scenario.arrival_after_decode_batches == 1
+
+
+def test_target15_candidate_selector_is_benchmark_only_and_explicit():
+    args = perf.parse_args(["--mixed-policy-candidate", "candidate-b"])
+    assert args.mixed_policy_candidate == "candidate-b"
+
+
+def test_target15_natural_text_workload_is_delayed_greedy_chat_plus_64k():
+    scenario = perf._scenario_map()["target15_mixed_natural_text_m1_64k"]
+    prompts, sampling_params = perf.build_workload(
+        scenario,
+        vocab_size=129280,
+        seed=0,
+        token_id_range=1024,
+    )
+    assert prompts[0] == perf.TARGET15_NATURAL_PROMPT
+    assert isinstance(prompts[1], list) and len(prompts[1]) == 65536
+    assert [params.temperature for params in sampling_params] == [0.0, 0.0]
+    assert [params.max_tokens for params in sampling_params] == [256, 8]
+    assert [params.ignore_eos for params in sampling_params] == [False, True]
+    assert scenario.initial_requests == 1
+    assert scenario.arrival_after_decode_batches == 1
+
+
+def test_target15_natural_text_chat_formatter_has_safe_fallback(tmp_path):
+    formatted = perf._format_target15_chat_prompt(
+        perf.TARGET15_NATURAL_PROMPT,
+        model_path=str(tmp_path),
+    )
+    assert formatted.startswith("System: ")
+    assert perf.TARGET15_NATURAL_SYSTEM_PROMPT in formatted
+    assert formatted.endswith("\nAssistant:")

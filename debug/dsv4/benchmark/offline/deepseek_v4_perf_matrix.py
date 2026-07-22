@@ -194,6 +194,15 @@ DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_ENV = {
     **DSV4_ROUTE_B_LIFETIME_ENV,
     **DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_ENV,
 }
+
+TARGET15_NATURAL_PROMPT = (
+    "Write a clear ten-point checklist for operating an inference server safely. "
+    "Each point should be one complete sentence."
+)
+TARGET15_NATURAL_SYSTEM_PROMPT = (
+    "Answer directly and concisely. Follow the requested format exactly, and keep "
+    "each checklist sentence short enough to complete all ten points."
+)
 DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_ENV = {
     **DSV4_ROUTE_B_LIFETIME_ENV,
     DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV: "1",
@@ -226,6 +235,8 @@ class Scenario:
     wave_size: int = 0
     prompt_len_cycle: tuple[int, ...] = ()
     decode_len_cycle: tuple[int, ...] = ()
+    initial_requests: int = 0
+    arrival_after_decode_batches: int = 0
 
     @property
     def max_input_len(self) -> int:
@@ -610,6 +621,76 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
         description=(
             "TARGET08.10 eviction-pressure workload: 96 distinct two-page prefixes "
             "under --num-pages 128, forcing safe radix eviction."
+        ),
+    ),
+    Scenario(
+        name="target15_mixed_arrival_m1_64k",
+        kind="target15_mixed_arrival",
+        batch_size=2,
+        prompt_len=65536,
+        decode_len=160,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=2,
+        prompt_len_cycle=(128, 65536),
+        decode_len_cycle=(160, 8),
+        initial_requests=1,
+        arrival_after_decode_batches=1,
+        description=(
+            "TARGET 15.1: admit one 128-token decoder, then inject one 64K "
+            "prefill after its first decode batch."
+        ),
+    ),
+    Scenario(
+        name="target15_mixed_arrival_m4_64k",
+        kind="target15_mixed_arrival",
+        batch_size=5,
+        prompt_len=65536,
+        decode_len=160,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=5,
+        prompt_len_cycle=(128, 128, 128, 128, 65536),
+        decode_len_cycle=(160, 160, 160, 160, 8),
+        initial_requests=4,
+        arrival_after_decode_batches=1,
+        description=(
+            "TARGET 15.1: admit four 128-token decoders, then inject one 64K "
+            "prefill after their first decode batch."
+        ),
+    ),
+    Scenario(
+        name="target15_mixed_arrival_m1_128k",
+        kind="target15_mixed_arrival",
+        batch_size=2,
+        prompt_len=131072,
+        decode_len=320,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=2,
+        prompt_len_cycle=(128, 131072),
+        decode_len_cycle=(320, 8),
+        initial_requests=1,
+        arrival_after_decode_batches=1,
+        description=(
+            "TARGET 15.1 selected-policy long smoke: active M=1 decode plus a "
+            "delayed 128K prefill."
+        ),
+    ),
+    Scenario(
+        name="target15_mixed_natural_text_m1_64k",
+        kind="target15_mixed_natural_text",
+        batch_size=2,
+        prompt_len=65536,
+        decode_len=256,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=2,
+        initial_requests=1,
+        arrival_after_decode_batches=1,
+        description=(
+            "TARGET 15.1 promotion amendment: start one greedy chat decoder, then "
+            "inject one synthetic 64K prefill after its first decode batch."
         ),
     ),
 )
@@ -2093,11 +2174,11 @@ def build_workload(
     vocab_size: int,
     seed: int,
     token_id_range: int = 1024,
-) -> tuple[list[list[int]], list[Any]]:
+) -> tuple[list[list[int] | str], list[Any]]:
     from minisgl.core import SamplingParams
 
     rng = random.Random(seed)
-    prompts: list[list[int]] = []
+    prompts: list[list[int] | str] = []
     output_lens: list[int] = []
 
     if scenario.kind in {"shared_prefix", "shared_prefix_reuse"}:
@@ -2310,7 +2391,21 @@ def build_workload(
                 )
             )
             output_lens.append(output_cycle[idx % 512])
-    elif scenario.kind in {"decode_ladder", "serving_mixed"}:
+    elif scenario.kind == "target15_mixed_natural_text":
+        if (scenario.total_requests or scenario.batch_size) != 2:
+            raise ValueError("target15_mixed_natural_text requires exactly two requests")
+        prompts.append(TARGET15_NATURAL_PROMPT)
+        output_lens.append(scenario.decode_len)
+        prompts.append(
+            _random_tokens(
+                rng,
+                scenario.prompt_len,
+                vocab_size,
+                token_id_range=token_id_range,
+            )
+        )
+        output_lens.append(8)
+    elif scenario.kind in {"decode_ladder", "serving_mixed", "target15_mixed_arrival"}:
         request_count = scenario.total_requests or scenario.batch_size
         prompt_cycle = scenario.prompt_len_cycle or (scenario.prompt_len,)
         decode_cycle = scenario.decode_len_cycle or (scenario.decode_len,)
@@ -2338,11 +2433,35 @@ def build_workload(
             )
             output_lens.append(scenario.decode_len)
 
-    sampling_params = [
-        SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=output_len)
-        for output_len in output_lens
-    ]
+    sampling_params = []
+    for idx, output_len in enumerate(output_lens):
+        natural_decode = scenario.kind == "target15_mixed_natural_text" and idx == 0
+        sampling_params.append(
+            SamplingParams(
+                temperature=0.0,
+                ignore_eos=not natural_decode,
+                max_tokens=output_len,
+            )
+        )
     return prompts, sampling_params
+
+
+def _format_target15_chat_prompt(prompt: str, *, model_path: str) -> str:
+    path = Path(model_path) / "encoding" / "encoding_dsv4.py"
+    if not path.is_file():
+        return f"System: {TARGET15_NATURAL_SYSTEM_PROMPT}\nUser: {prompt}\nAssistant:"
+    spec = importlib.util.spec_from_file_location("target15_encoding_dsv4", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load DeepSeek V4 encoding from {path}")
+    encoding = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(encoding)
+    return encoding.encode_messages(
+        [
+            {"role": "system", "content": TARGET15_NATURAL_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        thinking_mode="chat",
+    )
 
 
 @dataclass
@@ -2383,14 +2502,31 @@ def make_benchmark_llm_class():
             self._active_generation_started_at: float | None = None
             self._active_generation_finished_at: float | None = None
             self.bench_admit_all_at_once = False
+            self.bench_initial_requests = 0
+            self.bench_arrival_after_decode_batches = 0
             super().__init__(*args, **kwargs)
 
         def offline_receive_msg(self, blocking: bool = False) -> list[BaseBackendMsg]:
             if blocking and len(self.pending_requests) == 0:
                 raise RequestAllFinished()
+            decode_batches = sum(
+                row.get("phase") == "decode" for row in self.bench_batch_trace
+            )
+            if (
+                self.bench_initial_requests > 0
+                and self.counter >= self.bench_initial_requests
+                and decode_batches < self.bench_arrival_after_decode_batches
+            ):
+                return []
             results: list[BaseBackendMsg] = []
             added, sum_input_len = 0, 0
             for tokens_or_prompt, sampling_params in self.pending_requests:
+                if (
+                    self.bench_initial_requests > 0
+                    and self.counter + added >= self.bench_initial_requests
+                    and decode_batches < self.bench_arrival_after_decode_batches
+                ):
+                    break
                 if not self.bench_admit_all_at_once and sum_input_len >= self.prefill_budget:
                     break
                 input_ids = self._tokenize_one(tokens_or_prompt)
@@ -2408,7 +2544,11 @@ def make_benchmark_llm_class():
                     ),
                     output_ids=[],
                     requested_output_len=sampling_params.max_tokens,
-                    started_at=self._active_generation_started_at,
+                    started_at=(
+                        time.perf_counter()
+                        if self.bench_initial_requests > 0
+                        else self._active_generation_started_at
+                    ),
                 )
             self.counter += added
             self.pending_requests = self.pending_requests[added:]
@@ -2597,6 +2737,12 @@ def make_benchmark_llm_class():
                         "input_tokens": len(status.input_ids),
                         "output_tokens": len(status.output_ids),
                         "output_token_ids": list(status.output_ids),
+                        "output_text": self.tokenizer.decode(
+                            status.output_ids, skip_special_tokens=True
+                        ),
+                        "raw_output_text": self.tokenizer.decode(
+                            status.output_ids, skip_special_tokens=False
+                        ),
                         "requested_output_len": status.requested_output_len,
                         "admitted_output_len": status.admitted_output_len,
                         "finish_reason": status.finish_reason,
@@ -3657,9 +3803,9 @@ def _estimate_kv_cache_bytes_from_config(llm, *, page_size: int, tp_size: int) -
 
 def _generation_parts(
     scenario: Scenario,
-    prompts: list[list[int]],
+    prompts: list[list[int] | str],
     sampling_params: list[Any],
-) -> tuple[tuple[list[list[int]], list[Any]], ...]:
+) -> tuple[tuple[list[list[int] | str], list[Any]], ...]:
     if (
         scenario.kind
         in {
@@ -3711,8 +3857,17 @@ def _run_one_repeat(
         seed=seed,
         token_id_range=token_id_range,
     )
+    if scenario.kind == "target15_mixed_natural_text":
+        prompts[0] = _format_target15_chat_prompt(
+            str(prompts[0]), model_path=llm.bench_model_path
+        )
     target_output_tokens = int(sum(param.max_tokens for param in sampling_params))
-    prompt_tokens = int(sum(len(prompt) for prompt in prompts))
+    prompt_tokens = int(
+        sum(
+            len(llm._tokenize_one(prompt)) if isinstance(prompt, str) else len(prompt)
+            for prompt in prompts
+        )
+    )
     torch.cuda.synchronize(llm.device)
     torch.cuda.reset_peak_memory_stats(llm.device)
     _case_boundary_debug_snapshot(llm, f"{nvtx_name or scenario.name}:before_prefix_metrics_before")
@@ -3722,6 +3877,8 @@ def _run_one_repeat(
     outputs = []
     trace: list[dict[str, Any]] = []
     request_metrics: list[dict[str, Any]] = []
+    llm.bench_initial_requests = scenario.initial_requests
+    llm.bench_arrival_after_decode_batches = scenario.arrival_after_decode_batches
     with nvtx_context:
         tic = time.perf_counter()
         generation_parts = _generation_parts(scenario, prompts, sampling_params)
@@ -3738,6 +3895,8 @@ def _run_one_repeat(
             request_metrics.extend(llm.request_metrics())
         torch.cuda.synchronize(llm.device)
         elapsed_s = time.perf_counter() - tic
+    llm.bench_initial_requests = 0
+    llm.bench_arrival_after_decode_batches = 0
     _case_boundary_debug_snapshot(llm, f"{nvtx_name or scenario.name}:before_prefix_metrics_after")
     prefix_metrics_after = llm.cache_manager.prefix_metrics_snapshot()
     _case_boundary_debug_snapshot(llm, f"{nvtx_name or scenario.name}:after_prefix_metrics_after")
@@ -3752,7 +3911,21 @@ def _run_one_repeat(
         sum(int(request.get("admitted_output_len") or 0) for request in request_metrics)
     )
     actual_output_tokens = int(sum(output_lens))
-    if actual_output_tokens != admitted_output_tokens:
+    request_output_tokens = int(
+        sum(int(request.get("output_tokens") or 0) for request in request_metrics)
+    )
+    if actual_output_tokens != request_output_tokens:
+        raise RuntimeError(
+            "offline benchmark request/output mismatch: "
+            f"request_output_tokens={request_output_tokens}, "
+            f"actual_output_tokens={actual_output_tokens}"
+        )
+    natural_eos_completion = scenario.kind == "target15_mixed_natural_text"
+    if (
+        actual_output_tokens > admitted_output_tokens
+        if natural_eos_completion
+        else actual_output_tokens != admitted_output_tokens
+    ):
         raise RuntimeError(
             "offline benchmark completion mismatch: "
             f"admitted_output_tokens={admitted_output_tokens}, "
@@ -4598,6 +4771,10 @@ def run_case(
             ),
             "requested_max_extend_tokens": args.max_extend_tokens,
             "use_serving_max_extend_tokens": args.use_serving_max_extend_tokens,
+            "mixed_policy_candidate": args.mixed_policy_candidate,
+            "mixed_policy_state": llm.phase_policy.snapshot()
+            if hasattr(llm.phase_policy, "snapshot")
+            else {"kind": type(llm.phase_policy).__name__},
             "max_running_req": load_init.get("max_running_req_rank0", {}),
             "token_id_range": args.token_id_range,
             "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
@@ -4681,6 +4858,40 @@ def _init_llm(
         **kwargs,
     )
     llm.bench_admit_all_at_once = bool(args.admit_all_at_once)
+    llm.bench_model_path = args.model_path
+    if args.mixed_policy_candidate != "release":
+        from minisgl.scheduler.phase_policy import MixedPhaseFairPolicy, PhaseDecision
+
+        if args.mixed_policy_candidate == "legacy-prefill-first":
+
+            class _LegacyPrefillFirst:
+                mixed_prefill_budget = int(llm.prefill_budget)
+
+                def choose(self, *, prefill_runnable, decode_runnable):
+                    if prefill_runnable:
+                        return PhaseDecision(
+                            "prefill", int(llm.prefill_budget), decode_runnable
+                        )
+                    if decode_runnable:
+                        return PhaseDecision("decode")
+                    return PhaseDecision(None)
+
+                def record_scheduled(self, *args, **kwargs):
+                    return None
+
+            llm.phase_policy = _LegacyPrefillFirst()
+        elif args.mixed_policy_candidate == "candidate-a":
+            llm.phase_policy = MixedPhaseFairPolicy(
+                isolated_prefill_budget=int(llm.prefill_budget),
+                mixed_prefill_budget=2048,
+                max_consecutive_decode=4,
+            )
+        elif args.mixed_policy_candidate == "candidate-b":
+            llm.phase_policy = MixedPhaseFairPolicy(
+                isolated_prefill_budget=int(llm.prefill_budget),
+                mixed_prefill_budget=4096,
+                max_consecutive_decode=8,
+            )
     torch.cuda.synchronize(llm.device)
     load_init_s = time.perf_counter() - tic
     max_sequence = _max_sequence_runtime_report(llm, args=args, scenarios=scenarios)
@@ -5059,6 +5270,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Benchmark contract: submit every selected request to the scheduler in "
             "one receive cycle while retaining the configured 8192-token chunk budget."
         ),
+    )
+    parser.add_argument(
+        "--mixed-policy-candidate",
+        choices=("release", "legacy-prefill-first", "candidate-a", "candidate-b"),
+        default="release",
+        help="TARGET 15.1 benchmark-only phase-policy selector.",
     )
     parser.add_argument("--list-scenarios", action="store_true")
     parser.add_argument("--list-variants", action="store_true")
