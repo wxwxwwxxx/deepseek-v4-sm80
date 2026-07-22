@@ -111,6 +111,7 @@ class Req:
     swa_evicted_seqlen: int = 0
     lifecycle: RequestLifecycle = field(default_factory=RequestLifecycle)
     reasoning_state: ReasoningState = field(init=False)
+    _host_token_buffer: torch.Tensor | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         assert self.input_ids.is_cpu
@@ -140,7 +141,26 @@ class Req:
         self.device_len += 1
 
     def append_host(self, next_token: torch.Tensor) -> None:
-        self.input_ids = torch.cat([self.input_ids, next_token])
+        if next_token.device.type != "cpu" or next_token.dtype != self.input_ids.dtype:
+            raise ValueError("next_token must match the request's CPU token dtype")
+        if next_token.numel() != 1:
+            raise ValueError("append_host expects exactly one token")
+
+        current_len = len(self.input_ids)
+        if current_len >= self.max_device_len:
+            raise RuntimeError("request has no remaining host token capacity")
+        if self._host_token_buffer is None:
+            # Allocate on first decode; chunked-prefill requests must not copy growing prompts.
+            self._host_token_buffer = torch.empty(
+                self.max_device_len,
+                dtype=self.input_ids.dtype,
+                device=self.input_ids.device,
+                pin_memory=self.input_ids.is_pinned(),
+            )
+            self._host_token_buffer[:current_len].copy_(self.input_ids)
+
+        self._host_token_buffer[current_len].copy_(next_token.reshape(()))
+        self.input_ids = self._host_token_buffer[: current_len + 1]
 
     @property
     def can_decode(self) -> bool:
