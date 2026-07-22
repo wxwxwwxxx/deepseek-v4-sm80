@@ -11,9 +11,14 @@ from minisgl.utils import init_logger
 
 if TYPE_CHECKING:
     from .args import ServerArgs
+    from .supervisor import ReadyAck
 
 
-def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
+def _run_scheduler(
+    args: ServerArgs,
+    ack_queue: mp.Queue[ReadyAck],
+    ready_role: str,
+) -> None:
     import torch
     from minisgl.scheduler import Scheduler
 
@@ -26,7 +31,7 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
     scheduler.sync_all_ranks()
 
     if args.tp_info.is_primary():
-        ack_queue.put("Scheduler is ready")
+        ack_queue.put((ready_role, "Scheduler is ready"))
 
     if args.silent_output:
         logging.disable(logging.INFO)
@@ -41,40 +46,70 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
         scheduler.shutdown()
 
 
-def launch_server(run_shell: bool = False) -> None:
-    from .api_server import run_api_server
-    from .args import parse_args
+def _request_scheduler_shutdown(args: ServerArgs) -> None:
+    import zmq
+    from minisgl.message import BaseBackendMsg, ExitMsg
+    from minisgl.utils import ZmqPushQueue
 
-    server_args, run_shell = parse_args(sys.argv[1:], run_shell)
-    logger = init_logger(__name__, "initializer")
+    send_backend = ZmqPushQueue(
+        args.zmq_backend_addr,
+        create=False,
+        encoder=BaseBackendMsg.encoder,
+    )
+    # A fresh local PUSH connection needs a brief bounded flush window for the
+    # shutdown message; never let a broken backend make parent cleanup unbounded.
+    send_backend.socket.setsockopt(zmq.SNDTIMEO, 1000)
+    send_backend.socket.setsockopt(zmq.LINGER, 1000)
+    try:
+        send_backend.put(ExitMsg())
+    finally:
+        send_backend.stop()
 
-    def start_subprocess() -> None:
-        import multiprocessing as mp
 
-        from minisgl.tokenizer import tokenize_worker
+def start_server_processes(
+    server_args: ServerArgs,
+    *,
+    startup_timeout: float = 15 * 60,
+    ack_poll_interval: float = 0.1,
+    shutdown_grace: float = 10.0,
+    termination_grace: float = 5.0,
+):
+    from minisgl.tokenizer import tokenize_worker
 
-        mp.set_start_method("spawn", force=True)
+    from .supervisor import ProcessSpec, ServerProcessSupervisor
 
-        world_size = server_args.tp_info.size
-        # a multiprocessing queue to receive ack from subprocesses
-        # so that we can guarantee all subprocesses are ready
-        ack_queue: mp.Queue[str] = mp.Queue()
+    context = mp.get_context("spawn")
+    supervisor = ServerProcessSupervisor(
+        context=context,
+        startup_timeout=startup_timeout,
+        ack_poll_interval=ack_poll_interval,
+        shutdown_grace=shutdown_grace,
+        termination_grace=termination_grace,
+    )
+    ack_queue = supervisor.ack_queue
+    world_size = server_args.tp_info.size
+    specs: list[ProcessSpec] = []
 
-        for i in range(world_size):
-            new_args = replace(
-                server_args,
-                tp_info=DistributedInfo(i, world_size),
-            )
-            mp.Process(
+    for rank in range(world_size):
+        role = f"minisgl-TP{rank}-scheduler"
+        new_args = replace(
+            server_args,
+            tp_info=DistributedInfo(rank, world_size),
+        )
+        specs.append(
+            ProcessSpec(
+                role=role,
                 target=_run_scheduler,
-                args=(new_args, ack_queue),
-                daemon=False,
-                name=f"minisgl-TP{i}-scheduler",
-            ).start()
+                args=(new_args, ack_queue, role),
+                expects_ready=rank == 0,
+            )
+        )
 
-        num_tokenizers = server_args.num_tokenizer
-        # DeTokenizer, only 1
-        mp.Process(
+    num_tokenizers = server_args.num_tokenizer
+    detokenizer_role = "minisgl-detokenizer-0"
+    specs.append(
+        ProcessSpec(
+            role=detokenizer_role,
             target=tokenize_worker,
             kwargs={
                 "tokenizer_path": server_args.model_path,
@@ -85,12 +120,15 @@ def launch_server(run_shell: bool = False) -> None:
                 "create": server_args.tokenizer_create_addr,
                 "tokenizer_id": num_tokenizers,
                 "ack_queue": ack_queue,
+                "ready_role": detokenizer_role,
             },
-            daemon=False,
-            name="minisgl-detokenizer-0",
-        ).start()
-        for i in range(num_tokenizers):
-            mp.Process(
+        )
+    )
+    for tokenizer_id in range(num_tokenizers):
+        role = f"minisgl-tokenizer-{tokenizer_id}"
+        specs.append(
+            ProcessSpec(
+                role=role,
                 target=tokenize_worker,
                 kwargs={
                     "tokenizer_path": server_args.model_path,
@@ -99,20 +137,29 @@ def launch_server(run_shell: bool = False) -> None:
                     "frontend_addr": server_args.zmq_frontend_addr,
                     "local_bs": 1,
                     "create": server_args.tokenizer_create_addr,
-                    "tokenizer_id": i,
+                    "tokenizer_id": tokenizer_id,
                     "ack_queue": ack_queue,
+                    "ready_role": role,
                 },
-                daemon=False,
-                name=f"minisgl-tokenizer-{i}",
-            ).start()
+            )
+        )
 
-        # Wait for acknowledgments from all worker processes:
-        # - world_size schedulers (but only primary rank sends ack)
-        # - num_tokenizers tokenizers
-        # - 1 detokenizer
-        # Total acks expected: 1 + num_tokenizers + 1 = num_tokenizers + 2
-        for _ in range(num_tokenizers + 2):
-            logger.info(ack_queue.get())
+    supervisor.start(specs)
+    supervisor.set_graceful_shutdown(lambda: _request_scheduler_shutdown(server_args))
+    return supervisor
+
+
+def launch_server(run_shell: bool = False) -> None:
+    from .api_server import run_api_server
+    from .args import parse_args
+
+    server_args, run_shell = parse_args(sys.argv[1:], run_shell)
+    logger = init_logger(__name__, "initializer")
+
+    def start_subprocess():
+        supervisor = start_server_processes(server_args)
+        logger.info("Server-owned child PIDs: %s", supervisor.owned_pids())
+        return supervisor
 
     run_api_server(server_args, start_subprocess, run_shell=run_shell)
 

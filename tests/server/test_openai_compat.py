@@ -9,7 +9,11 @@ import httpx
 from fastapi.testclient import TestClient
 from minisgl.message import AbortMsg, TokenizeMsg, UserReply
 from minisgl.server import api_server
-from minisgl.server.api_server import FrontendManager, OpenAICompletionRequest
+from minisgl.server.api_server import (
+    BackendUnavailableError,
+    FrontendManager,
+    OpenAICompletionRequest,
+)
 from openai import AsyncOpenAI, OpenAI
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openai"
@@ -59,6 +63,9 @@ class FakeFrontend:
 
     async def abort_user(self, uid: int) -> None:
         self.aborted.append(uid)
+
+    def _schedule_abort(self, uid: int) -> None:
+        asyncio.create_task(self.abort_user(uid))
 
     def shutdown(self) -> None:
         pass
@@ -756,3 +763,30 @@ def test_backend_errors_are_not_assistant_content() -> None:
     assert stream_events[0]["error"]["type"] == "invalid_request_error"
     assert "choices" not in stream_events[0]
     assert stream_events[-1] == "[DONE]"
+
+
+def test_new_request_receives_explicit_backend_unavailable_response() -> None:
+    class UnavailableFrontend(FakeFrontend):
+        def new_user(self) -> int:
+            raise BackendUnavailableError("runtime-worker exited with code 9")
+
+    client, frontend = make_client(UnavailableFrontend())
+    with client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "message": "runtime-worker exited with code 9",
+            "type": "server_error",
+            "param": None,
+            "code": "backend_unavailable",
+        }
+    }
+    assert frontend.sent == []

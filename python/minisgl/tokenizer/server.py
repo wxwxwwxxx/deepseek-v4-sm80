@@ -38,7 +38,8 @@ def tokenize_worker(
     local_bs: int,
     tokenizer_id: int = -1,
     model_source: str = "huggingface",
-    ack_queue: mp.Queue[str] | None = None,
+    ack_queue: mp.Queue[tuple[str, str]] | None = None,
+    ready_role: str | None = None,
 ) -> None:
     send_backend = ZmqPushQueue(backend_addr, create=False, encoder=BaseBackendMsg.encoder)
     send_frontend = ZmqPushQueue(frontend_addr, create=False, encoder=BaseFrontendMsg.encoder)
@@ -54,7 +55,9 @@ def tokenize_worker(
     detokenize_manager = DetokenizeManager(tokenizer)
 
     if ack_queue is not None:
-        ack_queue.put(f"Tokenize server {tokenizer_id} is ready")
+        if ready_role is None:
+            ready_role = f"tokenizer-{tokenizer_id}"
+        ack_queue.put((ready_role, f"Tokenize server {tokenizer_id} is ready"))
 
     try:
         while True:

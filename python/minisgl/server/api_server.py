@@ -8,7 +8,7 @@ import time
 import uuid
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Tuple
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -34,9 +34,16 @@ from starlette.background import BackgroundTask
 
 from .args import ServerArgs
 
+if TYPE_CHECKING:
+    from .supervisor import ServerProcessSupervisor
+
 logger = init_logger(__name__, "FrontendAPI")
 
 _GLOBAL_STATE = None
+
+
+class BackendUnavailableError(RuntimeError):
+    pass
 
 
 def get_global_state() -> FrontendManager:
@@ -244,6 +251,14 @@ def _error_body(
     }
 
 
+def _backend_unavailable_body(message: str) -> Dict[str, Any]:
+    return _error_body(
+        message,
+        code="backend_unavailable",
+        error_type="server_error",
+    )
+
+
 def _usage_from_reply(reply: UserReply | None) -> Dict[str, int] | None:
     if reply is None or reply.prompt_tokens is None or reply.completion_tokens is None:
         return None
@@ -373,12 +388,25 @@ class FrontendManager:
     initialized: bool = False
     ack_map: Dict[int, List[UserReply]] = field(default_factory=dict)
     event_map: Dict[int, asyncio.Event] = field(default_factory=dict)
+    supervisor: ServerProcessSupervisor | None = None
+    health_poll_interval: float = 1.0
+    listener_task: asyncio.Task[None] | None = None
+    health_task: asyncio.Task[None] | None = None
+    failure_cleanup_task: asyncio.Task[None] | None = None
+    terminal_error: BackendUnavailableError | None = None
+    request_uids: set[int] = field(default_factory=set)
+    abort_tasks: Dict[int, asyncio.Task[None]] = field(default_factory=dict)
+    _shutdown_started: bool = False
+    _shutdown_complete: bool = False
+    _queues_stopped: bool = False
 
     def new_user(self) -> int:
+        self._raise_if_unavailable()
         uid = self.uid_counter
         self.uid_counter += 1
         self.ack_map[uid] = []
         self.event_map[uid] = asyncio.Event()
+        self.request_uids.add(uid)
         return uid
 
     async def listen(self):
@@ -390,16 +418,94 @@ class FrontendManager:
                 self.ack_map[msg.uid].append(msg)
                 self.event_map[msg.uid].set()
 
-    def _create_listener_once(self):
+    def _create_listener_once(self) -> None:
         if not self.initialized:
-            asyncio.create_task(self.listen())
+            self.listener_task = asyncio.create_task(
+                self.listen(), name="minisgl-frontend-listener"
+            )
+            self.listener_task.add_done_callback(self._listener_done)
             self.initialized = True
 
-    async def send_one(self, msg: BaseTokenizerMsg):
+    async def start_runtime_tasks(self) -> None:
+        self._raise_if_unavailable()
         self._create_listener_once()
-        await self.send_tokenizer.put(msg)
+        if self.supervisor is not None and self.health_task is None:
+            self.health_task = asyncio.create_task(
+                self._watch_child_health(), name="minisgl-child-health-watcher"
+            )
+
+    def _listener_done(self, task: asyncio.Task[None]) -> None:
+        if self._shutdown_started or self.terminal_error is not None or task.cancelled():
+            return
+        exception = task.exception()
+        if exception is None:
+            detail = "frontend listener exited unexpectedly"
+        else:
+            detail = f"frontend listener failed: {type(exception).__name__}: {exception}"
+        self._mark_backend_unavailable(detail)
+
+    async def _watch_child_health(self) -> None:
+        assert self.supervisor is not None
+        while True:
+            await asyncio.sleep(self.health_poll_interval)
+            failure = self.supervisor.unexpected_exit(phase="runtime")
+            if failure is not None:
+                self._mark_backend_unavailable(failure.describe())
+                return
+
+    def _raise_if_unavailable(self) -> None:
+        if self.terminal_error is not None:
+            raise self.terminal_error
+        if self._shutdown_started:
+            raise BackendUnavailableError("server is shutting down")
+
+    def _mark_backend_unavailable(self, detail: str) -> None:
+        if self.terminal_error is not None or self._shutdown_started:
+            return
+        self.terminal_error = BackendUnavailableError(detail)
+        logger.error("Backend unavailable: %s", detail)
+        for event in self.event_map.values():
+            event.set()
+        loop = asyncio.get_running_loop()
+        self.failure_cleanup_task = loop.create_task(
+            self._cleanup_after_failure(), name="minisgl-backend-failure-cleanup"
+        )
+
+    async def _cleanup_after_failure(self) -> None:
+        current = asyncio.current_task()
+        tasks = [
+            task
+            for task in (self.listener_task, self.health_task)
+            if task is not None and task is not current and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self.supervisor is not None:
+            await asyncio.to_thread(self.supervisor.shutdown, request_graceful=False)
+        self._stop_queues()
+
+    async def send_one(self, msg: BaseTokenizerMsg):
+        self._raise_if_unavailable()
+        self._create_listener_once()
+        try:
+            await self.send_tokenizer.put(msg)
+        except asyncio.CancelledError:
+            uid = getattr(msg, "uid", None)
+            if isinstance(uid, int):
+                self._schedule_abort(uid)
+            raise
+        except Exception as exc:
+            detail = f"frontend send failed: {type(exc).__name__}: {exc}"
+            self._mark_backend_unavailable(detail)
+            uid = getattr(msg, "uid", None)
+            if isinstance(uid, int):
+                self._discard_request(uid)
+            raise self.terminal_error from exc
 
     async def wait_for_ack(self, uid: int):
+        completed = False
         try:
             event = self.event_map[uid]
 
@@ -411,19 +517,32 @@ class FrontendManager:
                 self.ack_map[uid] = []
                 ack = None
                 for ack in pending:
+                    if ack.finished:
+                        completed = True
                     yield ack
                 if ack and ack.finished:
                     break
+                if self.terminal_error is not None:
+                    raise self.terminal_error
+                if self._shutdown_started:
+                    raise BackendUnavailableError("server is shutting down")
         finally:
             self.ack_map.pop(uid, None)
             self.event_map.pop(uid, None)
+            if completed or self.terminal_error is not None or self._shutdown_started:
+                self.request_uids.discard(uid)
+            else:
+                self._schedule_abort(uid)
 
     async def stream_generate(self, uid: int):
-        async with aclosing(self.wait_for_ack(uid)) as replies:
-            async for ack in replies:
-                yield f"data: {ack.incremental_output}\n".encode()
-                if ack.finished:
-                    break
+        try:
+            async with aclosing(self.wait_for_ack(uid)) as replies:
+                async for ack in replies:
+                    yield f"data: {ack.incremental_output}\n".encode()
+                    if ack.finished:
+                        break
+        except BackendUnavailableError as exc:
+            yield f"data: {json.dumps(_backend_unavailable_body(str(exc)))}\n".encode()
         yield "data: [DONE]\n".encode()
         logger.debug("Finished streaming response for user %s", uid)
 
@@ -440,50 +559,53 @@ class FrontendManager:
         first_chunk = True
         final_reply = None
         reasoning_parser = _ReasoningStreamParser(enabled=reasoning)
-        async with aclosing(self.wait_for_ack(uid)) as replies:
-            async for ack in replies:
-                if ack.error:
-                    error = _error_body(
-                        ack.error,
-                        code="backend_error",
-                        error_type=(
-                            "invalid_request_error"
-                            if ack.finish_reason == "length_rejected"
-                            else "server_error"
-                        ),
+        try:
+            async with aclosing(self.wait_for_ack(uid)) as replies:
+                async for ack in replies:
+                    if ack.error:
+                        error = _error_body(
+                            ack.error,
+                            code="backend_error",
+                            error_type=(
+                                "invalid_request_error"
+                                if ack.finish_reason == "length_rejected"
+                                else "server_error"
+                            ),
+                        )
+                        yield f"data: {json.dumps(error)}\n\n".encode()
+                        final_reply = ack
+                        break
+
+                    reasoning_delta, content_delta = reasoning_parser.feed(
+                        ack.incremental_output,
+                        finished=ack.finished,
                     )
-                    yield f"data: {json.dumps(error)}\n\n".encode()
-                    final_reply = ack
-                    break
+                    deltas = []
+                    if reasoning_delta:
+                        deltas.append({"reasoning_content": reasoning_delta})
+                    if content_delta:
+                        deltas.append({"content": content_delta})
+                    if not deltas and first_chunk:
+                        deltas.append({})
 
-                reasoning_delta, content_delta = reasoning_parser.feed(
-                    ack.incremental_output,
-                    finished=ack.finished,
-                )
-                deltas = []
-                if reasoning_delta:
-                    deltas.append({"reasoning_content": reasoning_delta})
-                if content_delta:
-                    deltas.append({"content": content_delta})
-                if not deltas and first_chunk:
-                    deltas.append({})
+                    for delta in deltas:
+                        if first_chunk:
+                            delta = {"role": "assistant", **delta}
+                            first_chunk = False
+                        chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"delta": delta, "index": 0, "finish_reason": None}],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n".encode()
 
-                for delta in deltas:
-                    if first_chunk:
-                        delta = {"role": "assistant", **delta}
-                        first_chunk = False
-                    chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{"delta": delta, "index": 0, "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n".encode()
-
-                if ack.finished:
-                    final_reply = ack
-                    break
+                    if ack.finished:
+                        final_reply = ack
+                        break
+        except BackendUnavailableError as exc:
+            yield f"data: {json.dumps(_backend_unavailable_body(str(exc)))}\n\n".encode()
 
         if final_reply is not None and not final_reply.error:
             end_chunk = {
@@ -523,28 +645,92 @@ class FrontendManager:
                     raise asyncio.CancelledError
                 yield chunk
         except asyncio.CancelledError:
-            asyncio.create_task(self.abort_user(uid))
+            self._schedule_abort(uid)
             raise
 
+    def _schedule_abort(self, uid: int) -> None:
+        if uid not in self.request_uids or uid in self.abort_tasks:
+            return
+        task = asyncio.create_task(self.abort_user(uid), name=f"minisgl-abort-{uid}")
+        self.abort_tasks[uid] = task
+
+        def discard(done: asyncio.Task[None]) -> None:
+            self.abort_tasks.pop(uid, None)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(discard)
+
+    def _discard_request(self, uid: int) -> None:
+        self.request_uids.discard(uid)
+        self.ack_map.pop(uid, None)
+        self.event_map.pop(uid, None)
+
     async def abort_user(self, uid: int):
+        if uid not in self.request_uids:
+            return
+        self.request_uids.discard(uid)
         await asyncio.sleep(0.1)
         self.ack_map.pop(uid, None)
         self.event_map.pop(uid, None)
         logger.warning("Aborting request for user %s", uid)
-        await self.send_one(AbortMsg(uid=uid))
+        if self.terminal_error is None and not self._shutdown_started:
+            await self.send_one(AbortMsg(uid=uid))
 
-    def shutdown(self):
+    def _stop_queues(self) -> None:
+        if self._queues_stopped:
+            return
         self.send_tokenizer.stop()
         self.recv_tokenizer.stop()
+        self._queues_stopped = True
+
+    async def shutdown_async(self) -> None:
+        if self._shutdown_complete:
+            return
+        self._shutdown_started = True
+        for event in self.event_map.values():
+            event.set()
+        tasks = [
+            task
+            for task in (self.listener_task, self.health_task, *self.abort_tasks.values())
+            if task is not None and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self.failure_cleanup_task is not None:
+            await asyncio.gather(self.failure_cleanup_task, return_exceptions=True)
+        elif self.supervisor is not None:
+            await asyncio.to_thread(self.supervisor.shutdown)
+        self._stop_queues()
+        self._shutdown_complete = True
+
+    def shutdown(self) -> None:
+        if self._shutdown_complete:
+            return
+        self._shutdown_started = True
+        if self.supervisor is not None:
+            self.supervisor.shutdown()
+        self._stop_queues()
+        self._shutdown_complete = True
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    yield
-    # shutdown code here
     global _GLOBAL_STATE
-    if _GLOBAL_STATE is not None:
-        _GLOBAL_STATE.shutdown()
+    manager = _GLOBAL_STATE
+    if isinstance(manager, FrontendManager):
+        await manager.start_runtime_tasks()
+    try:
+        yield
+    finally:
+        if isinstance(manager, FrontendManager):
+            await manager.shutdown_async()
+        elif manager is not None:
+            manager.shutdown()
+        if _GLOBAL_STATE is manager:
+            _GLOBAL_STATE = None
 
 
 app = FastAPI(title="MiniSGL API Server", version="0.0.1", lifespan=lifespan)
@@ -554,6 +740,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(BackendUnavailableError)
+async def backend_unavailable_error(_: Request, exc: BackendUnavailableError):
+    return JSONResponse(status_code=503, content=_backend_unavailable_body(str(exc)))
 
 
 @app.exception_handler(RequestValidationError)
@@ -748,11 +939,13 @@ async def shell_completion(req: OpenAICompletionRequest):
     return StreamingResponse(
         state.stream_generate(uid),
         media_type="text/event-stream",
-        background=BackgroundTask(lambda: _abort),
+        background=BackgroundTask(_abort),
     )
 
 
 async def shell():
+    state = get_global_state()
+    await state.start_runtime_tasks()
     commands = ["/exit", "/reset"]
     completer = WordCompleter(commands)
     session = PromptSession("$ ", completer=completer)
@@ -803,16 +996,14 @@ async def shell():
     finally:
         print("Exiting shell...")
         await asyncio.sleep(0.1)
-        get_global_state().shutdown()
-        # then kill all the subprocesses
-        import psutil
-
-        parent = psutil.Process()
-        for child in parent.children(recursive=True):
-            child.kill()
+        await state.shutdown_async()
 
 
-def run_api_server(config: ServerArgs, start_backend: Callable[[], None], run_shell: bool) -> None:
+def run_api_server(
+    config: ServerArgs,
+    start_backend: Callable[[], ServerProcessSupervisor],
+    run_shell: bool,
+) -> None:
     """
     Run the frontend API server (FastAPI + uvicorn) and wire it to the tokenizer process via ZMQ.
 
@@ -846,17 +1037,21 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], None], run_sh
         ),
     )
 
-    # start the backend here
-    start_backend()
+    manager = _GLOBAL_STATE
+    try:
+        manager.supervisor = start_backend()
 
-    logger.info(
-        "Served model name: %s; configured model path: %s; model-path compatibility "
-        "alias accepted: yes",
-        config.resolved_served_model_name,
-        config.model_path,
-    )
-    logger.info(f"API server is ready to serve on {host}:{port}")
-    if not run_shell:
-        uvicorn.run(app, host=host, port=port)
-    else:
-        asyncio.run(shell())
+        logger.info(
+            "Served model name: %s; configured model path: %s; model-path compatibility "
+            "alias accepted: yes",
+            config.resolved_served_model_name,
+            config.model_path,
+        )
+        logger.info(f"API server is ready to serve on {host}:{port}")
+        if not run_shell:
+            uvicorn.run(app, host=host, port=port)
+        else:
+            asyncio.run(shell())
+    finally:
+        manager.shutdown()
+        _GLOBAL_STATE = None
