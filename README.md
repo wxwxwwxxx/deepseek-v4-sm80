@@ -8,8 +8,8 @@ Many optimized kernels used by modern DeepSeek serving stacks target newer GPU
 architectures and are unavailable on Ampere. This project adapts Mini-SGLang
 for DeepSeek V4 Flash on Ampere, supplies Ampere-compatible kernels and runtime
 paths, and applies practical performance tuning for tensor-parallel serving. It
-also supports chunked prefill and validated single-request contexts through
-512K tokens on the DGX A100 platform.
+also supports resident-batch chunked prefill, validated 512-Ki prompts at BS8,
+and exact 1-Mi total sequences at BS4 on the DGX A100 platform.
 
 See the [DGX A100 performance results](PERFORMANCE.md) for measured throughput,
 CUDA graph memory tradeoffs, and long-context capacity.
@@ -28,8 +28,9 @@ CUDA graph memory tradeoffs, and long-context capacity.
   prefill.
 - **Model-aligned precision:** BF16 activations and primary compute, while
   preserving the model's FP32 state and quantized FP8/FP4 weights.
-- **Long-context support:** 512K single-sequence capability has been validated
-  with page size 256 and bounded prefill chunks.
+- **Long-context support:** the public M8 recipe has been validated with
+  512-Ki prompts at BS8 and exact 1-Mi total sequences at BS4, using page size
+  256 and an 8,192-token total prefill-forward budget.
 
 This release serves **DeepSeek V4 Flash only**. The validated platform is one
 DGX with **8x NVIDIA A100-SXM4-80GB**, TP8, CUDA 12.8.2, and NCCL 2.26.2-1.
@@ -126,17 +127,21 @@ with 8x A100-SXM4-80GB GPUs:
 
 | Configuration | Max running / graph M | KV capacity (tokens) | Intended use |
 | --- | ---: | ---: | --- |
-| `default_m128` (default) | 128 | 682,240 | General serving with balanced graph coverage and KV capacity. |
-| `low_m64` | 64 | 811,008 | More KV capacity for low-concurrency serving. |
-| `high_m256` | 256 | 424,704 | Higher-throughput serving with graph replay through M=256. |
-| `long_context_m4` | 4 | 930,816 | Low-concurrency long-context serving, validated through 512K. |
+| `default_m128` (default) | 128 | 3,904,256 | General serving with balanced graph coverage and KV capacity. |
+| `low_m64` | 64 | 4,758,016 | More KV capacity for low-concurrency serving. |
+| `high_m256` | 256 | 2,196,992 | Higher-throughput serving with graph replay through M=256. |
+| `long_context_m8` | 8 | 5,523,200 | Recommended long-context serving; validated at 512-Ki BS8 and exact 1-Mi-total BS4. |
 
-These recipes use page size 256, prefill chunk size 8,192, and memory ratio 0.9
-unless explicitly overridden. Select one with `--recipe NAME`; explicit
-command-line settings take precedence over its fields. The listed KV capacities
-were measured on the DGX A100 platform and may differ on other Ampere systems.
-The effective context limit is constrained by the available KV-cache capacity
-even when the model configuration permits a larger value.
+These recipes use page size 256, a total prefill-forward budget of 8,192
+tokens, and memory ratio 0.9 unless explicitly overridden. The resident
+scheduler divides that budget fairly across active prefill requests. Select one
+with `--recipe NAME`; explicit command-line settings take precedence over its
+fields. The listed KV capacities were measured on the DGX A100 platform and
+may differ on other Ampere systems.
+
+The M8 long-context validations are single-run capability smokes, not latency
+guarantees. Their deterministic prompts differ at token zero and receive no
+prefix-cache savings.
 
 ### Key arguments
 
@@ -153,7 +158,7 @@ another workload or Ampere system:
 | `--cuda-graph-max-bs N` | Largest decode batch captured by CUDA Graph. | Larger values cover higher active M but consume more graph memory, reduce KV capacity, and increase startup time. Batches above this value remain legal and run eagerly. |
 | `--context-length N` | Maximum prompt plus generated tokens for one sequence, overriding the model config. | Larger values widen request/page tables; actual admission is still limited by available KV capacity. |
 | `--memory-ratio R` | Fraction of GPU memory made available to the runtime capacity planner. | Raising it can provide more KV pages but leaves less safety headroom for allocations outside the planned budget. |
-| `--max-prefill-length N` | Maximum number of tokens processed by one chunked-prefill forward. | Larger chunks may improve prefill efficiency but increase activation/workspace peaks; smaller chunks reduce peak memory. |
+| `--max-prefill-length N` | Total token budget processed by one chunked-prefill forward. | The resident scheduler shares it across active prefills; larger budgets may improve efficiency but increase activation/workspace peaks. |
 
 `--max-running-requests` may exceed `--cuda-graph-max-bs`; published recipes
 keep them equal for clear performance and capacity comparisons.

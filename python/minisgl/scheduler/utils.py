@@ -20,6 +20,9 @@ class PendingReq:
     reasoning_effort: str | None = None
     lifecycle: RequestLifecycle = field(default_factory=RequestLifecycle)
     chunked_req: ChunkedReq | None = None
+    # Host-only fairness ledger. Prefix hits are deliberately excluded: this
+    # counts only tokens granted by the scheduler for this request generation.
+    prefill_scheduled_tokens: int = 0
 
     @property
     def input_len(self) -> int:

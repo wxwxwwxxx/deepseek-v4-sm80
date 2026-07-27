@@ -147,11 +147,11 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
             "default_m128",
             "low_m64",
             "high_m256",
-            "long_context_m4",
+            "long_context_m8",
         ],
         help=(
             "Apply a default M128, low-M64, high-throughput M256, or long-context "
-            "M4 recipe validated on DGX A100 8x80GB. Defaults to default_m128. "
+            "M8 recipe validated on DGX A100 8x80GB. Defaults to default_m128. "
             "Explicit request, graph, and sequence settings override recipe fields."
         ),
     )

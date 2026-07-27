@@ -46,7 +46,7 @@ _DSV4_SM80_RECIPES = {
     "default_m128": (128, 128, None),
     "low_m64": (64, 64, None),
     "high_m256": (256, 256, None),
-    "long_context_m4": (4, 4, 524_288),
+    "long_context_m8": (8, 8, 1_048_576),
 }
 _GENERIC_DEFAULT_MAX_EXTEND_TOKENS = 8192
 _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS = 8192
@@ -117,9 +117,7 @@ class Engine:
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
-        self.reasoning_sampler_contract_enabled = (
-            config.reasoning_sampler_contract_enabled
-        )
+        self.reasoning_sampler_contract_enabled = config.reasoning_sampler_contract_enabled
         self.reasoning_token_ids = resolve_engine_reasoning_token_ids(config)
         # DeepSeek V4 SM80 uses BF16 activations while preserving model-defined
         # FP32 state and quantized checkpoint weights.
@@ -249,9 +247,7 @@ class Engine:
             "post_kv_model_cache_prepare_report", {}
         )
         if post_kv_prepare_report:
-            self.model_prepare_report["fused_wqa_wkv_bf16_weight_cache"] = (
-                post_kv_prepare_report
-            )
+            self.model_prepare_report["fused_wqa_wkv_bf16_weight_cache"] = post_kv_prepare_report
         self._finalize_graph_memory_ledger()
         self._maybe_release_marlin_wna16_for_timing(
             timing="after_graph_capture",
@@ -457,9 +453,7 @@ class Engine:
             metadata_width=int(config.max_seq_len),
             page_size=int(config.page_size),
             capture_greedy_sample=bool(config.cuda_graph_capture_greedy_sample),
-            reasoning_sampler_contract_enabled=(
-                config.reasoning_sampler_contract_enabled
-            ),
+            reasoning_sampler_contract_enabled=(config.reasoning_sampler_contract_enabled),
         )
         estimate_bytes = self._sync_max_int(estimate.estimate_bytes)
         margin_bytes = self._sync_max_int(estimate.safety_margin_bytes)
@@ -586,14 +580,16 @@ class Engine:
             "timing": timing,
             "eligible": bool(eligible),
             "applied_to_num_pages": applied,
-            "ineligible_reason": None
-            if eligible
-            else _marlin_wna16_credit_ineligible_reason(
-                config=config,
-                requested=requested,
-                release_requested=release_requested,
-                timing=timing,
-                source_bytes=source_bytes,
+            "ineligible_reason": (
+                None
+                if eligible
+                else _marlin_wna16_credit_ineligible_reason(
+                    config=config,
+                    requested=requested,
+                    release_requested=release_requested,
+                    timing=timing,
+                    source_bytes=source_bytes,
+                )
             ),
             "source_bytes": source_bytes,
             "gross_release_credit_bytes": gross_credit,
@@ -715,11 +711,7 @@ def _marlin_wna16_credit_ineligible_reason(
 
 
 def _pynccl_max_buffer_bytes(config: EngineConfig) -> int:
-    max_bytes = (
-        config.max_forward_len
-        * config.model_config.hidden_size
-        * torch.bfloat16.itemsize
-    )
+    max_bytes = config.max_forward_len * config.model_config.hidden_size * torch.bfloat16.itemsize
     if _use_dsv4_sm80_default_pynccl_threshold(config):
         return min(max_bytes, DSV4_RELEASE.pynccl_max_buffer_bytes)
     return max_bytes

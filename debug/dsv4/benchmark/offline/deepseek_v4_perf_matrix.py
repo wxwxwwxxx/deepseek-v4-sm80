@@ -40,21 +40,13 @@ DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_RELEASE_ORIGINAL_EXPERT_WEIGHTS"
 )
 DSV4_MARLIN_WNA16_RELEASE_TIMING_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_RELEASE_TIMING"
-DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT"
-)
+DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT_ENV = "MINISGL_DSV4_MARLIN_WNA16_RELEASE_CAPACITY_CREDIT"
 DSV4_MARLIN_WNA16_QUARANTINE_BLOCKS_ENV = (
     "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_RELEASED_BLOCKS"
 )
-DSV4_MARLIN_WNA16_QUARANTINE_BYTES_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
-)
-DSV4_MARLIN_WNA16_QUARANTINE_PATTERN_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
-)
-DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG_ENV = (
-    "MINISGL_DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG"
-)
+DSV4_MARLIN_WNA16_QUARANTINE_BYTES_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_BYTES"
+DSV4_MARLIN_WNA16_QUARANTINE_PATTERN_ENV = "MINISGL_DSV4_MARLIN_WNA16_DEBUG_QUARANTINE_PATTERN"
+DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG_ENV = "MINISGL_DSV4_MARLIN_WNA16_GUARD_INTEGRITY_DEBUG"
 DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC_ENV = "MINISGL_DSV4_CLEAR_ALLOCATED_KV_ON_PAGE_ALLOC"
 DSV4_HC_TOGGLE = "MINISGL_DSV4_SM80_HC"
 DSV4_RMSNORM_TOGGLE = "MINISGL_DSV4_SM80_RMSNORM"
@@ -85,9 +77,7 @@ DSV4_CASE_BOUNDARY_DEBUG_ENV = "MINISGL_DSV4_CASE_BOUNDARY_DEBUG"
 DSV4_SWA_INDEPENDENT_LIFECYCLE_ENV = "MINISGL_DSV4_SWA_INDEPENDENT_LIFECYCLE"
 DSV4_SWA_METADATA_PAGE_TABLE_CACHE_ENV = "MINISGL_DSV4_SWA_METADATA_PAGE_TABLE_CACHE"
 DSV4_SWA_DIRECT_TOKEN_METADATA_ENV = "MINISGL_DSV4_SWA_DIRECT_TOKEN_METADATA"
-DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_ENV = (
-    "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED"
-)
+DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED_ENV = "MINISGL_DSV4_SWA_DIRECT_REPLAY_METADATA_FUSED"
 DSV4_INDEXER_FP8_CACHE_TOGGLE = "MINISGL_DSV4_SM80_INDEXER_FP8_CACHE"
 DSV4_FP8_ACT_QUANT_TRITON_TOGGLE = "MINISGL_DSV4_SM80_FP8_ACT_QUANT_TRITON"
 DSV4_STATIC_SCALE_CACHE_TOGGLE = "MINISGL_DSV4_SM80_STATIC_SCALE_CACHE"
@@ -128,9 +118,7 @@ DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT = (
 DSV4_A100_MARLIN_PREBUILD_VARIANT = "dsv4_sm80_a100_victory_marlin_prebuild"
 DSV4_A100_MARLIN_RELEASE_VARIANT = "dsv4_sm80_a100_victory_marlin_release"
 DSV4_RELEASE_DEFAULT_VARIANT = "dsv4_sm80_release_default"
-DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_VARIANT = (
-    "dsv4_sm80_a100_victory_marlin_release_safe_arena"
-)
+DSV4_A100_MARLIN_RELEASE_SAFE_ARENA_VARIANT = "dsv4_sm80_a100_victory_marlin_release_safe_arena"
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release"
 )
@@ -140,9 +128,7 @@ DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_VARIANT = (
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent_swadirect"
 )
-DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_REPLAY_METADATA_FUSED_VARIANT = (
-    "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent_swadirect_replaymetafused"
-)
+DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_REPLAY_METADATA_FUSED_VARIANT = "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_swa_independent_swadirect_replaymetafused"
 DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_VARIANT = (
     "dsv4_sm80_a100_victory_prefix_routeb_lifetime_marlin_release_safe_arena"
 )
@@ -335,6 +321,30 @@ DEFAULT_SCENARIOS: tuple[Scenario, ...] = (
 )
 
 
+RELEASE_CARD_SCENARIOS: tuple[Scenario, ...] = tuple(
+    Scenario(
+        name=f"release_card_{recipe}_{prompt_label}_d1k",
+        kind="random",
+        batch_size=batch_size,
+        prompt_len=prompt_len,
+        decode_len=1024,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            f"Release-card single-wave {recipe} workload at its maximum active "
+            f"M={batch_size}: {prompt_label.upper()} prompt and 1K decode."
+        ),
+    )
+    for recipe, batch_size in (
+        ("long_m8", 8),
+        ("low_m64", 64),
+        ("default_m128", 128),
+        ("high_m256", 256),
+    )
+    for prompt_label, prompt_len in (("p1k", 1024), ("p4k", 4096))
+)
+
+
 TARGET08_SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         name="historical_4096_1024_bs4",
@@ -368,6 +378,71 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
             "TARGET 16.3 resident BS4 pressure gate. Four deterministic prompts "
             "differ at token zero, are admitted together, and produce exactly eight "
             "tokens with EOS ignored."
+        ),
+    ),
+    Scenario(
+        name="target16_resident_64k_bs4",
+        kind="long_context_pressure",
+        batch_size=4,
+        prompt_len=65_536,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 16.31 bounded resident-batch gate. Four deterministic 64K "
+            "prompts differ at token zero, are admitted together, and produce "
+            "exactly eight tokens with EOS ignored."
+        ),
+    ),
+    Scenario(
+        name="target16_single_64k_control",
+        kind="long_context_pressure",
+        batch_size=1,
+        prompt_len=65_536,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        description=("TARGET 16.31 single-request 64K control with eight output tokens."),
+    ),
+    Scenario(
+        name="target16_budget_frontier_64k_bs8",
+        kind="long_context_pressure",
+        batch_size=8,
+        prompt_len=65_536,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 16.32 bounded budget-selection gate. Eight deterministic "
+            "64K prompts differ at token zero, remain resident together, and "
+            "produce exactly eight tokens with EOS ignored."
+        ),
+    ),
+    Scenario(
+        name="target16_long_context_512k_bs8",
+        kind="long_context_pressure",
+        batch_size=8,
+        prompt_len=524_288,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 16.32 Gate A. Eight deterministic 512 Ki prompts differ at "
+            "token zero, remain resident together, and produce exactly eight "
+            "tokens with EOS ignored."
+        ),
+    ),
+    Scenario(
+        name="target16_exact_1m_total_bs4",
+        kind="long_context_pressure",
+        batch_size=4,
+        prompt_len=1_048_568,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 16.32 Gate B. Four deterministic prompts differ at token "
+            "zero and reach exactly 1,048,576 total tokens with EOS ignored."
         ),
     ),
     Scenario(
@@ -748,6 +823,33 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
         ),
     ),
     Scenario(
+        name="target16_mixed_decode_m4_multi_prefill_32k",
+        kind="target15_mixed_arrival",
+        batch_size=8,
+        prompt_len=32_768,
+        decode_len=64,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=8,
+        prompt_len_cycle=(
+            128,
+            128,
+            128,
+            128,
+            32_768,
+            32_768,
+            32_768,
+            32_768,
+        ),
+        decode_len_cycle=(64, 64, 64, 64, 8, 8, 8, 8),
+        initial_requests=4,
+        arrival_after_decode_batches=1,
+        description=(
+            "TARGET 16.31 mixed gate: start four 128-token decoders, then inject "
+            "four 32K prefills together after the first decode batch."
+        ),
+    ),
+    Scenario(
         name="target15_mixed_arrival_m1_128k",
         kind="target15_mixed_arrival",
         batch_size=2,
@@ -761,8 +863,7 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
         initial_requests=1,
         arrival_after_decode_batches=1,
         description=(
-            "TARGET 15.1 selected-policy long smoke: active M=1 decode plus a "
-            "delayed 128K prefill."
+            "TARGET 15.1 selected-policy long smoke: active M=1 decode plus a delayed 128K prefill."
         ),
     ),
     Scenario(
@@ -1019,7 +1120,7 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         allow_dsv4_cuda_graph=True,
     ),
     Variant(
-        name=("v1_moe_graph_hc_rmsnorm_fwqakv_qkvrope_wqb_wob_idxwqb_" "gatecache_idxstorecache"),
+        name=("v1_moe_graph_hc_rmsnorm_fwqakv_qkvrope_wqb_wob_idxwqb_gatecache_idxstorecache"),
         env={
             DSV4_V1_MOE_TOGGLE: "1",
             DSV4_HC_TOGGLE: "1",
@@ -1043,9 +1144,7 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         allow_dsv4_cuda_graph=True,
     ),
     Variant(
-        name=(
-            "v1_moe_graph_hc_rmsnorm_fwqakvcache_qkvrope_wqb_wob_idxwqb_" "gatecache_idxstorecache"
-        ),
+        name=("v1_moe_graph_hc_rmsnorm_fwqakvcache_qkvrope_wqb_wob_idxwqb_gatecache_idxstorecache"),
         env={
             DSV4_V1_MOE_TOGGLE: "1",
             DSV4_HC_TOGGLE: "1",
@@ -1846,8 +1945,7 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         name="target0762_woabf16bmmcache",
         env={DSV4_A100_VICTORY_BUNDLE_TOGGLE: "1"},
         description=(
-            "Legacy alias for dsv4_sm80_a100_victory kept for TARGET 07.62 "
-            "artifacts and scripts."
+            "Legacy alias for dsv4_sm80_a100_victory kept for TARGET 07.62 artifacts and scripts."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
@@ -1928,7 +2026,11 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
 )
 
 
-ALL_SCENARIOS: tuple[Scenario, ...] = (*DEFAULT_SCENARIOS, *TARGET08_SCENARIOS)
+ALL_SCENARIOS: tuple[Scenario, ...] = (
+    *DEFAULT_SCENARIOS,
+    *RELEASE_CARD_SCENARIOS,
+    *TARGET08_SCENARIOS,
+)
 
 
 ALL_VARIANTS: tuple[Variant, ...] = (*DEFAULT_VARIANTS, *RUNTIME_VARIANTS)
@@ -2171,9 +2273,7 @@ def active_dsv4_toggles(dsv4_kernel) -> list[str]:
 
 def raw_dsv4_env() -> dict[str, str]:
     return {
-        name: os.environ[name]
-        for name in sorted(os.environ)
-        if name.startswith("MINISGL_DSV4_")
+        name: os.environ[name] for name in sorted(os.environ) if name.startswith("MINISGL_DSV4_")
     }
 
 
@@ -2409,9 +2509,7 @@ def build_workload(
             output_lens.append(max(1, decode_len))
     elif scenario.kind == "cuda_graph_padding_boundaries":
         if scenario.batch_size != 257:
-            raise ValueError(
-                "cuda_graph_padding_boundaries currently requires batch_size=257"
-            )
+            raise ValueError("cuda_graph_padding_boundaries currently requires batch_size=257")
         # The prefill forward produces token one. These budgets then leave
         # 257/129/65/33/17 live requests on successive decode plateaus.
         boundary_output_lens = [2] * 128 + [4] * 64 + [6] * 32 + [8] * 16 + [10] * 17
@@ -2443,9 +2541,7 @@ def build_workload(
             output_lens.append(output_len)
     elif scenario.kind == "cuda_graph_recipe_balanced_wave":
         if scenario.batch_size != 256 or (scenario.total_requests or 0) % 256:
-            raise ValueError(
-                "cuda_graph_recipe_balanced_wave requires 256-request whole waves"
-            )
+            raise ValueError("cuda_graph_recipe_balanced_wave requires 256-request whole waves")
         # Prefill emits token one. Each wave then spends eight decode steps at
         # M=256/192/128/16/1 before draining.
         output_cycle = [8] * 64 + [16] * 64 + [24] * 112 + [32] * 15 + [40]
@@ -2598,11 +2694,7 @@ def _is_emitted_benchmark_output_token(
 ) -> bool:
     """Return whether an offline benchmark reply contributes an output token."""
     effective_finish_reason = (finish_reason or "stop") if finished else None
-    return not (
-        finished
-        and effective_finish_reason == "stop"
-        and next_token == eos_token_id
-    )
+    return not (finished and effective_finish_reason == "stop" and next_token == eos_token_id)
 
 
 def make_benchmark_llm_class():
@@ -2626,9 +2718,7 @@ def make_benchmark_llm_class():
         def offline_receive_msg(self, blocking: bool = False) -> list[BaseBackendMsg]:
             if blocking and len(self.pending_requests) == 0:
                 raise RequestAllFinished()
-            decode_batches = sum(
-                row.get("phase") == "decode" for row in self.bench_batch_trace
-            )
+            decode_batches = sum(row.get("phase") == "decode" for row in self.bench_batch_trace)
             if (
                 self.bench_initial_requests > 0
                 and self.counter >= self.bench_initial_requests
@@ -2715,9 +2805,12 @@ def make_benchmark_llm_class():
                     self.cache_manager.num_pages - len(self.cache_manager.free_slots)
                 ),
                 "free_full_pages": int(len(self.cache_manager.free_slots)),
+                "sequence_ownership": _host_sequence_ownership_snapshot(self, batch.reqs),
                 "reqs": [
                     {
                         "uid": req.uid,
+                        "table_idx": int(req.table_idx),
+                        "generation_id": int(req.lifecycle.generation_id),
                         "cached_len": int(req.cached_len),
                         "extend_len": int(req.extend_len),
                         "device_len": int(req.device_len),
@@ -2741,7 +2834,7 @@ def make_benchmark_llm_class():
                 stderr_batch_trace = int(os.environ.get("RANK", "0")) == 0
             range_name = f"batch_forward:{batch.phase}:bs{batch.size}:padded{batch.padded_size}"
             enqueue_range_name = (
-                f"batch_forward_enqueue:{batch.phase}:" f"bs{batch.size}:padded{batch.padded_size}"
+                f"batch_forward_enqueue:{batch.phase}:bs{batch.size}:padded{batch.padded_size}"
             )
             if stderr_batch_trace:
                 max_device_len = max((int(req.device_len) for req in batch.reqs), default=0)
@@ -2754,11 +2847,9 @@ def make_benchmark_llm_class():
                 )
             graph_before = copy.deepcopy(getattr(self.engine.graph_runner, "capture_status", {}))
             torch.cuda.synchronize(self.device)
-            long_prefill_timing = (
-                os.environ.get("MINISGL_DSV4_LONG_PREFILL_TIMING", "").strip().lower()
-                in {"1", "true", "yes", "on"}
-                and bool(batch.is_prefill)
-            )
+            long_prefill_timing = os.environ.get(
+                "MINISGL_DSV4_LONG_PREFILL_TIMING", ""
+            ).strip().lower() in {"1", "true", "yes", "on"} and bool(batch.is_prefill)
             chunk_memory_before = None
             if long_prefill_timing:
                 free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
@@ -2779,9 +2870,7 @@ def make_benchmark_llm_class():
                     for value in raw_profiler_contexts.split(",")
                     if value.strip()
                 }
-                committed_context = max(
-                    (int(req.device_len) for req in batch.reqs), default=0
-                )
+                committed_context = max((int(req.device_len) for req in batch.reqs), default=0)
                 profiler_checkpoint = committed_context in profiler_contexts
             if profiler_checkpoint:
                 torch.cuda.profiler.start()
@@ -2830,9 +2919,7 @@ def make_benchmark_llm_class():
                     "temporary_high_water_bytes": max(0, peak_allocated - allocated),
                 }
             if self._active_generation_started_at is not None:
-                info["completed_since_generate_start_s"] = (
-                    toc - self._active_generation_started_at
-                )
+                info["completed_since_generate_start_s"] = toc - self._active_generation_started_at
             self.bench_batch_trace.append(info)
             if stderr_batch_trace:
                 print(
@@ -3001,9 +3088,7 @@ class KernelCallTracer:
         )
         for entry in entries:
             entry["mean_ms"] = (
-                None
-                if entry["timed_count"] == 0
-                else entry["total_ms"] / entry["timed_count"]
+                None if entry["timed_count"] == 0 else entry["total_ms"] / entry["timed_count"]
             )
         budget_env = getattr(
             self.module,
@@ -3015,9 +3100,7 @@ class KernelCallTracer:
             "call_count": len(self.indexer_samples),
             "timed_count": timed_count,
             "total_ms": total_ms,
-            "configured_max_logits_mb": int(
-                os.environ.get(budget_env, str(default_budget))
-            ),
+            "configured_max_logits_mb": int(os.environ.get(budget_env, str(default_budget))),
             "entries": entries,
         }
 
@@ -3157,9 +3240,7 @@ def _select_scenarios(args: argparse.Namespace) -> list[Scenario]:
 def _select_variants(args: argparse.Namespace) -> list[Variant]:
     names = args.variants or [DSV4_RELEASE_DEFAULT_VARIANT]
     if names != [DSV4_RELEASE_DEFAULT_VARIANT]:
-        raise SystemExit(
-            "The release perf matrix supports only the canonical optimized runtime."
-        )
+        raise SystemExit("The release perf matrix supports only the canonical optimized runtime.")
     variant_map = _variant_map()
     return [variant_map[name] for name in names]
 
@@ -3191,8 +3272,7 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
         )
 
     allow_dsv4_cuda_graph = bool(
-        (args.allow_dsv4_cuda_graph or variant_graph)
-        and not args.disable_cuda_graph
+        (args.allow_dsv4_cuda_graph or variant_graph) and not args.disable_cuda_graph
     )
     cuda_graph_bs = args.cuda_graph_bs
     if args.cuda_graph_capture_greedy_sample is None:
@@ -3226,9 +3306,7 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
             "DSV4 SWA independent lifecycle variants must be run separately or with "
             "--enable-dsv4-swa-independent-lifecycle."
         )
-    enable_dsv4_radix_prefix_cache = bool(
-        args.enable_dsv4_radix_prefix_cache or variant_prefix
-    )
+    enable_dsv4_radix_prefix_cache = bool(args.enable_dsv4_radix_prefix_cache or variant_prefix)
     enable_dsv4_component_loc_ownership = bool(
         args.enable_dsv4_component_loc_ownership or variant_component
     )
@@ -3302,9 +3380,7 @@ def _max_running_req_llm_kwargs(
     return {"max_running_req": mode.requested_override}
 
 
-def _validate_max_running_req(
-    report: dict[str, Any], scenarios: Sequence[Scenario]
-) -> None:
+def _validate_max_running_req(report: dict[str, Any], scenarios: Sequence[Scenario]) -> None:
     required = _scenario_max_running_req(scenarios)
     effective = int(report["effective"])
     if required > effective:
@@ -3359,8 +3435,69 @@ def _max_sequence_llm_kwargs(
     return {"context_length": mode.requested_override}
 
 
-def _max_extend_tokens(scenarios: Sequence[Scenario]) -> int:
-    return max((scenario.batch_size * scenario.max_input_len for scenario in scenarios), default=1)
+@dataclass(frozen=True)
+class BenchmarkBudgetResolution:
+    requested_max_extend_tokens: int | None
+    use_serving_max_extend_tokens: bool
+    resolved_max_extend_tokens: int
+    source: str
+    long_context_scenarios: tuple[str, ...]
+    resolved_before_model_load: bool = True
+
+
+def _resolve_benchmark_max_extend_tokens(
+    args: argparse.Namespace,
+    scenarios: Sequence[Scenario],
+) -> BenchmarkBudgetResolution:
+    """Resolve and validate the scheduler budget before model construction."""
+    if args.max_extend_tokens is not None:
+        resolved = int(args.max_extend_tokens)
+        source = "explicit"
+    else:
+        # The benchmark must never silently expand a total forward budget to
+        # batch_size * prompt_len. Both the default and the explicit serving
+        # selector resolve to the release-owned 8192-token budget.
+        resolved = 8192
+        source = (
+            "serving_default_requested"
+            if args.use_serving_max_extend_tokens
+            else "benchmark_release_default"
+        )
+
+    if resolved == 256:
+        raise ValueError(
+            "--max-extend-tokens 256 is forbidden; use the 8192-token release "
+            "budget for long-context scheduler workloads"
+        )
+
+    long_context_scenarios = tuple(
+        scenario.name for scenario in scenarios if scenario.max_input_len >= 512 * 1024
+    )
+    if long_context_scenarios:
+        if args.max_extend_tokens is None and not args.use_serving_max_extend_tokens:
+            raise ValueError(
+                "512K/1M full-model workloads require "
+                "--use-serving-max-extend-tokens or an explicit "
+                "--max-extend-tokens value of at least 8192"
+            )
+        if resolved < 8192:
+            raise ValueError(
+                "512K/1M full-model workloads require a resolved chunk budget "
+                f"of at least 8192, got {resolved}"
+            )
+        if resolved not in {8192, 16384}:
+            raise ValueError(
+                "512K/1M full-model workloads require an intended chunk budget "
+                f"of exactly 8192 or 16384, got {resolved}"
+            )
+
+    return BenchmarkBudgetResolution(
+        requested_max_extend_tokens=args.max_extend_tokens,
+        use_serving_max_extend_tokens=bool(args.use_serving_max_extend_tokens),
+        resolved_max_extend_tokens=resolved,
+        source=source,
+        long_context_scenarios=long_context_scenarios,
+    )
 
 
 def _safe_mean(values: Sequence[float]) -> float | None:
@@ -3393,10 +3530,7 @@ def _percentile(values: Sequence[float], percentile: float) -> float | None:
 
 
 def _latency_percentiles(values: Sequence[float]) -> dict[str, float | None]:
-    return {
-        f"p{percentile}": _percentile(values, percentile)
-        for percentile in (50, 90, 95, 99)
-    }
+    return {f"p{percentile}": _percentile(values, percentile) for percentile in (50, 90, 95, 99)}
 
 
 def _decode_m_range(value: int) -> str:
@@ -3456,6 +3590,17 @@ def _schedule_summary(repeats: Sequence[dict[str, Any]]) -> dict[str, Any]:
     total_batches = 0
     max_batch_size = 0
     max_padded_size = 0
+    max_prefill_request_batch = 0
+    max_decode_m = 0
+    max_prefill_input_tokens = 0
+    max_c4_owner_count = 0
+    max_c128_owner_count = 0
+    max_owner_overlap_snapshot: dict[str, Any] = {}
+    owner_generation_matches = True
+    prefill_progress_spreads = []
+    observed_prefill_uids = set()
+    cleanup_owner_counts = []
+    swa_ownership_versions = []
     for repeat in repeats:
         for row in repeat.get("schedule_trace", []):
             total_batches += 1
@@ -3473,6 +3618,46 @@ def _schedule_summary(repeats: Sequence[dict[str, Any]]) -> dict[str, Any]:
             phase_padded_counts[phase_padded_key] = phase_padded_counts.get(phase_padded_key, 0) + 1
             max_batch_size = max(max_batch_size, batch_size)
             max_padded_size = max(max_padded_size, padded_size)
+            if phase == "prefill":
+                max_prefill_request_batch = max(max_prefill_request_batch, batch_size)
+                max_prefill_input_tokens = max(
+                    max_prefill_input_tokens, int(row.get("input_tokens", 0))
+                )
+                reqs = row.get("reqs", []) or []
+                progress = [
+                    int(req.get("device_len", 0))
+                    for req in reqs
+                    if int(req.get("extend_len", 0)) > 0
+                ]
+                observed_prefill_uids.update(int(req["uid"]) for req in reqs if "uid" in req)
+                if progress:
+                    prefill_progress_spreads.append(max(progress) - min(progress))
+            elif phase == "decode":
+                max_decode_m = max(max_decode_m, batch_size)
+            ownership = row.get("sequence_ownership", {}) or {}
+            c4_owner_count = int(ownership.get("c4_owner_count", 0))
+            c128_owner_count = int(ownership.get("c128_owner_count", 0))
+            max_c4_owner_count = max(max_c4_owner_count, c4_owner_count)
+            max_c128_owner_count = max(max_c128_owner_count, c128_owner_count)
+            if max(c4_owner_count, c128_owner_count) > max(
+                int(max_owner_overlap_snapshot.get("c4_owner_count", 0)),
+                int(max_owner_overlap_snapshot.get("c128_owner_count", 0)),
+            ):
+                max_owner_overlap_snapshot = copy.deepcopy(ownership)
+            swa_ownership_versions.append(int(ownership.get("swa_ownership_version", 0)))
+            for req in ownership.get("reqs", []):
+                generation_id = int(req.get("generation_id", -1))
+                for key in ("c4_owner_generation", "c128_owner_generation"):
+                    owner = req.get(key)
+                    owner_generation_matches &= owner is None or int(owner) == generation_id
+        cleanup = repeat.get("sequence_ownership_after_cleanup", {}) or {}
+        cleanup_owner_counts.append(
+            {
+                "c4_owner_count": int(cleanup.get("c4_owner_count", 0)),
+                "c128_owner_count": int(cleanup.get("c128_owner_count", 0)),
+            }
+        )
+        swa_ownership_versions.append(int(cleanup.get("swa_ownership_version", 0)))
     return {
         "total_batches": total_batches,
         "phase_counts": dict(sorted(phase_counts.items())),
@@ -3482,6 +3667,29 @@ def _schedule_summary(repeats: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "phase_padded_size_counts": dict(sorted(phase_padded_counts.items())),
         "max_batch_size": max_batch_size,
         "max_padded_size": max_padded_size,
+        "max_prefill_request_batch": max_prefill_request_batch,
+        "max_decode_m": max_decode_m,
+        "max_prefill_input_tokens": max_prefill_input_tokens,
+        "max_c4_owner_count": max_c4_owner_count,
+        "max_c128_owner_count": max_c128_owner_count,
+        "owner_generation_matches": owner_generation_matches,
+        "observed_prefill_uids": sorted(observed_prefill_uids),
+        "prefill_progress_checkpoint_count": len(prefill_progress_spreads),
+        "max_prefill_progress_spread_tokens": max(prefill_progress_spreads, default=0),
+        "prefill_progress_within_one_256_token_page": all(
+            spread <= 256 for spread in prefill_progress_spreads
+        ),
+        "max_owner_overlap_snapshot": max_owner_overlap_snapshot,
+        "all_sequence_owners_released_after_cleanup": all(
+            counts["c4_owner_count"] == 0 and counts["c128_owner_count"] == 0
+            for counts in cleanup_owner_counts
+        ),
+        "cleanup_owner_counts": cleanup_owner_counts,
+        "swa_ownership_version_range": (
+            [min(swa_ownership_versions), max(swa_ownership_versions)]
+            if swa_ownership_versions
+            else [0, 0]
+        ),
     }
 
 
@@ -3611,9 +3819,7 @@ def _max_sequence_runtime_report(
     rope_kind = str(getattr(engine, "rope_cache_kind", "materialized"))
     rope_tensors = _rope_tensor_report(engine.model)
     rope_bytes = int(sum(row["bytes"] for row in rope_tensors))
-    physical_rope_lengths = [
-        int(row["shape"][0]) for row in rope_tensors if row.get("shape")
-    ]
+    physical_rope_lengths = [int(row["shape"][0]) for row in rope_tensors if row.get("shape")]
     effective_rope_cache_len = int(
         getattr(
             engine,
@@ -3639,16 +3845,12 @@ def _max_sequence_runtime_report(
         ),
         "decode_len_requested_max": max(
             (
-                max(scenario.decode_len_cycle)
-                if scenario.decode_len_cycle
-                else scenario.decode_len
+                max(scenario.decode_len_cycle) if scenario.decode_len_cycle else scenario.decode_len
                 for scenario in scenarios
             ),
             default=0,
         ),
-        "scenario_fits_effective_engine": (
-            mode.scenario_required_total_seq_len <= effective_max
-        ),
+        "scenario_fits_effective_engine": (mode.scenario_required_total_seq_len <= effective_max),
         "context_page_table": {
             "shape": list(page_table.shape),
             "bytes": int(page_table.numel() * page_table.element_size()),
@@ -3657,9 +3859,7 @@ def _max_sequence_runtime_report(
     }
 
 
-def _validate_selected_scenarios(
-    report: dict[str, Any], scenarios: Sequence[Scenario]
-) -> None:
+def _validate_selected_scenarios(report: dict[str, Any], scenarios: Sequence[Scenario]) -> None:
     effective_max = int(report["effective_engine_max_seq_len"])
     rope_len = int(report["effective_rope_cache_len"])
     for scenario in scenarios:
@@ -3735,9 +3935,7 @@ def _replay_timing_bucket_delta(
     after_bucket: dict[str, Any],
 ) -> dict[str, Any] | None:
     count = int(after_bucket.get("count") or 0) - int(before_bucket.get("count") or 0)
-    total_s = float(after_bucket.get("total_s") or 0.0) - float(
-        before_bucket.get("total_s") or 0.0
-    )
+    total_s = float(after_bucket.get("total_s") or 0.0) - float(before_bucket.get("total_s") or 0.0)
     if count <= 0:
         return None
     bucket = {
@@ -3766,9 +3964,7 @@ def _replay_timing_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[
     status = copy.deepcopy(after_timing)
     before_count = int(before_timing.get("count") or 0)
     count = int(after_timing.get("count") or 0) - before_count
-    total_s = float(after_timing.get("total_s") or 0.0) - float(
-        before_timing.get("total_s") or 0.0
-    )
+    total_s = float(after_timing.get("total_s") or 0.0) - float(before_timing.get("total_s") or 0.0)
     status["count"] = count
     status["total_s"] = total_s
     status["mean_s"] = total_s / count if count > 0 else None
@@ -3920,6 +4116,55 @@ def _rank_memory_report(torch, llm) -> dict[str, int]:
     }
 
 
+def _host_sequence_ownership_snapshot(llm, reqs=()) -> dict[str, Any]:
+    """Capture generation ownership without touching device state."""
+    kv_cache = llm.engine.kv_cache
+    entries = []
+    for req in reqs:
+        table_idx = int(req.table_idx)
+        generation_id = int(req.lifecycle.generation_id)
+        c4_owner = (
+            kv_cache.c4_sequence_owner(table_idx)
+            if hasattr(kv_cache, "c4_sequence_owner")
+            else None
+        )
+        c128_owner = (
+            kv_cache.c128_sequence_owner(table_idx)
+            if hasattr(kv_cache, "c128_sequence_owner")
+            else None
+        )
+        if c4_owner is not None and int(c4_owner) != generation_id:
+            raise RuntimeError(
+                "benchmark observed a C4 sequence owner mismatch: "
+                f"table_idx={table_idx}, generation_id={generation_id}, "
+                f"owner={c4_owner}"
+            )
+        if c128_owner is not None and int(c128_owner) != generation_id:
+            raise RuntimeError(
+                "benchmark observed a C128 sequence owner mismatch: "
+                f"table_idx={table_idx}, generation_id={generation_id}, "
+                f"owner={c128_owner}"
+            )
+        entries.append(
+            {
+                "uid": int(req.uid),
+                "table_idx": table_idx,
+                "generation_id": generation_id,
+                "c4_owner_generation": (None if c4_owner is None else int(c4_owner)),
+                "c128_owner_generation": (None if c128_owner is None else int(c128_owner)),
+            }
+        )
+    return {
+        "c4_owner_count": int(getattr(kv_cache, "c4_sequence_owner_count", 0)),
+        "c128_owner_count": int(getattr(kv_cache, "c128_sequence_owner_count", 0)),
+        "swa_independent_lifecycle": bool(
+            getattr(kv_cache, "swa_independent_lifecycle_enabled", False)
+        ),
+        "swa_ownership_version": int(getattr(kv_cache, "swa_ownership_version", 0)),
+        "reqs": entries,
+    }
+
+
 def _estimate_kv_cache_bytes_from_config(llm, *, page_size: int, tp_size: int) -> int:
     from minisgl.kvcache import estimate_kvcache_bytes_per_page
 
@@ -3992,9 +4237,7 @@ def _run_one_repeat(
         token_id_range=token_id_range,
     )
     if scenario.kind == "target15_mixed_natural_text":
-        prompts[0] = _format_target15_chat_prompt(
-            str(prompts[0]), model_path=llm.bench_model_path
-        )
+        prompts[0] = _format_target15_chat_prompt(str(prompts[0]), model_path=llm.bench_model_path)
     target_output_tokens = int(sum(param.max_tokens for param in sampling_params))
     prompt_tokens = int(
         sum(
@@ -4014,9 +4257,7 @@ def _run_one_repeat(
                 shared += 1
             max_pairwise_shared_prefix = max(max_pairwise_shared_prefix, shared)
     if scenario.kind == "long_context_pressure":
-        if len(first_tokens) != scenario.batch_size or len(set(first_tokens)) != len(
-            first_tokens
-        ):
+        if len(first_tokens) != scenario.batch_size or len(set(first_tokens)) != len(first_tokens):
             raise RuntimeError(
                 "long-context pressure prompts must have distinct first-page token streams"
             )
@@ -4095,12 +4336,9 @@ def _run_one_repeat(
         "prompt_stream_contract": {
             "first_tokens": first_tokens,
             "distinct_within_first_cacheable_page": (
-                len(first_tokens) == len(set(first_tokens))
-                and max_pairwise_shared_prefix < 256
+                len(first_tokens) == len(set(first_tokens)) and max_pairwise_shared_prefix < 256
             ),
-            "max_pairwise_shared_prefix_tokens_within_first_page": (
-                max_pairwise_shared_prefix
-            ),
+            "max_pairwise_shared_prefix_tokens_within_first_page": (max_pairwise_shared_prefix),
         },
         "target_output_tokens": target_output_tokens,
         "actual_output_tokens": actual_output_tokens,
@@ -4142,6 +4380,7 @@ def _run_one_repeat(
         "resident_full_pages_after_cleanup": int(
             llm.cache_manager.num_pages - len(llm.cache_manager.free_slots)
         ),
+        "sequence_ownership_after_cleanup": _host_sequence_ownership_snapshot(llm),
     }
 
 
@@ -4530,8 +4769,7 @@ def _aggregate_case_report(
     repeat_summary: list[dict[str, Any]] = []
     for repeat_index, repeat0 in enumerate(repeats0):
         elapsed = max(
-            float(payload["repeats"][repeat_index]["elapsed_s"])
-            for payload in rank_payloads
+            float(payload["repeats"][repeat_index]["elapsed_s"]) for payload in rank_payloads
         )
         prefill_s = max(
             float(payload["repeats"][repeat_index]["phase_totals"]["prefill_forward_s"])
@@ -4566,9 +4804,7 @@ def _aggregate_case_report(
             "median": median,
             "max": max(values) if values else None,
             "relative_span": (
-                None
-                if median in (None, 0.0)
-                else (max(values) - min(values)) / median
+                None if median in (None, 0.0) else (max(values) - min(values)) / median
             ),
         }
 
@@ -4625,9 +4861,7 @@ def _aggregate_case_report(
             "repeat_count": len(repeat_summary),
             "prefill_tokens_per_s": stable_metric("prefill_tokens_per_s"),
             "decode_tokens_per_s": stable_metric("decode_tokens_per_s"),
-            "end_to_end_output_tokens_per_s": stable_metric(
-                "end_to_end_output_tokens_per_s"
-            ),
+            "end_to_end_output_tokens_per_s": stable_metric("end_to_end_output_tokens_per_s"),
         },
     }
     graph_status_case = (
@@ -4922,9 +5156,7 @@ def run_case(
             "allow_dsv4_cuda_graph": runtime_options["allow_dsv4_cuda_graph"],
             "cuda_graph_bs": runtime_options["cuda_graph_bs"],
             "cuda_graph_max_bs": runtime_options["cuda_graph_max_bs"],
-            "cuda_graph_bucket_policy": getattr(
-                llm.engine, "cuda_graph_policy", None
-            ).to_report(),
+            "cuda_graph_bucket_policy": getattr(llm.engine, "cuda_graph_policy", None).to_report(),
             "cuda_graph_capture_greedy_sample": runtime_options["cuda_graph_capture_greedy_sample"],
             "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}),
             "graph_runner_case": graph_status_case,
@@ -4941,9 +5173,11 @@ def run_case(
             "requested_max_extend_tokens": args.max_extend_tokens,
             "use_serving_max_extend_tokens": args.use_serving_max_extend_tokens,
             "mixed_policy_candidate": args.mixed_policy_candidate,
-            "mixed_policy_state": llm.phase_policy.snapshot()
-            if hasattr(llm.phase_policy, "snapshot")
-            else {"kind": type(llm.phase_policy).__name__},
+            "mixed_policy_state": (
+                llm.phase_policy.snapshot()
+                if hasattr(llm.phase_policy, "snapshot")
+                else {"kind": type(llm.phase_policy).__name__}
+            ),
             "max_running_req": load_init.get("max_running_req_rank0", {}),
             "token_id_range": args.token_id_range,
             "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
@@ -4988,20 +5222,17 @@ def _init_llm(
     tp_size: int,
     distributed_init_method: str | None,
     runtime_options: dict[str, Any],
+    resolved_max_extend_tokens: int,
 ):
     import torch
     from minisgl.distributed import DistributedInfo
 
     BenchmarkLLM = make_benchmark_llm_class()
-    max_extend_tokens = args.max_extend_tokens
-    if max_extend_tokens is None and not args.use_serving_max_extend_tokens:
-        max_extend_tokens = _max_extend_tokens(scenarios)
     kwargs: dict[str, Any] = {}
     if distributed_init_method is not None:
         kwargs["distributed_init_method"] = distributed_init_method
-    if max_extend_tokens is not None:
-        kwargs["max_extend_tokens"] = max_extend_tokens
-        kwargs["max_extend_tokens_explicit"] = True
+    kwargs["max_extend_tokens"] = resolved_max_extend_tokens
+    kwargs["max_extend_tokens_explicit"] = True
     kwargs.update(_max_sequence_llm_kwargs(args, scenarios))
     kwargs.update(_max_running_req_llm_kwargs(args, scenarios))
     tic = time.perf_counter()
@@ -5019,9 +5250,7 @@ def _init_llm(
         cuda_graph_max_bs=runtime_options["cuda_graph_max_bs"],
         cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
         enable_dsv4_radix_prefix_cache=runtime_options["enable_dsv4_radix_prefix_cache"],
-        enable_dsv4_component_loc_ownership=runtime_options[
-            "enable_dsv4_component_loc_ownership"
-        ],
+        enable_dsv4_component_loc_ownership=runtime_options["enable_dsv4_component_loc_ownership"],
         enable_dsv4_swa_independent_lifecycle=runtime_options[
             "enable_dsv4_swa_independent_lifecycle"
         ],
@@ -5039,9 +5268,7 @@ def _init_llm(
 
                 def choose(self, *, prefill_runnable, decode_runnable):
                     if prefill_runnable:
-                        return PhaseDecision(
-                            "prefill", int(llm.prefill_budget), decode_runnable
-                        )
+                        return PhaseDecision("prefill", int(llm.prefill_budget), decode_runnable)
                     if decode_runnable:
                         return PhaseDecision("decode")
                     return PhaseDecision(None)
@@ -5108,18 +5335,27 @@ def run_matrix(args: argparse.Namespace) -> int:
         )
     distributed_init_method = _distributed_init_method(args, tp_size)
     output_dir = Path(args.output_dir)
+    budget_resolution = _resolve_benchmark_max_extend_tokens(args, scenarios)
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
         matrix_path = output_dir / "matrix.jsonl"
         if matrix_path.exists():
             matrix_path.unlink()
+        budget_payload = asdict(budget_resolution)
+        print(
+            "[benchmark-budget] "
+            f"resolved_max_extend_tokens="
+            f"{budget_resolution.resolved_max_extend_tokens} "
+            f"source={budget_resolution.source} "
+            "resolved_before_model_load=true",
+            flush=True,
+        )
+        _write_json(output_dir / "resolved_budget.json", budget_payload)
 
     from minisgl.kernel import deepseek_v4 as dsv4_kernel
 
     init_variant = (
-        _graph_init_variant(variants)
-        if runtime_options["allow_dsv4_cuda_graph"]
-        else variants[0]
+        _graph_init_variant(variants) if runtime_options["allow_dsv4_cuda_graph"] else variants[0]
     )
     configure_variant(dsv4_kernel, init_variant)
     tracer = KernelCallTracer(dsv4_kernel)
@@ -5135,7 +5371,14 @@ def run_matrix(args: argparse.Namespace) -> int:
             tp_size=tp_size,
             distributed_init_method=distributed_init_method,
             runtime_options=runtime_options,
+            resolved_max_extend_tokens=(budget_resolution.resolved_max_extend_tokens),
         )
+        if int(llm.prefill_budget) != budget_resolution.resolved_max_extend_tokens:
+            raise RuntimeError(
+                "runtime max_extend_tokens differs from the pre-load resolved "
+                f"budget: runtime={llm.prefill_budget}, "
+                f"resolved={budget_resolution.resolved_max_extend_tokens}"
+            )
         _validate_selected_scenarios(local_load_init["max_sequence"], scenarios)
         _validate_max_running_req(local_load_init["max_running_req"], scenarios)
         gathered_load_init = _gather_payloads(torch, llm, local_load_init)
@@ -5183,9 +5426,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "cuda_graph_bs": runtime_options["cuda_graph_bs"],
                         "cuda_graph_max_bs": runtime_options["cuda_graph_max_bs"],
                         "cuda_graph_bucket_policy": llm.engine.cuda_graph_policy.to_report(),
-                        "dsv4_sm80_recipe": getattr(
-                            llm.engine, "kv_capacity_plan_report", {}
-                        ).get("dsv4_sm80_recipe"),
+                        "dsv4_sm80_recipe": getattr(llm.engine, "kv_capacity_plan_report", {}).get(
+                            "dsv4_sm80_recipe"
+                        ),
                         "cuda_graph_capture_greedy_sample": runtime_options[
                             "cuda_graph_capture_greedy_sample"
                         ],
@@ -5199,6 +5442,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                         ),
                         "requested_max_extend_tokens": args.max_extend_tokens,
                         "use_serving_max_extend_tokens": args.use_serving_max_extend_tokens,
+                        "budget_resolution": asdict(budget_resolution),
                         "enable_dsv4_radix_prefix_cache": runtime_options[
                             "enable_dsv4_radix_prefix_cache"
                         ],
@@ -5287,7 +5531,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "default_m128",
             "low_m64",
             "high_m256",
-            "long_context_m4",
+            "long_context_m8",
         ),
         default="default_m128",
         help="Select a DSV4 A100/sm80 recipe; defaults to default_m128.",
@@ -5320,10 +5564,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--context-length",
         dest="max_seq_len",
         type=int,
-        help=(
-            "Release/server spelling for an explicit maximum total sequence "
-            "length override."
-        ),
+        help=("Release/server spelling for an explicit maximum total sequence length override."),
     )
     max_seq_group.add_argument(
         "--scenario-sized-max-seq-len",
@@ -5338,8 +5579,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--use-serving-max-extend-tokens",
         action="store_true",
         help=(
-            "Leave max_extend_tokens at the serving default instead of expanding it to "
-            "the largest selected scenario input."
+            "Explicitly select the 8192-token serving budget. Required for "
+            "512K/1M full-model scenarios unless --max-extend-tokens >=8192 "
+            "is supplied."
         ),
     )
     max_running_req_group = parser.add_mutually_exclusive_group()
@@ -5483,6 +5725,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--max-seq-len must be positive")
     if args.max_running_req is not None and args.max_running_req <= 0:
         parser.error("--max-running-req must be positive")
+    if args.max_extend_tokens is not None and args.max_extend_tokens <= 0:
+        parser.error("--max-extend-tokens must be positive")
     if args.token_id_range <= 0:
         parser.error("--token-id-range must be positive")
     if args.num_pages == 0:

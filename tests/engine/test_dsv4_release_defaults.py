@@ -124,7 +124,7 @@ def test_deepseek_v4_release_defaults_honor_explicit_generic_max_extend_tokens(m
         ("default_m128", 128, 128, None),
         ("low_m64", 64, 64, None),
         ("high_m256", 256, 256, None),
-        ("long_context_m4", 4, 4, 524_288),
+        ("long_context_m8", 8, 8, 1_048_576),
     ],
 )
 def test_public_dsv4_sm80_recipes_resolve_through_one_graph_policy(
@@ -152,6 +152,7 @@ def test_public_dsv4_sm80_recipes_resolve_through_one_graph_policy(
         "dsv4_sm80_mid_m128",
         "dsv4_sm80_balanced",
         "dsv4_sm80_1m_smoke",
+        "long_context_m4",
     ],
 )
 def test_removed_dsv4_sm80_recipe_names_fail(monkeypatch, recipe):
@@ -172,7 +173,7 @@ def test_recipe_preserves_explicit_request_graph_and_sequence_overrides(monkeypa
     )
     monkeypatch.setattr(engine_module.logger, "info", lambda *args, **kwargs: None)
     config = _fake_config(
-        dsv4_sm80_recipe="long_context_m4",
+        dsv4_sm80_recipe="long_context_m8",
         max_running_req=8,
         max_running_req_explicit=True,
         cuda_graph_max_bs=2,

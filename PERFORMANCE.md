@@ -12,7 +12,7 @@ system with eight 80GB GPUs.
 | Precision | BF16 compute with model-defined FP32/FP8/FP4 state |
 | Runtime | CUDA 12.8, NCCL 2.26-2.27 |
 | Page size | 256 tokens |
-| Prefill chunk | 8,192 tokens |
+| Total prefill-forward budget | 8,192 tokens |
 | Communication | PyNCCL threshold32m |
 
 Performance rows are current, closed, single-wave offline workloads: all
@@ -25,8 +25,14 @@ guarantees for other sm80 systems.
 
 | Configuration | Max running / graph M | Active M | Prompt/request | Requests/s | Output tok/s | Prefill tok/s | Decode tok/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `default_m128` | 128 | 128 | 1K | 0.9997 | 1,023.67 | 4,686.70 | 1,506.39 |
-| `low_m64` | 64 | 4 | 4K | 0.1153 | 118.02 | 2,498.31 | 160.36 |
+| `long_context_m8` | 8 | 8 | 1K | 0.2360 | 241.68 | 3,334.01 | 283.61 |
+| `long_context_m8` | 8 | 8 | 4K | 0.1937 | 198.37 | 3,580.32 | 283.28 |
+| `low_m64` | 64 | 64 | 1K | 0.6949 | 711.60 | 3,680.75 | 981.44 |
+| `low_m64` | 64 | 64 | 4K | 0.4277 | 437.97 | 3,874.16 | 973.79 |
+| `default_m128` | 128 | 128 | 1K | 0.8357 | 855.73 | 4,252.18 | 1,211.90 |
+| `default_m128` | 128 | 128 | 4K | 0.4716 | 482.95 | 3,893.20 | 1,203.89 |
+| `high_m256` | 256 | 256 | 1K | 0.9285 | 950.76 | 4,544.20 | 1,372.06 |
+| `high_m256` | 256 | 256 | 4K | 0.4951 | 507.02 | 3,892.32 | 1,355.17 |
 
 ## CUDA Graph And KV Capacity
 
@@ -35,24 +41,27 @@ cost of startup time and KV-cache capacity.
 
 | Configuration | Max running / graph M | Physical graph memory | KV tokens |
 | --- | ---: | ---: | ---: |
-| `long_context_m4` | 4 | 0.87 GiB | 930,816 |
-| `low_m64` | 64 | 1.52 GiB | 811,008 |
-| `default_m128` | 128 | 2.33 GiB | 682,240 |
-| `high_m256` | 256 | 3.58 GiB | 424,704 |
+| `long_context_m8` | 8 | 0.99 GiB | 5,523,200 |
+| `low_m64` | 64 | 1.68 GiB | 4,758,016 |
+| `default_m128` | 128 | 2.69 GiB | 3,904,256 |
+| `high_m256` | 256 | 4.76 GiB | 2,196,992 |
 
 The default covers decode batches through M=128. M64 trades some graph coverage
 for additional KV capacity, while M256 trades capacity for high-concurrency
-graph replay. M4 is a capability-oriented configuration for 512K contexts.
-Effective context length is bounded by this KV capacity even though the model
-configuration permits up to 1M tokens.
+graph replay. M8 is the promoted long-context configuration. Effective context
+length is bounded by this KV capacity even though the model configuration
+permits up to 1M tokens.
 
 ## Long Context
 
-| Workload | TTFT | Prefill tok/s | Decode tok/s | Peak allocated/rank | Result |
+| Recipe/workload | TTFT | Prefill tok/s | Decode tok/s | Peak allocated/rank | Result |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 512K prompt + 8 output, BS1 | 790.68 s | 677.82 | 32.29 | 72.04 GiB | Passed with 64 prefill chunks |
+| M8, 512-Ki prompt + 8 output, BS8 | 5,132.41 s | 835.63 | 168.48 | 71.95 GiB | Passed: 512 resident BS8 prefill forwards, decode M8 |
+| M8, exact 1-Mi total/request, BS4 | 10,346.82 s | 410.42 | 73.04 | 72.32 GiB | Passed: 512 resident BS4 prefill forwards, decode M4 |
 
-Long-context numbers are single-run reference measurements.
+Long-context numbers are single-run capability smokes on the stated platform,
+not latency guarantees. Prompts differed at token zero, saved prefill tokens
+were zero, and the total prefill-forward budget was 8,192 tokens.
 
 ## Notes
 
