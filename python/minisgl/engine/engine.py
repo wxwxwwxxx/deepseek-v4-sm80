@@ -9,7 +9,12 @@ from minisgl.attention import create_attention_backend
 from minisgl.core import Batch, Context, Req, set_global_ctx
 from minisgl.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from minisgl.dsv4_release import DSV4_RELEASE
-from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
+from minisgl.kvcache import (
+    create_kvcache_pool,
+    estimate_c4_sequence_state_bytes,
+    estimate_c128_sequence_state_bytes,
+    estimate_kvcache_bytes_per_page,
+)
 from minisgl.models import create_model, load_weight
 from minisgl.reasoning import ReasoningTokenIds, resolve_reasoning_token_ids
 from minisgl.utils import (
@@ -312,6 +317,14 @@ class Engine:
             tp_size=config.tp_info.size,
         )
         fixed_swa_cache_bytes = 0
+        fixed_c4_sequence_state_bytes = estimate_c4_sequence_state_bytes(
+            config.model_config,
+            int(config.max_running_req),
+        )
+        fixed_c128_sequence_state_bytes = estimate_c128_sequence_state_bytes(
+            config.model_config,
+            int(config.max_running_req),
+        )
         legacy_cache_per_page = cache_per_page
         if config.model_config.is_deepseek_v4 and self._dsv4_swa_independent_enabled(config):
             dtype_size = torch.bfloat16.itemsize
@@ -345,6 +358,8 @@ class Engine:
             - model_memory
             + applied_credit_bytes
             - fixed_swa_cache_bytes
+            - fixed_c4_sequence_state_bytes
+            - fixed_c128_sequence_state_bytes
             - request_table_bytes
             - non_graph_activation_allowance_bytes
             - graph_estimate_bytes
@@ -355,6 +370,8 @@ class Engine:
             - model_memory
             + applied_credit_bytes
             - fixed_swa_cache_bytes
+            - fixed_c4_sequence_state_bytes
+            - fixed_c128_sequence_state_bytes
             - request_table_bytes
             - non_graph_activation_allowance_bytes
         )
@@ -373,7 +390,12 @@ class Engine:
 
         assert num_pages > 1, "Not enough memory for KV cache, try reducing --num-pages"
         num_tokens = num_pages * config.page_size
-        real_kv_size = num_pages * cache_per_page + fixed_swa_cache_bytes
+        real_kv_size = (
+            num_pages * cache_per_page
+            + fixed_swa_cache_bytes
+            + fixed_c4_sequence_state_bytes
+            + fixed_c128_sequence_state_bytes
+        )
         credit_report["planned_num_pages"] = int(num_pages)
         credit_report["planned_num_tokens"] = int(num_tokens)
         credit_report["planned_kv_bytes"] = int(real_kv_size)
@@ -385,6 +407,8 @@ class Engine:
             "cache_per_page_bytes": int(cache_per_page),
             "legacy_cache_per_page_bytes": int(legacy_cache_per_page),
             "fixed_swa_cache_bytes": int(fixed_swa_cache_bytes),
+            "fixed_c4_sequence_state_bytes": int(fixed_c4_sequence_state_bytes),
+            "fixed_c128_sequence_state_bytes": int(fixed_c128_sequence_state_bytes),
             "requested_device_budget_bytes": int(requested_device_budget),
             "weights_and_transformed_cache_bytes": int(model_memory),
             "request_page_table_bytes": int(request_table_bytes),

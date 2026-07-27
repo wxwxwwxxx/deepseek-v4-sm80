@@ -48,6 +48,8 @@ class FakeCacheManager:
     def __init__(self) -> None:
         self.cached: list[tuple[int, bool]] = []
         self.swa_releases: list[int] = []
+        self.released_sequence_slots: list[tuple[int, int]] = []
+        self.kv_cache = self
 
     @contextmanager
     def lazy_free_region(self):
@@ -58,6 +60,9 @@ class FakeCacheManager:
 
     def release_active_dsv4_swa_out_of_window(self, req: Req) -> None:
         self.swa_releases.append(req.uid)
+
+    def release_sequence_slot(self, table_idx: int, generation_id: int) -> None:
+        self.released_sequence_slots.append((table_idx, generation_id))
 
 
 class FakePrefillManager:
@@ -158,6 +163,7 @@ def test_eos_discards_one_later_completion_and_retires_after_it() -> None:
     assert req.lifecycle.state is RequestLifecycleState.TERMINAL_PENDING_RETIRE
     assert req.lifecycle.outstanding_epochs == {stale_ref.issue_epoch}
     assert scheduler.table_manager.freed == []
+    assert scheduler.cache_manager.released_sequence_slots == []
     assert [msg.next_token for msg in flattened_replies(scheduler)] == [1]
 
     reasoning_after_terminal = req.reasoning_state
@@ -170,6 +176,9 @@ def test_eos_discards_one_later_completion_and_retires_after_it() -> None:
     assert [msg.next_token for msg in flattened_replies(scheduler)] == [1]
     assert [msg.completion_tokens for msg in flattened_replies(scheduler)] == [1]
     assert scheduler.table_manager.freed == [req.table_idx]
+    assert scheduler.cache_manager.released_sequence_slots == [
+        (req.table_idx, req.lifecycle.generation_id)
+    ]
     assert scheduler.cache_manager.cached == [(req.uid, True)]
     assert scheduler._stats_tracker.records == [{"generation_tokens": 1}]
 
@@ -204,6 +213,7 @@ def test_abort_discards_inflight_without_frontend_or_usage_mutation(monkeypatch)
     scheduler._process_one_msg(AbortBackendMsg(uid=req.uid))
     assert req.lifecycle.state is RequestLifecycleState.TERMINAL_PENDING_RETIRE
     assert scheduler.table_manager.freed == []
+    assert scheduler.cache_manager.released_sequence_slots == []
     process(scheduler, [stale_ref], [3])
     assert req.lifecycle.state is RequestLifecycleState.RETIRED
     assert req.lifecycle.terminal_finish_reason == "abort"
@@ -212,6 +222,9 @@ def test_abort_discards_inflight_without_frontend_or_usage_mutation(monkeypatch)
     assert flattened_replies(scheduler) == []
     assert scheduler._stats_tracker.records == []
     assert scheduler.table_manager.freed == [req.table_idx]
+    assert scheduler.cache_manager.released_sequence_slots == [
+        (req.table_idx, req.lifecycle.generation_id)
+    ]
 
 
 def test_mixed_batch_terminal_row_is_discarded_while_companion_continues() -> None:

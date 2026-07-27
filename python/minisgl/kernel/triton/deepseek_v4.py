@@ -2914,20 +2914,23 @@ def direct_decode_index_metadata_for_replay(
 @triton.jit
 def _c4_online_pool_kernel(
     projected_ptr,
-    state_ptr,
+    sequence_state_ptr,
+    checkpoint_ptr,
     ape_ptr,
     positions_ptr,
     table_indices_ptr,
     ctx_page_table_ptr,
-    state_page_mapping_ptr,
+    checkpoint_page_mapping_ptr,
     output_ptr,
     rows: tl.constexpr,
     head_dim: tl.constexpr,
     projected_stride0: tl.constexpr,
-    state_stride0: tl.constexpr,
+    sequence_state_stride0: tl.constexpr,
+    checkpoint_stride0: tl.constexpr,
+    sequence_state_slots: tl.constexpr,
     ctx_page_table_stride0: tl.constexpr,
     ctx_page_table_width: tl.constexpr,
-    state_page_mapping_width: tl.constexpr,
+    checkpoint_page_mapping_width: tl.constexpr,
     page_size: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ) -> None:
@@ -2936,8 +2939,9 @@ def _c4_online_pool_kernel(
     Each program owns one output row and a head-dimension tile.  Current-call
     values are read directly from ``projected_ptr`` so long prefills cannot
     overwrite their eight-slot carry ring before all completed groups reduce.
-    Values before the current chunk are resolved through the scheduler-owned
-    full-token table and the existing full-page -> state-page mapping.
+    The older four rows of the first group in a page come directly from the
+    prior page's compact checkpoint. Other historical rows come from the
+    stable request-slot working ring.
     """
 
     row = tl.program_id(0)
@@ -2988,21 +2992,41 @@ def _c4_online_pool_kernel(
             & (candidate_pos == logical_pos)
         )
 
+        use_checkpoint = (
+            (source_slot < 4)
+            & (logical_pos // page_size != pos // page_size)
+        )
         full_loc = tl.load(
             ctx_page_table_ptr + table_idx * ctx_page_table_stride0 + logical_pos,
-            mask=(logical_pos >= 0) & (logical_pos < ctx_page_table_width),
+            mask=use_checkpoint
+            & (table_idx >= 0)
+            & (logical_pos >= 0)
+            & (logical_pos < ctx_page_table_width),
             other=-1,
         )
         full_page = full_loc // page_size
-        state_page = tl.load(
-            state_page_mapping_ptr + full_page,
-            mask=(full_loc >= 0)
+        checkpoint_page = tl.load(
+            checkpoint_page_mapping_ptr + full_page,
+            mask=use_checkpoint
+            & (full_loc >= 0)
             & (full_page >= 0)
-            & (full_page < state_page_mapping_width),
+            & (full_page < checkpoint_page_mapping_width),
             other=-1,
         )
-        state_loc = state_page * 8 + (full_loc % 8)
-        persistent = (logical_pos >= 0) & (full_loc >= 0) & (state_page >= 0)
+        checkpoint_loc = checkpoint_page * 4 + (logical_pos % 4)
+        checkpoint_persistent = (
+            use_checkpoint
+            & (logical_pos >= 0)
+            & (full_loc >= 0)
+            & (checkpoint_page >= 0)
+        )
+        sequence_loc = table_idx * 8 + (logical_pos % 8)
+        sequence_persistent = (
+            (~use_checkpoint)
+            & (logical_pos >= 0)
+            & (table_idx >= 0)
+            & (table_idx < sequence_state_slots)
+        )
 
         use_right = source_slot >= 4
         kv_offset = head_dim if use_right else 0
@@ -3017,18 +3041,47 @@ def _c4_online_pool_kernel(
             mask=current & d_mask,
             other=float("-inf"),
         ).to(tl.float32)
-        state_kv = tl.load(
-            state_ptr + state_loc * state_stride0 + kv_offset + d,
-            mask=(~current) & persistent & d_mask,
+        sequence_kv = tl.load(
+            sequence_state_ptr
+            + sequence_loc * sequence_state_stride0
+            + kv_offset
+            + d,
+            mask=(~current) & sequence_persistent & d_mask,
             other=0.0,
         ).to(tl.float32)
-        state_score = tl.load(
-            state_ptr + state_loc * state_stride0 + score_offset + d,
-            mask=(~current) & persistent & d_mask,
+        sequence_score = tl.load(
+            sequence_state_ptr
+            + sequence_loc * sequence_state_stride0
+            + score_offset
+            + d,
+            mask=(~current) & sequence_persistent & d_mask,
             other=float("-inf"),
         ).to(tl.float32)
-        source_kv = tl.where(current, current_kv, state_kv)
-        source_score = tl.where(current, current_score, state_score)
+        checkpoint_kv = tl.load(
+            checkpoint_ptr + checkpoint_loc * checkpoint_stride0 + d,
+            mask=(~current) & checkpoint_persistent & d_mask,
+            other=0.0,
+        ).to(tl.float32)
+        checkpoint_score = tl.load(
+            checkpoint_ptr
+            + checkpoint_loc * checkpoint_stride0
+            + head_dim
+            + d,
+            mask=(~current) & checkpoint_persistent & d_mask,
+            other=float("-inf"),
+        ).to(tl.float32)
+        historical_kv = tl.where(
+            use_checkpoint,
+            checkpoint_kv,
+            sequence_kv,
+        )
+        historical_score = tl.where(
+            use_checkpoint,
+            checkpoint_score,
+            sequence_score,
+        )
+        source_kv = tl.where(current, current_kv, historical_kv)
+        source_score = tl.where(current, current_score, historical_score)
         ape_row = source_slot if source_slot < 4 else source_slot - 4
         ape_col = d if source_slot < 4 else head_dim + d
         source_score += tl.load(
@@ -3036,7 +3089,11 @@ def _c4_online_pool_kernel(
             mask=d_mask,
             other=0.0,
         ).to(tl.float32)
-        source_score = tl.where(current | persistent, source_score, float("-inf"))
+        source_score = tl.where(
+            current | checkpoint_persistent | sequence_persistent,
+            source_score,
+            float("-inf"),
+        )
 
         if source_slot == 0:
             kv_0, score_0 = source_kv, source_score
@@ -3091,110 +3148,148 @@ def _c4_online_state_store_kernel(
     raw_out_loc_ptr,
     positions_ptr,
     table_indices_ptr,
-    state_page_mapping_ptr,
-    state_ptr,
+    checkpoint_page_mapping_ptr,
+    sequence_state_ptr,
+    checkpoint_ptr,
     rows: tl.constexpr,
     projected_stride0: tl.constexpr,
-    state_stride0: tl.constexpr,
-    state_page_mapping_width: tl.constexpr,
+    sequence_state_stride0: tl.constexpr,
+    checkpoint_stride0: tl.constexpr,
+    sequence_state_slots: tl.constexpr,
+    checkpoint_page_mapping_width: tl.constexpr,
     page_size: tl.constexpr,
+    head_dim: tl.constexpr,
     width: tl.constexpr,
     BLOCK: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    full_loc = tl.load(raw_out_loc_ptr + row)
-    full_page = full_loc // page_size
-    state_page = tl.load(
-        state_page_mapping_ptr + full_page,
-        mask=(full_loc >= 0)
-        & (full_page >= 0)
-        & (full_page < state_page_mapping_width),
-        other=-1,
-    )
-    state_loc = state_page * 8 + (full_loc % 8)
+    pos = tl.load(positions_ptr + row)
+    table_idx = tl.load(table_indices_ptr + row)
+    sequence_loc = table_idx * 8 + (pos % 8)
 
-    # Parallel prefill rows separated by eight tokens can alias the ring.  Only
-    # the last current-call writer for a state location is allowed to persist.
+    # Parallel prefill rows separated by eight tokens alias the sequence ring.
+    # Only the last current-call writer for a sequence location persists.
     later_row = row + 8
     later_in_range = later_row < rows
-    later_full_loc = tl.load(
-        raw_out_loc_ptr + later_row,
+    later_pos = tl.load(positions_ptr + later_row, mask=later_in_range, other=-1)
+    later_table = tl.load(
+        table_indices_ptr + later_row,
         mask=later_in_range,
         other=-1,
     )
-    later_full_page = later_full_loc // page_size
-    later_state_page = tl.load(
-        state_page_mapping_ptr + later_full_page,
-        mask=later_in_range
-        & (later_full_loc >= 0)
-        & (later_full_page >= 0)
-        & (later_full_page < state_page_mapping_width),
-        other=-1,
-    )
-    later_state_loc = later_state_page * 8 + (later_full_loc % 8)
-    pos = tl.load(positions_ptr + row)
-    table_idx = tl.load(table_indices_ptr + row)
-    later_pos = tl.load(positions_ptr + later_row, mask=later_in_range, other=-1)
-    later_table = tl.load(table_indices_ptr + later_row, mask=later_in_range, other=-1)
     shadowed = (
         later_in_range
         & (later_table == table_idx)
         & (later_pos == pos + 8)
-        & (later_state_loc == state_loc)
     )
-    valid = (state_page >= 0) & (~shadowed) & (offsets < width)
-    value = tl.load(
+    sequence_valid = (
+        (table_idx >= 0)
+        & (table_idx < sequence_state_slots)
+        & (~shadowed)
+        & (offsets < width)
+    )
+    sequence_value = tl.load(
         projected_ptr + row * projected_stride0 + offsets,
-        mask=valid,
+        mask=sequence_valid,
         other=0.0,
     )
-    tl.store(state_ptr + state_loc * state_stride0 + offsets, value, mask=valid)
+    tl.store(
+        sequence_state_ptr
+        + sequence_loc * sequence_state_stride0
+        + offsets,
+        sequence_value,
+        mask=sequence_valid,
+    )
+
+    # Publication is fused into the same store launch. Only a full page's
+    # final four rows write the immutable checkpoint, so there are no aliases.
+    full_loc = tl.load(raw_out_loc_ptr + row)
+    full_page = full_loc // page_size
+    checkpoint_page = tl.load(
+        checkpoint_page_mapping_ptr + full_page,
+        mask=(full_loc >= 0)
+        & (full_page >= 0)
+        & (full_page < checkpoint_page_mapping_width),
+        other=-1,
+    )
+    checkpoint_loc = checkpoint_page * 4 + (full_loc % 4)
+    checkpoint_offsets = offsets
+    projected_offsets = tl.where(
+        checkpoint_offsets < head_dim,
+        checkpoint_offsets,
+        checkpoint_offsets + head_dim,
+    )
+    checkpoint_valid = (
+        (checkpoint_page >= 0)
+        & ((full_loc % page_size) >= (page_size - 4))
+        & (checkpoint_offsets < 2 * head_dim)
+    )
+    checkpoint_value = tl.load(
+        projected_ptr + row * projected_stride0 + projected_offsets,
+        mask=checkpoint_valid,
+        other=0.0,
+    )
+    tl.store(
+        checkpoint_ptr
+        + checkpoint_loc * checkpoint_stride0
+        + checkpoint_offsets,
+        checkpoint_value,
+        mask=checkpoint_valid,
+    )
 
 
 def c4_online_pool_and_update(
     projected: torch.Tensor,
-    state: torch.Tensor,
+    sequence_state: torch.Tensor,
+    checkpoint: torch.Tensor,
     ape: torch.Tensor,
     positions: torch.Tensor,
     table_indices: torch.Tensor,
     raw_out_loc: torch.Tensor,
     ctx_page_table: torch.Tensor,
-    state_page_mapping: torch.Tensor,
+    checkpoint_page_mapping: torch.Tensor,
     *,
     page_size: int,
 ) -> torch.Tensor | None:
     """SM80 bridge for SGLang-style fixed-row C4 production.
 
-    ``projected`` and ``state`` contain the official overlap layout
-    ``[kv_left, kv_right, score_left, score_right]`` in FP32.  The returned
-    tensor has one row per input token; non-boundary rows are zero and are
-    suppressed by the fixed publication-location mask.
+    ``projected`` and ``sequence_state`` contain the official overlap layout
+    ``[kv_left, kv_right, score_left, score_right]`` in FP32. ``checkpoint``
+    contains only ``[kv_left, score_left]`` for the prior page's final four
+    rows. The returned tensor has one row per input token; non-boundary rows
+    are zero and suppressed by the fixed publication-location mask.
     """
 
     tensors = (
         projected,
-        state,
+        sequence_state,
+        checkpoint,
         ape,
         positions,
         table_indices,
         raw_out_loc,
         ctx_page_table,
-        state_page_mapping,
+        checkpoint_page_mapping,
     )
     if (
         projected.ndim != 2
-        or state.ndim != 2
+        or sequence_state.ndim != 2
+        or checkpoint.ndim != 2
         or projected.shape[1] % 4
-        or state.shape[1] != projected.shape[1]
+        or sequence_state.shape[1] != projected.shape[1]
+        or checkpoint.shape[1] != projected.shape[1] // 2
+        or sequence_state.shape[0] % 8
+        or checkpoint.shape[0] % 4
         or ape.shape != (4, projected.shape[1] // 2)
         or projected.dtype is not torch.float32
-        or state.dtype is not torch.float32
+        or sequence_state.dtype is not torch.float32
+        or checkpoint.dtype is not torch.float32
         or ape.dtype is not torch.float32
         or page_size <= 0
         or page_size & (page_size - 1)
         or not all(t.is_cuda and t.is_contiguous() for t in tensors)
-        or any(t.dtype not in (torch.int32, torch.int64) for t in tensors[3:])
+        or any(t.dtype not in (torch.int32, torch.int64) for t in tensors[4:])
     ):
         return None
     rows = int(projected.shape[0])
@@ -3205,7 +3300,7 @@ def c4_online_pool_and_update(
         or table_indices.numel() != rows
         or raw_out_loc.numel() != rows
         or ctx_page_table.ndim != 2
-        or state_page_mapping.ndim != 1
+        or checkpoint_page_mapping.ndim != 1
     ):
         return None
 
@@ -3216,20 +3311,23 @@ def c4_online_pool_and_update(
     block_d = min(triton.next_power_of_2(head_dim), 256)
     _c4_online_pool_kernel[(rows, triton.cdiv(head_dim, block_d))](
         projected,
-        state,
+        sequence_state,
+        checkpoint,
         ape,
         positions,
         table_indices,
         ctx_page_table,
-        state_page_mapping,
+        checkpoint_page_mapping,
         output,
         rows=rows,
         head_dim=head_dim,
         projected_stride0=projected.stride(0),
-        state_stride0=state.stride(0),
+        sequence_state_stride0=sequence_state.stride(0),
+        checkpoint_stride0=checkpoint.stride(0),
+        sequence_state_slots=sequence_state.shape[0] // 8,
         ctx_page_table_stride0=ctx_page_table.stride(0),
         ctx_page_table_width=ctx_page_table.shape[1],
-        state_page_mapping_width=state_page_mapping.numel(),
+        checkpoint_page_mapping_width=checkpoint_page_mapping.numel(),
         page_size=int(page_size),
         BLOCK_D=block_d,
         num_warps=4,
@@ -3241,13 +3339,17 @@ def c4_online_pool_and_update(
         raw_out_loc,
         positions,
         table_indices,
-        state_page_mapping,
-        state,
+        checkpoint_page_mapping,
+        sequence_state,
+        checkpoint,
         rows=rows,
         projected_stride0=projected.stride(0),
-        state_stride0=state.stride(0),
-        state_page_mapping_width=state_page_mapping.numel(),
+        sequence_state_stride0=sequence_state.stride(0),
+        checkpoint_stride0=checkpoint.stride(0),
+        sequence_state_slots=sequence_state.shape[0] // 8,
+        checkpoint_page_mapping_width=checkpoint_page_mapping.numel(),
         page_size=int(page_size),
+        head_dim=head_dim,
         width=width,
         BLOCK=block,
         num_warps=4,
@@ -3262,20 +3364,15 @@ def _c128_online_pool_kernel(
     ape_ptr,
     positions_ptr,
     table_indices_ptr,
-    ctx_page_table_ptr,
-    state_page_mapping_ptr,
     output_ptr,
     rows: tl.constexpr,
     head_dim: tl.constexpr,
     projected_stride0: tl.constexpr,
     state_stride0: tl.constexpr,
-    ctx_page_table_stride0: tl.constexpr,
-    ctx_page_table_width: tl.constexpr,
-    state_page_mapping_width: tl.constexpr,
-    page_size: tl.constexpr,
+    state_sequence_slots: tl.constexpr,
     RATIO: tl.constexpr,
 ) -> None:
-    """Reduce one non-overlap C128 group from current rows plus paged carry."""
+    """Reduce one C128 group from current rows plus sequence-owned carry."""
 
     row = tl.program_id(0)
     d = tl.program_id(1)
@@ -3308,21 +3405,12 @@ def _c128_online_pool_kernel(
         & (candidate_pos == logical_pos)
     )
 
-    full_loc = tl.load(
-        ctx_page_table_ptr + table_idx * ctx_page_table_stride0 + logical_pos,
-        mask=(logical_pos >= 0) & (logical_pos < ctx_page_table_width),
-        other=-1,
+    state_loc = table_idx * RATIO + source_slot
+    persistent = (
+        (logical_pos >= 0)
+        & (table_idx >= 0)
+        & (table_idx < state_sequence_slots)
     )
-    full_page = full_loc // page_size
-    state_page = tl.load(
-        state_page_mapping_ptr + full_page,
-        mask=(full_loc >= 0)
-        & (full_page >= 0)
-        & (full_page < state_page_mapping_width),
-        other=-1,
-    )
-    state_loc = state_page * RATIO + (full_loc % RATIO)
-    persistent = (logical_pos >= 0) & (full_loc >= 0) & (state_page >= 0)
     d_mask = d < head_dim
 
     current_kv = tl.load(
@@ -3365,69 +3453,48 @@ def _c128_online_pool_kernel(
 def _c128_online_state_store_kernel(
     projected_ptr,
     ape_ptr,
-    raw_out_loc_ptr,
     positions_ptr,
     table_indices_ptr,
-    state_page_mapping_ptr,
     state_ptr,
     rows: tl.constexpr,
     head_dim: tl.constexpr,
     projected_stride0: tl.constexpr,
     state_stride0: tl.constexpr,
-    state_page_mapping_width: tl.constexpr,
-    page_size: tl.constexpr,
+    state_sequence_slots: tl.constexpr,
     RATIO: tl.constexpr,
     width: tl.constexpr,
     BLOCK: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    full_loc = tl.load(raw_out_loc_ptr + row)
-    full_page = full_loc // page_size
-    state_page = tl.load(
-        state_page_mapping_ptr + full_page,
-        mask=(full_loc >= 0)
-        & (full_page >= 0)
-        & (full_page < state_page_mapping_width),
-        other=-1,
-    )
-    state_loc = state_page * RATIO + (full_loc % RATIO)
+    pos = tl.load(positions_ptr + row)
+    table_idx = tl.load(table_indices_ptr + row)
+    state_loc = table_idx * RATIO + (pos % RATIO)
 
     # A long prefill may contain more than one group.  Preserve only the last
     # current-call writer to each physical ring slot after every boundary row
     # has consumed current-call projections directly.
     later_row = row + RATIO
     later_in_range = later_row < rows
-    later_full_loc = tl.load(
-        raw_out_loc_ptr + later_row,
-        mask=later_in_range,
-        other=-1,
-    )
-    later_full_page = later_full_loc // page_size
-    later_state_page = tl.load(
-        state_page_mapping_ptr + later_full_page,
-        mask=later_in_range
-        & (later_full_loc >= 0)
-        & (later_full_page >= 0)
-        & (later_full_page < state_page_mapping_width),
-        other=-1,
-    )
-    later_state_loc = later_state_page * RATIO + (later_full_loc % RATIO)
-    pos = tl.load(positions_ptr + row)
-    table_idx = tl.load(table_indices_ptr + row)
     later_pos = tl.load(positions_ptr + later_row, mask=later_in_range, other=-1)
     later_table = tl.load(
         table_indices_ptr + later_row,
         mask=later_in_range,
         other=-1,
     )
+    later_state_loc = later_table * RATIO + (later_pos % RATIO)
     shadowed = (
         later_in_range
         & (later_table == table_idx)
         & (later_pos == pos + RATIO)
         & (later_state_loc == state_loc)
     )
-    valid = (state_page >= 0) & (~shadowed) & (offsets < width)
+    valid = (
+        (table_idx >= 0)
+        & (table_idx < state_sequence_slots)
+        & (~shadowed)
+        & (offsets < width)
+    )
     value = tl.load(
         projected_ptr + row * projected_stride0 + offsets,
         mask=valid,
@@ -3450,11 +3517,6 @@ def c128_online_pool_and_update(
     ape: torch.Tensor,
     positions: torch.Tensor,
     table_indices: torch.Tensor,
-    raw_out_loc: torch.Tensor,
-    ctx_page_table: torch.Tensor,
-    state_page_mapping: torch.Tensor,
-    *,
-    page_size: int,
 ) -> torch.Tensor | None:
     """SM80 fixed-row producer for the official C128 non-overlap contract."""
 
@@ -3464,9 +3526,6 @@ def c128_online_pool_and_update(
         ape,
         positions,
         table_indices,
-        raw_out_loc,
-        ctx_page_table,
-        state_page_mapping,
     )
     if (
         projected.ndim != 2
@@ -3477,9 +3536,6 @@ def c128_online_pool_and_update(
         or projected.dtype is not torch.float32
         or state.dtype is not torch.float32
         or ape.dtype is not torch.float32
-        or page_size <= 0
-        or page_size & (page_size - 1)
-        or page_size % 128
         or not all(t.is_cuda and t.is_contiguous() for t in tensors)
         or any(t.dtype not in (torch.int32, torch.int64) for t in tensors[3:])
     ):
@@ -3490,9 +3546,7 @@ def c128_online_pool_and_update(
     if (
         positions.numel() != rows
         or table_indices.numel() != rows
-        or raw_out_loc.numel() != rows
-        or ctx_page_table.ndim != 2
-        or state_page_mapping.ndim != 1
+        or state.shape[0] % 128
     ):
         return None
 
@@ -3504,17 +3558,12 @@ def c128_online_pool_and_update(
         ape,
         positions,
         table_indices,
-        ctx_page_table,
-        state_page_mapping,
         output,
         rows=rows,
         head_dim=head_dim,
         projected_stride0=projected.stride(0),
         state_stride0=state.stride(0),
-        ctx_page_table_stride0=ctx_page_table.stride(0),
-        ctx_page_table_width=ctx_page_table.shape[1],
-        state_page_mapping_width=state_page_mapping.numel(),
-        page_size=int(page_size),
+        state_sequence_slots=state.shape[0] // 128,
         RATIO=128,
         num_warps=4,
     )
@@ -3523,17 +3572,14 @@ def c128_online_pool_and_update(
     _c128_online_state_store_kernel[(rows, triton.cdiv(width, block))](
         projected,
         ape,
-        raw_out_loc,
         positions,
         table_indices,
-        state_page_mapping,
         state,
         rows=rows,
         head_dim=head_dim,
         projected_stride0=projected.stride(0),
         state_stride0=state.stride(0),
-        state_page_mapping_width=state_page_mapping.numel(),
-        page_size=int(page_size),
+        state_sequence_slots=state.shape[0] // 128,
         RATIO=128,
         width=width,
         BLOCK=block,

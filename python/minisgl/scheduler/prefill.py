@@ -54,6 +54,13 @@ class PrefillAdder:
             return self.cache_manager.unlock(handle)
 
         table_idx = self.table_manager.allocate()
+        acquire_sequence_slot = getattr(
+            getattr(self.cache_manager, "kv_cache", None),
+            "acquire_sequence_slot",
+            None,
+        )
+        if callable(acquire_sequence_slot):
+            acquire_sequence_slot(table_idx, req.lifecycle.generation_id)
         if cached_len > 0:  # NOTE: set the cached part
             device_ids = self.table_manager.token_pool[table_idx][:cached_len]
             page_entry = self.table_manager.page_table[table_idx][:cached_len]

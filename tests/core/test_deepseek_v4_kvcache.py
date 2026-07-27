@@ -4,7 +4,11 @@ import minisgl.core as core
 import pytest
 import torch
 from minisgl.core import Req, SamplingParams
-from minisgl.kvcache import create_kvcache_pool, estimate_kvcache_bytes_per_page
+from minisgl.kvcache import (
+    create_kvcache_pool,
+    estimate_c4_sequence_state_bytes,
+    estimate_kvcache_bytes_per_page,
+)
 from minisgl.kvcache.deepseek_v4_pool import (
     DeepSeekV4KVCache,
     DSV4SWAPageHandles,
@@ -201,19 +205,25 @@ def test_deepseek_v4_pool_factory_defaults_to_bf16_and_maps_layers():
     assert pool.indexer_cache(1).shape == (8, 4)
     assert pool.attention_compress_state(1).last_dim == 32
     assert pool.indexer_compress_state(1).last_dim == 16
+    assert pool.attention_compress_state(1).kv_score_buffer.kv_score.shape == (
+        2 * pool.C4_STATE_RING_SIZE,
+        32,
+    )
+    assert pool.attention_c4_checkpoint(1).kv_score_buffer.kv_score.shape == (
+        8 * pool.C4_CHECKPOINT_ROWS,
+        16,
+    )
+    assert pool.indexer_c4_checkpoint(1).kv_score_buffer.kv_score.shape == (
+        8 * pool.C4_CHECKPOINT_ROWS,
+        8,
+    )
     assert pool.attention_compress_state(2).last_dim == 16
     assert (
         pool.attention_compress_state(2).kv_score_buffer.kv_score.dtype
         is torch.float32
     )
 
-    max_swa_loc = torch.tensor([pool.num_tokens - 1], dtype=torch.int32)
-    state_loc = pool.attention_compress_state(1).translate_from_swa_loc_to_state_loc(max_swa_loc)
-    state_size = pool.attention_compress_state(1).kv_score_buffer.kv_score.shape[0]
-    assert int(state_loc.item()) < state_size
-
-
-def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
+def test_deepseek_v4_memory_estimator_excludes_fixed_sequence_state():
     cfg = _tiny_dsv4_config([4, 128, 0])
 
     assert (
@@ -222,8 +232,221 @@ def test_deepseek_v4_memory_estimator_accounts_for_ring_state_pools():
             page_size=1,
             tp_size=1,
         )
-        == 9785
+        == 441
     )
+    assert estimate_c4_sequence_state_bytes(cfg, 2) == 4608
+
+
+def test_c128_sequence_slot_owner_no_clear_reorder_dummy_abort_completion_and_reuse():
+    pool = _make_dsv4_pool(
+        [128, 128],
+        num_pages=4,
+        page_size=256,
+        max_running_req=2,
+    )
+    assert pool.c128_sequence_slots == 3
+    assert pool.c128_sequence_state_bytes == 2 * 3 * 128 * 2 * 8 * 4
+
+    state0 = pool.attention_compress_state(0).kv_score_buffer.kv_score
+    state1 = pool.attention_compress_state(1).kv_score_buffer.kv_score
+    state0[: 2 * 128].fill_(101)
+    state1[: 2 * 128].fill_(-101)
+    pool.acquire_c128_sequence_slot(0, 10)
+    pool.acquire_c128_sequence_slot(1, 11)
+    assert torch.all(state0[: 2 * 128] == 101)
+    assert torch.all(state1[: 2 * 128] == -101)
+    state0[0:7].fill_(10)
+    state0[128:133].fill_(11)
+    state1[0:7].fill_(20)
+    state1[128:133].fill_(21)
+
+    # Reordering batch rows changes only the order of stable table indices.
+    reordered = torch.tensor([1, 0], dtype=torch.long)
+    assert torch.all(state0[reordered[0] * 128 : reordered[0] * 128 + 5] == 11)
+    assert torch.all(state0[reordered[1] * 128 : reordered[1] * 128 + 7] == 10)
+
+    # Graph padding owns the extra slot and cannot alias either live request.
+    dummy_start = 2 * 128
+    live_before = state0[: 2 * 128].clone()
+    state0[dummy_start : dummy_start + 4].fill_(99)
+    assert torch.equal(state0[: 2 * 128], live_before)
+
+    # Page allocation/eviction cannot clear or own sequence state.
+    pool.on_pages_allocated(torch.tensor([0], dtype=torch.int32), page_size=256)
+    assert torch.all(state0[:7] == 10)
+    pool.on_token_indices_freed(torch.arange(256, dtype=torch.int32), page_size=256)
+    assert torch.all(state0[:7] == 10)
+
+    # Abort and completion use the same owner-checked retirement transition.
+    slot0_before_release = state0[:128].clone()
+    pool.release_c128_sequence_slot(0, 10)
+    assert pool.c128_sequence_owner(0) is None
+    assert torch.equal(state0[:128], slot0_before_release)
+    assert torch.all(state0[128:133] == 11)
+    pool.acquire_c128_sequence_slot(0, 12)
+    assert pool.c128_sequence_owner(0) == 12
+    assert torch.equal(state0[:128], slot0_before_release)
+    pool.release_c128_sequence_slot(1, 11)
+    pool.release_c128_sequence_slot(0, 12)
+
+    # Repeated abort/completion-shaped reuse drops only logical ownership.
+    previous_payload: dict[int, torch.Tensor] = {}
+    for generation in range(13, 21):
+        slot = generation % 2
+        pool.acquire_c128_sequence_slot(slot, generation)
+        start = slot * 128
+        if slot in previous_payload:
+            assert torch.equal(state0[start : start + 128], previous_payload[slot])
+        state0[start : start + 9].fill_(generation)
+        payload = state0[start : start + 128].clone()
+        pool.release_c128_sequence_slot(slot, generation)
+        assert pool.c128_sequence_owner(slot) is None
+        assert torch.equal(state0[start : start + 128], payload)
+        previous_payload[slot] = payload
+    assert pool.c128_sequence_owner_count == 0
+
+    with pytest.raises(RuntimeError, match="owner mismatch"):
+        pool.release_c128_sequence_slot(0, 12)
+    with pytest.raises(ValueError, match="out of range"):
+        pool.acquire_c128_sequence_slot(2, 13)
+
+
+def test_c4_sequence_slot_owner_no_clear_attention_indexer_dummy_and_reuse():
+    pool = _make_dsv4_pool(
+        [4, 4],
+        num_pages=4,
+        page_size=256,
+        max_running_req=2,
+    )
+    assert pool.c4_sequence_slots == 3
+    assert pool.c4_sequence_state_bytes == (
+        2
+        * 3
+        * pool.C4_STATE_RING_SIZE
+        * 4
+        * (pool._head_dim + pool._index_head_dim)
+        * torch.float32.itemsize
+    )
+
+    attention = pool.attention_compress_state(0).kv_score_buffer.kv_score
+    indexer = pool.indexer_compress_state(0).kv_score_buffer.kv_score
+    checkpoint = pool.attention_c4_checkpoint(0).kv_score_buffer.kv_score
+    attention.fill_(101)
+    indexer.fill_(-101)
+    checkpoint.fill_(303)
+
+    pool.acquire_sequence_slot(0, 20)
+    pool.acquire_sequence_slot(1, 21)
+    assert pool.c4_sequence_owner(0) == 20
+    assert pool.c4_sequence_owner(1) == 21
+    assert torch.all(attention == 101)
+    assert torch.all(indexer == -101)
+
+    # Stable request slots do not follow transient batch-row reorder.
+    attention[: pool.C4_STATE_RING_SIZE].fill_(20)
+    attention[
+        pool.C4_STATE_RING_SIZE : 2 * pool.C4_STATE_RING_SIZE
+    ].fill_(21)
+    reordered = torch.tensor([1, 0])
+    assert torch.all(
+        attention[
+            reordered[0] * pool.C4_STATE_RING_SIZE :
+            (reordered[0] + 1) * pool.C4_STATE_RING_SIZE
+        ]
+        == 21
+    )
+
+    # The final physical slot is graph-only and cannot become a live owner.
+    dummy_start = 2 * pool.C4_STATE_RING_SIZE
+    live_before = attention[:dummy_start].clone()
+    attention[dummy_start:].fill_(404)
+    assert torch.equal(attention[:dummy_start], live_before)
+    with pytest.raises(ValueError, match="out of range"):
+        pool.acquire_sequence_slot(2, 22)
+
+    pool.release_sequence_slot(0, 20)
+    stale_attention = attention[: pool.C4_STATE_RING_SIZE].clone()
+    stale_indexer = indexer[: pool.C4_STATE_RING_SIZE].clone()
+    pool.acquire_sequence_slot(0, 22)
+    assert torch.equal(
+        attention[: pool.C4_STATE_RING_SIZE],
+        stale_attention,
+    )
+    assert torch.equal(
+        indexer[: pool.C4_STATE_RING_SIZE],
+        stale_indexer,
+    )
+    assert torch.all(checkpoint == 303)
+    pool.release_sequence_slot(0, 22)
+    pool.release_sequence_slot(1, 21)
+    assert pool.c4_sequence_owner_count == 0
+
+    with pytest.raises(RuntimeError, match="owner mismatch"):
+        pool.release_sequence_slot(0, 22)
+
+
+def test_c128_sequence_pool_keeps_graph_dummy_outside_live_owner_namespace():
+    pool = _make_dsv4_pool(
+        [128],
+        num_pages=4,
+        page_size=256,
+        max_running_req=2,
+    )
+    state_pool = pool.attention_compress_state(0)
+    state = state_pool.kv_score_buffer.kv_score
+    dummy_last_row = pool.c128_sequence_slots * 128 - 1
+    state[dummy_last_row].fill_(77)
+    state[0].fill_(11)
+    pool.acquire_c128_sequence_slot(0, 99)
+    pool.release_c128_sequence_slot(0, 99)
+
+    assert torch.all(state[0] == 11)
+    assert torch.all(state[dummy_last_row] == 77)
+    with pytest.raises(ValueError, match="out of range"):
+        pool.acquire_c128_sequence_slot(2, 99)
+
+
+def test_dsv4_radix_all_reusable_boundaries_are_128_aligned_and_do_not_own_c128_active_state():
+    page_size = 256
+    num_pages = 12
+    pool = _make_dsv4_pool(
+        [4, 128],
+        num_pages=num_pages,
+        page_size=page_size,
+        enable_component_loc_ownership=False,
+        max_running_req=2,
+    )
+    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    pool.acquire_c128_sequence_slot(0, 20)
+    c128_state = pool.attention_compress_state(1).kv_score_buffer.kv_score
+    c128_state[:17].fill_(7)
+
+    base = torch.arange(769, dtype=torch.int32)
+    _cache_finished_prompt(cm, 0, base)
+    full_hit = cm.match_req(PendingReq(1, base, SamplingParams(max_tokens=1))).cuda_handle
+    assert full_hit.cached_len == 3 * page_size
+    assert full_hit.cached_len % 128 == 0
+
+    fork = torch.cat([base[:600], torch.arange(169, dtype=torch.int32) + 100_000])
+    shared_hit = cm.match_req(PendingReq(2, fork, SamplingParams(max_tokens=1))).cuda_handle
+    assert shared_hit.cached_len == 2 * page_size
+    assert shared_hit.cached_len % 128 == 0
+    _cache_finished_prompt(cm, 1, fork)
+    fork_hit = cm.match_req(PendingReq(2, fork, SamplingParams(max_tokens=1))).cuda_handle
+    assert fork_hit.cached_len == 3 * page_size
+    assert fork_hit.cached_len % 128 == 0
+
+    stack = [cm.prefix_cache.root_node]
+    while stack:
+        node = stack.pop()
+        if not node.is_root():
+            assert node.length % page_size == 0
+            assert node.length % 128 == 0
+        stack.extend(node.children.values())
+
+    _evict_all_prefix(cm, pool, page_size)
+    assert torch.all(c128_state[:17] == 7)
+    pool.release_c128_sequence_slot(0, 20)
 
 
 def test_deepseek_v4_release_has_indexer_fp8_side_cache():
@@ -284,31 +507,9 @@ def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_sl
     assert torch.all(fp8_values[64:] == 11)
     assert torch.all(fp8_scales[:64] == 0)
     assert torch.all(fp8_scales[64:] == 12)
-    if enable_component_loc_ownership:
-        assert torch.all(c4_state[:8, : 2 * pool._head_dim] == 0)
-        assert torch.all(torch.isneginf(c4_state[:8, 2 * pool._head_dim :]))
-        assert torch.all(c4_state[8:-1] == 7)
-        assert torch.all(c4_state[-1, : 2 * pool._head_dim] == 0)
-        assert torch.all(torch.isneginf(c4_state[-1, 2 * pool._head_dim :]))
-    else:
-        assert torch.all(c4_state == 7)
-    if enable_component_loc_ownership:
-        assert torch.all(c128_state[:128, : pool._head_dim] == 0)
-        assert torch.all(torch.isneginf(c128_state[:128, pool._head_dim :]))
-        assert torch.all(c128_state[128:-1] == 8)
-        assert torch.all(c128_state[-1, : pool._head_dim] == 0)
-        assert torch.all(torch.isneginf(c128_state[-1, pool._head_dim :]))
-    else:
-        assert torch.all(c128_state == 8)
-    if enable_component_loc_ownership:
-        index_dim = pool._index_head_dim
-        assert torch.all(indexer_state[:8, : 2 * index_dim] == 0)
-        assert torch.all(torch.isneginf(indexer_state[:8, 2 * index_dim :]))
-        assert torch.all(indexer_state[8:-1] == 9)
-        assert torch.all(indexer_state[-1, : 2 * index_dim] == 0)
-        assert torch.all(torch.isneginf(indexer_state[-1, 2 * index_dim :]))
-    else:
-        assert torch.all(indexer_state == 9)
+    assert torch.all(c4_state == 7)
+    assert torch.all(indexer_state == 9)
+    assert torch.all(c128_state == 8)
 
 
 def test_deepseek_v4_pool_can_write_and_read_all_cache_components():
@@ -421,8 +622,13 @@ def test_deepseek_v4_radix_prefix_swa_window_128_boundary_is_page_safe():
     snapshot = cm.prefix_metrics_snapshot()
     assert snapshot["dsv4_retention"]["c4_slots"] == 32
     assert snapshot["dsv4_retention"]["c128_slots"] == 1
-    assert snapshot["dsv4_retention"]["c4_state_slots"] == pool.C4_STATE_RING_SIZE
-    assert snapshot["dsv4_retention"]["c128_state_slots"] == pool.C128_STATE_RING_SIZE
+    assert snapshot["dsv4_retention"]["c4_checkpoint_slots"] == pool.C4_CHECKPOINT_ROWS
+    assert snapshot["dsv4_retention"]["c4_sequence_state_bytes"] == (
+        pool.c4_sequence_state_bytes
+    )
+    assert snapshot["dsv4_retention"]["c128_sequence_state_bytes"] == (
+        pool.c128_sequence_state_bytes
+    )
 
 
 def test_deepseek_v4_radix_prefix_repeated_hit_evict_cycle_has_no_leak():
@@ -465,9 +671,8 @@ def test_dsv4_component_loc_ownership_releases_full_head_without_stale_component
     assert counts.c4_slots == 2 * (page_size // 4)
     assert counts.c128_slots == 2 * (page_size // 128)
     assert counts.c4_indexer_slots == 2 * (page_size // 4)
-    assert counts.c4_state_slots == 2 * pool.C4_STATE_RING_SIZE
-    assert counts.c128_state_slots == 2 * pool.C128_STATE_RING_SIZE
-    assert counts.c4_indexer_state_slots == 2 * pool.C4_STATE_RING_SIZE
+    assert counts.c4_checkpoint_slots == 2 * pool.C4_CHECKPOINT_ROWS
+    assert counts.c4_indexer_checkpoint_slots == 2 * pool.C4_CHECKPOINT_ROWS
     assert cm.prefix_cache.size_info.total_size == 2 * page_size
     assert cm.prefix_metrics_snapshot()["dsv4_component_ownership"]["live_full_pages"] == 1
 
@@ -479,9 +684,9 @@ def test_dsv4_component_loc_ownership_releases_full_head_without_stale_component
     component_pages = handle.get_dsv4_component_pages()
     assert component_pages is not None
     retained_c4_pages = component_pages.c4_pages.clone()
-    retained_c4_state_pages = component_pages.c4_state_pages.clone()
+    retained_c4_checkpoint_pages = component_pages.c4_checkpoint_pages.clone()
     assert retained_c4_pages.tolist() == [0, 1]
-    assert retained_c4_state_pages.tolist() == [0, 1]
+    assert retained_c4_checkpoint_pages.tolist() == [0, 1]
 
     cm.free_slots = torch.sort(cm.free_slots).values
     reuse = _allocate_req_with_ids(cm, 2, torch.arange(64, dtype=torch.int32) + 10_000)
@@ -493,7 +698,10 @@ def test_dsv4_component_loc_ownership_releases_full_head_without_stale_component
     )
     assert reused_components is not None
     assert reused_components.c4_pages[0].item() not in retained_c4_pages.tolist()
-    assert reused_components.c4_state_pages[0].item() not in retained_c4_state_pages.tolist()
+    assert (
+        reused_components.c4_checkpoint_pages[0].item()
+        not in retained_c4_checkpoint_pages.tolist()
+    )
     _finish_req(cm, reuse)
     cm.check_integrity()
 
@@ -501,7 +709,7 @@ def test_dsv4_component_loc_ownership_releases_full_head_without_stale_component
     pool.assert_no_leak()
 
 
-def test_dsv4_component_loc_ownership_retains_state_but_keeps_swa_safe_boundary():
+def test_dsv4_component_loc_ownership_retains_checkpoint_but_keeps_swa_safe_boundary():
     page_size = 128
     num_pages = 4
     pool = _make_dsv4_pool(
@@ -516,7 +724,7 @@ def test_dsv4_component_loc_ownership_retains_state_but_keeps_swa_safe_boundary(
     _cache_finished_prompt(cm, 0, prompt)
 
     # A 256-token request matches only the first 255 tokens, which page-aligns
-    # to the first page. That page has independent state, but no live SWA data,
+    # to the first page. That page has an independent checkpoint, but no live SWA data,
     # so the fixed point must still reject the hit.
     guarded = cm.match_req(
         PendingReq(1, prompt[:256], SamplingParams(max_tokens=1))
@@ -524,15 +732,15 @@ def test_dsv4_component_loc_ownership_retains_state_but_keeps_swa_safe_boundary(
     assert guarded.cached_len == 0
 
     # A 257-token request matches two full pages. The final page is the retained
-    # live SWA tail, while state pages are owned independently along the path.
+    # live SWA tail, while checkpoint pages are owned independently along the path.
     hit = cm.match_req(PendingReq(2, prompt[:257], SamplingParams(max_tokens=1))).cuda_handle
     assert hit.cached_len == 2 * page_size
     handles = hit.get_dsv4_component_pages()
     assert handles is not None
-    assert handles.has_required_state_pages
-    assert handles.c4_state_pages.tolist() == [0, 1]
-    assert handles.c128_state_pages.tolist() == [0, 1]
-    assert handles.c4_indexer_state_pages.tolist() == [0, 1]
+    assert handles.has_required_checkpoint_pages
+    assert handles.c4_checkpoint_pages.tolist() == [0, 1]
+    assert not hasattr(handles, "c128_state_pages")
+    assert handles.c4_indexer_checkpoint_pages.tolist() == [0, 1]
 
     _evict_all_prefix(cm, pool, page_size)
     pool.assert_no_leak()
@@ -573,7 +781,7 @@ def test_dsv4_swa_independent_lifecycle_tombstones_swa_without_component_invalid
     assert torch.all(matched[page_size:] >= 0)
     component_pages = handle.get_dsv4_component_pages()
     swa_pages = handle.get_dsv4_swa_pages()
-    assert component_pages is not None and component_pages.has_required_state_pages
+    assert component_pages is not None and component_pages.has_required_checkpoint_pages
     assert swa_pages is not None and swa_pages.swa_pages is not None
     assert swa_pages.swa_pages.tolist()[0] >= 0
     assert swa_pages.swa_pages.tolist()[1] >= 0

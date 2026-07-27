@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import gcd
 from typing import Literal
 
 import torch
@@ -15,14 +14,6 @@ DSV4CacheLayout = Literal["bf16_flat", "flashmla_fp8_packed"]
 
 def _indexer_fp8_cache_enabled() -> bool:
     return True
-
-
-def _lcm(a: int, b: int) -> int:
-    return a // gcd(a, b) * b
-
-
-def _align_up(value: int, alignment: int) -> int:
-    return div_ceil(value, alignment) * alignment
 
 
 def _clear_allocated_kv_modes() -> set[str]:
@@ -91,9 +82,8 @@ class DSV4AllocationCounts:
     c4_slots: int
     c128_slots: int
     c4_indexer_slots: int
-    c4_state_slots: int = 0
-    c128_state_slots: int = 0
-    c4_indexer_state_slots: int = 0
+    c4_checkpoint_slots: int = 0
+    c4_indexer_checkpoint_slots: int = 0
 
     @property
     def any_allocated(self) -> bool:
@@ -105,9 +95,8 @@ class DSV4AllocationCounts:
                 self.c4_slots,
                 self.c128_slots,
                 self.c4_indexer_slots,
-                self.c4_state_slots,
-                self.c128_state_slots,
-                self.c4_indexer_state_slots,
+                self.c4_checkpoint_slots,
+                self.c4_indexer_checkpoint_slots,
             )
         )
 
@@ -239,20 +228,21 @@ class DSV4ComponentPageHandles:
     c4_pages: torch.Tensor | None = None
     c128_pages: torch.Tensor | None = None
     c4_indexer_pages: torch.Tensor | None = None
-    c4_state_pages: torch.Tensor | None = None
-    c128_state_pages: torch.Tensor | None = None
-    c4_indexer_state_pages: torch.Tensor | None = None
+    c4_checkpoint_pages: torch.Tensor | None = None
+    c4_indexer_checkpoint_pages: torch.Tensor | None = None
 
     @property
     def num_pages(self) -> int:
         return div_ceil(self.length, self.page_size) if self.length else 0
 
     @property
-    def has_required_state_pages(self) -> bool:
+    def has_required_checkpoint_pages(self) -> bool:
         return (
-            (self.c4_pages is None or self.c4_state_pages is not None)
-            and (self.c128_pages is None or self.c128_state_pages is not None)
-            and (self.c4_indexer_pages is None or self.c4_indexer_state_pages is not None)
+            (self.c4_pages is None or self.c4_checkpoint_pages is not None)
+            and (
+                self.c4_indexer_pages is None
+                or self.c4_indexer_checkpoint_pages is not None
+            )
         )
 
     def slice_tokens(self, start: int, end: int) -> DSV4ComponentPageHandles:
@@ -280,9 +270,8 @@ class DSV4ComponentPageHandles:
             c4_pages=_slice(self.c4_pages),
             c128_pages=_slice(self.c128_pages),
             c4_indexer_pages=_slice(self.c4_indexer_pages),
-            c4_state_pages=_slice(self.c4_state_pages),
-            c128_state_pages=_slice(self.c128_state_pages),
-            c4_indexer_state_pages=_slice(self.c4_indexer_state_pages),
+            c4_checkpoint_pages=_slice(self.c4_checkpoint_pages),
+            c4_indexer_checkpoint_pages=_slice(self.c4_indexer_checkpoint_pages),
         )
 
     @staticmethod
@@ -309,9 +298,8 @@ class DSV4ComponentPageHandles:
             c4_pages=_cat("c4_pages"),
             c128_pages=_cat("c128_pages"),
             c4_indexer_pages=_cat("c4_indexer_pages"),
-            c4_state_pages=_cat("c4_state_pages"),
-            c128_state_pages=_cat("c128_state_pages"),
-            c4_indexer_state_pages=_cat("c4_indexer_state_pages"),
+            c4_checkpoint_pages=_cat("c4_checkpoint_pages"),
+            c4_indexer_checkpoint_pages=_cat("c4_indexer_checkpoint_pages"),
         )
 
 
@@ -340,69 +328,72 @@ class DSV4KVAndScore:
 
 
 class DSV4CompressStatePool:
+    """Exact-sized mutable compressor carry owned by stable request slots."""
+
     def __init__(
         self,
         *,
         size: int,
-        ring_size: int,
         overlap: bool,
         head_dim: int,
         ratio: Literal[4, 128],
         dtype: torch.dtype,
         device: torch.device,
-        page_size: int,
     ) -> None:
         self.ratio = ratio
-        self.ring_size = ring_size
-        self.overlap = overlap
-        self.head_dim = head_dim
-        self.page_size = page_size
         last_dim = 2 * (1 + int(overlap)) * head_dim
-        padded_size = _align_up(size + ring_size + 1, _lcm(ratio, page_size))
         self.last_dim = last_dim
-        self.logical_size = size
         self.kv_score_buffer = DSV4KVAndScore(
-            torch.empty((padded_size, last_dim), dtype=dtype, device=device)
+            torch.empty((int(size), last_dim), dtype=dtype, device=device)
         )
-        self.kv_score_buffer[-1].clear()
 
-    def translate_from_swa_loc_to_state_loc(self, swa_loc: torch.Tensor) -> torch.Tensor:
-        page_size = max(self.page_size, 1)
-        swa_pages = swa_loc // page_size
-        state_loc = swa_pages * self.ring_size + (swa_loc % self.ring_size)
-        return torch.where(swa_loc < 0, -1, state_loc)
+    @property
+    def allocated_bytes(self) -> int:
+        tensor = self.kv_score_buffer.kv_score
+        return int(tensor.numel() * tensor.element_size())
 
-    def get_state_by_state_loc(self, state_loc: torch.Tensor) -> DSV4KVAndScore:
-        return self.kv_score_buffer[state_loc]
 
-    def set_state_by_state_loc(self, state_loc: torch.Tensor, value: DSV4KVAndScore) -> None:
-        self.kv_score_buffer[state_loc] = value
-        self.kv_score_buffer[-1].clear()
+class DSV4C4CheckpointPool:
+    """Minimal immutable C4 recovery tail: four left-half KV/score rows."""
 
-    def clear_state_locs(self, state_locs: torch.Tensor) -> None:
-        if state_locs.numel() == 0:
-            return
-        buffer = self.kv_score_buffer.kv_score
-        locs = torch.unique(state_locs.to(device=buffer.device, dtype=torch.long))
-        locs = locs[(locs >= 0) & (locs < self.kv_score_buffer.kv_score.shape[0])]
-        if locs.numel() == 0:
-            return
-        item_size = self.kv_score_buffer._item_size
-        buffer.index_fill_(0, locs, 0)
-        buffer[:, item_size:].index_fill_(0, locs, float("-inf"))
-        self.kv_score_buffer[-1].clear()
+    ROWS_PER_PAGE = 4
+
+    def __init__(
+        self,
+        *,
+        num_pages: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        self.num_pages = int(num_pages)
+        self.head_dim = int(head_dim)
+        self.kv_score_buffer = DSV4KVAndScore(
+            torch.empty(
+                (self.num_pages * self.ROWS_PER_PAGE, 2 * self.head_dim),
+                dtype=dtype,
+                device=device,
+            )
+        )
+
+    @property
+    def allocated_bytes(self) -> int:
+        tensor = self.kv_score_buffer.kv_score
+        return int(tensor.numel() * tensor.element_size())
 
 
 class DeepSeekV4KVCache(BaseKVCachePool):
-    """DSV4-specific KV pool with radix prefix reuse intentionally disabled.
+    """DSV4-specific KV pool with scheduler-owned component lifecycles.
 
     The scheduler owns a single full-token page table.  This pool derives all
     DSV4 component slots from that namespace and tracks page-level allocation
-    with refcounts, so C4/C128/indexer/cache-state buffers are released when
-    the owning full-token pages are released.
+    with refcounts. Completed C4/C128/indexer buffers and compact immutable C4
+    checkpoints follow full-page/radix ownership. Mutable C4 and C128 working
+    state is independently owned by stable request slots.
     """
 
     C4_STATE_RING_SIZE = 8
+    C4_CHECKPOINT_ROWS = 4
     C128_STATE_RING_SIZE = 128
 
     def __init__(
@@ -428,6 +419,11 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._num_pages = num_pages
         self._page_size = page_size
         self._num_tokens = num_pages * page_size
+        self._max_running_req = max(int(max_running_req or 1), 1)
+        self._c4_sequence_slots = self._max_running_req + 1
+        self._c4_sequence_owners: list[int | None] = [None] * self._max_running_req
+        self._c128_sequence_slots = self._max_running_req + 1
+        self._c128_sequence_owners: list[int | None] = [None] * self._max_running_req
         self._dummy_token_start = (
             self._num_tokens if dummy_token_start is None else int(dummy_token_start)
         )
@@ -452,8 +448,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._c128_slots = div_ceil(self._num_tokens, 128)
         self._c4_component_page_size = max(div_ceil(page_size, 4), 1)
         self._c128_component_page_size = max(div_ceil(page_size, 128), 1)
-        self._c4_state_page_size = self.C4_STATE_RING_SIZE
-        self._c128_state_page_size = self.C128_STATE_RING_SIZE
+        self._c4_checkpoint_page_size = self.C4_CHECKPOINT_ROWS
         self._c4_component_pages = div_ceil(self._c4_slots, self._c4_component_page_size)
         self._c128_component_pages = div_ceil(
             self._c128_slots,
@@ -558,17 +553,14 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._c4_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
         self._c128_refcount = torch.zeros(self._c128_slots, dtype=torch.int16, device=device)
         self._c4_indexer_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
-        self._c4_state_refcount = torch.zeros(
-            self._num_pages * self._c4_state_page_size,
+        self._c4_checkpoint_refcount = torch.zeros(
+            self._num_pages * self._c4_checkpoint_page_size,
             dtype=torch.int16,
             device=device,
         )
-        self._c128_state_refcount = torch.zeros(
-            self._num_pages * self._c128_state_page_size,
-            dtype=torch.int16,
-            device=device,
+        self._c4_indexer_checkpoint_refcount = torch.zeros_like(
+            self._c4_checkpoint_refcount
         )
-        self._c4_indexer_state_refcount = torch.zeros_like(self._c4_state_refcount)
         self._full_to_c4_page = torch.full(
             (self._num_pages,),
             -1,
@@ -577,9 +569,22 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         )
         self._full_to_c128_page = torch.full_like(self._full_to_c4_page, -1)
         self._full_to_c4_indexer_page = torch.full_like(self._full_to_c4_page, -1)
-        self._full_to_c4_state_page = torch.full_like(self._full_to_c4_page, -1)
-        self._full_to_c128_state_page = torch.full_like(self._full_to_c4_page, -1)
-        self._full_to_c4_indexer_state_page = torch.full_like(self._full_to_c4_page, -1)
+        self._full_to_c4_checkpoint_page = torch.full_like(
+            self._full_to_c4_page,
+            -1,
+        )
+        self._full_to_c4_indexer_checkpoint_page = torch.full_like(
+            self._full_to_c4_page,
+            -1,
+        )
+        if not self._component_loc_ownership_enabled and self._c4_layer_count:
+            identity_pages = torch.arange(
+                self._num_pages,
+                dtype=torch.int32,
+                device=device,
+            )
+            self._full_to_c4_checkpoint_page.copy_(identity_pages)
+            self._full_to_c4_indexer_checkpoint_page.copy_(identity_pages)
         self._free_c4_pages = torch.arange(
             self._c4_component_pages,
             dtype=torch.int32,
@@ -595,17 +600,12 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             dtype=torch.int32,
             device=device,
         )
-        self._free_c4_state_pages = torch.arange(
+        self._free_c4_checkpoint_pages = torch.arange(
             self._num_pages,
             dtype=torch.int32,
             device=device,
         )
-        self._free_c128_state_pages = torch.arange(
-            self._num_pages,
-            dtype=torch.int32,
-            device=device,
-        )
-        self._free_c4_indexer_state_pages = torch.arange(
+        self._free_c4_indexer_checkpoint_pages = torch.arange(
             self._num_pages,
             dtype=torch.int32,
             device=device,
@@ -615,38 +615,52 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._indexer_compress_state_pools: list[DSV4CompressStatePool | None] = [
             None
         ] * self._num_layers
+        self._c4_checkpoint_pools: list[DSV4C4CheckpointPool | None] = [
+            None
+        ] * self._num_layers
+        self._c4_indexer_checkpoint_pools: list[DSV4C4CheckpointPool | None] = [
+            None
+        ] * self._num_layers
         for mapping in self._layer_mapping:
             if mapping.compress_ratio == 4:
                 self._compress_state_pools[mapping.layer_id] = DSV4CompressStatePool(
-                    size=self._num_pages * self.C4_STATE_RING_SIZE,
-                    ring_size=self.C4_STATE_RING_SIZE,
+                    size=self._c4_sequence_slots * self.C4_STATE_RING_SIZE,
                     overlap=True,
                     head_dim=self._head_dim,
                     ratio=4,
                     dtype=self._policy.compress_state_dtype,
                     device=device,
-                    page_size=page_size,
                 )
                 self._indexer_compress_state_pools[mapping.layer_id] = DSV4CompressStatePool(
-                    size=self._num_pages * self.C4_STATE_RING_SIZE,
-                    ring_size=self.C4_STATE_RING_SIZE,
+                    size=self._c4_sequence_slots * self.C4_STATE_RING_SIZE,
                     overlap=True,
                     head_dim=self._index_head_dim,
                     ratio=4,
                     dtype=self._policy.compress_state_dtype,
                     device=device,
-                    page_size=page_size,
+                )
+                self._c4_checkpoint_pools[mapping.layer_id] = DSV4C4CheckpointPool(
+                    num_pages=self._num_pages,
+                    head_dim=self._head_dim,
+                    dtype=self._policy.compress_state_dtype,
+                    device=device,
+                )
+                self._c4_indexer_checkpoint_pools[
+                    mapping.layer_id
+                ] = DSV4C4CheckpointPool(
+                    num_pages=self._num_pages,
+                    head_dim=self._index_head_dim,
+                    dtype=self._policy.compress_state_dtype,
+                    device=device,
                 )
             elif mapping.compress_ratio == 128:
                 self._compress_state_pools[mapping.layer_id] = DSV4CompressStatePool(
-                    size=self._num_pages * self.C128_STATE_RING_SIZE,
-                    ring_size=self.C128_STATE_RING_SIZE,
+                    size=self._c128_sequence_slots * self.C128_STATE_RING_SIZE,
                     overlap=False,
                     head_dim=self._head_dim,
                     ratio=128,
                     dtype=self._policy.c128_compress_state_dtype,
                     device=device,
-                    page_size=page_size,
                 )
 
     @property
@@ -722,18 +736,13 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 if self._c4_layer_count
                 else 0
             ),
-            c4_state_slots=(
-                int(torch.count_nonzero(self._c4_state_refcount).item())
+            c4_checkpoint_slots=(
+                int(torch.count_nonzero(self._c4_checkpoint_refcount).item())
                 if self._c4_layer_count
                 else 0
             ),
-            c128_state_slots=(
-                int(torch.count_nonzero(self._c128_state_refcount).item())
-                if self._c128_layer_count
-                else 0
-            ),
-            c4_indexer_state_slots=(
-                int(torch.count_nonzero(self._c4_indexer_state_refcount).item())
+            c4_indexer_checkpoint_slots=(
+                int(torch.count_nonzero(self._c4_indexer_checkpoint_refcount).item())
                 if self._c4_layer_count
                 else 0
             ),
@@ -794,28 +803,216 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         assert pool is not None, f"Layer {layer_id} has no attention compress state."
         return pool
 
+    def attention_c4_checkpoint(self, layer_id: int) -> DSV4C4CheckpointPool:
+        pool = self._c4_checkpoint_pools[layer_id]
+        assert pool is not None, f"Layer {layer_id} has no attention C4 checkpoint."
+        return pool
+
+    def indexer_c4_checkpoint(self, layer_id: int) -> DSV4C4CheckpointPool:
+        pool = self._c4_indexer_checkpoint_pools[layer_id]
+        assert pool is not None, f"Layer {layer_id} has no indexer C4 checkpoint."
+        return pool
+
+    @property
+    def c4_sequence_slots(self) -> int:
+        return self._c4_sequence_slots
+
+    @property
+    def c4_sequence_state_bytes(self) -> int:
+        return sum(
+            pool.allocated_bytes
+            for pool in (
+                *self._compress_state_pools,
+                *self._indexer_compress_state_pools,
+            )
+            if pool is not None and pool.ratio == 4
+        )
+
+    @property
+    def c4_checkpoint_bytes(self) -> int:
+        return sum(
+            pool.allocated_bytes
+            for pool in (
+                *self._c4_checkpoint_pools,
+                *self._c4_indexer_checkpoint_pools,
+            )
+            if pool is not None
+        )
+
+    @property
+    def c4_sequence_owner_count(self) -> int:
+        return sum(owner is not None for owner in self._c4_sequence_owners)
+
+    def c4_sequence_owner(self, table_idx: int) -> int | None:
+        self._validate_live_c4_sequence_slot(table_idx)
+        return self._c4_sequence_owners[int(table_idx)]
+
+    def acquire_c4_sequence_slot(self, table_idx: int, generation_id: int) -> None:
+        if not self._c4_layer_count:
+            return
+        self._validate_live_c4_sequence_slot(table_idx)
+        table_idx = int(table_idx)
+        generation_id = int(generation_id)
+        owner = self._c4_sequence_owners[table_idx]
+        if owner is not None:
+            raise RuntimeError(
+                "DSV4 C4 sequence slot is already owned: "
+                f"table_idx={table_idx}, owner_generation={owner}, "
+                f"new_generation={generation_id}"
+            )
+        self._c4_sequence_owners[table_idx] = generation_id
+
+    def release_c4_sequence_slot(self, table_idx: int, generation_id: int) -> None:
+        if not self._c4_layer_count:
+            return
+        self._validate_live_c4_sequence_slot(table_idx)
+        table_idx = int(table_idx)
+        generation_id = int(generation_id)
+        owner = self._c4_sequence_owners[table_idx]
+        if owner != generation_id:
+            raise RuntimeError(
+                "DSV4 C4 sequence slot owner mismatch on release: "
+                f"table_idx={table_idx}, owner_generation={owner}, "
+                f"release_generation={generation_id}"
+            )
+        self._c4_sequence_owners[table_idx] = None
+
+    def _validate_live_c4_sequence_slot(self, table_idx: int) -> None:
+        table_idx = int(table_idx)
+        if table_idx < 0 or table_idx >= self._max_running_req:
+            raise ValueError(
+                "DSV4 live C4 sequence slot is out of range: "
+                f"table_idx={table_idx}, max_running_req={self._max_running_req}"
+            )
+
+    @property
+    def c128_sequence_slots(self) -> int:
+        return self._c128_sequence_slots
+
+    @property
+    def c128_sequence_state_bytes(self) -> int:
+        return sum(
+            pool.allocated_bytes
+            for pool in self._compress_state_pools
+            if pool is not None and pool.ratio == 128
+        )
+
+    @property
+    def c128_sequence_owner_count(self) -> int:
+        return sum(owner is not None for owner in self._c128_sequence_owners)
+
+    def c128_sequence_owner(self, table_idx: int) -> int | None:
+        self._validate_live_c128_sequence_slot(table_idx)
+        return self._c128_sequence_owners[int(table_idx)]
+
+    def acquire_c128_sequence_slot(self, table_idx: int, generation_id: int) -> None:
+        if not self._c128_layer_count:
+            return
+        self._validate_live_c128_sequence_slot(table_idx)
+        table_idx = int(table_idx)
+        generation_id = int(generation_id)
+        owner = self._c128_sequence_owners[table_idx]
+        if owner is not None:
+            raise RuntimeError(
+                "DSV4 C128 sequence slot is already owned: "
+                f"table_idx={table_idx}, owner_generation={owner}, "
+                f"new_generation={generation_id}"
+            )
+        self._c128_sequence_owners[table_idx] = generation_id
+
+    def release_c128_sequence_slot(self, table_idx: int, generation_id: int) -> None:
+        if not self._c128_layer_count:
+            return
+        self._validate_live_c128_sequence_slot(table_idx)
+        table_idx = int(table_idx)
+        generation_id = int(generation_id)
+        owner = self._c128_sequence_owners[table_idx]
+        if owner != generation_id:
+            raise RuntimeError(
+                "DSV4 C128 sequence slot owner mismatch on release: "
+                f"table_idx={table_idx}, owner_generation={owner}, "
+                f"release_generation={generation_id}"
+            )
+        self._c128_sequence_owners[table_idx] = None
+
+    def _validate_live_c128_sequence_slot(self, table_idx: int) -> None:
+        table_idx = int(table_idx)
+        if table_idx < 0 or table_idx >= self._max_running_req:
+            raise ValueError(
+                "DSV4 live C128 sequence slot is out of range: "
+                f"table_idx={table_idx}, max_running_req={self._max_running_req}"
+            )
+
+    def acquire_sequence_slot(self, table_idx: int, generation_id: int) -> None:
+        """Atomically owner-tag all DSV4 mutable state for one request slot."""
+
+        self._validate_live_c4_sequence_slot(table_idx)
+        table_idx = int(table_idx)
+        generation_id = int(generation_id)
+        c4_owner = self._c4_sequence_owners[table_idx]
+        c128_owner = self._c128_sequence_owners[table_idx]
+        if self._c4_layer_count and c4_owner is not None:
+            raise RuntimeError(
+                "DSV4 C4 sequence slot is already owned: "
+                f"table_idx={table_idx}, owner_generation={c4_owner}, "
+                f"new_generation={generation_id}"
+            )
+        if self._c128_layer_count and c128_owner is not None:
+            raise RuntimeError(
+                "DSV4 C128 sequence slot is already owned: "
+                f"table_idx={table_idx}, owner_generation={c128_owner}, "
+                f"new_generation={generation_id}"
+            )
+        if self._c4_layer_count:
+            self._c4_sequence_owners[table_idx] = generation_id
+        if self._c128_layer_count:
+            self._c128_sequence_owners[table_idx] = generation_id
+
+    def release_sequence_slot(self, table_idx: int, generation_id: int) -> None:
+        """Atomically invalidate all DSV4 mutable state after retirement."""
+
+        self._validate_live_c4_sequence_slot(table_idx)
+        table_idx = int(table_idx)
+        generation_id = int(generation_id)
+        c4_owner = self._c4_sequence_owners[table_idx]
+        c128_owner = self._c128_sequence_owners[table_idx]
+        if self._c4_layer_count and c4_owner != generation_id:
+            raise RuntimeError(
+                "DSV4 C4 sequence slot owner mismatch on release: "
+                f"table_idx={table_idx}, owner_generation={c4_owner}, "
+                f"release_generation={generation_id}"
+            )
+        if self._c128_layer_count and c128_owner != generation_id:
+            raise RuntimeError(
+                "DSV4 C128 sequence slot owner mismatch on release: "
+                f"table_idx={table_idx}, owner_generation={c128_owner}, "
+                f"release_generation={generation_id}"
+            )
+        if self._c4_layer_count:
+            self._c4_sequence_owners[table_idx] = None
+        if self._c128_layer_count:
+            self._c128_sequence_owners[table_idx] = None
+
     def indexer_compress_state(self, layer_id: int) -> DSV4CompressStatePool:
         pool = self._indexer_compress_state_pools[layer_id]
         assert pool is not None, f"Layer {layer_id} has no indexer compress state."
         return pool
 
-    def compress_state_page_mapping(
+    def c4_checkpoint_page_mapping(
         self,
-        ratio: Literal[4, 128],
+        ratio: Literal[4],
         *,
         component: Literal["attention", "indexer"] = "attention",
     ) -> torch.Tensor:
-        """Return the scheduler-owned full-page -> compressor-state-page map."""
+        """Return the scheduler-owned full-page -> compact-checkpoint map."""
 
-        if ratio == 4:
-            return (
-                self._full_to_c4_indexer_state_page
-                if component == "indexer"
-                else self._full_to_c4_state_page
-            )
-        if component == "indexer":
-            raise ValueError("DSV4 C128 has no indexer compression state")
-        return self._full_to_c128_state_page
+        if ratio != 4:
+            raise ValueError("Only C4 has a page-owned compact checkpoint")
+        return (
+            self._full_to_c4_indexer_checkpoint_page
+            if component == "indexer"
+            else self._full_to_c4_checkpoint_page
+        )
 
     def component_cache(self, layer_id: int) -> torch.Tensor:
         mapping = self.get_layer_mapping(layer_id)
@@ -930,30 +1127,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             return
         self._c128_buffer.index_fill_(1, locs, 0)
 
-    def _clear_c4_state_locs(self, locs: torch.Tensor) -> None:
-        locs = self._sanitize_locs(locs, self._num_pages * self._c4_state_page_size)
-        if locs.numel() == 0:
-            return
-        for pool in self._compress_state_pools:
-            if pool is not None and pool.ratio == 4:
-                pool.clear_state_locs(locs)
-
-    def _clear_c4_indexer_state_locs(self, locs: torch.Tensor) -> None:
-        locs = self._sanitize_locs(locs, self._num_pages * self._c4_state_page_size)
-        if locs.numel() == 0:
-            return
-        for pool in self._indexer_compress_state_pools:
-            if pool is not None and pool.ratio == 4:
-                pool.clear_state_locs(locs)
-
-    def _clear_c128_state_locs(self, locs: torch.Tensor) -> None:
-        locs = self._sanitize_locs(locs, self._num_pages * self._c128_state_page_size)
-        if locs.numel() == 0:
-            return
-        for pool in self._compress_state_pools:
-            if pool is not None and pool.ratio == 128:
-                pool.clear_state_locs(locs)
-
     def _sanitize_locs(self, locs: torch.Tensor, upper_bound: int) -> torch.Tensor:
         if locs.numel() == 0:
             return torch.empty(0, dtype=torch.long, device=self.device)
@@ -984,31 +1157,11 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             if "component" in clear_modes:
                 self._clear_c4_component_locs(c4_locs)
                 self._clear_c4_indexer_component_locs(c4_locs)
-            if "state" in clear_modes:
-                state_locs = self.state_locs_from_full_locs(
-                    full_locs,
-                    4,
-                    component="attention",
-                )
-                indexer_state_locs = self.state_locs_from_full_locs(
-                    full_locs,
-                    4,
-                    component="indexer",
-                )
-                self._clear_c4_state_locs(state_locs)
-                self._clear_c4_indexer_state_locs(indexer_state_locs)
         if self._c128_layer_count:
             c128_locs = torch.unique(full_locs // 128)
             self._c128_refcount[c128_locs] += 1
             if "component" in clear_modes:
                 self._clear_c128_component_locs(c128_locs)
-            if "state" in clear_modes:
-                state_locs = self.state_locs_from_full_locs(
-                    full_locs,
-                    128,
-                    component="attention",
-                )
-                self._clear_c128_state_locs(state_locs)
 
     def on_token_indices_freed(
         self,
@@ -1069,6 +1222,16 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         counts = self.allocation_counts
         if counts.any_allocated:
             raise RuntimeError(f"DSV4 KV cache slot leak: {counts}")
+        if self.c4_sequence_owner_count:
+            raise RuntimeError(
+                "DSV4 C4 sequence-state owner leak: "
+                f"owners={self._c4_sequence_owners}"
+            )
+        if self.c128_sequence_owner_count:
+            raise RuntimeError(
+                "DSV4 C128 sequence-state owner leak: "
+                f"owners={self._c128_sequence_owners}"
+            )
 
     def estimate_prefix_retention(
         self,
@@ -1088,15 +1251,15 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         c4_slots = retained_pages * div_ceil(page_size, 4) if self._c4_layer_count else 0
         c128_slots = retained_pages * div_ceil(page_size, 128) if self._c128_layer_count else 0
         c4_indexer_slots = c4_slots if self._c4_layer_count else 0
-        c4_state_slots = retained_pages * self.C4_STATE_RING_SIZE if self._c4_layer_count else 0
-        c128_state_slots = (
-            retained_pages * self.C128_STATE_RING_SIZE if self._c128_layer_count else 0
+        c4_checkpoint_slots = (
+            retained_pages * self.C4_CHECKPOINT_ROWS
+            if self._c4_layer_count
+            else 0
         )
-        c4_indexer_state_slots = c4_state_slots if self._c4_layer_count else 0
+        c4_indexer_checkpoint_slots = c4_checkpoint_slots
 
         dtype_size = self._dtype.itemsize
         c4_state_dtype_size = self._policy.compress_state_dtype.itemsize
-        c128_state_dtype_size = self._policy.c128_compress_state_dtype.itemsize
         legacy_swa_bytes = self._num_layers * retained_full_tokens * self._head_dim * dtype_size
         if self._swa_independent_lifecycle_enabled:
             runtime_swa_pages = self.runtime_swa_counters()["current_swa_tail_pages"]
@@ -1115,29 +1278,21 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             if self._use_indexer_fp8_cache
             else 0
         )
-        c4_state_bytes = (
+        c4_checkpoint_bytes = (
             self._c4_layer_count
             * retained_pages
-            * self.C4_STATE_RING_SIZE
-            * 4
-            * self._head_dim
-            * c4_state_dtype_size
-        )
-        c4_indexer_state_bytes = (
-            self._c4_layer_count
-            * retained_pages
-            * self.C4_STATE_RING_SIZE
-            * 4
-            * self._index_head_dim
-            * c4_state_dtype_size
-        )
-        c128_state_bytes = (
-            self._c128_layer_count
-            * retained_pages
-            * self.C128_STATE_RING_SIZE
+            * self.C4_CHECKPOINT_ROWS
             * 2
             * self._head_dim
-            * c128_state_dtype_size
+            * c4_state_dtype_size
+        )
+        c4_indexer_checkpoint_bytes = (
+            self._c4_layer_count
+            * retained_pages
+            * self.C4_CHECKPOINT_ROWS
+            * 2
+            * self._index_head_dim
+            * c4_state_dtype_size
         )
         retained_memory_bytes = (
             swa_bytes
@@ -1145,9 +1300,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             + c128_bytes
             + c4_indexer_bytes
             + c4_indexer_fp8_bytes
-            + c4_state_bytes
-            + c4_indexer_state_bytes
-            + c128_state_bytes
+            + c4_checkpoint_bytes
+            + c4_indexer_checkpoint_bytes
         )
         return {
             "retained_pages": retained_pages,
@@ -1155,9 +1309,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "c4_slots": c4_slots,
             "c128_slots": c128_slots,
             "c4_indexer_slots": c4_indexer_slots,
-            "c4_state_slots": c4_state_slots,
-            "c128_state_slots": c128_state_slots,
-            "c4_indexer_state_slots": c4_indexer_state_slots,
+            "c4_checkpoint_slots": c4_checkpoint_slots,
+            "c4_indexer_checkpoint_slots": c4_indexer_checkpoint_slots,
             "swa_independent_lifecycle": bool(self._swa_independent_lifecycle_enabled),
             "swa_tail_tokens": swa_tokens,
             "swa_bytes": swa_bytes,
@@ -1166,9 +1319,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "c128_bytes": c128_bytes,
             "c4_indexer_bytes": c4_indexer_bytes,
             "c4_indexer_fp8_bytes": c4_indexer_fp8_bytes,
-            "c4_state_bytes": c4_state_bytes,
-            "c4_indexer_state_bytes": c4_indexer_state_bytes,
-            "c128_state_bytes": c128_state_bytes,
+            "c4_checkpoint_bytes": c4_checkpoint_bytes,
+            "c4_indexer_checkpoint_bytes": c4_indexer_checkpoint_bytes,
+            "c4_sequence_state_bytes": self.c4_sequence_state_bytes,
+            "c128_sequence_state_bytes": self.c128_sequence_state_bytes,
             "retained_memory_bytes": retained_memory_bytes,
             "page_size_c128_aligned": page_size % 128 == 0,
         }
@@ -1299,20 +1453,15 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 self._c4_layer_count > 0,
                 "C4 indexer",
             ),
-            c4_state_pages=_gather(
-                self._full_to_c4_state_page,
+            c4_checkpoint_pages=_gather(
+                self._full_to_c4_checkpoint_page,
                 self._c4_layer_count > 0,
-                "C4 state",
+                "C4 checkpoint",
             ),
-            c128_state_pages=_gather(
-                self._full_to_c128_state_page,
-                self._c128_layer_count > 0,
-                "C128 state",
-            ),
-            c4_indexer_state_pages=_gather(
-                self._full_to_c4_indexer_state_page,
+            c4_indexer_checkpoint_pages=_gather(
+                self._full_to_c4_indexer_checkpoint_page,
                 self._c4_layer_count > 0,
-                "C4 indexer state",
+                "C4 indexer checkpoint",
             ),
         )
 
@@ -1395,48 +1544,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             swa_pages=swa_pages,
         )
 
-    def state_locs_from_full_locs(
-        self,
-        full_locs: torch.Tensor,
-        ratio: Literal[4, 128],
-        *,
-        component: Literal["attention", "indexer"] = "attention",
-    ) -> torch.Tensor:
-        if ratio == 4:
-            mapping = (
-                self._full_to_c4_indexer_state_page
-                if component == "indexer"
-                else self._full_to_c4_state_page
-            )
-            state_page_size = self._c4_state_page_size
-        else:
-            if component == "indexer":
-                raise ValueError("DSV4 C128 has no indexer compression state")
-            mapping = self._full_to_c128_state_page
-            state_page_size = self._c128_state_page_size
-
-        full_locs = full_locs.to(device=self.device, dtype=torch.long)
-        if full_locs.numel() == 0:
-            return full_locs
-        if not self._component_loc_ownership_enabled:
-            page_size = max(self._page_size, 1)
-            pages = full_locs.div(page_size, rounding_mode="floor")
-            state_locs = pages * state_page_size + (full_locs % state_page_size)
-            return torch.where(full_locs < 0, torch.full_like(state_locs, -1), state_locs)
-
-        full_pages = full_locs.div(self._page_size, rounding_mode="floor")
-        offsets = full_locs % state_page_size
-        valid = (full_locs >= 0) & (full_pages >= 0) & (full_pages < self._num_pages)
-        out = torch.full_like(full_locs, -1)
-        if bool(torch.any(valid)):
-            state_pages = mapping[full_pages[valid]]
-            if torch.any(state_pages < 0):
-                raise RuntimeError(
-                    "DSV4 state loc requested for full locs without active state mapping"
-                )
-            out[valid] = state_pages.to(torch.long) * state_page_size + offsets[valid]
-        return out
-
     def release_component_page_handles(self, handles: DSV4ComponentPageHandles | None) -> None:
         if handles is None or handles.length == 0:
             return
@@ -1466,29 +1573,21 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 free_attr="_free_c4_indexer_pages",
                 name="C4 indexer",
             )
-        if handles.c4_state_pages is not None:
+        if handles.c4_checkpoint_pages is not None:
             self._free_component_pages(
-                handles.c4_state_pages,
-                refcount=self._c4_state_refcount,
-                page_size=self._c4_state_page_size,
-                free_attr="_free_c4_state_pages",
-                name="C4 state",
+                handles.c4_checkpoint_pages,
+                refcount=self._c4_checkpoint_refcount,
+                page_size=self._c4_checkpoint_page_size,
+                free_attr="_free_c4_checkpoint_pages",
+                name="C4 checkpoint",
             )
-        if handles.c128_state_pages is not None:
+        if handles.c4_indexer_checkpoint_pages is not None:
             self._free_component_pages(
-                handles.c128_state_pages,
-                refcount=self._c128_state_refcount,
-                page_size=self._c128_state_page_size,
-                free_attr="_free_c128_state_pages",
-                name="C128 state",
-            )
-        if handles.c4_indexer_state_pages is not None:
-            self._free_component_pages(
-                handles.c4_indexer_state_pages,
-                refcount=self._c4_indexer_state_refcount,
-                page_size=self._c4_state_page_size,
-                free_attr="_free_c4_indexer_state_pages",
-                name="C4 indexer state",
+                handles.c4_indexer_checkpoint_pages,
+                refcount=self._c4_indexer_checkpoint_refcount,
+                page_size=self._c4_checkpoint_page_size,
+                free_attr="_free_c4_indexer_checkpoint_pages",
+                name="C4 indexer checkpoint",
             )
 
     def release_swa_page_handles(
@@ -1552,11 +1651,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         if self._c4_layer_count:
             counts.append(int(self._free_c4_pages.numel()))
             counts.append(int(self._free_c4_indexer_pages.numel()))
-            counts.append(int(self._free_c4_state_pages.numel()))
-            counts.append(int(self._free_c4_indexer_state_pages.numel()))
+            counts.append(int(self._free_c4_checkpoint_pages.numel()))
+            counts.append(int(self._free_c4_indexer_checkpoint_pages.numel()))
         if self._c128_layer_count:
             counts.append(int(self._free_c128_pages.numel()))
-            counts.append(int(self._free_c128_state_pages.numel()))
         return min(counts) if counts else self._num_pages
 
     def available_swa_pages(self) -> int:
@@ -1664,9 +1762,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             torch.any(self._full_to_c4_page[full_pages] >= 0)
             or torch.any(self._full_to_c128_page[full_pages] >= 0)
             or torch.any(self._full_to_c4_indexer_page[full_pages] >= 0)
-            or torch.any(self._full_to_c4_state_page[full_pages] >= 0)
-            or torch.any(self._full_to_c128_state_page[full_pages] >= 0)
-            or torch.any(self._full_to_c4_indexer_state_page[full_pages] >= 0)
+            or torch.any(self._full_to_c4_checkpoint_page[full_pages] >= 0)
+            or torch.any(
+                self._full_to_c4_indexer_checkpoint_page[full_pages] >= 0
+            )
         ):
             raise RuntimeError("DSV4 component allocation found stale full-to-component mapping")
 
@@ -1695,34 +1794,31 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             if "component" in clear_modes:
                 self._clear_c4_indexer_component_locs(indexer_locs, indexer_pages)
 
-            c4_state_pages = self._alloc_component_pages(
-                "_free_c4_state_pages",
+            c4_checkpoint_pages = self._alloc_component_pages(
+                "_free_c4_checkpoint_pages",
                 count,
-                "C4 state",
+                "C4 checkpoint",
             )
-            c4_state_locs = self._component_locs_from_pages(
-                c4_state_pages,
-                page_size=self._c4_state_page_size,
+            c4_checkpoint_locs = self._component_locs_from_pages(
+                c4_checkpoint_pages,
+                page_size=self._c4_checkpoint_page_size,
             )
-            self._c4_state_refcount[c4_state_locs] += 1
-            self._full_to_c4_state_page[full_pages] = c4_state_pages
-            # A newly assigned carry page must never expose data from its prior
-            # owner.  Online C4 reads valid prefix positions immediately, so
-            # initialization is part of allocation rather than a debug mode.
-            self._clear_c4_state_locs(c4_state_locs)
+            self._c4_checkpoint_refcount[c4_checkpoint_locs] += 1
+            self._full_to_c4_checkpoint_page[full_pages] = c4_checkpoint_pages
 
-            indexer_state_pages = self._alloc_component_pages(
-                "_free_c4_indexer_state_pages",
+            indexer_checkpoint_pages = self._alloc_component_pages(
+                "_free_c4_indexer_checkpoint_pages",
                 count,
-                "C4 indexer state",
+                "C4 indexer checkpoint",
             )
-            indexer_state_locs = self._component_locs_from_pages(
-                indexer_state_pages,
-                page_size=self._c4_state_page_size,
+            indexer_checkpoint_locs = self._component_locs_from_pages(
+                indexer_checkpoint_pages,
+                page_size=self._c4_checkpoint_page_size,
             )
-            self._c4_indexer_state_refcount[indexer_state_locs] += 1
-            self._full_to_c4_indexer_state_page[full_pages] = indexer_state_pages
-            self._clear_c4_indexer_state_locs(indexer_state_locs)
+            self._c4_indexer_checkpoint_refcount[indexer_checkpoint_locs] += 1
+            self._full_to_c4_indexer_checkpoint_page[
+                full_pages
+            ] = indexer_checkpoint_pages
 
         if self._c128_layer_count:
             c128_pages = self._alloc_component_pages("_free_c128_pages", count, "C128")
@@ -1735,21 +1831,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             if "component" in clear_modes:
                 self._clear_c128_component_locs(c128_locs)
 
-            c128_state_pages = self._alloc_component_pages(
-                "_free_c128_state_pages",
-                count,
-                "C128 state",
-            )
-            c128_state_locs = self._component_locs_from_pages(
-                c128_state_pages,
-                page_size=self._c128_state_page_size,
-            )
-            self._c128_state_refcount[c128_state_locs] += 1
-            self._full_to_c128_state_page[full_pages] = c128_state_pages
-            # C128 is an online carry owner: allocation must clear recycled KV
-            # and score slots before any prefix or boundary reduction can read
-            # the page, independent of optional diagnostic clear modes.
-            self._clear_c128_state_locs(c128_state_locs)
 
     def _release_component_pages_for_full_pages(
         self,
@@ -1783,18 +1864,15 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                         if self._c4_layer_count
                         else None
                     ),
-                    c4_state_pages=(
-                        self._full_to_c4_state_page[full_pages].clone()
+                    c4_checkpoint_pages=(
+                        self._full_to_c4_checkpoint_page[full_pages].clone()
                         if self._c4_layer_count
                         else None
                     ),
-                    c128_state_pages=(
-                        self._full_to_c128_state_page[full_pages].clone()
-                        if self._c128_layer_count
-                        else None
-                    ),
-                    c4_indexer_state_pages=(
-                        self._full_to_c4_indexer_state_page[full_pages].clone()
+                    c4_indexer_checkpoint_pages=(
+                        self._full_to_c4_indexer_checkpoint_page[
+                            full_pages
+                        ].clone()
                         if self._c4_layer_count
                         else None
                     ),
@@ -1804,9 +1882,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._full_to_c4_page[full_pages] = -1
         self._full_to_c128_page[full_pages] = -1
         self._full_to_c4_indexer_page[full_pages] = -1
-        self._full_to_c4_state_page[full_pages] = -1
-        self._full_to_c128_state_page[full_pages] = -1
-        self._full_to_c4_indexer_state_page[full_pages] = -1
+        self._full_to_c4_checkpoint_page[full_pages] = -1
+        self._full_to_c4_indexer_checkpoint_page[full_pages] = -1
 
     def _release_swa_pages_for_full_pages(
         self,
@@ -1920,9 +1997,8 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             ("C4", self._c4_refcount),
             ("C128", self._c128_refcount),
             ("C4 indexer", self._c4_indexer_refcount),
-            ("C4 state", self._c4_state_refcount),
-            ("C128 state", self._c128_state_refcount),
-            ("C4 indexer state", self._c4_indexer_state_refcount),
+            ("C4 checkpoint", self._c4_checkpoint_refcount),
+            ("C4 indexer checkpoint", self._c4_indexer_checkpoint_refcount),
         ):
             if torch.any(refcount < 0):
                 raise RuntimeError(f"DSV4 KV cache has negative {name} refcounts")
@@ -1961,9 +2037,12 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             ("C4", self._free_c4_pages, self._c4_component_pages),
             ("C128", self._free_c128_pages, self._c128_component_pages),
             ("C4 indexer", self._free_c4_indexer_pages, self._c4_component_pages),
-            ("C4 state", self._free_c4_state_pages, self._num_pages),
-            ("C128 state", self._free_c128_state_pages, self._num_pages),
-            ("C4 indexer state", self._free_c4_indexer_state_pages, self._num_pages),
+            ("C4 checkpoint", self._free_c4_checkpoint_pages, self._num_pages),
+            (
+                "C4 indexer checkpoint",
+                self._free_c4_indexer_checkpoint_pages,
+                self._num_pages,
+            ),
         ):
             if pages.numel() == 0:
                 continue
@@ -2055,7 +2134,6 @@ def _build_layer_mapping(
 def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) -> int:
     dtype_size = torch.bfloat16.itemsize
     c4_state_dtype_size = torch.float32.itemsize
-    c128_state_dtype_size = torch.float32.itemsize
     head_dim = model_config.head_dim
     index_head_dim = model_config.index_head_dim or head_dim
     ratios = model_config.compress_ratios or [0] * model_config.num_layers
@@ -2076,26 +2154,19 @@ def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) ->
         if _indexer_fp8_cache_enabled()
         else 0
     )
-    c4_state_bytes = (
+    c4_checkpoint_bytes = (
         c4_layers
-        * DeepSeekV4KVCache.C4_STATE_RING_SIZE
-        * 4
-        * head_dim
-        * c4_state_dtype_size
-    )
-    c4_indexer_state_bytes = (
-        c4_layers
-        * DeepSeekV4KVCache.C4_STATE_RING_SIZE
-        * 4
-        * index_head_dim
-        * c4_state_dtype_size
-    )
-    c128_state_bytes = (
-        c128_layers
-        * DeepSeekV4KVCache.C128_STATE_RING_SIZE
+        * DeepSeekV4KVCache.C4_CHECKPOINT_ROWS
         * 2
         * head_dim
-        * c128_state_dtype_size
+        * c4_state_dtype_size
+    )
+    c4_indexer_checkpoint_bytes = (
+        c4_layers
+        * DeepSeekV4KVCache.C4_CHECKPOINT_ROWS
+        * 2
+        * index_head_dim
+        * c4_state_dtype_size
     )
     return (
         swa_bytes
@@ -2103,20 +2174,71 @@ def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) ->
         + c128_bytes
         + indexer_bytes
         + indexer_fp8_extra_bytes
-        + c4_state_bytes
-        + c4_indexer_state_bytes
-        + c128_state_bytes
+        + c4_checkpoint_bytes
+        + c4_indexer_checkpoint_bytes
+    )
+
+
+def estimate_deepseek_v4_c4_sequence_state_bytes(
+    model_config,
+    max_running_req: int,
+    *,
+    include_dummy: bool = True,
+) -> int:
+    num_layers = int(getattr(model_config, "num_layers", 0) or 0)
+    head_dim = int(getattr(model_config, "head_dim", 0) or 0)
+    index_head_dim = int(
+        getattr(model_config, "index_head_dim", 0) or head_dim
+    )
+    ratios = list(getattr(model_config, "compress_ratios", None) or [0] * num_layers)
+    if len(ratios) < num_layers:
+        ratios += [0] * (num_layers - len(ratios))
+    c4_layers = sum(r == 4 for r in ratios[:num_layers])
+    sequence_slots = max(int(max_running_req), 1) + int(include_dummy)
+    return (
+        c4_layers
+        * sequence_slots
+        * DeepSeekV4KVCache.C4_STATE_RING_SIZE
+        * 4
+        * (head_dim + index_head_dim)
+        * torch.float32.itemsize
+    )
+
+
+def estimate_deepseek_v4_c128_sequence_state_bytes(
+    model_config,
+    max_running_req: int,
+    *,
+    include_dummy: bool = True,
+) -> int:
+    num_layers = int(getattr(model_config, "num_layers", 0) or 0)
+    head_dim = int(getattr(model_config, "head_dim", 0) or 0)
+    ratios = list(getattr(model_config, "compress_ratios", None) or [0] * num_layers)
+    if len(ratios) < num_layers:
+        ratios += [0] * (num_layers - len(ratios))
+    c128_layers = sum(r == 128 for r in ratios[:num_layers])
+    sequence_slots = max(int(max_running_req), 1) + int(include_dummy)
+    return (
+        c128_layers
+        * sequence_slots
+        * DeepSeekV4KVCache.C128_STATE_RING_SIZE
+        * 2
+        * head_dim
+        * torch.float32.itemsize
     )
 
 
 __all__ = [
     "DeepSeekV4KVCache",
     "DSV4AllocationCounts",
+    "DSV4C4CheckpointPool",
     "DSV4CacheLayoutPolicy",
     "DSV4ComponentPageHandles",
     "DSV4CompressStatePool",
     "DSV4KVAndScore",
     "DSV4LayerCacheMapping",
     "DSV4SWAPageHandles",
+    "estimate_deepseek_v4_c4_sequence_state_bytes",
+    "estimate_deepseek_v4_c128_sequence_state_bytes",
     "estimate_deepseek_v4_kvcache_bytes_per_page",
 ]

@@ -428,6 +428,13 @@ class Scheduler(SchedulerIOMixin):
         del uid, admission
 
     def _free_req_resources(self, req: Req) -> None:
+        release_sequence_slot = getattr(
+            getattr(self.cache_manager, "kv_cache", None),
+            "release_sequence_slot",
+            None,
+        )
+        if callable(release_sequence_slot):
+            release_sequence_slot(req.table_idx, req.lifecycle.generation_id)
         self.table_manager.free(req.table_idx)
         self.cache_manager.cache_req(req, finished=True)
 

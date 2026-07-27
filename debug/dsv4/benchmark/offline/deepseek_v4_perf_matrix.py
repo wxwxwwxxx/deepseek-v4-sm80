@@ -357,6 +357,34 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
         description="TARGET07 historical fixed benchmark: prompt 4096, decode 128, batch 4.",
     ),
     Scenario(
+        name="long_context_pressure_512k_bs4",
+        kind="long_context_pressure",
+        batch_size=4,
+        prompt_len=524288,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 16.3 resident BS4 pressure gate. Four deterministic prompts "
+            "differ at token zero, are admitted together, and produce exactly eight "
+            "tokens with EOS ignored."
+        ),
+    ),
+    Scenario(
+        name="long_context_pressure_1m_bs2",
+        kind="long_context_pressure",
+        batch_size=2,
+        prompt_len=1048568,
+        decode_len=8,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 16.3 exact-one-Mi resident BS2 pressure gate. Two deterministic "
+            "prompts differ at token zero, are admitted together, and reach exactly "
+            "1,048,576 total tokens with EOS ignored."
+        ),
+    ),
+    Scenario(
         name="decode_ladder_bs16",
         kind="decode_ladder",
         batch_size=16,
@@ -478,6 +506,66 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
             "Offline serving-style substitute: 112 total requests issued as seven "
             "same-process waves of 16, with mixed prompt and output lengths. "
             "The current offline scheduler does not model timed arrivals or RPS."
+        ),
+    ),
+    Scenario(
+        name="c128_short_churn_m1",
+        kind="serving_mixed",
+        batch_size=1,
+        prompt_len=16,
+        decode_len=4,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=16,
+        wave_size=1,
+        description=(
+            "TARGET 16.15 short-request churn: sixteen sequential M=1 waves "
+            "exercise repeated C128 owner generation reuse."
+        ),
+    ),
+    Scenario(
+        name="c128_short_churn_m16",
+        kind="serving_mixed",
+        batch_size=16,
+        prompt_len=16,
+        decode_len=4,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=64,
+        wave_size=16,
+        description=(
+            "TARGET 16.15 short-request churn: four M=16 waves exercise C128 "
+            "owner retirement and slot reuse."
+        ),
+    ),
+    Scenario(
+        name="c128_short_churn_m64",
+        kind="serving_mixed",
+        batch_size=64,
+        prompt_len=16,
+        decode_len=4,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=256,
+        wave_size=64,
+        description=(
+            "TARGET 16.2 benchmark-accounting gate: four M=64 waves exercise "
+            "C4/C128 owner retirement, EOS accounting, and slot reuse."
+        ),
+    ),
+    Scenario(
+        name="c128_short_churn_m128",
+        kind="serving_mixed",
+        batch_size=128,
+        prompt_len=16,
+        decode_len=4,
+        repeats=1,
+        warmup_repeats=0,
+        total_requests=256,
+        wave_size=128,
+        description=(
+            "TARGET 16.15 short-request churn: two M=128 waves exercise every "
+            "live C128 slot through retirement and reuse."
         ),
     ),
     Scenario(
@@ -2405,6 +2493,18 @@ def build_workload(
             )
         )
         output_lens.append(8)
+    elif scenario.kind == "long_context_pressure":
+        for idx in range(scenario.batch_size):
+            prompt = _random_tokens(
+                rng,
+                scenario.prompt_len,
+                vocab_size,
+                token_id_range=token_id_range,
+            )
+            if prompt:
+                prompt[0] = 10 + idx
+            prompts.append(prompt)
+            output_lens.append(scenario.decode_len)
     elif scenario.kind in {"decode_ladder", "serving_mixed", "target15_mixed_arrival"}:
         request_count = scenario.total_requests or scenario.batch_size
         prompt_cycle = scenario.prompt_len_cycle or (scenario.prompt_len,)
@@ -2489,6 +2589,22 @@ class BenchRequestStatus:
         self.finished_at = timestamp
 
 
+def _is_emitted_benchmark_output_token(
+    *,
+    next_token: int,
+    eos_token_id: int,
+    finished: bool,
+    finish_reason: str | None,
+) -> bool:
+    """Return whether an offline benchmark reply contributes an output token."""
+    effective_finish_reason = (finish_reason or "stop") if finished else None
+    return not (
+        finished
+        and effective_finish_reason == "stop"
+        and next_token == eos_token_id
+    )
+
+
 def make_benchmark_llm_class():
     import torch
     from minisgl.llm.llm import LLM, RequestAllFinished
@@ -2504,6 +2620,7 @@ def make_benchmark_llm_class():
             self.bench_admit_all_at_once = False
             self.bench_initial_requests = 0
             self.bench_arrival_after_decode_batches = 0
+            self.bench_peak_live_full_pages = 0
             super().__init__(*args, **kwargs)
 
         def offline_receive_msg(self, blocking: bool = False) -> list[BaseBackendMsg]:
@@ -2558,7 +2675,12 @@ def make_benchmark_llm_class():
             timestamp = time.perf_counter()
             for msg in reply:
                 status = self.status_map[msg.uid]
-                emitted_output_token = not (msg.finished and msg.next_token == self.eos_token_id)
+                emitted_output_token = _is_emitted_benchmark_output_token(
+                    next_token=msg.next_token,
+                    eos_token_id=self.eos_token_id,
+                    finished=msg.finished,
+                    finish_reason=msg.finish_reason,
+                )
                 if emitted_output_token:
                     status.output_ids.append(msg.next_token)
                     status.record_token(timestamp)
@@ -2589,6 +2711,10 @@ def make_benchmark_llm_class():
                 "decode_tokens": int(batch.size if batch.is_decode else 0),
                 "max_extend_len": int(max((req.extend_len for req in batch.reqs), default=0)),
                 "max_device_len": int(max((req.device_len for req in batch.reqs), default=0)),
+                "live_full_pages": int(
+                    self.cache_manager.num_pages - len(self.cache_manager.free_slots)
+                ),
+                "free_full_pages": int(len(self.cache_manager.free_slots)),
                 "reqs": [
                     {
                         "uid": req.uid,
@@ -2601,6 +2727,10 @@ def make_benchmark_llm_class():
                     for req in batch.reqs
                 ],
             }
+            self.bench_peak_live_full_pages = max(
+                self.bench_peak_live_full_pages,
+                int(self._bench_batch_info[batch_id]["live_full_pages"]),
+            )
             return forward_input
 
         def _forward(self, forward_input):
@@ -2716,6 +2846,7 @@ def make_benchmark_llm_class():
 
         def generate(self, prompts, sampling_params):
             self.bench_batch_trace = []
+            self.bench_peak_live_full_pages = 0
             self._active_generation_started_at = time.perf_counter()
             self._active_generation_finished_at = None
             try:
@@ -3059,7 +3190,10 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
             "DSV4 CUDA graph variants must be run separately or with --allow-dsv4-cuda-graph."
         )
 
-    allow_dsv4_cuda_graph = bool(args.allow_dsv4_cuda_graph or variant_graph)
+    allow_dsv4_cuda_graph = bool(
+        (args.allow_dsv4_cuda_graph or variant_graph)
+        and not args.disable_cuda_graph
+    )
     cuda_graph_bs = args.cuda_graph_bs
     if args.cuda_graph_capture_greedy_sample is None:
         cuda_graph_capture_greedy_sample = variant_graph_greedy_sample
@@ -3868,6 +4002,24 @@ def _run_one_repeat(
             for prompt in prompts
         )
     )
+    token_prompts = [prompt for prompt in prompts if isinstance(prompt, list)]
+    first_tokens = [int(prompt[0]) for prompt in token_prompts if prompt]
+    max_pairwise_shared_prefix = 0
+    for left_index, left in enumerate(token_prompts):
+        for right in token_prompts[left_index + 1 :]:
+            shared = 0
+            for left_token, right_token in zip(left[:256], right[:256]):
+                if left_token != right_token:
+                    break
+                shared += 1
+            max_pairwise_shared_prefix = max(max_pairwise_shared_prefix, shared)
+    if scenario.kind == "long_context_pressure":
+        if len(first_tokens) != scenario.batch_size or len(set(first_tokens)) != len(
+            first_tokens
+        ):
+            raise RuntimeError(
+                "long-context pressure prompts must have distinct first-page token streams"
+            )
     torch.cuda.synchronize(llm.device)
     torch.cuda.reset_peak_memory_stats(llm.device)
     _case_boundary_debug_snapshot(llm, f"{nvtx_name or scenario.name}:before_prefix_metrics_before")
@@ -3940,6 +4092,16 @@ def _run_one_repeat(
     return {
         "elapsed_s": elapsed_s,
         "prompt_tokens": prompt_tokens,
+        "prompt_stream_contract": {
+            "first_tokens": first_tokens,
+            "distinct_within_first_cacheable_page": (
+                len(first_tokens) == len(set(first_tokens))
+                and max_pairwise_shared_prefix < 256
+            ),
+            "max_pairwise_shared_prefix_tokens_within_first_page": (
+                max_pairwise_shared_prefix
+            ),
+        },
         "target_output_tokens": target_output_tokens,
         "actual_output_tokens": actual_output_tokens,
         "admitted_output_tokens": admitted_output_tokens,
@@ -3973,6 +4135,13 @@ def _run_one_repeat(
             "decode_tokens": _sum_trace_int(trace, "decode", "decode_tokens"),
         },
         "memory": _rank_memory_report(torch, llm),
+        "resident_full_pages_peak": int(llm.bench_peak_live_full_pages),
+        "resident_full_tokens_peak": int(
+            llm.bench_peak_live_full_pages * llm.cache_manager.page_size
+        ),
+        "resident_full_pages_after_cleanup": int(
+            llm.cache_manager.num_pages - len(llm.cache_manager.free_slots)
+        ),
     }
 
 
@@ -4845,6 +5014,7 @@ def _init_llm(
         memory_ratio=args.memory_ratio,
         use_pynccl=runtime_options["use_pynccl"],
         allow_dsv4_cuda_graph=runtime_options["allow_dsv4_cuda_graph"],
+        disable_cuda_graph=not runtime_options["allow_dsv4_cuda_graph"],
         cuda_graph_bs=runtime_options["cuda_graph_bs"],
         cuda_graph_max_bs=runtime_options["cuda_graph_max_bs"],
         cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
@@ -5147,6 +5317,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     max_seq_group.add_argument(
+        "--context-length",
+        dest="max_seq_len",
+        type=int,
+        help=(
+            "Release/server spelling for an explicit maximum total sequence "
+            "length override."
+        ),
+    )
+    max_seq_group.add_argument(
         "--scenario-sized-max-seq-len",
         action="store_true",
         help=(
@@ -5190,6 +5369,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--allow-dsv4-cuda-graph",
         action="store_true",
         help="Opt in to DeepSeek V4 decode CUDA graph capture. Defaults to sizes 1,2,4,8,16.",
+    )
+    parser.add_argument(
+        "--disable-cuda-graph",
+        action="store_true",
+        help=(
+            "Debug control for an exact eager comparison of the canonical release "
+            "variant. This overrides the release variant's graph default."
+        ),
     )
     parser.add_argument(
         "--enable-dsv4-radix-prefix-cache",
@@ -5280,6 +5467,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--list-scenarios", action="store_true")
     parser.add_argument("--list-variants", action="store_true")
     args = parser.parse_args(argv)
+    if args.allow_dsv4_cuda_graph and args.disable_cuda_graph:
+        parser.error("--allow-dsv4-cuda-graph and --disable-cuda-graph are mutually exclusive")
     if args.page_size <= 0:
         parser.error("--page-size must be positive")
     for name in ("prompt_len", "decode_len", "batch_size", "repeats"):

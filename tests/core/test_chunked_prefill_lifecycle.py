@@ -26,6 +26,52 @@ class _FakeDsv4KVCache:
         return self._swa_pages
 
 
+class _SequenceStateKVCache:
+    def __init__(self) -> None:
+        self.acquired: list[tuple[int, int]] = []
+
+    def acquire_sequence_slot(self, table_idx: int, generation_id: int) -> None:
+        self.acquired.append((table_idx, generation_id))
+
+
+class _MissHandle:
+    cached_len = 0
+
+
+def test_chunked_prefill_acquires_sequence_state_once_and_keeps_stable_table_slot():
+    kv_cache = _SequenceStateKVCache()
+    handle = _MissHandle()
+    cache_manager = SimpleNamespace(
+        kv_cache=kv_cache,
+        available_size=128,
+        match_req=lambda req: SimpleNamespace(cuda_handle=handle),
+        lock=lambda matched: None,
+    )
+    token_pool = torch.empty((1, 32), dtype=torch.int32)
+    table_manager = SimpleNamespace(
+        available_size=1,
+        allocate=lambda: 0,
+        token_pool=token_pool,
+        page_table=torch.empty((1, 32), dtype=torch.int32),
+    )
+    pending = PendingReq(
+        uid=7,
+        input_ids=torch.arange(9, dtype=torch.int32),
+        sampling_params=SamplingParams(max_tokens=2),
+    )
+    pending.lifecycle.generation_id = 1601
+
+    first = PrefillAdder(3, 0, cache_manager, table_manager).try_add_one(pending)
+    assert isinstance(first, ChunkedReq)
+    pending.chunked_req = first
+    second = PrefillAdder(3, 0, cache_manager, table_manager).try_add_one(pending)
+
+    assert isinstance(second, ChunkedReq)
+    assert first.table_idx == second.table_idx == 0
+    assert first.lifecycle is second.lifecycle
+    assert kv_cache.acquired == [(0, 1601)]
+
+
 def test_dsv4_swa_tail_pages_do_not_cap_full_request_admission_capacity():
     page_size = 4
     ctx = core.Context(page_size=page_size)

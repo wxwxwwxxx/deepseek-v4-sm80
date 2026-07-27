@@ -167,7 +167,7 @@ def test_llm_uses_launcher_environment(monkeypatch):
 def test_all_moved_debug_scripts_exist_and_compile():
     scripts = sorted(DEBUG_DIR.glob("deepseek_v4_*.py"))
     scripts += [DEBUG_DIR / "dsv4_graph_reserve_lifecycle.py"]
-    assert len(scripts) == 18
+    assert len(scripts) == 25
     for script in scripts:
         assert script.is_file()
         compile(script.read_text(encoding="utf-8"), str(script), "exec")

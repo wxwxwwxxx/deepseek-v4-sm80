@@ -41,6 +41,15 @@ def test_release_matrix_keeps_page_size_256():
     assert perf.parse_args([]).page_size == 256
 
 
+def test_context_length_uses_release_spelling_for_max_sequence_override():
+    args = perf.parse_args(["--context-length", "1048576"])
+    assert args.max_seq_len == 1048576
+    with pytest.raises(SystemExit):
+        perf.parse_args(
+            ["--context-length", "1048576", "--max-seq-len", "1048576"]
+        )
+
+
 def test_scenario_override_keeps_macro_shape_explicit():
     args = perf.parse_args(
         [
@@ -67,6 +76,30 @@ def test_target15_delayed_arrival_workload_has_one_long_request():
     assert [params.max_tokens for params in sampling_params] == [160, 160, 160, 160, 8]
     assert scenario.initial_requests == 4
     assert scenario.arrival_after_decode_batches == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "batch_size", "prompt_len"),
+    [
+        ("long_context_pressure_512k_bs4", 4, 524288),
+        ("long_context_pressure_1m_bs2", 2, 1048568),
+    ],
+)
+def test_target16_long_pressure_prompts_diverge_at_token_zero(
+    name, batch_size, prompt_len
+):
+    scenario = perf._scenario_map()[name]
+    prompts, sampling_params = perf.build_workload(
+        scenario,
+        vocab_size=129280,
+        seed=0,
+        token_id_range=1024,
+    )
+    assert len(prompts) == batch_size
+    assert all(len(prompt) == prompt_len for prompt in prompts)
+    assert len({prompt[0] for prompt in prompts}) == batch_size
+    assert all(params.max_tokens == 8 for params in sampling_params)
+    assert all(params.ignore_eos for params in sampling_params)
 
 
 def test_target15_candidate_selector_is_benchmark_only_and_explicit():
@@ -99,3 +132,22 @@ def test_target15_natural_text_chat_formatter_has_safe_fallback(tmp_path):
     assert formatted.startswith("System: ")
     assert perf.TARGET15_NATURAL_SYSTEM_PROMPT in formatted
     assert formatted.endswith("\nAssistant:")
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "expected"),
+    [
+        ("stop", False),
+        ("length", True),
+    ],
+)
+def test_terminal_eos_accounting_depends_on_finish_reason(finish_reason, expected):
+    assert (
+        perf._is_emitted_benchmark_output_token(
+            next_token=100,
+            eos_token_id=100,
+            finished=True,
+            finish_reason=finish_reason,
+        )
+        is expected
+    )

@@ -510,7 +510,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         *,
         component: Literal["attention", "indexer"] = "attention",
     ) -> torch.Tensor:
-        """Project, update paged carry state, and reduce fixed compressor rows.
+        """Project, update compressor carry state, and reduce fixed rows.
 
         Publication remains ordered after this call: the caller applies the
         accepted norm/RoPE/cache transform to the returned fixed-row buffer,
@@ -536,15 +536,24 @@ class DSV4AttentionBackend(BaseAttnBackend):
         ).contiguous()
         rows = int(projected.shape[0])
         if compressor.ratio == 4:
+            checkpoint_pool = (
+                self.kvcache.indexer_c4_checkpoint(layer_id)
+                if component == "indexer"
+                else self.kvcache.attention_c4_checkpoint(layer_id)
+            )
             return dsv4_kernel.c4_online_pool_and_update_fallback(
                 projected,
                 state_pool.kv_score_buffer.kv_score,
+                checkpoint_pool.kv_score_buffer.kv_score,
                 compressor.ape,
                 core.positions[:rows],
                 core.req_table_indices[:rows],
                 core.raw_out_loc[:rows],
                 get_global_ctx().page_table,
-                self.kvcache.compress_state_page_mapping(4, component=component),
+                self.kvcache.c4_checkpoint_page_mapping(
+                    4,
+                    component=component,
+                ),
                 page_size=self.page_size,
             )
         return dsv4_kernel.c128_online_pool_and_update_fallback(
@@ -553,10 +562,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             compressor.ape,
             core.positions[:rows],
             core.req_table_indices[:rows],
-            core.raw_out_loc[:rows],
-            get_global_ctx().page_table,
-            self.kvcache.compress_state_page_mapping(128, component=component),
-            page_size=self.page_size,
         )
 
     def store_indexer(

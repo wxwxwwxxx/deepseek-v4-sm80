@@ -520,9 +520,8 @@ class CacheManager:
                 "live_c4_slots": counts.c4_slots,
                 "live_c128_slots": counts.c128_slots,
                 "live_c4_indexer_slots": counts.c4_indexer_slots,
-                "live_c4_state_slots": counts.c4_state_slots,
-                "live_c128_state_slots": counts.c128_state_slots,
-                "live_c4_indexer_state_slots": counts.c4_indexer_state_slots,
+                "live_c4_checkpoint_slots": counts.c4_checkpoint_slots,
+                "live_c4_indexer_checkpoint_slots": counts.c4_indexer_checkpoint_slots,
                 "available_component_pages": self.kv_cache.available_component_pages(),
                 "evictable_live_full_tokens": int(
                     getattr(self.prefix_cache, "dsv4_evictable_live_full_tokens", 0)

@@ -1072,13 +1072,14 @@ def compress_forward_fallback(
 
 def c4_online_pool_and_update_fallback(
     projected: torch.Tensor,
-    state: torch.Tensor,
+    sequence_state: torch.Tensor,
+    checkpoint: torch.Tensor,
     ape: torch.Tensor,
     positions: torch.Tensor,
     table_indices: torch.Tensor,
     raw_out_loc: torch.Tensor,
     ctx_page_table: torch.Tensor,
-    state_page_mapping: torch.Tensor,
+    checkpoint_page_mapping: torch.Tensor,
     *,
     page_size: int,
 ) -> torch.Tensor:
@@ -1089,13 +1090,14 @@ def c4_online_pool_and_update_fallback(
     try:
         output = _triton_dsv4_ops().c4_online_pool_and_update(
             projected,
-            state,
+            sequence_state,
+            checkpoint,
             ape,
             positions,
             table_indices,
             raw_out_loc,
             ctx_page_table,
-            state_page_mapping,
+            checkpoint_page_mapping,
             page_size=int(page_size),
         )
     except Exception as exc:
@@ -1113,13 +1115,8 @@ def c128_online_pool_and_update_fallback(
     ape: torch.Tensor,
     positions: torch.Tensor,
     table_indices: torch.Tensor,
-    raw_out_loc: torch.Tensor,
-    ctx_page_table: torch.Tensor,
-    state_page_mapping: torch.Tensor,
-    *,
-    page_size: int,
 ) -> torch.Tensor:
-    """Run the fixed-row online C128 producer on its paged FP32 carry."""
+    """Run the fixed-row C128 producer on request/sequence-owned FP32 carry."""
 
     if not dsv4_triton_available():
         raise RuntimeError("DSV4 online C128 compression requires the Triton backend")
@@ -1130,10 +1127,6 @@ def c128_online_pool_and_update_fallback(
             ape,
             positions,
             table_indices,
-            raw_out_loc,
-            ctx_page_table,
-            state_page_mapping,
-            page_size=int(page_size),
         )
     except Exception as exc:
         raise RuntimeError("DSV4 online C128 SM80 bridge failed") from exc

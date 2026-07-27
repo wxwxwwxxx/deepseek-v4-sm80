@@ -64,6 +64,34 @@ def estimate_kvcache_bytes_per_page(
     return estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size)
 
 
+def estimate_c128_sequence_state_bytes(
+    model_config: ModelConfig,
+    max_running_req: int,
+) -> int:
+    if not model_config.is_deepseek_v4:
+        return 0
+    from .deepseek_v4_pool import estimate_deepseek_v4_c128_sequence_state_bytes
+
+    return estimate_deepseek_v4_c128_sequence_state_bytes(
+        model_config,
+        max_running_req,
+    )
+
+
+def estimate_c4_sequence_state_bytes(
+    model_config: ModelConfig,
+    max_running_req: int,
+) -> int:
+    if not model_config.is_deepseek_v4:
+        return 0
+    from .deepseek_v4_pool import estimate_deepseek_v4_c4_sequence_state_bytes
+
+    return estimate_deepseek_v4_c4_sequence_state_bytes(
+        model_config,
+        max_running_req,
+    )
+
+
 @SUPPORTED_CACHE_MANAGER.register("radix")
 def create_radix_cache(device: torch.device):
     from .radix_cache import RadixPrefixCache
@@ -79,6 +107,8 @@ __all__ = [
     "create_kvcache_pool",
     "create_prefix_cache",
     "estimate_kvcache_bytes_per_page",
+    "estimate_c4_sequence_state_bytes",
+    "estimate_c128_sequence_state_bytes",
     "BaseKVCachePool",
     "BaseCacheHandle",
     "BasePrefixCache",
