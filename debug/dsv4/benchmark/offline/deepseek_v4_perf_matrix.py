@@ -342,6 +342,39 @@ RELEASE_CARD_SCENARIOS: tuple[Scenario, ...] = tuple(
 )
 
 
+TARGET17_C4_PUBLICATION_SCENARIOS: tuple[Scenario, ...] = tuple(
+    Scenario(
+        name=f"target17_c4_publication_decode_m{batch_size}",
+        kind="random",
+        batch_size=batch_size,
+        prompt_len=128,
+        decode_len=32,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 17.3 full-weight CUDA-graph C4 indexer publication "
+            f"timing at physical decode M={batch_size}."
+        ),
+    )
+    for batch_size in (1, 4, 16, 64, 128)
+) + tuple(
+    Scenario(
+        name=f"target17_c4_publication_prefill_{prompt_len // 1024}k",
+        kind="random",
+        batch_size=1,
+        prompt_len=prompt_len,
+        decode_len=1,
+        repeats=1,
+        warmup_repeats=0,
+        description=(
+            "TARGET 17.3 full-weight eager C4 indexer publication prefill "
+            f"timing at {prompt_len} tokens."
+        ),
+    )
+    for prompt_len in (1024, 4096, 8192)
+)
+
+
 TARGET08_SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
         name="historical_4096_1024_bs4",
@@ -1988,6 +2021,7 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
 ALL_SCENARIOS: tuple[Scenario, ...] = (
     *DEFAULT_SCENARIOS,
     *RELEASE_CARD_SCENARIOS,
+    *TARGET17_C4_PUBLICATION_SCENARIOS,
     *TARGET08_SCENARIOS,
 )
 
