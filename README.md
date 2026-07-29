@@ -112,13 +112,10 @@ curl http://127.0.0.1:1919/v1/chat/completions \
   }'
 ```
 
-For complex prompts that need long `max` reasoning, enabling the optional
-`--enable-reasoning-sampler-contract` server flag can improve answer quality
-and reduce malformed responses. The three-state sampler prevents EOS while
-reasoning, permits one transition through `</think>`, and then prevents
-additional reasoning delimiters after the answer begins. It is disabled by
-default and reduces, but does not guarantee the elimination of, malformed
-model output.
+When `max` mode performs long-context reasoning, the model may occasionally
+produce a malformed response. In that case, first try moderately lowering
+`top_p` and `temperature` and, if needed, enable
+`--enable-reasoning-sampler-contract` on the server.
 
 ## Runtime Settings
 

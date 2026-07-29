@@ -25,14 +25,14 @@ guarantees for other sm80 systems.
 
 | Configuration | Max running / graph M | Active M | Prompt/request | Requests/s | Output tok/s | Prefill tok/s | Decode tok/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `long_context_m8` | 8 | 8 | 1K | 0.2360 | 241.68 | 3,334.01 | 283.61 |
-| `long_context_m8` | 8 | 8 | 4K | 0.1937 | 198.37 | 3,580.32 | 283.28 |
-| `low_m64` | 64 | 64 | 1K | 0.6949 | 711.60 | 3,680.75 | 981.44 |
-| `low_m64` | 64 | 64 | 4K | 0.4277 | 437.97 | 3,874.16 | 973.79 |
-| `default_m128` | 128 | 128 | 1K | 0.8357 | 855.73 | 4,252.18 | 1,211.90 |
-| `default_m128` | 128 | 128 | 4K | 0.4716 | 482.95 | 3,893.20 | 1,203.89 |
-| `high_m256` | 256 | 256 | 1K | 0.9285 | 950.76 | 4,544.20 | 1,372.06 |
-| `high_m256` | 256 | 256 | 4K | 0.4951 | 507.02 | 3,892.32 | 1,355.17 |
+| `long_context_m8` | 8 | 8 | 1K | 0.2503 | 256.29 | 3,225.57 | 305.16 |
+| `long_context_m8` | 8 | 8 | 4K | 0.1936 | 198.25 | 3,348.49 | 284.98 |
+| `low_m64` | 64 | 64 | 1K | 0.7155 | 732.64 | 4,353.23 | 984.60 |
+| `low_m64` | 64 | 64 | 4K | 0.3876 | 396.93 | 3,555.71 | 865.93 |
+| `default_m128` | 128 | 128 | 1K | 0.8295 | 849.44 | 4,409.16 | 1,189.50 |
+| `default_m128` | 128 | 128 | 4K | 0.4187 | 428.75 | 3,586.80 | 1,016.41 |
+| `high_m256` | 256 | 256 | 1K | 0.9086 | 930.37 | 4,508.60 | 1,341.18 |
+| `high_m256` | 256 | 254 | 4K | 0.4489 | 459.66 | 3,665.04 | 1,170.26 |
 
 ## CUDA Graph And KV Capacity
 
@@ -41,10 +41,10 @@ cost of startup time and KV-cache capacity.
 
 | Configuration | Max running / graph M | Physical graph memory | KV tokens |
 | --- | ---: | ---: | ---: |
-| `long_context_m8` | 8 | 0.99 GiB | 5,523,200 |
-| `low_m64` | 64 | 1.68 GiB | 4,758,016 |
-| `default_m128` | 128 | 2.69 GiB | 3,904,256 |
-| `high_m256` | 256 | 4.76 GiB | 2,196,992 |
+| `long_context_m8` | 8 | 0.95 GiB | 5,523,200 |
+| `low_m64` | 64 | 1.57 GiB | 4,758,016 |
+| `default_m128` | 128 | 2.50 GiB | 3,904,256 |
+| `high_m256` | 256 | 4.41 GiB | 2,196,992 |
 
 The default covers decode batches through M=128. M64 trades some graph coverage
 for additional KV capacity, while M256 trades capacity for high-concurrency
