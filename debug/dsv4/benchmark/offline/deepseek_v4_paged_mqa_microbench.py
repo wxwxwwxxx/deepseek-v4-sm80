@@ -11,11 +11,13 @@ from typing import Any
 
 import torch
 
-
 ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "python"))
 
 from minisgl.kernel import deepseek_v4 as dsv4_kernel  # noqa: E402
+
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference  # noqa: E402
 
 
 def _parse_csv_ints(value: str) -> list[int]:
@@ -94,8 +96,8 @@ def _bench_case(
     )
 
     with _with_env("MINISGL_DSV4_SM80_PAGED_MQA_BF16", None):
-        metadata = dsv4_kernel.get_paged_mqa_logits_metadata_fallback(contexts, device=device)
-        expected = dsv4_kernel.paged_mqa_attention_fallback(
+        metadata = dsv4_reference.get_paged_mqa_logits_metadata_fallback(contexts, device=device)
+        expected = dsv4_reference.paged_mqa_attention_fallback(
             q,
             cache,
             contexts,
@@ -103,7 +105,7 @@ def _bench_case(
             attn_sink=attn_sink,
         )
         fallback_ms = _time_cuda_wall(
-            lambda: dsv4_kernel.paged_mqa_attention_fallback(
+            lambda: dsv4_reference.paged_mqa_attention_fallback(
                 q,
                 cache,
                 contexts,
@@ -115,13 +117,13 @@ def _bench_case(
         )
 
     metadata_build_ms = _time_cuda_wall(
-        lambda: dsv4_kernel.get_paged_mqa_logits_metadata_fallback(contexts, device=device),
+        lambda: dsv4_reference.get_paged_mqa_logits_metadata_fallback(contexts, device=device),
         warmup=warmup,
         iters=iters,
     )
 
     with _with_env("MINISGL_DSV4_SM80_PAGED_MQA_BF16", "1"):
-        actual = dsv4_kernel.paged_mqa_attention_fallback(
+        actual = dsv4_reference.paged_mqa_attention_fallback(
             q,
             cache,
             metadata,
@@ -129,7 +131,7 @@ def _bench_case(
             attn_sink=attn_sink,
         )
         triton_metadata_ms = _time_cuda_wall(
-            lambda: dsv4_kernel.paged_mqa_attention_fallback(
+            lambda: dsv4_reference.paged_mqa_attention_fallback(
                 q,
                 cache,
                 metadata,
@@ -140,7 +142,7 @@ def _bench_case(
             iters=iters,
         )
         triton_list_ms = _time_cuda_wall(
-            lambda: dsv4_kernel.paged_mqa_attention_fallback(
+            lambda: dsv4_reference.paged_mqa_attention_fallback(
                 q,
                 cache,
                 contexts,
@@ -162,9 +164,7 @@ def _bench_case(
         "metadata_build_wall_ms": metadata_build_ms,
         "triton_metadata_wall_ms": triton_metadata_ms,
         "triton_list_wall_ms": triton_list_ms,
-        "speedup_vs_fallback": fallback_ms / triton_metadata_ms
-        if triton_metadata_ms > 0
-        else None,
+        "speedup_vs_fallback": fallback_ms / triton_metadata_ms if triton_metadata_ms > 0 else None,
         "max_abs_error": float(error.max().item()),
         "mean_abs_error": float(error.mean().item()),
         "allclose_3e_2": bool(torch.allclose(actual, expected, atol=3e-2, rtol=3e-2)),

@@ -7,14 +7,10 @@ import sys
 from pathlib import Path
 
 import torch
+from minisgl.kernel.deepseek_v4 import c4_online_pool_and_update
 from torch.profiler import ProfilerActivity, profile
 
-from minisgl.kernel.deepseek_v4 import c4_online_pool_and_update_fallback
-
-
-_POISON_PROOF_PATH = (
-    Path(__file__).resolve().parent / "deepseek_v4_c4_production_poison.py"
-)
+_POISON_PROOF_PATH = Path(__file__).resolve().parent / "deepseek_v4_c4_production_poison.py"
 
 
 def _load_poison_proof():
@@ -40,7 +36,7 @@ def _producer_call(
     rows = projected.index_select(0, positions).contiguous()
     table_indices = torch.zeros_like(positions)
     raw_out_loc = positions.clone()
-    return c4_online_pool_and_update_fallback(
+    return c4_online_pool_and_update(
         rows,
         fixture.sequence_state,
         fixture.checkpoint,
@@ -70,7 +66,7 @@ def _profile_producer(
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
     ) as trace:
-        c4_online_pool_and_update_fallback(
+        c4_online_pool_and_update(
             rows,
             fixture.sequence_state,
             fixture.checkpoint,
@@ -181,14 +177,9 @@ def run_census() -> dict[str, object]:
         "_c4_online_state_store_kernel": 1,
     }
     for label, scenario in scenarios.items():
-        observed = {
-            str(item["name"]): int(item["launches"])
-            for item in scenario["kernels"]
-        }
+        observed = {str(item["name"]): int(item["launches"]) for item in scenario["kernels"]}
         if observed != expected:
-            raise AssertionError(
-                f"{label}: producer kernel census changed: {observed}"
-            )
+            raise AssertionError(f"{label}: producer kernel census changed: {observed}")
 
     return {
         "status": "pass",

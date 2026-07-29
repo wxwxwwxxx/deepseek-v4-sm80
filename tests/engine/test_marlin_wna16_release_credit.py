@@ -10,7 +10,14 @@ from minisgl.engine.graph_policy import resolve_cuda_graph_bucket_policy
 
 def _fake_config(*, num_page_override=None):
     return SimpleNamespace(
-        model_config=SimpleNamespace(is_deepseek_v4=True),
+        model_config=SimpleNamespace(
+            is_deepseek_v4=True,
+            num_layers=0,
+            head_dim=0,
+            index_head_dim=0,
+            compress_ratios=[],
+            window_size=128,
+        ),
         page_size=256,
         tp_info=SimpleNamespace(size=8),
         memory_ratio=1.0,

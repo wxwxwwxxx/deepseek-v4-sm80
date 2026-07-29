@@ -9,9 +9,7 @@ import json
 from pathlib import Path
 
 import torch
-
-from minisgl.kernel.deepseek_v4 import c128_online_pool_and_update_fallback
-
+from minisgl.kernel.deepseek_v4 import c128_online_pool_and_update
 
 POSITIONS = (0, 1, 2, 126, 127, 128, 129, 254, 255, 256, 257, 510, 511, 512, 513)
 TOTAL = max(POSITIONS) + 1
@@ -93,7 +91,7 @@ def _sequence_run(
         end = start + chunk
         positions = torch.arange(start, end, dtype=torch.int32, device=device)
         table_indices = torch.zeros(chunk, dtype=torch.int32, device=device)
-        produced = c128_online_pool_and_update_fallback(
+        produced = c128_online_pool_and_update(
             projected[start:end],
             state,
             ape,
@@ -105,11 +103,7 @@ def _sequence_run(
                 outputs[pos] = produced[local].clone()
             if pos in POSITIONS:
                 phase = (pos + 1) % RATIO
-                active[pos] = (
-                    state[:phase].clone()
-                    if phase
-                    else state.new_empty((0, 2 * HEAD_DIM))
-                )
+                active[pos] = state[:phase].clone() if phase else state.new_empty((0, 2 * HEAD_DIM))
         start = end
     assert start == total
     return outputs, active
@@ -157,13 +151,10 @@ def main() -> None:
             endpoint_cases[str(endpoint)] = {
                 "chunks": chunks if name != "one_token_at_a_time" else f"{total}x1",
                 "completed_output_errors": {
-                    str(pos): _error(value, official_outputs[pos])
-                    for pos, value in outputs.items()
+                    str(pos): _error(value, official_outputs[pos]) for pos, value in outputs.items()
                 },
                 "active_state_error": _error(final_active, official_active[endpoint]),
-                "pre_edit_active_state_error": _error(
-                    final_active, legacy["active"].to(device)
-                ),
+                "pre_edit_active_state_error": _error(final_active, legacy["active"].to(device)),
                 "completed_output_hashes": {
                     str(pos): _hash(value) for pos, value in outputs.items()
                 },

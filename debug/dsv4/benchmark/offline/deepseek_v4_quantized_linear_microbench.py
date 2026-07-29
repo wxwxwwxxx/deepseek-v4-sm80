@@ -12,12 +12,13 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-
 ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "python"))
 
 from minisgl.kernel import deepseek_v4 as dsv4_kernel  # noqa: E402
 
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference  # noqa: E402
 
 SHAPES = {
     "fp8_wq_a": ("fp8", 4096, 1024),
@@ -83,8 +84,10 @@ def _make_case(
     x = torch.randn(m, k, device=device, dtype=torch.bfloat16)
     scale_base = torch.rand(device=device, dtype=torch.float32, size=(1,)) + 0.5
     if kind == "fp8":
-        weight = torch.randn(n, k, device=device, dtype=torch.float32).clamp(-4, 4).to(
-            dsv4_kernel.fp8_dtype()
+        weight = (
+            torch.randn(n, k, device=device, dtype=torch.float32)
+            .clamp(-4, 4)
+            .to(dsv4_kernel.fp8_dtype())
         )
         scale = (
             torch.rand(
@@ -97,9 +100,9 @@ def _make_case(
         ).to(dsv4_kernel.e8m0_dtype())
     elif kind == "fp4":
         weight = torch.randint(-128, 127, (n, k // 2), device=device, dtype=torch.int8)
-        scale = (
-            torch.rand(n, (k + 31) // 32, device=device, dtype=torch.float32) + scale_base
-        ).to(dsv4_kernel.e8m0_dtype())
+        scale = (torch.rand(n, (k + 31) // 32, device=device, dtype=torch.float32) + scale_base).to(
+            dsv4_kernel.e8m0_dtype()
+        )
     else:
         raise ValueError(f"unknown kind: {kind}")
     return x, weight, scale
@@ -117,29 +120,25 @@ def _bench_case(
     device: torch.device,
 ) -> dict[str, Any]:
     x, weight, scale = _make_case(kind=kind, m=m, k=k, n=n, device=device)
-    toggle = (
-        "MINISGL_DSV4_SM80_FP8_GEMM"
-        if kind == "fp8"
-        else "MINISGL_DSV4_SM80_FP4_GEMM"
-    )
+    toggle = "MINISGL_DSV4_SM80_FP8_GEMM" if kind == "fp8" else "MINISGL_DSV4_SM80_FP4_GEMM"
 
     with _with_env(toggle, None):
-        expected = dsv4_kernel.quantized_linear_ref(x, weight, scale, weight_kind=kind)
+        expected = dsv4_reference.quantized_linear_ref(x, weight, scale, weight_kind=kind)
         fallback_ms = _bench_cuda(
-            lambda: dsv4_kernel.quantized_linear_ref(x, weight, scale, weight_kind=kind),
+            lambda: dsv4_reference.quantized_linear_ref(x, weight, scale, weight_kind=kind),
             warmup=warmup,
             iters=iters,
         )
 
     with _with_env(toggle, "1"):
-        actual = dsv4_kernel.quantized_linear_ref(x, weight, scale, weight_kind=kind)
+        actual = dsv4_reference.quantized_linear_ref(x, weight, scale, weight_kind=kind)
         triton_ms = _bench_cuda(
-            lambda: dsv4_kernel.quantized_linear_ref(x, weight, scale, weight_kind=kind),
+            lambda: dsv4_reference.quantized_linear_ref(x, weight, scale, weight_kind=kind),
             warmup=warmup,
             iters=iters,
         )
 
-    x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+    x_quant = dsv4_reference.quantize_fp8_activation_ref(x)
     if kind == "fp8":
         dequant_fn = lambda: dsv4_kernel.dequant_fp8_weight(
             weight,
@@ -147,7 +146,7 @@ def _bench_case(
             out_dtype=x.dtype,
         )
     else:
-        dequant_fn = lambda: dsv4_kernel.dequant_fp4_weight(
+        dequant_fn = lambda: dsv4_reference.dequant_fp4_weight(
             weight,
             scale,
             out_dtype=x.dtype,
@@ -155,7 +154,7 @@ def _bench_case(
     w_dequant = dequant_fn()
 
     act_quant_ms = _bench_cuda(
-        lambda: dsv4_kernel.quantize_fp8_activation_ref(x),
+        lambda: dsv4_reference.quantize_fp8_activation_ref(x),
         warmup=warmup,
         iters=iters,
     )

@@ -3,10 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import torch
+
+ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "python"))
+
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
+
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference  # noqa: E402
 
 
 def _time_cuda(fn, *, warmup: int, iters: int) -> float:
@@ -92,7 +100,7 @@ def run_case(
 
     os.environ.pop("MINISGL_DSV4_SM80_INDEXER_BF16", None)
     os.environ.pop("MINISGL_DSV4_SM80_TOPK", None)
-    expected = dsv4_kernel.indexer_select_bf16_fallback(
+    expected = dsv4_reference.indexer_select_bf16_fallback(
         q,
         weights,
         cache,
@@ -103,7 +111,7 @@ def run_case(
         ratio=4,
     )
     default_ms = _time_cuda(
-        lambda: dsv4_kernel.indexer_select_bf16_fallback(
+        lambda: dsv4_reference.indexer_select_bf16_fallback(
             q,
             weights,
             cache,
@@ -119,7 +127,7 @@ def run_case(
 
     os.environ["MINISGL_DSV4_SM80_INDEXER_BF16"] = "1"
     os.environ["MINISGL_DSV4_SM80_TOPK"] = "1"
-    actual = dsv4_kernel.indexer_select_bf16_fallback(
+    actual = dsv4_reference.indexer_select_bf16_fallback(
         q,
         weights,
         cache,
@@ -131,7 +139,7 @@ def run_case(
     )
     _assert_same_raw_sets(expected, actual)
     opt_in_ms = _time_cuda(
-        lambda: dsv4_kernel.indexer_select_bf16_fallback(
+        lambda: dsv4_reference.indexer_select_bf16_fallback(
             q,
             weights,
             cache,
@@ -177,9 +185,15 @@ def main() -> None:
         raise SystemExit("CUDA is required for this benchmark")
     torch.manual_seed(20260629)
     cases = [
-        run_case(1, 1024, num_heads=64, head_dim=128, width=512, iters=args.iters, warmup=args.warmup),
-        run_case(4, 2048, num_heads=64, head_dim=128, width=512, iters=args.iters, warmup=args.warmup),
-        run_case(16, 4096, num_heads=64, head_dim=128, width=512, iters=args.iters, warmup=args.warmup),
+        run_case(
+            1, 1024, num_heads=64, head_dim=128, width=512, iters=args.iters, warmup=args.warmup
+        ),
+        run_case(
+            4, 2048, num_heads=64, head_dim=128, width=512, iters=args.iters, warmup=args.warmup
+        ),
+        run_case(
+            16, 4096, num_heads=64, head_dim=128, width=512, iters=args.iters, warmup=args.warmup
+        ),
     ]
     result = {
         "device": torch.cuda.get_device_name(),

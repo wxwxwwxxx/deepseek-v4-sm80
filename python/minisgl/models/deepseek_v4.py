@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
-from minisgl.attention import BaseAttnMetadata
 from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata
 from minisgl.core import Batch, get_global_ctx
 from minisgl.distributed import DistributedCommunicator, get_tp_info
@@ -24,22 +23,6 @@ if TYPE_CHECKING:
     from .config import ModelConfig
 
 
-
-
-
-
-def _marlin_wna16_release_timing() -> str:
-    return DSV4_RELEASE.marlin_release_timing
-
-
-def _marlin_wna16_release_deferred_from_model_prepare() -> bool:
-    return _marlin_wna16_release_timing() != "model_prepare"
-
-
-
-
-
-
 def _cuda_graph_capture_active() -> bool:
     if not torch.cuda.is_available():
         return False
@@ -47,26 +30,6 @@ def _cuda_graph_capture_active() -> bool:
         return bool(torch.cuda.is_current_stream_capturing())
     except Exception:
         return False
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _cached_hc_bf16_weight(owner: object, cache_name: str, weight: torch.Tensor) -> torch.Tensor:
@@ -111,8 +74,6 @@ def _cached_fp32_weight(
         setattr(owner, cache_name, cached)
         setattr(owner, meta_name, meta)
     return cached
-
-
 
 
 def _tensor_cache_meta(tensor: torch.Tensor | None) -> tuple | None:
@@ -179,10 +140,6 @@ def _cached_fp8_bf16_weight(
     setattr(owner, cache_name, cached)
     setattr(owner, meta_name, meta)
     return cached
-
-
-
-
 
 
 def _linear_cached_bf16_weight(
@@ -388,21 +345,13 @@ def _cached_fused_wqa_wkv_fp8_weight(
     return cached
 
 
-@dataclass
-class DSV4FallbackAttentionMetadata(BaseAttnMetadata):
-    cu_seqlens_q: torch.Tensor
-
-    def get_last_indices(self, bs: int) -> torch.Tensor:
-        return self.cu_seqlens_q[1 : 1 + bs] - 1
-
-
 class DSV4RMSNorm(BaseOP):
     def __init__(self, size: int, eps: float = 1e-6):
         self.eps = eps
         self.weight = torch.empty(size, dtype=torch.bfloat16)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return dsv4_kernel.rms_norm_fallback(x, self.weight, eps=self.eps)
+        return dsv4_kernel.rms_norm(x, self.weight, eps=self.eps)
 
 
 class DSV4VocabParallelEmbedding(BaseOP):
@@ -475,18 +424,12 @@ class DSV4Linear(BaseOP):
         reduce: bool = True,
         reduce_label: str | None = None,
     ) -> torch.Tensor:
-        scale = getattr(self, "weight_scale_inv", None)
-        if self.weight.dtype is torch.int8:
-            y = dsv4_kernel.quantized_linear_ref(x, self.weight, scale, weight_kind="fp4")
-        elif self.weight.dtype is dsv4_kernel.fp8_dtype():
-            y = dsv4_kernel.quantized_linear_ref(
-                x,
-                self.weight,
-                scale,
-                weight_kind="fp8",
+        if self.weight.dtype is not torch.bfloat16:
+            raise RuntimeError(
+                "DSV4Linear.forward is reserved for release BF16 projections; "
+                "FP8 projections must use their prepared BF16 weight cache."
             )
-        else:
-            y = F.linear(x, self.weight.to(x.dtype))
+        y = F.linear(x, self.weight)
         if reduce and self.row_parallel and self._tp_size > 1:
             y = self._comm.all_reduce(
                 y,
@@ -518,8 +461,6 @@ class DSV4Linear(BaseOP):
             "bytes": int(cached.numel() * cached.element_size()),
         }
 
-
-
     def forward_fp8_cached_bf16_weight(
         self,
         x: torch.Tensor,
@@ -539,7 +480,7 @@ class DSV4Linear(BaseOP):
             allow_build=False,
             owner_label=owner_label,
         )
-        x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
+        x_quant = dsv4_kernel.quantize_fp8_activation(x)
         y = _linear_cached_bf16_weight(
             x_quant,
             cached_weight,
@@ -566,32 +507,12 @@ class DSV4Compressor(BaseOP):
         )
         self.norm = DSV4RMSNorm(head_dim, config.rms_norm_eps)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        positions: torch.Tensor | None = None,
-        *,
-        apply_norm: bool = True,
-    ) -> torch.Tensor:
-        return dsv4_kernel.compress_forward_fallback(
-            x,
-            positions,
-            ratio=self.ratio,
-            head_dim=self.head_dim,
-            overlap=self.overlap,
-            ape=self.ape,
-            wkv_gate=self.wkv_gate,
-            norm=self.norm,
-            apply_norm=apply_norm,
-        )
-
 
 class DSV4Indexer(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int):
         self.layer_id = layer_id
         self.n_heads = config.index_n_heads
         self.head_dim = config.index_head_dim
-        self.weight_scale = (self.head_dim**-0.5) * (self.n_heads**-0.5)
         self.wq_b = DSV4Linear(
             config.q_lora_rank,
             self.n_heads * self.head_dim,
@@ -626,33 +547,6 @@ class DSV4Indexer(BaseOP):
             owner_label=self._wq_b_owner_label,
         )
 
-    def prepare_bf16_query(
-        self,
-        x: torch.Tensor,
-        q_lora: torch.Tensor,
-        positions: torch.Tensor,
-        *,
-        rotary_dim: int,
-        base: float,
-        original_seq_len: int,
-        factor: float,
-        beta_fast: int,
-        beta_slow: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        q = self._wq_b_forward(q_lora).view(-1, self.n_heads, self.head_dim)
-        q = dsv4_kernel.indexer_q_rope_hadamard_bf16_fallback(
-            q,
-            positions,
-            rotary_dim=rotary_dim,
-            base=base,
-            original_seq_len=original_seq_len,
-            factor=factor,
-            beta_fast=beta_fast,
-            beta_slow=beta_slow,
-        )
-        weights = self.weights_proj.forward(x) * self.weight_scale
-        return q, weights
-
     def prepare_fp8_query(
         self,
         x: torch.Tensor,
@@ -668,7 +562,7 @@ class DSV4Indexer(BaseOP):
     ) -> dsv4_kernel.DSV4IndexerFP8Query:
         q = self._wq_b_forward(q_lora).view(-1, self.n_heads, self.head_dim)
         weights = self.weights_proj.forward(x)
-        return dsv4_kernel.indexer_q_rope_fp8_fallback(
+        return dsv4_kernel.indexer_q_rope_fp8(
             q,
             weights,
             positions,
@@ -681,21 +575,6 @@ class DSV4Indexer(BaseOP):
             beta_fast=beta_fast,
             beta_slow=beta_slow,
         )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        q_lora: torch.Tensor,
-        positions: torch.Tensor,
-        *,
-        apply_norm: bool = True,
-        touch_projections: bool = True,
-    ) -> torch.Tensor:
-        compressed_kv = self.compressor.forward(x, positions, apply_norm=apply_norm)
-        if touch_projections:
-            self._wq_b_forward(q_lora)
-            self.weights_proj.forward(x)
-        return compressed_kv
 
 
 class DSV4Attention(BaseOP):
@@ -767,25 +646,15 @@ class DSV4Attention(BaseOP):
             self.indexer = DSV4Indexer(config, layer_id)
 
     @staticmethod
-    def _swa_store_out_loc(attn_backend, batch: Batch | torch.Tensor) -> torch.Tensor:
-        if isinstance(batch, torch.Tensor):
-            out_loc = batch
-            metadata = None
-        else:
-            out_loc = batch.out_loc
-            metadata = getattr(batch, "attn_metadata", None)
-        if isinstance(metadata, DSV4AttentionMetadata):
-            cached = getattr(metadata.core_metadata, "swa_out_loc", None)
-            rows = int(out_loc.shape[0])
-            if cached is not None and int(cached.shape[0]) >= rows:
-                return cached[:rows]
-        kvcache = getattr(attn_backend, "kvcache", None)
-        translate = getattr(kvcache, "translate_full_locs_to_swa_locs", None)
-        if callable(translate) and bool(
-            getattr(kvcache, "swa_independent_lifecycle_enabled", False)
-        ):
-            return translate(out_loc).to(device=out_loc.device, dtype=out_loc.dtype)
-        return out_loc
+    def _swa_store_out_loc(batch: Batch) -> torch.Tensor:
+        metadata = batch.attn_metadata
+        if not isinstance(metadata, DSV4AttentionMetadata):
+            raise RuntimeError("DSV4 attention requires prepared DSV4 metadata.")
+        out_loc = metadata.core_metadata.swa_out_loc
+        rows = int(batch.out_loc.shape[0])
+        if out_loc is None or int(out_loc.shape[0]) < rows:
+            raise RuntimeError("DSV4 release metadata is missing independent SWA write locations.")
+        return out_loc[:rows]
 
     @property
     def _q_wqb_bf16_weight_cache_name(self) -> str:
@@ -820,13 +689,11 @@ class DSV4Attention(BaseOP):
             owner_label=self._q_wqb_owner_label,
         )
 
-
     def prepare_wo_b_bf16_weight_cache(self) -> dict[str, object] | None:
         return self.wo_b.prepare_fp8_bf16_weight_cache(
             self._wo_b_bf16_weight_cache_name,
             owner_label=self._wo_b_owner_label,
         )
-
 
     def prepare_wo_a_bf16_bmm_cache(self) -> dict[str, object] | None:
         scale = getattr(self.wo_a, "weight_scale_inv", None)
@@ -884,328 +751,138 @@ class DSV4Attention(BaseOP):
         }
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch = get_global_ctx().batch
+        ctx = get_global_ctx()
+        batch = ctx.batch
         positions = batch.positions.to(device=x.device, dtype=torch.long)
-        attn_backend = getattr(get_global_ctx(), "attn_backend", None)
-        attn_metadata = getattr(batch, "attn_metadata", None)
-        use_dsv4_backend = isinstance(attn_metadata, DSV4AttentionMetadata)
-        kv_norm_rope_store_enabled = (
-            use_dsv4_backend
-            and attn_backend is not None
-            and x.is_cuda
-            and dsv4_kernel.dsv4_triton_available()
-        )
-        fused_q_kv_rmsnorm = (
-            False
-            and not kv_norm_rope_store_enabled
-        )
-        fused_q_kv_norm_rope_store = (
-            kv_norm_rope_store_enabled
-            and dsv4_kernel.dsv4_triton_available()
-        )
-        kv_from_shared_wqa_wkv = None
-        kv = None
-        fused_wqa_wkv_shared_act = dsv4_kernel.dsv4_triton_available()
-        if fused_wqa_wkv_shared_act:
-            cached_fused_weight = _cached_fused_wqa_wkv_fp8_weight(
-                self,
-                "_cached_fused_wqa_wkv_bf16_weight",
-                self.wq_a.weight,
-                getattr(self.wq_a, "weight_scale_inv", None),
-                self.wkv.weight,
-                getattr(self.wkv, "weight_scale_inv", None),
-                out_dtype=x.dtype,
-                allow_build=False,
-            )
-            if cached_fused_weight is not None:
-                x_quant = dsv4_kernel.quantize_fp8_activation_ref(x)
-                qkv = _linear_cached_bf16_weight(
-                    x_quant,
-                    cached_fused_weight,
-                )
-                q_lora_raw, kv_from_shared_wqa_wkv = qkv.split(
-                    [self.q_norm.weight.shape[0], self.head_dim],
-                    dim=-1,
-                )
-            else:
-                q_lora_raw, kv_from_shared_wqa_wkv = (
-                    dsv4_kernel.quantized_linear_fp8_pair_shared_activation_ref(
-                        x,
-                        self.wq_a.weight,
-                        getattr(self.wq_a, "weight_scale_inv", None),
-                        self.wkv.weight,
-                        getattr(self.wkv, "weight_scale_inv", None),
-                    )
-                )
-        else:
-            q_lora_raw = self.wq_a.forward(x)
-        if not fused_q_kv_rmsnorm:
-            q_lora = self.q_norm.forward(q_lora_raw)
-        if fused_q_kv_rmsnorm:
-            kv = (
-                kv_from_shared_wqa_wkv
-                if kv_from_shared_wqa_wkv is not None
-                else self.wkv.forward(x)
-            )
-            q_lora, kv = None
-        else:
-            q = self.wq_b.forward_fp8_cached_bf16_weight(
-                q_lora,
-                cache_name=self._q_wqb_bf16_weight_cache_name,
-                owner_label=self._q_wqb_owner_label,
-            ).view(-1, self.num_local_heads, self.head_dim)
-        if fused_q_kv_norm_rope_store and kv is None:
-            kv = (
-                kv_from_shared_wqa_wkv
-                if kv_from_shared_wqa_wkv is not None
-                else self.wkv.forward(x)
-            )
-        q_kv_norm_rope_cache_written = False
-        kv_qat_completed = False
-        if fused_q_kv_norm_rope_store and kv is not None:
-            q_kv_norm_rope_cache_written = dsv4_kernel.q_kv_norm_rope_cache_fallback(
-                q,
-                kv,
-                positions,
-                norm_weight=self.kv_norm.weight,
-                rms_norm_eps=self.rms_norm_eps,
-                cache=attn_backend.kvcache.swa_cache(self.layer_id),
-                out_loc=self._swa_store_out_loc(attn_backend, batch),
-                rotary_dim=self.rope_head_dim,
-                base=float(self.rope_base),
-                original_seq_len=self.original_seq_len,
-                factor=self.rope_factor,
-                beta_fast=self.beta_fast,
-                beta_slow=self.beta_slow,
-                publish_swa_qat=self._produce_swa_qat,
-            )
-            kv_qat_completed = q_kv_norm_rope_cache_written and self._produce_swa_qat
-        if not q_kv_norm_rope_cache_written:
-            dsv4_kernel.q_norm_rope_fallback(
-                q,
-                positions,
-                rms_norm_eps=self.rms_norm_eps,
-                rotary_dim=self.rope_head_dim,
-                base=float(self.rope_base),
-                original_seq_len=self.original_seq_len,
-                factor=self.rope_factor,
-                beta_fast=self.beta_fast,
-                beta_slow=self.beta_slow,
-            )
+        attn_backend = ctx.attn_backend
+        if not isinstance(batch.attn_metadata, DSV4AttentionMetadata):
+            raise RuntimeError("DSV4 model forward requires prepared DSV4 metadata.")
+        if attn_backend is None:
+            raise RuntimeError("DSV4 model forward requires the DSV4 attention backend.")
 
-        if kv is None:
-            kv = (
-                kv_from_shared_wqa_wkv
-                if kv_from_shared_wqa_wkv is not None
-                else self.wkv.forward(x)
-            )
-        kv_cache_written = False
-        if kv_norm_rope_store_enabled:
-            if not q_kv_norm_rope_cache_written:
-                dsv4_kernel.k_norm_rope_cache_fallback(
-                    kv,
-                    positions,
-                    norm_weight=self.kv_norm.weight,
-                    rms_norm_eps=self.rms_norm_eps,
-                    cache=attn_backend.kvcache.swa_cache(self.layer_id),
-                    out_loc=self._swa_store_out_loc(attn_backend, batch),
-                    rotary_dim=self.rope_head_dim,
-                    base=float(self.rope_base),
-                    original_seq_len=self.original_seq_len,
-                    factor=self.rope_factor,
-                    beta_fast=self.beta_fast,
-                    beta_slow=self.beta_slow,
-                    publish_swa_qat=self._produce_swa_qat,
-                )
-                kv_qat_completed = self._produce_swa_qat
-            kv_cache_written = True
-        else:
-            if not fused_q_kv_rmsnorm:
-                kv = self.kv_norm.forward(kv)
-            dsv4_kernel.k_norm_rope_cache_fallback(
-                kv,
-                positions,
-                rotary_dim=self.rope_head_dim,
-                base=float(self.rope_base),
-                original_seq_len=self.original_seq_len,
-                factor=self.rope_factor,
-                beta_fast=self.beta_fast,
-                beta_slow=self.beta_slow,
-            )
-        if self.rope_head_dim < kv.shape[-1] and not kv_qat_completed:
-            kv[..., : -self.rope_head_dim] = dsv4_kernel.quantize_fp8_activation_ref(
+        cached_fused_weight = _cached_fused_wqa_wkv_fp8_weight(
+            self,
+            "_cached_fused_wqa_wkv_bf16_weight",
+            self.wq_a.weight,
+            getattr(self.wq_a, "weight_scale_inv", None),
+            self.wkv.weight,
+            getattr(self.wkv, "weight_scale_inv", None),
+            out_dtype=x.dtype,
+            allow_build=False,
+        )
+        if cached_fused_weight is None:
+            raise RuntimeError("DSV4 release requires the fused WQA/WKV BF16 cache.")
+        x_quant = dsv4_kernel.quantize_fp8_activation(x)
+        qkv = _linear_cached_bf16_weight(x_quant, cached_fused_weight)
+        q_lora_raw, kv = qkv.split(
+            [self.q_norm.weight.shape[0], self.head_dim],
+            dim=-1,
+        )
+        q_lora = self.q_norm.forward(q_lora_raw)
+        q = self.wq_b.forward_fp8_cached_bf16_weight(
+            q_lora,
+            cache_name=self._q_wqb_bf16_weight_cache_name,
+            owner_label=self._q_wqb_owner_label,
+        ).view(-1, self.num_local_heads, self.head_dim)
+
+        dsv4_kernel.q_kv_norm_rope_cache(
+            q,
+            kv,
+            positions,
+            norm_weight=self.kv_norm.weight,
+            rms_norm_eps=self.rms_norm_eps,
+            cache=attn_backend.kvcache.swa_cache(self.layer_id),
+            out_loc=self._swa_store_out_loc(batch),
+            rotary_dim=self.rope_head_dim,
+            base=float(self.rope_base),
+            original_seq_len=self.original_seq_len,
+            factor=self.rope_factor,
+            beta_fast=self.beta_fast,
+            beta_slow=self.beta_slow,
+            publish_swa_qat=self._produce_swa_qat,
+        )
+        if self.rope_head_dim < kv.shape[-1] and not self._produce_swa_qat:
+            kv[..., : -self.rope_head_dim] = dsv4_kernel.quantize_fp8_activation(
                 kv[..., : -self.rope_head_dim], block_size=64
             )
 
-        compress_store_fuses_norm = (
-            use_dsv4_backend
-            and attn_backend is not None
-            and dsv4_kernel.dsv4_triton_available()
-        )
-
         if hasattr(self, "indexer"):
-            indexer_select_fp8 = (
-                use_dsv4_backend
-                and attn_backend is not None
+            indexer_query = self.indexer.prepare_fp8_query(
+                x,
+                q_lora,
+                positions,
+                rotary_dim=self.rope_head_dim,
+                base=float(self.rope_base),
+                original_seq_len=self.original_seq_len,
+                factor=self.rope_factor,
+                beta_fast=self.beta_fast,
+                beta_slow=self.beta_slow,
             )
-            indexer_select_bf16 = (
-                not indexer_select_fp8
-                and use_dsv4_backend
-                and attn_backend is not None
-                and dsv4_kernel.dsv4_triton_available()
-            )
-            indexer_q = None
-            indexer_weights = None
-            indexer_fp8_query = None
-            if indexer_select_fp8:
-                indexer_fp8_query = self.indexer.prepare_fp8_query(
-                    x,
-                    q_lora,
-                    positions,
-                    rotary_dim=self.rope_head_dim,
-                    base=float(self.rope_base),
-                    original_seq_len=self.original_seq_len,
-                    factor=self.rope_factor,
-                    beta_fast=self.beta_fast,
-                    beta_slow=self.beta_slow,
-                )
-            if indexer_select_bf16:
-                indexer_q, indexer_weights = self.indexer.prepare_bf16_query(
-                    x,
-                    q_lora,
-                    positions,
-                    rotary_dim=self.rope_head_dim,
-                    base=float(self.rope_base),
-                    original_seq_len=self.original_seq_len,
-                    factor=self.rope_factor,
-                    beta_fast=self.beta_fast,
-                    beta_slow=self.beta_slow,
-                )
-            online_c4 = (
-                use_dsv4_backend
-                and attn_backend is not None
-                and hasattr(attn_backend, "forward_compress")
-                and dsv4_kernel.dsv4_triton_available()
-            )
-            if online_c4:
-                indexer_kv = attn_backend.forward_compress(
-                    self.layer_id,
-                    x,
-                    batch,
-                    self.indexer.compressor,
-                    component="indexer",
-                )
-                if not (indexer_select_bf16 or indexer_select_fp8):
-                    self.indexer._wq_b_forward(q_lora)
-                    self.indexer.weights_proj.forward(x)
-            else:
-                indexer_kv = self.indexer.forward(
-                    x,
-                    q_lora,
-                    positions,
-                    apply_norm=not compress_store_fuses_norm,
-                    touch_projections=not (indexer_select_bf16 or indexer_select_fp8),
-                )
-            if use_dsv4_backend and hasattr(attn_backend, "store_indexer"):
-                indexer_store_norm_weight = None
-                if compress_store_fuses_norm:
-                    indexer_store_norm_weight = _cached_indexer_store_norm_fp32_weight(
-                        self.indexer.compressor.norm,
-                        "_dsv4_indexer_store_norm_fp32_weight",
-                        self.indexer.compressor.norm.weight,
-                    )
-                attn_backend.store_indexer(
-                    self.layer_id,
-                    indexer_kv,
-                    batch,
-                    norm_weight=indexer_store_norm_weight,
-                    rms_norm_eps=self.rms_norm_eps if compress_store_fuses_norm else None,
-                    rotary_dim=self.rope_head_dim,
-                    base=float(self.rope_base),
-                    original_seq_len=self.original_seq_len,
-                    factor=self.rope_factor,
-                    beta_fast=self.beta_fast,
-                    beta_slow=self.beta_slow,
-                    apply_hadamard=online_c4 or indexer_select_bf16,
-                )
-            if indexer_select_fp8 and indexer_fp8_query is not None:
-                if not hasattr(attn_backend, "select_indexer_fp8"):
-                    raise RuntimeError(
-                        "Optimized DSV4 FP8 indexer cache requires an attention "
-                        "backend with select_indexer_fp8."
-                    )
-                attn_backend.select_indexer_fp8(
-                    self.layer_id,
-                    indexer_fp8_query.q_values,
-                    indexer_fp8_query.weights,
-                    batch,
-                )
-            if (
-                indexer_select_bf16
-                and indexer_q is not None
-                and indexer_weights is not None
-                and hasattr(attn_backend, "select_indexer")
-            ):
-                attn_backend.select_indexer(
-                    self.layer_id,
-                    indexer_q,
-                    indexer_weights,
-                    batch,
-                )
-        if hasattr(self, "compressor"):
-            online_compress = (
-                self.compress_ratio in (4, 128)
-                and use_dsv4_backend
-                and attn_backend is not None
-                and hasattr(attn_backend, "forward_compress")
-                and dsv4_kernel.dsv4_triton_available()
-            )
-            if online_compress:
-                compressed_kv = attn_backend.forward_compress(
-                    self.layer_id,
-                    x,
-                    batch,
-                    self.compressor,
-                    component="attention",
-                )
-            else:
-                compressed_kv = self.compressor.forward(
-                    x,
-                    positions,
-                    apply_norm=not compress_store_fuses_norm,
-                )
-            if use_dsv4_backend and hasattr(attn_backend, "store_compressed"):
-                attn_backend.store_compressed(
-                    self.layer_id,
-                    compressed_kv,
-                    batch,
-                    self.compress_ratio,
-                    norm_weight=(
-                        self.compressor.norm.weight if compress_store_fuses_norm else None
-                    ),
-                    rms_norm_eps=self.rms_norm_eps if compress_store_fuses_norm else None,
-                    rotary_dim=self.rope_head_dim,
-                    base=float(self.rope_base),
-                    original_seq_len=self.original_seq_len,
-                    factor=self.rope_factor,
-                    beta_fast=self.beta_fast,
-                    beta_slow=self.beta_slow,
-                )
-
-        if use_dsv4_backend and attn_backend is not None:
-            o = attn_backend.forward(
-                q,
-                kv,
-                kv,
+            indexer_kv = attn_backend.forward_compress(
                 self.layer_id,
+                x,
                 batch,
-                compress_ratio=self.compress_ratio,
-                attn_sink=self.attn_sink,
-                swa_cache_written=kv_cache_written,
+                self.indexer.compressor,
+                component="indexer",
             )
-        else:
-            raise RuntimeError("The DeepSeek V4 release requires the DSV4 attention backend.")
-        dsv4_kernel.apply_rotary_tail(
+            indexer_store_norm_weight = _cached_indexer_store_norm_fp32_weight(
+                self.indexer.compressor.norm,
+                "_dsv4_indexer_store_norm_fp32_weight",
+                self.indexer.compressor.norm.weight,
+            )
+            attn_backend.store_indexer(
+                self.layer_id,
+                indexer_kv,
+                batch,
+                norm_weight=indexer_store_norm_weight,
+                rms_norm_eps=self.rms_norm_eps,
+                rotary_dim=self.rope_head_dim,
+                base=float(self.rope_base),
+                original_seq_len=self.original_seq_len,
+                factor=self.rope_factor,
+                beta_fast=self.beta_fast,
+                beta_slow=self.beta_slow,
+                apply_hadamard=True,
+            )
+            attn_backend.select_indexer_fp8(
+                self.layer_id,
+                indexer_query.q_values,
+                indexer_query.weights,
+                batch,
+            )
+        if hasattr(self, "compressor"):
+            compressed_kv = attn_backend.forward_compress(
+                self.layer_id,
+                x,
+                batch,
+                self.compressor,
+                component="attention",
+            )
+            attn_backend.store_compressed(
+                self.layer_id,
+                compressed_kv,
+                batch,
+                self.compress_ratio,
+                norm_weight=self.compressor.norm.weight,
+                rms_norm_eps=self.rms_norm_eps,
+                rotary_dim=self.rope_head_dim,
+                base=float(self.rope_base),
+                original_seq_len=self.original_seq_len,
+                factor=self.rope_factor,
+                beta_fast=self.beta_fast,
+                beta_slow=self.beta_slow,
+            )
+
+        o = attn_backend.forward(
+            q,
+            kv,
+            kv,
+            self.layer_id,
+            batch,
+            compress_ratio=self.compress_ratio,
+            attn_sink=self.attn_sink,
+        )
+        dsv4_kernel.rotary_tail(
             o,
             positions,
             rotary_dim=self.rope_head_dim,
@@ -1275,7 +952,7 @@ class DSV4MoEGate(BaseOP):
         num_token_non_padded: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         weight = _cached_gate_fp32_weight(self, "_cached_gate_weight_fp32", self.weight)
-        return dsv4_kernel.moe_gate_fallback(
+        return dsv4_kernel.moe_gate(
             hidden_states,
             weight,
             input_ids=input_ids,
@@ -1290,10 +967,8 @@ class DSV4MoEGate(BaseOP):
 
 class DSV4FusedRoutedExperts(BaseOP):
     def __init__(self, config: ModelConfig, *, layer_id: int | None = None):
-        tp = get_tp_info()
         self.layer_id = layer_id
-        self._tp_size = tp.size
-        self._comm = DistributedCommunicator()
+        tp = get_tp_info()
         local_intermediate = div_even(config.moe_intermediate_size, tp.size)
         self.swiglu_limit = config.swiglu_limit or 0.0
         self.w13_weight = torch.empty(
@@ -1371,8 +1046,6 @@ class DSV4FusedRoutedExperts(BaseOP):
             "w2": getattr(cache, "w2", None),
             "w2_scale": getattr(cache, "w2_scale", None),
         }
-
-
 
     def _marlin_cache_report(
         self,
@@ -1580,57 +1253,26 @@ class DSV4FusedRoutedExperts(BaseOP):
     def _marlin_wna16_release_attribute_names(self) -> set[str]:
         return set(self._raw_expert_weight_names())
 
-
-
     def forward(
         self,
         hidden_states: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
         *,
-        reduce: bool = True,
         moe_plan: dsv4_kernel.DSV4MoEExecutionPlan | None = None,
     ) -> torch.Tensor:
-        missing_raw_weights = self._missing_raw_expert_weights()
-        if missing_raw_weights:
-            if self._marlin_wna16_weights is None:
-                raise RuntimeError(
-                    f"{self._released_raw_weight_error(missing=missing_raw_weights)} "
-                    "Marlin WNA16 prebuilt cache is missing."
-                )
-            grouped = dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16_prepacked(
-                hidden_states,
-                weights,
-                indices,
-                self._marlin_wna16_weights,
-                swiglu_limit=self.swiglu_limit,
-                moe_plan=moe_plan,
+        if self._marlin_wna16_weights is None:
+            raise RuntimeError(
+                f"{self._released_raw_weight_error()} Marlin WNA16 prebuilt cache is missing."
             )
-        else:
-            w13_weight, w13_scale, w2_weight, w2_scale = self._raw_expert_weight_tensors()
-            grouped, self._marlin_wna16_weights = (
-                dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16(
-                    hidden_states,
-                    weights,
-                    indices,
-                    w13_weight,
-                    w13_scale,
-                    w2_weight,
-                    w2_scale,
-                    swiglu_limit=self.swiglu_limit,
-                    cache=self._marlin_wna16_weights,
-                    owner_label=self._marlin_owner_label,
-                    moe_plan=moe_plan,
-                )
-            )
-        if reduce and self._tp_size > 1:
-            grouped_for_reduce = grouped.float()
-            grouped_reduced = self._comm.all_reduce(
-                grouped_for_reduce,
-                label="dsv4.routed_expert_all_reduce",
-            )
-            grouped = grouped_reduced.to(grouped.dtype)
-        return grouped
+        return dsv4_kernel.moe_route_dispatch_bf16_marlin_wna16_prepacked(
+            hidden_states,
+            weights,
+            indices,
+            self._marlin_wna16_weights,
+            swiglu_limit=self.swiglu_limit,
+            moe_plan=moe_plan,
+        )
 
 
 class DSV4SharedExperts(BaseOP):
@@ -1688,21 +1330,14 @@ class DSV4SharedExperts(BaseOP):
         )
         return reports
 
-
-    def prepare_down_bf16_weight_cache(self) -> dict[str, object]:
-        return self.down_proj.prepare_fp8_bf16_weight_cache(
-            self._down_bf16_weight_cache_name,
-            owner_label=self._down_owner_label,
-        )
-
-    def forward(self, hidden_states: torch.Tensor, *, reduce: bool = True) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate_up = self.gate_up_proj.forward_fp8_cached_bf16_weight(
             hidden_states,
             cache_name=self._gate_up_bf16_weight_cache_name,
             owner_label=self._gate_up_owner_label,
         )
         gate, up = gate_up.chunk(2, dim=-1)
-        hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
+        hidden = dsv4_kernel.silu_and_mul_clamp(
             gate,
             up,
             swiglu_limit=self.swiglu_limit,
@@ -1712,8 +1347,6 @@ class DSV4SharedExperts(BaseOP):
             hidden_for_down,
             cache_name=self._down_bf16_weight_cache_name,
             owner_label=self._down_owner_label,
-            reduce=reduce,
-            reduce_label="dsv4.shared_expert_all_reduce",
         )
 
 
@@ -1724,10 +1357,7 @@ def _dsv4_moe_reduce_once_input(
     layer_id: int,
     path: str,
 ) -> torch.Tensor:
-    if (
-        hidden_dtype == torch.bfloat16
-        and output.dtype != torch.bfloat16
-    ):
+    if hidden_dtype == torch.bfloat16 and output.dtype != torch.bfloat16:
         return output.to(torch.bfloat16)
     return output
 
@@ -1761,6 +1391,7 @@ class DSV4FusedMoERunner:
         gate: DSV4MoEGate,
         experts: DSV4FusedRoutedExperts,
         shared_experts: DSV4SharedExperts | None,
+        num_experts: int,
         topk_count: int,
         scoring_func: str,
         routed_scaling_factor: float,
@@ -1770,6 +1401,7 @@ class DSV4FusedMoERunner:
         self.gate = gate
         self.experts = experts
         self.shared_experts = shared_experts
+        self.num_experts = num_experts
         self.topk_count = topk_count
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
@@ -1799,25 +1431,15 @@ class DSV4FusedMoERunner:
         weights: torch.Tensor,
         indices: torch.Tensor,
     ) -> DSV4FusedMoERunnerPrepareResult:
-        if hasattr(self.experts, "w13_weight"):
-            num_experts = self.experts.w13_weight.shape[0]
-        elif self.experts._marlin_wna16_weights is not None:
-            num_experts = self.experts._marlin_wna16_weights.w13.shape[0]
-        else:
-            raise RuntimeError(
-                f"layer{self.layer_id}.moe runner cannot build a route plan because "
-                f"{dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ERROR} "
-                "Marlin WNA16 cache is missing."
-            )
         moe_plan = dsv4_kernel.build_moe_v2_execution_plan(
             flat,
             weights,
             indices,
-            num_experts=num_experts,
+            num_experts=self.num_experts,
             block_size_m=dsv4_kernel.moe_execution_block_size(
                 tokens=flat.shape[0],
                 topk=indices.shape[1],
-                num_experts=num_experts,
+                num_experts=self.num_experts,
             ),
             reduce_once=True,
         )
@@ -1836,7 +1458,6 @@ class DSV4FusedMoERunner:
             flat,
             prepared.weights,
             prepared.indices,
-            reduce=False,
             moe_plan=prepared.moe_plan,
         )
 
@@ -1848,7 +1469,7 @@ class DSV4FusedMoERunner:
     def apply_shared(self, flat: torch.Tensor) -> torch.Tensor | None:
         if self.shared_experts is None:
             return None
-        shared = self.shared_experts.forward(flat, reduce=False)
+        shared = self.shared_experts.forward(flat)
         return shared.float()
 
     def maybe_reduce_final(
@@ -1923,6 +1544,7 @@ class DSV4MoE(BaseOP):
             gate=self.gate,
             experts=self.experts,
             shared_experts=getattr(self, "shared_experts", None),
+            num_experts=config.n_routed_experts,
             topk_count=self.topk_count,
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
@@ -1969,7 +1591,7 @@ class DeepseekV4DecoderLayer(BaseOP):
         scale: torch.Tensor,
         base: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return dsv4_kernel.hc_pre_fallback(
+        return dsv4_kernel.hc_pre(
             x,
             fn,
             scale,
@@ -1987,23 +1609,19 @@ class DeepseekV4DecoderLayer(BaseOP):
         post: torch.Tensor,
         comb: torch.Tensor,
     ) -> torch.Tensor:
-        return dsv4_kernel.hc_post_fallback(x, residual, post, comb)
+        return dsv4_kernel.hc_post(x, residual, post, comb)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         residual = x
         attn_fn = _cached_hc_bf16_weight(self, "_hc_attn_fn_bf16", self.hc_attn_fn)
-        y, post, comb = self._hc_pre(
-            x, attn_fn, self.hc_attn_scale, self.hc_attn_base
-        )
+        y, post, comb = self._hc_pre(x, attn_fn, self.hc_attn_scale, self.hc_attn_base)
         y = self.input_layernorm.forward(y)
         y = self.self_attn.forward(y)
         x = self._hc_post(y, residual, post, comb)
 
         residual = x
         ffn_fn = _cached_hc_bf16_weight(self, "_hc_ffn_fn_bf16", self.hc_ffn_fn)
-        y, post, comb = self._hc_pre(
-            x, ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
-        )
+        y, post, comb = self._hc_pre(x, ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         y = self.post_attention_layernorm.forward(y)
         y = self.mlp.forward(y, input_ids)
         output = self._hc_post(y, residual, post, comb)
@@ -2056,31 +1674,14 @@ class DeepseekV4Model(BaseOP):
             if shared_experts is not None:
                 shared_expert_reports.extend(shared_experts.prepare_bf16_weight_cache())
 
-        moe_marlin_wna16_reports: list[dict[str, object]] = []
         moe_marlin_wna16_prebuild_reports: list[dict[str, object]] = []
-        moe_marlin_wna16_release_reports: list[dict[str, object]] = []
-        moe_marlin_prebuild_enabled = DSV4_RELEASE.marlin_prebuild
-        moe_marlin_release_original = DSV4_RELEASE.release_raw_expert_weights
-        moe_marlin_release_timing = _marlin_wna16_release_timing()
-        moe_marlin_release_deferred = _marlin_wna16_release_deferred_from_model_prepare()
-        if moe_marlin_release_original and not moe_marlin_prebuild_enabled:
-            raise RuntimeError(
-                "optimized raw-expert release requires Marlin WNA16 prebuild so the "
-                "Marlin WNA16 cache exists before original expert weights are released."
-            )
-        if moe_marlin_prebuild_enabled:
-            for layer in self.layers.op_list:
-                moe_marlin_wna16_prebuild_reports.append(
-                    layer.mlp.experts.prepare_marlin_wna16_weight_cache(
-                        release_original=False,
-                    )
+        for layer in self.layers.op_list:
+            moe_marlin_wna16_prebuild_reports.append(
+                layer.mlp.experts.prepare_marlin_wna16_weight_cache(
+                    release_original=False,
                 )
-            moe_marlin_wna16_reports = moe_marlin_wna16_prebuild_reports
-            if moe_marlin_release_original and not moe_marlin_release_deferred:
-                moe_marlin_wna16_release_reports = self.release_marlin_wna16_original_expert_weights(
-                    stage_label="model_prepare_release",
-                )["entries"]
-                moe_marlin_wna16_reports = moe_marlin_wna16_release_reports
+            )
+        moe_marlin_wna16_reports = moe_marlin_wna16_prebuild_reports
         total_q_wqb_bytes = int(sum(int(report["bytes"]) for report in q_wqb_reports))
         total_wo_b_bytes = int(sum(int(report["bytes"]) for report in wo_b_reports))
         total_indexer_wq_b_bytes = int(sum(int(report["bytes"]) for report in indexer_wq_b_reports))
@@ -2088,11 +1689,6 @@ class DeepseekV4Model(BaseOP):
         total_shared_expert_bytes = int(
             sum(int(report["bytes"]) for report in shared_expert_reports)
         )
-
-
-
-
-
 
         total_moe_marlin_wna16_persistent_bytes = int(
             sum(int(report["persistent_bytes"]) for report in moe_marlin_wna16_reports)
@@ -2174,30 +1770,18 @@ class DeepseekV4Model(BaseOP):
             "moe_marlin_wna16_cache": {
                 "enabled": bool(moe_marlin_wna16_reports),
                 "backend": dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16,
-                "prebuild_requested": bool(moe_marlin_prebuild_enabled),
-                "release_original_requested": bool(moe_marlin_release_original),
-                "release_timing": moe_marlin_release_timing,
-                "release_deferred_from_model_prepare": bool(moe_marlin_release_deferred),
+                "prebuild_requested": True,
+                "release_original_requested": True,
+                "release_timing": DSV4_RELEASE.marlin_release_timing,
+                "release_deferred_from_model_prepare": True,
                 "layers_cached": len(moe_marlin_wna16_reports),
                 "total_persistent_bytes": total_moe_marlin_wna16_persistent_bytes,
                 "total_source_bytes": total_moe_marlin_wna16_source_bytes,
                 "total_released_original_bytes": total_moe_marlin_wna16_released_bytes,
-                "release_runtime_policy": (
-                    "marlin_wna16_prepacked_only"
-                    if (
-                        moe_marlin_release_original
-                        and not moe_marlin_release_deferred
-                        and bool(moe_marlin_wna16_reports)
-                    )
-                    else None
-                ),
-                "fail_closed_error": (
-                    dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ERROR
-                    if moe_marlin_release_original
-                    else None
-                ),
+                "release_runtime_policy": None,
+                "fail_closed_error": dsv4_kernel.DSV4_MARLIN_WNA16_RELEASE_ERROR,
                 "prebuild_entries": moe_marlin_wna16_prebuild_reports,
-                "release_entries": moe_marlin_wna16_release_reports,
+                "release_entries": [],
                 "entries": moe_marlin_wna16_reports,
             },
         }
@@ -2247,17 +1831,9 @@ class DeepseekV4Model(BaseOP):
             ),
         }
 
-
-
-
-
-
-
-
-
     def _hc_head(self, x: torch.Tensor) -> torch.Tensor:
         hc_head_fn = _cached_hc_bf16_weight(self, "_hc_head_fn_bf16", self.hc_head_fn)
-        return dsv4_kernel.hc_head_fallback(
+        return dsv4_kernel.hc_head(
             x,
             hc_head_fn,
             self.hc_head_scale,
@@ -2296,19 +1872,13 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
     ) -> dict[str, object]:
         return self.model.release_marlin_wna16_original_expert_weights(stage_label=stage_label)
 
-
-
-
-
     def forward(self):
         batch = get_global_ctx().batch
         output = self.model.forward(batch.input_ids)
         if batch.is_prefill:
-            output = output[
-                batch.attn_metadata.get_last_indices(batch.size)
-            ].contiguous()
+            output = output[batch.attn_metadata.get_last_indices(batch.size)].contiguous()
         logits = self.lm_head.linear(output)
         return logits
 
 
-__all__ = ["DeepseekV4ForCausalLM", "DSV4FallbackAttentionMetadata", "DSV4AttentionMetadata"]
+__all__ = ["DeepseekV4ForCausalLM", "DSV4AttentionMetadata"]

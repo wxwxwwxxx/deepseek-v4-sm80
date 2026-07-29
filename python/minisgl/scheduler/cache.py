@@ -15,8 +15,6 @@ if TYPE_CHECKING:
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
-
-
 @dataclass
 class PrefixCacheMetrics:
     match_requests: int = 0
@@ -33,9 +31,7 @@ class PrefixCacheMetrics:
     evicted_tokens: int = 0
 
     def snapshot(self, page_size: int) -> dict[str, Any]:
-        hit_rate = (
-            0.0 if self.match_requests == 0 else self.hit_requests / self.match_requests
-        )
+        hit_rate = 0.0 if self.match_requests == 0 else self.hit_requests / self.match_requests
         avg_hit = 0.0 if self.hit_requests == 0 else self.total_hit_tokens / self.hit_requests
         return {
             "match_requests": self.match_requests,
@@ -62,14 +58,13 @@ class CacheManager:
         num_pages: int,
         page_size: int,
         page_table: torch.Tensor,
-        type: str,
         kv_cache: BaseKVCachePool | None = None,
     ):
         # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
         # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
         device = page_table.device
         self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * page_size
-        self.prefix_cache = create_prefix_cache(device=device, type=type)
+        self.prefix_cache = create_prefix_cache(device=device)
         self.device = device
         self.num_pages = num_pages
         self.page_table = page_table
@@ -77,28 +72,17 @@ class CacheManager:
         self.kv_cache = kv_cache
         self.metrics = PrefixCacheMetrics()
         self._lazy_free_depth = 0
-        self.dsv4_component_ownership = bool(
-            getattr(kv_cache, "component_loc_ownership_enabled", False)
-        )
-        if self.dsv4_component_ownership:
-            self.dsv4_swa_independent_lifecycle = bool(
-                getattr(kv_cache, "swa_independent_lifecycle_enabled", False)
-            )
-            setattr(self.prefix_cache, "dsv4_component_ownership_enabled", True)
+        if self.kv_cache is not None:
             setattr(
                 self.prefix_cache,
                 "dsv4_component_evict_callback",
                 self._release_dsv4_component_pages,
             )
-            if self.dsv4_swa_independent_lifecycle:
-                setattr(self.prefix_cache, "dsv4_swa_independent_lifecycle_enabled", True)
-                setattr(
-                    self.prefix_cache,
-                    "dsv4_swa_evict_callback",
-                    self._release_dsv4_swa_pages,
-                )
-        else:
-            self.dsv4_swa_independent_lifecycle = False
+            setattr(
+                self.prefix_cache,
+                "dsv4_swa_evict_callback",
+                self._release_dsv4_swa_pages,
+            )
 
     def match_req(self, req: PendingReq) -> MatchResult:
         input_len = req.input_len
@@ -109,7 +93,7 @@ class CacheManager:
 
     @property
     def available_size(self) -> int:
-        if self.dsv4_component_ownership:
+        if self.kv_cache is not None:
             live_full_tokens = int(
                 getattr(
                     self.prefix_cache,
@@ -169,13 +153,14 @@ class CacheManager:
             "finished": bool(finished),
             "cached_len": int(req.cached_len),
             "page_size": int(self.page_size),
-            "component_loc_ownership": bool(self.dsv4_component_ownership),
-            "swa_independent_lifecycle": bool(self.dsv4_swa_independent_lifecycle),
+            "component_loc_ownership": self.kv_cache is not None,
+            "swa_independent_lifecycle": self.kv_cache is not None,
         }
         insert_ids = req.input_ids[: req.cached_len]
         page_indices = self.page_table[req.table_idx, : req.cached_len]
         old_handle = req.cache_handle
-        if self.dsv4_component_ownership:
+        if self.kv_cache is not None:
+
             def make_new_component_pages(
                 start: int,
                 end: int,
@@ -189,8 +174,6 @@ class CacheManager:
                 start: int,
                 end: int,
             ):
-                if not self.dsv4_swa_independent_lifecycle:
-                    return None
                 handles = self.kv_cache.make_swa_page_handles(
                     page_indices[start:end],
                     self.page_size,
@@ -222,12 +205,10 @@ class CacheManager:
                 dsv4_swa_pages_builder=make_new_swa_pages,
             )
         else:
-            cached_len, new_handle = self.prefix_cache.insert_prefix(
-                insert_ids, page_indices
-            )
+            cached_len, new_handle = self.prefix_cache.insert_prefix(insert_ids, page_indices)
         self.metrics.inserted_tokens += max(0, new_handle.cached_len - cached_len)
         already_cached_indices = page_indices[old_handle.cached_len : cached_len].clone()
-        if self.dsv4_component_ownership and cached_len > old_handle.cached_len:
+        if self.kv_cache is not None and cached_len > old_handle.cached_len:
             matched_indices = new_handle.get_matched_indices()
             page_indices[old_handle.cached_len : cached_len].copy_(
                 matched_indices[old_handle.cached_len : cached_len]
@@ -244,25 +225,23 @@ class CacheManager:
             self.lock(new_handle)
         self._release_dsv4_swa_out_of_window(new_handle)
         self._release_dsv4_component_owned_full_head(new_handle)
-        if self.dsv4_component_ownership and not finished and new_handle.cached_len > 0:
+        if self.kv_cache is not None and not finished and new_handle.cached_len > 0:
             page_indices[: new_handle.cached_len].copy_(new_handle.get_matched_indices())
-
 
     def check_integrity(self) -> None:
         self.prefix_cache.check_integrity()
         cache_pages = self.prefix_cache.size_info.total_size // self.page_size
         live_pages = self.num_pages - len(self.free_slots)
         if self.kv_cache is not None:
-            if self.dsv4_component_ownership:
-                live_full_slots = self.kv_cache.allocation_counts.full_slots
-                if live_full_slots % self.page_size != 0:
-                    raise RuntimeError(
-                        "DSV4 component ownership full-slot refcount is not page-aligned: "
-                        f"full_slots={live_full_slots}, page_size={self.page_size}"
-                    )
-                live_pages = live_full_slots // self.page_size
+            live_full_slots = self.kv_cache.allocation_counts.full_slots
+            if live_full_slots % self.page_size != 0:
+                raise RuntimeError(
+                    "DSV4 component ownership full-slot refcount is not page-aligned: "
+                    f"full_slots={live_full_slots}, page_size={self.page_size}"
+                )
+            live_pages = live_full_slots // self.page_size
             self.kv_cache.check_allocation_integrity(live_pages, self.page_size)
-        if self.dsv4_component_ownership:
+        if self.kv_cache is not None:
             expected_pages = self.num_pages
             actual_pages = len(self.free_slots) + live_pages
         else:
@@ -297,9 +276,8 @@ class CacheManager:
             del self._free
             self.free_slots = torch.cat([self.free_slots] + lazy_free_list)
 
-
     def _allocate(self, needed_pages: int) -> torch.Tensor:
-        if self.dsv4_component_ownership:
+        if self.kv_cache is not None:
             self._evict_for_dsv4_component_capacity(needed_pages)
         elif needed_pages > (free_pages := len(self.free_slots)):
             evicted = self.prefix_cache.evict((needed_pages - free_pages) * self.page_size)
@@ -324,7 +302,7 @@ class CacheManager:
     def _valid_full_indices(self, indices: torch.Tensor) -> torch.Tensor:
         if len(indices) == 0:
             return indices
-        if not self.dsv4_component_ownership:
+        if self.kv_cache is None:
             return indices
         if indices.numel() % self.page_size != 0:
             page_starts = indices[:: self.page_size]
@@ -353,8 +331,6 @@ class CacheManager:
             release(handles, tombstone=tombstone)
 
     def _release_dsv4_swa_out_of_window(self, handle: BaseCacheHandle) -> None:
-        if not self.dsv4_swa_independent_lifecycle:
-            return
         releaser = getattr(self.prefix_cache, "release_dsv4_swa_out_of_window", None)
         if not callable(releaser):
             return
@@ -364,8 +340,6 @@ class CacheManager:
         releaser(handle, tail_tokens=tail_tokens)
 
     def release_active_dsv4_swa_out_of_window(self, req: Req) -> None:
-        if not self.dsv4_swa_independent_lifecycle:
-            return
         releaser = getattr(self.kv_cache, "release_swa_for_full_indices", None)
         if not callable(releaser):
             return
@@ -395,8 +369,6 @@ class CacheManager:
         return align_down(max(cached_len, 0), self.page_size)
 
     def _release_dsv4_component_owned_full_head(self, handle: BaseCacheHandle) -> None:
-        if not self.dsv4_component_ownership:
-            return
         releaser = getattr(self.prefix_cache, "release_dsv4_full_head", None)
         if not callable(releaser):
             return
@@ -412,7 +384,7 @@ class CacheManager:
                 released,
                 self.page_size,
                 free_components=False,
-                free_swa=not self.dsv4_swa_independent_lifecycle,
+                free_swa=False,
             )
         self.free_slots = torch.cat([self.free_slots, released[:: self.page_size]])
 
@@ -421,24 +393,12 @@ class CacheManager:
         while (
             len(self.free_slots) < needed_pages
             or self.kv_cache.available_component_pages() < needed_pages
-            or (
-                self.dsv4_swa_independent_lifecycle
-                and self.kv_cache.available_swa_pages() < needed_pages
-            )
+            or self.kv_cache.available_swa_pages() < needed_pages
         ):
             full_deficit = max(0, needed_pages - len(self.free_slots))
             component_deficit = max(0, needed_pages - self.kv_cache.available_component_pages())
-            swa_deficit = (
-                max(0, needed_pages - self.kv_cache.available_swa_pages())
-                if self.dsv4_swa_independent_lifecycle
-                else 0
-            )
-            if (
-                self.dsv4_swa_independent_lifecycle
-                and swa_deficit > 0
-                and full_deficit == 0
-                and component_deficit == 0
-            ):
+            swa_deficit = max(0, needed_pages - self.kv_cache.available_swa_pages())
+            if swa_deficit > 0 and full_deficit == 0 and component_deficit == 0:
                 release_swa = getattr(self.prefix_cache, "release_dsv4_evictable_swa_pages", None)
                 released_swa = release_swa(swa_deficit) if callable(release_swa) else 0
                 if released_swa > 0:
@@ -452,29 +412,25 @@ class CacheManager:
                     valid,
                     self.page_size,
                     free_components=False,
-                    free_swa=not self.dsv4_swa_independent_lifecycle,
+                    free_swa=False,
                 )
                 self.free_slots = torch.cat([self.free_slots, valid[:: self.page_size]])
             if (
                 valid.numel() == 0
                 and (
                     self.kv_cache.available_component_pages() < needed_pages
-                    or (
-                        self.dsv4_swa_independent_lifecycle
-                        and self.kv_cache.available_swa_pages() < needed_pages
-                    )
+                    or self.kv_cache.available_swa_pages() < needed_pages
                 )
                 and self.prefix_cache.size_info.evictable_size == 0
             ):
                 break
         assert len(self.free_slots) >= needed_pages, "Eviction did not free enough full pages."
-        assert (
-            self.kv_cache.available_component_pages() >= needed_pages
-        ), "Eviction did not free enough DSV4 component pages."
-        if self.dsv4_swa_independent_lifecycle:
-            assert (
-                self.kv_cache.available_swa_pages() >= needed_pages
-            ), "Eviction did not free enough DSV4 SWA pages."
+        assert self.kv_cache.available_component_pages() >= needed_pages, (
+            "Eviction did not free enough DSV4 component pages."
+        )
+        assert self.kv_cache.available_swa_pages() >= needed_pages, (
+            "Eviction did not free enough DSV4 SWA pages."
+        )
 
     def _page_to_token(self, pages: torch.Tensor) -> torch.Tensor:
         if self.page_size == 1:
@@ -500,7 +456,7 @@ class CacheManager:
         retention_estimator = getattr(self.kv_cache, "estimate_prefix_retention", None)
         if callable(retention_estimator):
             snapshot["dsv4_retention"] = retention_estimator(retained_tokens, self.page_size)
-        if self.dsv4_component_ownership and self.kv_cache is not None:
+        if self.kv_cache is not None:
             counts = self.kv_cache.allocation_counts
             swa_counters = (
                 self.kv_cache.runtime_swa_counters()
@@ -530,28 +486,24 @@ class CacheManager:
                     getattr(self.prefix_cache, "dsv4_evictable_component_tokens", 0)
                 ),
             }
-            if self.dsv4_swa_independent_lifecycle:
-                snapshot["dsv4_swa_lifecycle"] = {
-                    **swa_counters,
-                    "retained_prefix_swa_pages": retained_swa_pages,
-                    "retained_prefix_swa_tokens": retained_swa_tokens,
-                    "evictable_prefix_swa_pages": int(
-                        getattr(self.prefix_cache, "dsv4_evictable_swa_tokens", 0)
-                    )
-                    // self.page_size,
-                    "protected_prefix_swa_pages": int(
-                        getattr(self.prefix_cache, "dsv4_protected_swa_tokens", 0)
-                    )
-                    // self.page_size,
-                    "active_decode_swa_pages_estimate": max(
-                        0,
-                        int(swa_counters.get("current_swa_tail_pages", 0))
-                        - retained_swa_pages,
-                    ),
-                }
+            snapshot["dsv4_swa_lifecycle"] = {
+                **swa_counters,
+                "retained_prefix_swa_pages": retained_swa_pages,
+                "retained_prefix_swa_tokens": retained_swa_tokens,
+                "evictable_prefix_swa_pages": int(
+                    getattr(self.prefix_cache, "dsv4_evictable_swa_tokens", 0)
+                )
+                // self.page_size,
+                "protected_prefix_swa_pages": int(
+                    getattr(self.prefix_cache, "dsv4_protected_swa_tokens", 0)
+                )
+                // self.page_size,
+                "active_decode_swa_pages_estimate": max(
+                    0,
+                    int(swa_counters.get("current_swa_tail_pages", 0)) - retained_swa_pages,
+                ),
+            }
         return snapshot
-
-
 
     def _record_prefix_match(self, cached_len: int, input_len: int) -> None:
         self.metrics.match_requests += 1
@@ -576,8 +528,6 @@ class CacheManager:
             return
         self.metrics.evictions += 1
         self.metrics.evicted_tokens += evicted_tokens
-
-
 
 
 def _write_page_table(

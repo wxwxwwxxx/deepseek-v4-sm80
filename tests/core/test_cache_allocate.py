@@ -4,10 +4,9 @@ Test that CacheManager._allocate correctly handles eviction with page_size > 1.
 
 from __future__ import annotations
 
+import minisgl.core as core
 import pytest
 import torch
-
-import minisgl.core as core
 from minisgl.scheduler.cache import CacheManager
 
 
@@ -25,7 +24,7 @@ def _make_cache_manager(num_pages: int, page_size: int) -> CacheManager:
     page_table = torch.empty((1,))
     ctx = core.Context(page_size=page_size)
     core.set_global_ctx(ctx)
-    return CacheManager(num_pages, page_size, page_table, type="radix")
+    return CacheManager(num_pages, page_size, page_table)
 
 
 def _insert_evictable(cm: CacheManager, input_ids: torch.Tensor, indices: torch.Tensor):
@@ -38,9 +37,9 @@ def _assert_all_page_aligned(tensor: torch.Tensor, page_size: int, label: str = 
     if len(tensor) == 0:
         return
     misaligned = tensor[tensor % page_size != 0]
-    assert (
-        len(misaligned) == 0
-    ), f"{label} contains non-page-aligned values: {misaligned.tolist()}, page_size={page_size}"
+    assert len(misaligned) == 0, (
+        f"{label} contains non-page-aligned values: {misaligned.tolist()}, page_size={page_size}"
+    )
 
 
 def _assert_no_overlap(pages: torch.Tensor, page_size: int):

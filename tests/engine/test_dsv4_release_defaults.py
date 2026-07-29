@@ -7,6 +7,22 @@ from minisgl.dsv4_release import DSV4_RELEASE
 from minisgl.engine import engine as engine_module
 
 
+@pytest.mark.parametrize("capability", [(8, 0), (8, 6)])
+def test_dsv4_ampere_device_gate_accepts_release_architectures(capability):
+    assert engine_module.validate_dsv4_device_capability(capability)
+
+
+@pytest.mark.parametrize("capability", [(8, 9), (9, 0), (12, 0)])
+def test_dsv4_ampere_device_gate_warns_via_unqualified_result(capability):
+    assert not engine_module.validate_dsv4_device_capability(capability)
+
+
+@pytest.mark.parametrize("capability", [(7, 0), (7, 5)])
+def test_dsv4_ampere_device_gate_rejects_pre_ampere(capability):
+    with pytest.raises(RuntimeError, match="compute capability 8.0 or newer"):
+        engine_module.validate_dsv4_device_capability(capability)
+
+
 def _fake_config(**overrides):
     config = SimpleNamespace(
         model_config=SimpleNamespace(is_deepseek_v4=True, is_moe=True),
@@ -18,16 +34,11 @@ def _fake_config(**overrides):
         allow_dsv4_cuda_graph=False,
         cuda_graph_bs=None,
         cuda_graph_max_bs=None,
-        cuda_graph_capture_fail_open=False,
         cuda_graph_capture_greedy_sample=False,
-        page_size=1,
+        page_size=256,
         max_extend_tokens=8192,
         max_extend_tokens_explicit=False,
         context_length=None,
-        cache_type="radix",
-        enable_dsv4_radix_prefix_cache=False,
-        enable_dsv4_component_loc_ownership=False,
-        enable_dsv4_swa_independent_lifecycle=False,
     )
     for name, value in overrides.items():
         setattr(config, name, value)
@@ -44,10 +55,6 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
 
     assert config.attention_backend == "dsv4"
     assert config.page_size == 256
-    assert config.cache_type == "radix"
-    assert config.enable_dsv4_radix_prefix_cache is True
-    assert config.enable_dsv4_component_loc_ownership is True
-    assert config.enable_dsv4_swa_independent_lifecycle is True
     assert config.max_extend_tokens == 8192
     assert config.allow_dsv4_cuda_graph is True
     assert config.dsv4_sm80_recipe is None
@@ -55,14 +62,20 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
     assert config.cuda_graph_max_bs == 128
     assert config.cuda_graph_policy.source_mode == "explicit_max"
     assert config.cuda_graph_policy.resolved_bs[-1] == 128
-    assert config.cuda_graph_capture_fail_open is True
-    assert DSV4_RELEASE.direct_graph_metadata_groups == frozenset({"swa", "c4"})
-    assert "c128" not in DSV4_RELEASE.direct_graph_metadata_groups
     assert DSV4_RELEASE.marlin_release_timing == "before_kv_alloc"
     assert DSV4_RELEASE.clear_allocated_page_scope == "component"
     assert DSV4_RELEASE.pynccl_max_buffer_bytes == 32 * 1024 * 1024
     assert DSV4_RELEASE.release_raw_expert_weights is True
     assert DSV4_RELEASE.marlin_prebuild is True
+
+
+@pytest.mark.parametrize("page_size", [1, 64, 128, 512])
+def test_deepseek_v4_release_boundary_rejects_noncanonical_page_size(monkeypatch, page_size):
+    monkeypatch.setattr(engine_module.logger, "info_rank0", lambda *args, **kwargs: None)
+    config = _fake_config(page_size=page_size)
+
+    with pytest.raises(ValueError, match="page_size=256"):
+        engine_module._adjust_config(config)
 
 
 @pytest.mark.parametrize("backend", ["fa", "fi", "trtllm", "fa,fi"])
@@ -102,7 +115,6 @@ def test_deepseek_v4_release_defaults_honor_explicit_max_extend_tokens(monkeypat
 
     assert config.max_extend_tokens == 16384
     assert config.page_size == 256
-    assert config.enable_dsv4_swa_independent_lifecycle is True
 
 
 def test_deepseek_v4_release_defaults_honor_explicit_generic_max_extend_tokens(monkeypatch):
@@ -115,7 +127,6 @@ def test_deepseek_v4_release_defaults_honor_explicit_generic_max_extend_tokens(m
 
     assert config.max_extend_tokens == 8192
     assert config.page_size == 256
-    assert config.enable_dsv4_swa_independent_lifecycle is True
 
 
 @pytest.mark.parametrize(

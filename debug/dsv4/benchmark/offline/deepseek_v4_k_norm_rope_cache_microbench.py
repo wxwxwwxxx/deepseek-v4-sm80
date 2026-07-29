@@ -11,11 +11,13 @@ from typing import Any
 
 import torch
 
-
 ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "python"))
 
 from minisgl.kernel import deepseek_v4 as dsv4_kernel  # noqa: E402
+
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference  # noqa: E402
 
 
 def _parse_csv_ints(value: str) -> list[int]:
@@ -93,7 +95,7 @@ def _bench_case(
     def run_once(kv_buf: torch.Tensor, cache: torch.Tensor) -> torch.Tensor:
         kv_buf.copy_(kv)
         cache.zero_()
-        return dsv4_kernel.k_norm_rope_cache_fallback(
+        return dsv4_reference.k_norm_rope_cache_fallback(
             kv_buf,
             positions,
             norm_weight=norm_weight,

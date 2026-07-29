@@ -6,6 +6,8 @@ import pytest
 import torch
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference
+
 
 def _has_sm80_cuda() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
@@ -72,13 +74,13 @@ def _reference_publication(
     values = source.float()
     values = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + 1e-6)
     source.copy_((values * norm_weight.float()).to(source.dtype))
-    dsv4_kernel.apply_rotary_tail(
+    dsv4_reference.apply_rotary_tail(
         source,
         positions,
         **PRODUCTION_ROPE,
     )
-    dsv4_kernel.indexer_kv_hadamard_fallback(source)
-    dsv4_kernel.store_indexer_fp8_cache_fallback(cache, 0, source, loc)
+    dsv4_reference.indexer_kv_hadamard_fallback(source)
+    dsv4_reference.store_indexer_fp8_cache_fallback(cache, 0, source, loc)
 
 
 def _candidate_publication(
@@ -88,7 +90,7 @@ def _candidate_publication(
     norm_weight: torch.Tensor,
     loc: torch.Tensor,
 ) -> None:
-    dsv4_kernel.compress_norm_rope_store_fallback(
+    dsv4_reference.compress_norm_rope_store_fallback(
         cache,
         0,
         source,
@@ -255,9 +257,7 @@ def test_c4_indexer_publication_production_high_positions_are_bitwise_exact(
 ) -> None:
     assert max(publication_positions) < PRODUCTION_MAX_POSITION, scenario
     rows = len(publication_positions)
-    generator = torch.Generator(device="cuda").manual_seed(
-        17500 + sum(publication_positions) % 997
-    )
+    generator = torch.Generator(device="cuda").manual_seed(17500 + sum(publication_positions) % 997)
     original = torch.randn(
         rows,
         128,
@@ -305,12 +305,12 @@ def test_c4_indexer_publication_production_high_positions_are_bitwise_exact(
     assert torch.equal(reference_cache._packed, candidate_cache._packed)
     assert torch.equal(reference_source[valid], candidate_source[valid])
     assert torch.equal(original[~valid], candidate_source[~valid])
-    reference_dequant = dsv4_kernel.dequantize_indexer_fp8_paged_cache_ref(
+    reference_dequant = dsv4_reference.dequantize_indexer_fp8_paged_cache_ref(
         reference_cache._packed,
         page_size=reference_cache.indexer_fp8_page_size,
         dim=128,
     )
-    candidate_dequant = dsv4_kernel.dequantize_indexer_fp8_paged_cache_ref(
+    candidate_dequant = dsv4_reference.dequantize_indexer_fp8_paged_cache_ref(
         candidate_cache._packed,
         page_size=candidate_cache.indexer_fp8_page_size,
         dim=128,

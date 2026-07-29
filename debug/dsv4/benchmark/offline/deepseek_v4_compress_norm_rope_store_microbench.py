@@ -10,12 +10,11 @@ from typing import Any, Literal
 
 import torch
 
-
 ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "python"))
 
-from minisgl.kernel import deepseek_v4 as dsv4_kernel  # noqa: E402
-
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference  # noqa: E402
 
 Mode = Literal["store_only", "norm_store", "norm_rope_store"]
 
@@ -99,7 +98,7 @@ def _run_once(
 ) -> None:
     kv_buf.copy_(kv_src)
     cache.zero_()
-    dsv4_kernel.compress_norm_rope_store_fallback(
+    dsv4_reference.compress_norm_rope_store_fallback(
         _FakeCompressedCache(cache),
         0,
         kv_buf,

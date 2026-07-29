@@ -19,6 +19,7 @@ from minisgl.models import create_model, load_weight
 from minisgl.reasoning import ReasoningTokenIds, resolve_reasoning_token_ids
 from minisgl.utils import (
     init_logger,
+    is_dsv4_ampere_capability,
     load_tokenizer,
     torch_dtype,
 )
@@ -50,6 +51,29 @@ _DSV4_SM80_RECIPES = {
 }
 _GENERIC_DEFAULT_MAX_EXTEND_TOKENS = 8192
 _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS = 8192
+
+
+def validate_dsv4_device_capability(capability: tuple[int, int]) -> bool:
+    """Validate the minimum device contract and report whether it is qualified."""
+
+    if capability < (8, 0):
+        raise RuntimeError(
+            "DeepSeek V4 on Ampere requires CUDA compute capability 8.0 or newer; "
+            f"detected sm{capability[0]}{capability[1]}."
+        )
+    return is_dsv4_ampere_capability(capability)
+
+
+def _validate_dsv4_device(device: torch.device) -> None:
+    capability = tuple(int(part) for part in torch.cuda.get_device_capability(device))
+    if validate_dsv4_device_capability(capability):
+        return
+    logger.warning_rank0(
+        "This runtime is specialized for Ampere SM80/SM86, but detected "
+        f"sm{capability[0]}{capability[1]}. Newer or otherwise unqualified "
+        "architectures may fail to start or run with degraded performance; "
+        "use the full SGLang project for those GPUs."
+    )
 
 
 class ForwardOutput(NamedTuple):
@@ -114,6 +138,7 @@ class Engine:
 
         self.device = torch.device(f"cuda:{config.tp_info.rank}")
         torch.cuda.set_device(self.device)
+        _validate_dsv4_device(self.device)
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
@@ -154,18 +179,8 @@ class Engine:
             num_pages=self.num_pages + 1,  # +1 for dummy page
             page_size=config.page_size,
             device=self.device,
-            enable_dsv4_component_loc_ownership=bool(
-                getattr(config, "enable_dsv4_component_loc_ownership", False)
-            ),
-            enable_dsv4_swa_independent_lifecycle=bool(
-                getattr(config, "enable_dsv4_swa_independent_lifecycle", False)
-            ),
             max_running_req=int(getattr(config, "max_running_req", 1)),
-            dsv4_swa_num_pages=(
-                self._planned_dsv4_swa_independent_pages(config)
-                if self._dsv4_swa_independent_enabled(config)
-                else None
-            ),
+            dsv4_swa_num_pages=self._planned_dsv4_swa_independent_pages(config),
             dsv4_dummy_token_start=num_tokens,
         )
         self._maybe_release_marlin_wna16_for_timing(
@@ -239,7 +254,6 @@ class Engine:
             max_seq_len=aligned_max_seq_len,
             vocab_size=config.model_config.vocab_size,
             dummy_req=self.dummy_req,
-            capture_fail_open=config.cuda_graph_capture_fail_open,
             capture_greedy_sample=config.cuda_graph_capture_greedy_sample,
             reasoning_token_ids=self.reasoning_token_ids,
         )
@@ -322,7 +336,7 @@ class Engine:
             int(config.max_running_req),
         )
         legacy_cache_per_page = cache_per_page
-        if config.model_config.is_deepseek_v4 and self._dsv4_swa_independent_enabled(config):
+        if config.model_config.is_deepseek_v4:
             dtype_size = torch.bfloat16.itemsize
             planned_swa_pages = self._planned_dsv4_swa_independent_pages(config)
             swa_per_page = (
@@ -444,7 +458,7 @@ class Engine:
             self.graph_memory_estimate_elapsed_s = time.perf_counter() - started
             return estimate
         capability = tuple(int(part) for part in torch.cuda.get_device_capability(self.device))
-        if capability != (8, 0):
+        if not is_dsv4_ampere_capability(capability):
             estimate = empty_graph_memory_estimate(graph_bs)
             self.graph_memory_estimate_elapsed_s = time.perf_counter() - started
             return estimate
@@ -526,9 +540,6 @@ class Engine:
         )
         graph_report["post_capture_free_bytes"] = int(post_capture_free)
         status["graph_memory_plan"] = dict(graph_report)
-
-    def _dsv4_swa_independent_enabled(self, config: EngineConfig) -> bool:
-        return bool(getattr(config, "enable_dsv4_swa_independent_lifecycle", False))
 
     def _planned_dsv4_swa_independent_pages(self, config: EngineConfig) -> int:
         window_size = int(getattr(config.model_config, "window_size", 128) or 128)
@@ -728,7 +739,7 @@ def _use_dsv4_sm80_default_pynccl_threshold(config: EngineConfig) -> bool:
         capability = torch.cuda.get_device_capability()
     except Exception:
         return False
-    return tuple(int(part) for part in capability) == (8, 0)
+    return is_dsv4_ampere_capability(tuple(int(part) for part in capability))
 
 
 def _resolve_cuda_graph_policy(
@@ -828,22 +839,11 @@ def _adjust_config(config: EngineConfig):
                 "cuda_graph_max_bs",
                 min(_DSV4_SM80_DEFAULT_CUDA_GRAPH_MAX_BS, config.max_running_req),
             )
-        if config.page_size == 1:
-            override("page_size", 256)
-        if hasattr(config, "cache_type") and getattr(config, "cache_type") != "radix":
-            override("cache_type", "radix")
-        if hasattr(config, "enable_dsv4_radix_prefix_cache") and not getattr(
-            config, "enable_dsv4_radix_prefix_cache"
-        ):
-            override("enable_dsv4_radix_prefix_cache", True)
-        if hasattr(config, "enable_dsv4_component_loc_ownership") and not getattr(
-            config, "enable_dsv4_component_loc_ownership"
-        ):
-            override("enable_dsv4_component_loc_ownership", True)
-        if hasattr(config, "enable_dsv4_swa_independent_lifecycle") and not getattr(
-            config, "enable_dsv4_swa_independent_lifecycle"
-        ):
-            override("enable_dsv4_swa_independent_lifecycle", True)
+        if config.page_size != 256:
+            raise ValueError(
+                "The DeepSeek V4 release runtime requires page_size=256; "
+                f"got page_size={config.page_size}."
+            )
         max_extend_tokens = getattr(config, "max_extend_tokens", None)
         max_extend_tokens_explicit = bool(getattr(config, "max_extend_tokens_explicit", False))
         if max_extend_tokens is None or (
@@ -882,6 +882,4 @@ def _adjust_config(config: EngineConfig):
             )
         if config.attention_backend == "auto":
             override("attention_backend", "dsv4")
-        if config.allow_dsv4_cuda_graph:
-            override("cuda_graph_capture_fail_open", True)
         _resolve_cuda_graph_policy(config)

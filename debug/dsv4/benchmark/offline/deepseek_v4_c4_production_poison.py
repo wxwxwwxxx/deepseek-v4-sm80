@@ -7,9 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-
-from minisgl.kernel.deepseek_v4 import c4_online_pool_and_update_fallback
-
+from minisgl.kernel.deepseek_v4 import c4_online_pool_and_update
 
 PAGE_SIZE = 256
 RATIO = 4
@@ -76,9 +74,7 @@ def _official_output(
     for source_slot in range(RING_SIZE):
         pos = end_pos - (RING_SIZE - 1 - source_slot)
         if pos < 0:
-            kv_rows.append(
-                torch.zeros(head_dim, dtype=torch.float32, device=projected.device)
-            )
+            kv_rows.append(torch.zeros(head_dim, dtype=torch.float32, device=projected.device))
             score_rows.append(
                 torch.full(
                     (head_dim,),
@@ -145,9 +141,7 @@ class ProductionFixture:
         )
         self.ctx_page_table[0].copy_(positions)
         self.ctx_page_table[1, :PAGE_SIZE].copy_(positions[:PAGE_SIZE])
-        self.ctx_page_table[1, PAGE_SIZE:].copy_(
-            2 * PAGE_SIZE + positions[PAGE_SIZE:] - PAGE_SIZE
-        )
+        self.ctx_page_table[1, PAGE_SIZE:].copy_(2 * PAGE_SIZE + positions[PAGE_SIZE:] - PAGE_SIZE)
         self.checkpoint_page_mapping = torch.arange(
             PHYSICAL_PAGES,
             dtype=torch.int64,
@@ -178,7 +172,7 @@ class ProductionFixture:
         table_indices = torch.full_like(positions, table_idx)
         if raw_out_loc is None:
             raw_out_loc = positions
-        return c4_online_pool_and_update_fallback(
+        return c4_online_pool_and_update(
             rows.contiguous(),
             self.sequence_state,
             self.checkpoint,
@@ -206,9 +200,7 @@ def _check_outputs(
             continue
         expected = _official_output(projected, ape, pos)
         if not torch.equal(output[row], expected):
-            difference = (
-                output[row].float() - expected.float()
-            ).abs().max().item()
+            difference = (output[row].float() - expected.float()).abs().max().item()
             raise AssertionError(
                 f"{label}: output {pos} differs from official FP32 reference "
                 f"after BF16 publication (max_abs={difference})"
@@ -240,9 +232,7 @@ def _run_partitioned(
         )
         raw_out_loc = None
         if physical_page is not None:
-            raw_out_loc = (
-                physical_page * PAGE_SIZE + positions - start
-            )
+            raw_out_loc = physical_page * PAGE_SIZE + positions - start
         output = fixture.run(
             projected,
             ape,
@@ -360,8 +350,7 @@ def _run_component(
         )
         if prefix_checked != outputs:
             raise AssertionError(
-                f"unexpected checked outputs for prefix {prefix_len}: "
-                f"{prefix_checked}"
+                f"unexpected checked outputs for prefix {prefix_len}: {prefix_checked}"
             )
         checked.extend(prefix_checked)
 
@@ -453,9 +442,7 @@ def _run_component(
         "head_dim": head_dim,
         "poison": poison_family,
         "checked_boundary_outputs": len(checked),
-        "required_prefix_outputs": [
-            pos for pos in checked if pos in (259, 263, 515, 519)
-        ],
+        "required_prefix_outputs": [pos for pos in checked if pos in (259, 263, 515, 519)],
         "status": "pass",
     }
 

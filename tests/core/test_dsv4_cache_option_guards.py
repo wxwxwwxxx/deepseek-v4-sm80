@@ -3,85 +3,26 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from minisgl.scheduler.scheduler import resolve_dsv4_cache_type
+from minisgl.scheduler.scheduler import validate_dsv4_release_cache_contract
 
 
-def _config(
-    *,
-    is_deepseek_v4: bool = True,
-    cache_type: str = "radix",
-    page_size: int = 256,
-    window_size: int = 128,
-    enable_radix: bool = False,
-    enable_component_loc_ownership: bool = False,
-    enable_swa_independent_lifecycle: bool = False,
-):
+def _config(*, is_deepseek_v4: bool = True, page_size: int = 256):
     return SimpleNamespace(
-        model_config=SimpleNamespace(is_deepseek_v4=is_deepseek_v4, window_size=window_size),
-        cache_type=cache_type,
+        model_config=SimpleNamespace(is_deepseek_v4=is_deepseek_v4),
         page_size=page_size,
-        enable_dsv4_radix_prefix_cache=enable_radix,
-        enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
-        enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
     )
 
-def test_dsv4_cache_type_resolution_requires_release_radix_contract():
-    with pytest.raises(ValueError, match="release requires radix"):
-        resolve_dsv4_cache_type(_config(enable_radix=False))
-    assert resolve_dsv4_cache_type(_config(enable_radix=True)) == "radix"
+
+def test_dsv4_release_cache_contract_accepts_canonical_config():
+    assert validate_dsv4_release_cache_contract(_config()) is None
+
+
+def test_dsv4_release_cache_contract_rejects_non_dsv4_models():
     with pytest.raises(ValueError, match="DeepSeek V4 Flash only"):
-        resolve_dsv4_cache_type(_config(is_deepseek_v4=False, cache_type="radix"))
-
-    with pytest.raises(ValueError, match="page size divisible"):
-        resolve_dsv4_cache_type(_config(enable_radix=True, page_size=64))
-
-    with pytest.raises(ValueError, match="requires cache_type='radix'"):
-        resolve_dsv4_cache_type(_config(cache_type="naive", enable_radix=True))
+        validate_dsv4_release_cache_contract(_config(is_deepseek_v4=False))
 
 
-def test_dsv4_component_loc_ownership_requires_phase1_radix_and_safe_window():
-    with pytest.raises(ValueError, match="requires the phase-1 radix"):
-        resolve_dsv4_cache_type(_config(enable_component_loc_ownership=True))
-
-    with pytest.raises(ValueError, match="window_size.*<= page_size"):
-        resolve_dsv4_cache_type(
-            _config(
-                page_size=128,
-                window_size=256,
-                enable_radix=True,
-                enable_component_loc_ownership=True,
-            )
-        )
-
-    assert (
-        resolve_dsv4_cache_type(
-            _config(enable_radix=True, enable_component_loc_ownership=True)
-        )
-        == "radix"
-    )
-
-
-def test_dsv4_swa_independent_lifecycle_requires_radix_and_route_b():
-    with pytest.raises(ValueError, match="requires --enable-dsv4-radix-prefix-cache"):
-        resolve_dsv4_cache_type(_config(enable_swa_independent_lifecycle=True))
-
-    with pytest.raises(ValueError, match="requires --enable-dsv4-component-loc-ownership"):
-        resolve_dsv4_cache_type(
-            _config(
-                enable_radix=True,
-                enable_swa_independent_lifecycle=True,
-            )
-        )
-
-    assert (
-        resolve_dsv4_cache_type(
-            _config(
-                page_size=128,
-                window_size=256,
-                enable_radix=True,
-                enable_component_loc_ownership=True,
-                enable_swa_independent_lifecycle=True,
-            )
-        )
-        == "radix"
-    )
+@pytest.mark.parametrize("page_size", [1, 64, 128, 512])
+def test_dsv4_release_cache_contract_requires_public_page_size_256(page_size):
+    with pytest.raises(ValueError, match="page_size=256"):
+        validate_dsv4_release_cache_contract(_config(page_size=page_size))

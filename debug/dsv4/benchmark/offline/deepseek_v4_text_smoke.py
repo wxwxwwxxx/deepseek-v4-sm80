@@ -51,6 +51,7 @@ def format_chat_prompt(
     model_path: str,
     system_prompt: str,
     thinking_mode: str,
+    reasoning_effort: str | None = None,
 ) -> str:
     encoding = load_dsv4_encoding(model_path)
     messages: list[dict[str, str]] = []
@@ -58,7 +59,11 @@ def format_chat_prompt(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
     if encoding is not None:
-        return encoding.encode_messages(messages, thinking_mode=thinking_mode)
+        return encoding.encode_messages(
+            messages,
+            thinking_mode=thinking_mode,
+            reasoning_effort=reasoning_effort,
+        )
     prefix = f"{system_prompt}\n\n" if system_prompt else ""
     return f"{prefix}User: {prompt}\nAssistant:"
 
@@ -160,7 +165,6 @@ def _distributed_info(args: argparse.Namespace) -> tuple[int, int, str | None]:
 
 def _jsonable_release(release) -> dict[str, Any]:
     payload = asdict(release)
-    payload["direct_graph_metadata_groups"] = sorted(payload["direct_graph_metadata_groups"])
     return payload
 
 
@@ -172,14 +176,26 @@ def run_text_smoke(args: argparse.Namespace) -> int:
 
     rank, world_size, init_method = _distributed_info(args)
     prompts = args.prompt or list(DEFAULT_PROMPTS)
+    if args.effort_matrix:
+        prompt_entries = [
+            (prompts[0], "chat", None),
+            (prompts[0], "thinking", "high"),
+            (prompts[0], "thinking", "max"),
+        ]
+    else:
+        reasoning_effort = args.reasoning_effort
+        if reasoning_effort is None and args.thinking_mode == "thinking":
+            reasoning_effort = "high"
+        prompt_entries = [(prompt, args.thinking_mode, reasoning_effort) for prompt in prompts]
     formatted = [
         format_chat_prompt(
             prompt,
             model_path=args.model_path,
             system_prompt=args.system_prompt,
-            thinking_mode=args.thinking_mode,
+            thinking_mode=thinking_mode,
+            reasoning_effort=reasoning_effort,
         )
-        for prompt in prompts
+        for prompt, thinking_mode, reasoning_effort in prompt_entries
     ]
     use_pynccl = not args.disable_pynccl
     allow_graph = not args.disable_cuda_graph
@@ -196,7 +212,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             args.model_path,
             tp_info=DistributedInfo(rank, world_size),
             dsv4_sm80_recipe=args.dsv4_sm80_recipe,
-            max_running_req=args.max_running_req or max(len(prompts), 1),
+            max_running_req=args.max_running_req or max(len(prompt_entries), 1),
             context_length=args.max_seq_len,
             max_extend_tokens=args.max_extend_tokens,
             num_page_override=args.num_pages,
@@ -216,11 +232,15 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 ignore_eos=False,
                 max_tokens=args.max_tokens,
             ),
-            reasoning_effort="high" if args.thinking_mode == "thinking" else None,
+            reasoning_effort=[reasoning_effort for _, _, reasoning_effort in prompt_entries],
         )
         torch.cuda.synchronize(llm.device)
         if rank == 0:
-            for prompt, formatted_prompt, item in zip(prompts, formatted, generated):
+            for (
+                prompt,
+                thinking_mode,
+                reasoning_effort,
+            ), formatted_prompt, item in zip(prompt_entries, formatted, generated):
                 token_ids = list(item["token_ids"])
                 raw_text = llm.tokenizer.decode(token_ids, skip_special_tokens=False)
                 text = llm.tokenizer.decode(token_ids, skip_special_tokens=True)
@@ -228,6 +248,8 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 outputs.append(
                     {
                         "prompt": prompt,
+                        "thinking_mode": thinking_mode,
+                        "reasoning_effort": reasoning_effort,
                         "formatted_prompt_preview": formatted_prompt[:240],
                         "generated_token_ids": token_ids,
                         "generated_token_count": len(token_ids),
@@ -236,7 +258,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                         "parsed": parse_completion_text(
                             raw_text,
                             model_path=args.model_path,
-                            thinking_mode=args.thinking_mode,
+                            thinking_mode=thinking_mode,
                         ),
                         "sanity": response_sanity(
                             text or raw_text,
@@ -262,7 +284,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
             "status": status,
             "model_path": args.model_path,
             "dsv4_release": _jsonable_release(DSV4_RELEASE),
-            "prompts": prompts,
+            "prompts": [entry[0] for entry in prompt_entries],
             "outputs": outputs,
             "error": error,
             "elapsed_s": elapsed_s,
@@ -273,15 +295,23 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 "use_pynccl": use_pynccl,
                 "allow_dsv4_cuda_graph": allow_graph,
                 "max_seq_len": args.max_seq_len,
-                "max_running_req": args.max_running_req or max(len(prompts), 1),
+                "max_running_req": args.max_running_req or max(len(prompt_entries), 1),
                 "max_extend_tokens": args.max_extend_tokens,
                 "max_tokens": args.max_tokens,
+                "effort_matrix": args.effort_matrix,
+                "reasoning_effort": args.reasoning_effort,
                 "reasoning_sampler_contract_enabled": (
                     llm.engine.reasoning_sampler_contract_enabled if llm else None
                 ),
-                "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {}) if llm else {},
-                "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}) if llm else {},
-                "kv_capacity_plan_report": getattr(llm.engine, "kv_capacity_plan_report", {}) if llm else {},
+                "graph_runner": getattr(llm.engine.graph_runner, "capture_status", {})
+                if llm
+                else {},
+                "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {})
+                if llm
+                else {},
+                "kv_capacity_plan_report": getattr(llm.engine, "kv_capacity_plan_report", {})
+                if llm
+                else {},
             },
         }
         path = Path(args.output)
@@ -323,6 +353,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--disable-cuda-graph", action="store_true")
     parser.add_argument("--enable-reasoning-sampler-contract", action="store_true")
     parser.add_argument("--thinking-mode", choices=("chat", "thinking"), default="chat")
+    parser.add_argument("--reasoning-effort", choices=("high", "max"), default=None)
+    parser.add_argument(
+        "--effort-matrix",
+        action="store_true",
+        help="Run one ordinary, one HIGH, and one MAX request in the same TP load.",
+    )
     parser.add_argument(
         "--system-prompt",
         default="You are a helpful assistant. Answer briefly and clearly.",

@@ -112,61 +112,22 @@ def validate_model_position_bound(*, max_device_len: int, rope_cache_len: int) -
     return observed_max_position
 
 
-def resolve_dsv4_cache_type(config: SchedulerConfig) -> str:
-    cache_type = config.cache_type
+def validate_dsv4_release_cache_contract(config: SchedulerConfig) -> None:
     if not config.model_config.is_deepseek_v4:
         raise ValueError("This release supports DeepSeek V4 Flash only.")
-
-    if getattr(config, "enable_dsv4_swa_independent_lifecycle", False):
-        if not config.enable_dsv4_radix_prefix_cache:
-            raise ValueError(
-                "DeepSeek V4 SWA independent lifecycle requires --enable-dsv4-radix-prefix-cache."
-            )
-        if not getattr(config, "enable_dsv4_component_loc_ownership", False):
-            raise ValueError(
-                "DeepSeek V4 SWA independent lifecycle requires "
-                "--enable-dsv4-component-loc-ownership so C4/C128/indexer/state "
-                "locations stay independent from released SWA/full rows."
-            )
-    if getattr(config, "enable_dsv4_component_loc_ownership", False):
-        if not config.enable_dsv4_radix_prefix_cache:
-            raise ValueError(
-                "DeepSeek V4 component loc ownership requires the phase-1 radix "
-                "prefix cache opt-in. Add --enable-dsv4-radix-prefix-cache."
-            )
-        window_size = int(getattr(config.model_config, "window_size", 128) or 128)
-        if window_size > config.page_size and not getattr(
-            config, "enable_dsv4_swa_independent_lifecycle", False
-        ):
-            raise ValueError(
-                "DeepSeek V4 component loc ownership currently keeps one "
-                "page-aligned SWA/full tail per retained node, so window_size "
-                f"must be <= page_size. Got window_size={window_size}, "
-                f"page_size={config.page_size}."
-            )
-    if not config.enable_dsv4_radix_prefix_cache:
-        raise ValueError("The DeepSeek V4 release requires radix prefix caching.")
-    if config.page_size % 128 != 0:
+    if config.page_size != 256:
         raise ValueError(
-            "DeepSeek V4 radix prefix cache requires a page size divisible "
-            f"by 128, got page_size={config.page_size}. Use --page-size 256."
+            "The DeepSeek V4 release runtime requires page_size=256; "
+            f"got page_size={config.page_size}."
         )
-    if cache_type != "radix":
-        raise ValueError(
-            "The DeepSeek V4 release requires "
-            f"cache_type='radix', got {cache_type!r}."
-        )
-    return cache_type
 
 
 class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from minisgl.engine import Engine
 
+        validate_dsv4_release_cache_contract(config)
         self.engine = Engine(config)
-        # Engine resolves the immutable DSV4 release cache/lifecycle ownership
-        # fields before the sole radix prefix-cache implementation is created.
-        cache_type = resolve_dsv4_cache_type(config)
 
         # use another stream to overlap metadata processing with computation
         self.device = self.engine.device
@@ -186,7 +147,6 @@ class Scheduler(SchedulerIOMixin):
             self.engine.num_pages,
             config.page_size,
             self.engine.page_table,
-            cache_type,
             kv_cache=self.engine.kv_cache,
         )
         self.decode_manager = DecodeManager(config.page_size)

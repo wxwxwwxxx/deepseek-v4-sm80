@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, List, Literal
 import torch
 import torch.nn.functional as F
 from minisgl.core import Batch, get_global_ctx
-from minisgl.dsv4_release import DSV4_RELEASE
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
 from minisgl.utils import (
@@ -21,23 +20,6 @@ if TYPE_CHECKING:
 
 DSV4CompressRatio = Literal[0, 4, 128]
 _PAGE_INDEX_ALIGNMENT = 64
-_DIRECT_GRAPH_METADATA_ALL_GROUPS = frozenset({"swa", "c4", "c128"})
-
-
-def _direct_graph_metadata_groups() -> frozenset[str]:
-    return DSV4_RELEASE.direct_graph_metadata_groups
-
-
-def _swa_metadata_page_table_cache_enabled() -> bool:
-    return True
-
-
-def _swa_direct_token_metadata_enabled() -> bool:
-    return True
-
-
-def _swa_direct_replay_metadata_fused_enabled() -> bool:
-    return True
 
 
 def _pad_last_dim(
@@ -102,13 +84,9 @@ class DSV4CoreAttentionMetadata(BaseAttnMetadata):
     c128_page_indices: torch.Tensor
     c128_full_indices: torch.Tensor
     swa_out_loc: torch.Tensor | None = None
-    component_loc_ownership: bool = False
     c4_page_table: torch.Tensor | None = None
     c128_page_table: torch.Tensor | None = None
     c4_indexer_page_table: torch.Tensor | None = None
-    swa_source_elided_for_graph: bool = False
-    c4_sparse_source_elided_for_graph: bool = False
-    c128_source_elided_for_graph: bool = False
     swa_ownership_version: int = 0
     materialized_seq_lens: torch.Tensor | None = None
 
@@ -163,24 +141,17 @@ class DSV4RawDecodeGraphMetadata(BaseAttnMetadata):
     materialized_seq_lens: torch.Tensor
     max_seqlen_q: int
     max_seqlen_k: int
-    component_loc_ownership: bool
     c4_page_table: torch.Tensor | None
     c128_page_table: torch.Tensor | None
     c4_indexer_page_table: torch.Tensor | None
     swa_ownership_version: int = 0
-    oracle_metadata: DSV4AttentionMetadata | None = None
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
         return self.cu_seqlens_q[1 : 1 + bs] - 1
 
 
 class DSV4AttentionBackend(BaseAttnBackend):
-    """Correctness-first DSV4 attention backend.
-
-    This backend deliberately materializes SGLang-style DSV4 metadata while the
-    actual attention path stays in PyTorch.  Fused FlashMLA/indexer kernels can
-    later consume the same metadata fields without changing the model call site.
-    """
+    """DeepSeek V4 release attention backend for Ampere GPUs."""
 
     def __init__(self, config: ModelConfig) -> None:
         ctx = get_global_ctx()
@@ -196,8 +167,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self.capture_bs: List[int] = []
         self.max_graph_bs = 0
         self._capture_graph_inputs_bound = False
-        self._capture_compressed_locs_in_graph = False
-        self._capture_compressed_locs_in_graph_component_guarded = False
         self._component_page_table_cache_width = 0
         self._component_page_table_cache_rows = 0
         self._component_page_table_cache_has_c4 = False
@@ -213,10 +182,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._prep_metadata_in_graph = False
         self._prep_metadata_in_graph_requested = False
         self._prep_metadata_in_graph_unsupported_reason: str | None = None
-        self._pending_prep_metadata_oracle: DSV4AttentionMetadata | None = None
-        self._pending_prep_metadata_oracle_rows = 0
-        self._prep_metadata_in_graph_oracle_replay_step = 0
-        self._materializing_prep_metadata_oracle = False
         self._c128_prefill_one_surface_status: dict[str, int | str] = {
             "calls": 0,
             "backend": "not_run",
@@ -237,14 +202,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             beta_slow=int(config.beta_slow),
             page_size=int(self.kvcache.indexer_fp8_page_size),
         )
-
-    @property
-    def capture_compressed_locs_in_graph(self) -> bool:
-        return self._capture_compressed_locs_in_graph
-
-    @property
-    def capture_compressed_locs_in_graph_component_guarded(self) -> bool:
-        return self._capture_compressed_locs_in_graph_component_guarded
 
     @property
     def prep_metadata_in_graph(self) -> bool:
@@ -288,21 +245,18 @@ class DSV4AttentionBackend(BaseAttnBackend):
             return unsupported("unsupported_page_size")
         if not self._capture_graph_inputs_bound:
             return unsupported("graph_inputs_not_bound")
-        if not bool(getattr(self.kvcache, "component_loc_ownership_enabled", False)):
-            return unsupported("component_loc_ownership_required")
-        if bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)):
-            full_to_swa_page = getattr(self.kvcache, "_full_to_swa_page", None)
-            if full_to_swa_page is None:
-                return unsupported("missing_swa_full_to_swa_page")
-            if (
-                not isinstance(full_to_swa_page, torch.Tensor)
-                or not full_to_swa_page.is_cuda
-                or full_to_swa_page.dtype is not torch.int32
-                or not full_to_swa_page.is_contiguous()
-                or int(getattr(self.kvcache, "_dummy_token_start", -1)) < 0
-                or int(getattr(self.kvcache, "_swa_dummy_page", -1)) < 0
-            ):
-                return unsupported("invalid_swa_independent_mapping_surface")
+        full_to_swa_page = getattr(self.kvcache, "_full_to_swa_page", None)
+        if full_to_swa_page is None:
+            return unsupported("missing_swa_full_to_swa_page")
+        if (
+            not isinstance(full_to_swa_page, torch.Tensor)
+            or not full_to_swa_page.is_cuda
+            or full_to_swa_page.dtype is not torch.int32
+            or not full_to_swa_page.is_contiguous()
+            or int(getattr(self.kvcache, "_dummy_token_start", -1)) < 0
+            or int(getattr(self.kvcache, "_swa_dummy_page", -1)) < 0
+        ):
+            return unsupported("invalid_swa_independent_mapping_surface")
         if (
             core.c4_page_table is None
             or core.c128_page_table is None
@@ -313,8 +267,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             or core.materialized_seq_lens is None
         ):
             return unsupported("missing_capture_surfaces")
-        if not dsv4_kernel.dsv4_triton_available():
-            return unsupported("triton_unavailable_or_not_sm80")
         self._prep_metadata_in_graph_unsupported_reason = None
         return True
 
@@ -336,13 +288,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             raise ValueError("DSV4 raw graph metadata requires at least one request")
         device = self.device
         rows = int(sum(req.extend_len for req in reqs))
-        {
-            "phase": batch.phase,
-            "batch_size": int(batch.size),
-            "padded_size": int(getattr(batch, "padded_size", batch.size)),
-            "rows": rows,
-            "prep_in_graph": True,
-        }
         positions = _to_int32(batch.positions, device)
         raw_out_loc = _to_int32(batch.out_loc, device)
         extend_lens_list = [req.extend_len for req in reqs]
@@ -383,7 +328,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             has_c4=True,
             has_c128=True,
         )
-        oracle = None
         return DSV4RawDecodeGraphMetadata(
             raw_out_loc=raw_out_loc,
             positions=positions,
@@ -396,12 +340,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
             materialized_seq_lens=materialized_seq_lens,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
-            component_loc_ownership=True,
             c4_page_table=component_tables[0],
             c128_page_table=component_tables[1],
             c4_indexer_page_table=component_tables[2],
             swa_ownership_version=self._current_swa_ownership_version(),
-            oracle_metadata=oracle,
         )
 
     def forward(
@@ -412,35 +354,24 @@ class DSV4AttentionBackend(BaseAttnBackend):
         layer_id: int,
         batch: Batch,
         *,
-        compress_ratio: DSV4CompressRatio | None = None,
+        compress_ratio: DSV4CompressRatio,
         attn_sink: torch.Tensor | None = None,
-        swa_cache_written: bool = False,
     ) -> torch.Tensor:
-        del v
+        del k, v
         metadata = batch.attn_metadata
         if not isinstance(metadata, DSV4AttentionMetadata):
             raise TypeError(
                 "DSV4AttentionBackend requires DSV4AttentionMetadata. "
                 "Call prepare_metadata before DSV4 model forward."
             )
-        ratio = compress_ratio
-        if ratio is None:
-            ratio = self.get_layer_compress_ratio(layer_id)
-        if not swa_cache_written:
-            swa_out_loc = metadata.core_metadata.swa_out_loc
-            rows = int(batch.out_loc.shape[0])
-            if swa_out_loc is not None and int(swa_out_loc.shape[0]) >= rows:
-                dsv4_kernel.store_swa_fallback(
-                    self.kvcache,
-                    layer_id,
-                    k,
-                    swa_out_loc[:rows],
-                    out_loc_is_swa=True,
-                )
-            else:
-                dsv4_kernel.store_swa_fallback(self.kvcache, layer_id, k, batch.out_loc)
-        {0: "swa_attention", 4: "c4_attention", 128: "c128_attention"}[ratio]
-        return self._fallback_attention(q, layer_id, metadata.core_metadata, ratio, attn_sink)
+        {0: "swa_attention", 4: "c4_attention", 128: "c128_attention"}[compress_ratio]
+        return self._sparse_attention(
+            q,
+            layer_id,
+            metadata.core_metadata,
+            compress_ratio,
+            attn_sink,
+        )
 
     def store_compressed(
         self,
@@ -492,7 +423,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 n = compressed_positions.numel()
         if n == 0:
             return
-        dsv4_kernel.compress_norm_rope_store_fallback(
+        dsv4_kernel.compress_norm_rope_store(
             self.kvcache,
             layer_id,
             compressed_kv[:n],
@@ -526,9 +457,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         """
 
         if (compressor.ratio, compressor.overlap) not in ((4, True), (128, False)):
-            raise ValueError(
-                "DSV4 online producer requires C4 overlap or C128 non-overlap"
-            )
+            raise ValueError("DSV4 online producer requires C4 overlap or C128 non-overlap")
         metadata = batch.attn_metadata
         if not isinstance(metadata, DSV4AttentionMetadata):
             raise RuntimeError("DSV4 online C4 producer requires DSV4 attention metadata")
@@ -538,7 +467,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             if component == "indexer"
             else self.kvcache.attention_compress_state(layer_id)
         )
-        projected = dsv4_kernel.linear_bf16_fp32_fallback(
+        projected = dsv4_kernel.linear_bf16_fp32(
             x,
             compressor.wkv_gate.weight,
         ).contiguous()
@@ -549,7 +478,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 if component == "indexer"
                 else self.kvcache.attention_c4_checkpoint(layer_id)
             )
-            return dsv4_kernel.c4_online_pool_and_update_fallback(
+            return dsv4_kernel.c4_online_pool_and_update(
                 projected,
                 state_pool.kv_score_buffer.kv_score,
                 checkpoint_pool.kv_score_buffer.kv_score,
@@ -564,7 +493,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 ),
                 page_size=self.page_size,
             )
-        return dsv4_kernel.c128_online_pool_and_update_fallback(
+        return dsv4_kernel.c128_online_pool_and_update(
             projected,
             state_pool.kv_score_buffer.kv_score,
             compressor.ape,
@@ -604,9 +533,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             compressed_kv = kv[:n]
         else:
             boundary = (positions + 1) % compress_metadata.ratio == 0
-            compressed_positions = (
-                positions[boundary] + 1 - compress_metadata.ratio
-            )
+            compressed_positions = positions[boundary] + 1 - compress_metadata.ratio
             if kv.shape[0] == positions.numel():
                 compressed_kv = kv[boundary]
             else:
@@ -616,7 +543,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 n = compressed_positions.numel()
         if n == 0:
             return
-        dsv4_kernel.compress_norm_rope_store_fallback(
+        dsv4_kernel.compress_norm_rope_store(
             self.kvcache,
             layer_id,
             compressed_kv[:n],
@@ -633,54 +560,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             cache_type="indexer",
             apply_hadamard=apply_hadamard,
         )
-
-    def select_indexer(
-        self,
-        layer_id: int,
-        q: torch.Tensor,
-        weights: torch.Tensor,
-        batch: Batch,
-    ) -> dsv4_kernel.DSV4IndexerSelectOutput | None:
-        metadata = batch.attn_metadata
-        if not isinstance(metadata, DSV4AttentionMetadata):
-            return None
-        indexer_metadata = metadata.indexer_metadata
-        if indexer_metadata is None or q.numel() == 0:
-            return None
-        rows = min(
-            q.shape[0],
-            weights.shape[0],
-            indexer_metadata.c4_seq_lens.shape[0],
-            indexer_metadata.page_table.shape[0],
-        )
-        if rows == 0:
-            return None
-        q = q[:rows]
-        weights = weights[:rows]
-        seq_lens = indexer_metadata.c4_seq_lens[:rows]
-        page_table = indexer_metadata.page_table[:rows]
-        out = dsv4_kernel.indexer_select_bf16_fallback(
-            q,
-            weights,
-            self.kvcache.indexer_cache(layer_id),
-            seq_lens,
-            page_table,
-            page_size=indexer_metadata.c4_page_size,
-            width=max(self.index_topk, 1),
-            ratio=4,
-            layer_id=layer_id,
-        )
-        core = metadata.core_metadata
-        raw_indices, page_indices, full_indices = self._remap_indexer_topk_for_attention(core, out)
-        self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
-        self._merge_indexer_rows_in_place(core.c4_sparse_page_indices, page_indices)
-        self._merge_indexer_rows_in_place(core.c4_sparse_full_indices, full_indices)
-        if out.topk.topk_lens is not None:
-            self._merge_indexer_lengths_in_place(
-                core.c4_sparse_topk_lengths,
-                out.topk.topk_lens,
-            )
-        return out
 
     def select_indexer_fp8(
         self,
@@ -707,35 +586,16 @@ class DSV4AttentionBackend(BaseAttnBackend):
         weights = weights[:rows]
         seq_lens = indexer_metadata.c4_seq_lens[:rows]
         page_table = indexer_metadata.page_table[:rows]
-        if (
-            hasattr(self.kvcache, "has_indexer_fp8_paged_cache")
-            and self.kvcache.has_indexer_fp8_paged_cache()
-        ):
-            out = dsv4_kernel.indexer_select_fp8_paged_fallback(
-                q_values,
-                weights,
-                self.kvcache.indexer_fp8_paged_cache(layer_id),
-                seq_lens,
-                page_table,
-                page_size=indexer_metadata.c4_page_size,
-                width=max(self.index_topk, 1),
-                ratio=4,
-                layer_id=layer_id,
-            )
-        else:
-            cache_values, cache_scales = self.kvcache.indexer_fp8_cache(layer_id)
-            out = dsv4_kernel.indexer_select_fp8_fallback(
-                q_values,
-                weights,
-                cache_values,
-                cache_scales,
-                seq_lens,
-                page_table,
-                page_size=indexer_metadata.c4_page_size,
-                width=max(self.index_topk, 1),
-                ratio=4,
-                layer_id=layer_id,
-            )
+        out = dsv4_kernel.indexer_select_fp8_paged(
+            q_values,
+            weights,
+            self.kvcache.indexer_fp8_paged_cache(layer_id),
+            seq_lens,
+            page_table,
+            page_size=indexer_metadata.c4_page_size,
+            width=max(self.index_topk, 1),
+            ratio=4,
+        )
         core = metadata.core_metadata
         raw_indices, page_indices, full_indices = self._remap_indexer_topk_for_attention(core, out)
         self._merge_indexer_rows_in_place(core.c4_sparse_raw_indices, raw_indices)
@@ -756,29 +616,27 @@ class DSV4AttentionBackend(BaseAttnBackend):
         raw_indices = out.topk.raw_indices
         page_indices = out.topk.page_indices
         full_indices = out.topk.full_indices
-        if core.component_loc_ownership and core.c4_page_table is not None:
-            component_page_size = self.kvcache.c4_component_page_size
-            remapped = dsv4_kernel.remap_indexer_topk_locs(
-                raw_indices,
-                core.c4_page_table[: raw_indices.shape[0]],
-                core.page_table[: raw_indices.shape[0]],
-                component_page_size=component_page_size,
-                full_page_size=self.page_size,
-                ratio=4,
-            )
-            if remapped is not None:
-                page_indices, full_indices = remapped
-                return raw_indices, page_indices, full_indices
-            page_indices = self._compressed_raw_to_component_locs(
-                core.c4_page_table[: raw_indices.shape[0]],
-                raw_indices,
-                4,
-            ).to(torch.int32)
-            full_indices = self._compressed_raw_to_full_locs_from_page_table(
-                core.page_table[: raw_indices.shape[0]],
-                raw_indices,
-                4,
-            ).to(torch.int32)
+        if core.c4_page_table is not None:
+            if self.device.type == "cuda":
+                page_indices, full_indices = dsv4_kernel.remap_indexer_topk_locs(
+                    raw_indices,
+                    core.c4_page_table[: raw_indices.shape[0]],
+                    core.page_table[: raw_indices.shape[0]],
+                    component_page_size=self.kvcache.c4_component_page_size,
+                    full_page_size=self.page_size,
+                    ratio=4,
+                )
+            else:
+                page_indices = self._compressed_raw_to_component_locs(
+                    core.c4_page_table[: raw_indices.shape[0]],
+                    raw_indices,
+                    4,
+                ).to(torch.int32)
+                full_indices = self._compressed_raw_to_full_locs_from_page_table(
+                    core.page_table[: raw_indices.shape[0]],
+                    raw_indices,
+                    4,
+                ).to(torch.int32)
         return raw_indices, page_indices, full_indices
 
     def _merge_indexer_rows(self, current: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
@@ -825,14 +683,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self.capture_bs = sorted(bs_list)
         self.max_graph_bs = max(bs_list) if bs_list else 0
         self._capture_graph_inputs_bound = False
-        self._capture_compressed_locs_in_graph = False
-        self._capture_compressed_locs_in_graph_component_guarded = False
         self._prep_metadata_in_graph_requested = True
         self._prep_metadata_in_graph = False
         self._prep_metadata_in_graph_unsupported_reason = None
-        self._pending_prep_metadata_oracle = None
-        self._pending_prep_metadata_oracle_rows = 0
-        self._prep_metadata_in_graph_oracle_replay_step = 0
         if self.max_graph_bs == 0:
             if self._prep_metadata_in_graph_requested:
                 self._prep_metadata_in_graph_unsupported_reason = "cuda_graph_disabled"
@@ -855,13 +708,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
         del input_ids
         if self.capture is None:
             return
-        disable_capture_locs = False
-        component_guarded = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
-        self._capture_compressed_locs_in_graph_component_guarded = component_guarded
         core = self.capture.core_metadata
         if out_loc.shape != core.raw_out_loc.shape or positions.shape != core.positions.shape:
             self._capture_graph_inputs_bound = False
-            self._capture_compressed_locs_in_graph = False
             return
         core.raw_out_loc = out_loc
         core.positions = positions
@@ -870,84 +719,33 @@ class DSV4AttentionBackend(BaseAttnBackend):
         if self.capture.c128_compress_metadata is not None:
             self.capture.c128_compress_metadata.positions = positions
         self._capture_graph_inputs_bound = True
-        self._capture_compressed_locs_in_graph = (
-            not disable_capture_locs
-            and not component_guarded
-            and out_loc.is_cuda
-            and positions.is_cuda
-            and dsv4_kernel.dsv4_triton_available()
-        )
         self._prep_metadata_in_graph = self._compute_prep_metadata_in_graph_supported(core)
 
     def stage_capture_metadata_for_graph(self, batch: Batch) -> None:
-        if self._prep_metadata_in_graph:
-            self._stage_prep_metadata_in_graph(batch)
+        if self.capture is None or getattr(batch, "attn_metadata", None) is not self.capture:
             return
-        if not self._capture_compressed_locs_in_graph or self.capture is None:
-            return
-        if getattr(batch, "attn_metadata", None) is not self.capture:
-            return
-        core = self.capture.core_metadata
-        dsv4_kernel.copy_masked_compressed_locs(
-            core.raw_out_loc,
-            core.positions,
-            core.c4_out_loc,
-            core.c128_out_loc,
-            batch.padded_size,
-        )
+        if not self._prep_metadata_in_graph:
+            reason = self._prep_metadata_in_graph_unsupported_reason or "unknown"
+            raise RuntimeError(
+                "CUDA graph requires in-graph DSV4 metadata preparation; "
+                f"unsupported_reason={reason}."
+            )
+        self._stage_prep_metadata_in_graph(batch)
 
     def prepare_for_replay(self, batch: Batch) -> None:
         assert self.capture is not None
         metadata = batch.attn_metadata
-        assert isinstance(metadata, (DSV4AttentionMetadata, DSV4RawDecodeGraphMetadata))
-        {
-            "phase": "decode" if batch.is_decode else batch.phase,
-            "batch_size": int(batch.size),
-            "padded_size": int(batch.padded_size),
-            "rows": int(batch.padded_size),
-        }
         if isinstance(metadata, DSV4RawDecodeGraphMetadata):
-            if not self._prep_metadata_in_graph:
-                metadata = self._build_metadata(batch)
-                batch.attn_metadata = metadata
-            else:
-                self._copy_raw_decode_graph_metadata_for_replay(
-                    metadata,
-                    batch.padded_size,
-                )
-                if metadata.oracle_metadata is not None:
-                    self._clamp_graph_replay_compressed_read_metadata(
-                        batch,
-                        metadata.oracle_metadata.core_metadata,
-                        batch.padded_size,
-                    )
-                    ok = self._run_prep_metadata_in_graph_kernel(int(batch.padded_size))
-                    if not ok:
-                        raise RuntimeError(
-                            "Optimized DSV4 graph metadata prep could not materialize "
-                            "the pre-forward metadata surface."
-                        )
-                self._pending_prep_metadata_oracle = metadata.oracle_metadata
-                self._pending_prep_metadata_oracle_rows = int(batch.padded_size)
-                return
+            self._copy_raw_decode_graph_metadata_for_replay(
+                metadata,
+                batch.padded_size,
+            )
+            return
         if metadata is self.capture:
             return
-        assert isinstance(metadata, DSV4AttentionMetadata)
-        if self._swa_version_guard_required():
-            src_core = metadata.core_metadata
-            if src_core.swa_ownership_version != self._current_swa_ownership_version():
-                metadata = self._build_metadata(batch)
-                batch.attn_metadata = metadata
-                self._ensure_swa_metadata_current(
-                    metadata.core_metadata,
-                    context="CUDA graph replay metadata rebuild",
-                )
-        self._clamp_graph_replay_compressed_read_metadata(
-            batch,
-            metadata.core_metadata,
-            batch.padded_size,
+        raise RuntimeError(
+            f"CUDA graph replay requires raw in-graph DSV4 metadata; got {type(metadata).__name__}."
         )
-        self._copy_metadata_for_replay(self.capture, metadata, batch.padded_size)
 
     def _copy_raw_decode_graph_metadata_for_replay(
         self,
@@ -956,16 +754,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> None:
         assert self.capture is not None
         dst_core = self.capture.core_metadata
-        if self._swa_version_guard_required():
-            current = self._current_swa_ownership_version()
-            if int(src.swa_ownership_version) != current:
-                raise RuntimeError(
-                    "DSV4 independent SWA raw graph metadata ownership version is stale: "
-                    f"context=CUDA graph replay raw metadata source, "
-                    f"metadata_version={int(src.swa_ownership_version)}, "
-                    f"current_version={current}"
-                )
-        dst_core.component_loc_ownership = bool(src.component_loc_ownership)
+        current = self._current_swa_ownership_version()
+        if int(src.swa_ownership_version) != current:
+            raise RuntimeError(
+                "DSV4 independent SWA raw graph metadata ownership version is stale: "
+                f"context=CUDA graph replay raw metadata source, "
+                f"metadata_version={int(src.swa_ownership_version)}, "
+                f"current_version={current}"
+            )
         dst_core.swa_ownership_version = int(src.swa_ownership_version)
         dst_core.max_seqlen_q = int(src.max_seqlen_q)
         dst_core.max_seqlen_k = int(src.max_seqlen_k)
@@ -1047,92 +843,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
             swa_full_to_swa_page=getattr(self.kvcache, "_full_to_swa_page", None),
             swa_dummy_token_start=int(getattr(self.kvcache, "_dummy_token_start", -1)),
             swa_dummy_page=int(getattr(self.kvcache, "_swa_dummy_page", -1)),
-            swa_independent=bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)),
         )
-
-    def validate_after_replay(self, batch: Batch) -> None:
-        oracle = self._pending_prep_metadata_oracle
-        rows = self._pending_prep_metadata_oracle_rows
-        self._pending_prep_metadata_oracle = None
-        self._pending_prep_metadata_oracle_rows = 0
-        if oracle is None or self.capture is None:
-            return
-        self._prep_metadata_in_graph_oracle_replay_step += 1
-        rows = max(0, min(int(rows), int(batch.padded_size)))
-        if rows <= 0:
-            return
-
-    def _clamp_graph_replay_compressed_read_metadata(
-        self,
-        batch: Batch,
-        metadata: DSV4CoreAttentionMetadata,
-        rows: int,
-    ) -> None:
-        if not batch.is_decode or rows <= 0:
-            return
-        if metadata.max_seqlen_q != 1:
-            return
-        {
-            "phase": "decode",
-            "batch_size": int(batch.size),
-            "padded_size": int(batch.padded_size),
-            "rows": int(rows),
-        }
-        materialized_values = self._graph_replay_materialized_seq_len_values(batch, rows)
-        if materialized_values is None:
-            return
-        rows = min(int(rows), len(materialized_values), int(metadata.seq_lens.shape[0]))
-        if rows <= 0:
-            return
-        clamp_needed = self._graph_replay_compressed_read_clamp_needed(
-            batch,
-            materialized_values,
-            rows,
-        )
-        if not clamp_needed:
-            return
-        seq_lens = metadata.seq_lens[:rows].to(device=self.device, dtype=torch.long)
-
-        table_indices = metadata.req_table_indices[:rows]
-        has_c4 = any(mapping.compress_ratio == 4 for mapping in self.kvcache.layer_mapping)
-        if has_c4:
-            # C4 has an ordered graph-internal producer: every replay updates
-            # carry state and publishes a completed boundary before either the
-            # indexer or attention consumer runs.  Its readable length is thus
-            # the current sequence length.
-            c4_lengths = seq_lens.div(4, rounding_mode="floor").to(torch.int32)
-            metadata.c4_topk_lengths_raw[:rows].copy_(c4_lengths)
-            metadata.c4_topk_lengths_clamp1[:rows].copy_(c4_lengths.clamp_min(1))
-            metadata.c4_sparse_topk_lengths[:rows].copy_(
-                c4_lengths.clamp(min=0, max=self.index_topk)
-            )
-            raw, page, full = self._make_sparse_compressed_indices(
-                table_indices,
-                c4_lengths,
-                4,
-                component_page_table=metadata.c4_page_table,
-            )
-            self._copy_2d(metadata.c4_sparse_raw_indices, raw, rows, fill=-1)
-            self._copy_2d(metadata.c4_sparse_page_indices, page, rows, fill=-1)
-            self._copy_2d(metadata.c4_sparse_full_indices, full, rows, fill=-1)
-
-        has_c128 = any(mapping.compress_ratio == 128 for mapping in self.kvcache.layer_mapping)
-        if has_c128:
-            # C128 now has the same producer-before-consumer ordering.  Only a
-            # completed 128-token boundary advances this current-sequence
-            # readable length; the prior materialization watermark described
-            # the old stateless producer and would hide the just-published row.
-            c128_lengths = seq_lens.div(128, rounding_mode="floor").to(torch.int32)
-            metadata.c128_topk_lengths_clamp1[:rows].copy_(c128_lengths.clamp_min(1))
-            raw, page, full = self._make_all_compressed_indices(
-                table_indices,
-                c128_lengths,
-                128,
-                component_page_table=metadata.c128_page_table,
-            )
-            self._copy_2d(metadata.c128_raw_indices, raw, rows, fill=-1)
-            self._copy_2d(metadata.c128_page_indices, page, rows, fill=-1)
-            self._copy_2d(metadata.c128_full_indices, full, rows, fill=-1)
 
     def _graph_replay_materialized_seq_len_values(
         self,
@@ -1160,32 +871,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             values.extend([0] * (rows - len(values)))
         return values[:rows]
 
-    def _graph_replay_compressed_read_clamp_needed(
-        self,
-        batch: Batch,
-        materialized_values: list[int],
-        rows: int,
-    ) -> bool:
-        seq_len_values: list[int] = []
-        for req in getattr(batch, "padded_reqs", batch.reqs):
-            extend_len = max(int(getattr(req, "extend_len", 1)), 1)
-            if int(getattr(req, "uid", 0)) < 0:
-                seq_len = 0
-            else:
-                seq_len = int(getattr(req, "device_len", 0))
-            seq_len_values.extend([seq_len] * extend_len)
-            if len(seq_len_values) >= rows:
-                break
-        if len(seq_len_values) < rows:
-            seq_len_values.extend([0] * (rows - len(seq_len_values)))
-        return any(
-            int(materialized_values[idx]) < int(seq_len_values[idx])
-            for idx in range(min(rows, len(materialized_values), len(seq_len_values)))
-        )
-
-    def _swa_version_guard_required(self) -> bool:
-        return bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
-
     def _current_swa_ownership_version(self) -> int:
         return int(getattr(self.kvcache, "swa_ownership_version", 0))
 
@@ -1195,8 +880,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         *,
         context: str,
     ) -> None:
-        if not self._swa_version_guard_required():
-            return
         current = self._current_swa_ownership_version()
         if int(metadata.swa_ownership_version) == current:
             return
@@ -1206,61 +889,20 @@ class DSV4AttentionBackend(BaseAttnBackend):
             f"current_version={current}"
         )
 
-    def _should_elide_index_source_for_graph(
-        self,
-        batch: Batch,
-        *,
-        component_ownership: bool,
-        enabled: bool,
-        group: Literal["swa", "c4", "c128"],
-    ) -> bool:
-        if not (
-            batch.is_decode
-            and component_ownership
-            and enabled
-            and self.capture is not None
-            and group in _direct_graph_metadata_groups()
-        ):
-            return False
-        if self._materializing_prep_metadata_oracle:
-            return False
-        if (
-            group == "swa"
-            and bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
-            and not _swa_direct_replay_metadata_fused_enabled()
-        ):
-            return False
-        padded_size = int(getattr(batch, "padded_size", batch.size))
-        if padded_size <= 0 or padded_size not in self.capture_bs:
-            return False
-        return self.device.type == "cuda" and dsv4_kernel.dsv4_triton_available()
-
     def _empty_index_source_placeholder(self, rows: int) -> torch.Tensor:
         return torch.full((int(rows), 1), -1, dtype=torch.int32, device=self.device)
-
-    def _explicit_c128_raw_full_oracle_requested(self) -> bool:
-        """Return whether this metadata build explicitly needs C128 raw/full.
-
-        Prefix-debug snapshots serialize the complete metadata family, and the
-        decode graph oracle compares it. Both are explicit diagnostic modes;
-        ordinary release eager prefill must keep raw/full lazy.
-        """
-        return None
 
     def _release_eager_c128_one_surface_configured(
         self,
         batch: Batch,
         *,
         has_c128: bool,
-        component_ownership: bool,
     ) -> bool:
-        """Identify the release eager path whose ABI is page indices + lengths."""
+        """Identify eager paths whose C128 ABI is page indices plus lengths."""
         return bool(
-            not batch.is_decode
-            and has_c128
-            and component_ownership
+            has_c128
             and self.page_size == 256
-            and not self._explicit_c128_raw_full_oracle_requested()
+            and (not batch.is_decode or self.device.type == "cuda")
         )
 
     @staticmethod
@@ -1285,9 +927,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 "refusing legacy raw/page/full materialization."
             )
         cap = dsv4_kernel.detect_dsv4_kernel_capabilities()
-        if self.device.type != "cuda" or not (cap.is_sm80 and cap.triton_available):
+        if self.device.type != "cuda" or not (cap.is_ampere and cap.triton_available):
             raise RuntimeError(
-                f"{failure_prefix}, but CUDA sm80/Triton is unavailable "
+                f"{failure_prefix}, but the Ampere CUDA/Triton backend is unavailable "
                 f"(device={self.device}, capability={cap.cuda_capability}, "
                 f"triton={cap.triton_available}); refusing legacy raw/page/full "
                 "materialization."
@@ -1337,15 +979,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         rows = int(sum(req.extend_len for req in reqs))
         has_c4 = any(m.compress_ratio == 4 for m in self.kvcache.layer_mapping)
         has_c128 = any(m.compress_ratio == 128 for m in self.kvcache.layer_mapping)
-        timing_base = {
-            "phase": batch.phase,
-            "batch_size": int(batch.size),
-            "padded_size": int(getattr(batch, "padded_size", batch.size)),
-            "rows": rows,
-            "component_loc_ownership": bool(
-                getattr(self.kvcache, "component_loc_ownership_enabled", False)
-            ),
-        }
         positions = _to_int32(batch.positions, device)
         raw_out_loc = _to_int32(batch.out_loc, device)
         extend_lens_list = [req.extend_len for req in reqs]
@@ -1356,11 +989,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         extend_lens = torch.tensor(extend_lens_list, dtype=torch.int32, device=device)
         req_seq_lens = torch.tensor(req_seq_lens_list, dtype=torch.int32, device=device)
         cu_seqlens_q = F.pad(extend_lens.cumsum(dim=0, dtype=torch.int32), (1, 0))
-        component_ownership = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
-        swa_independent = bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
-        swa_direct_token_metadata = bool(
-            swa_independent and batch.is_decode and _swa_direct_token_metadata_enabled()
-        )
         table_indices = torch.empty(positions.numel(), dtype=torch.int32, device=device)
         offset = 0
         for req, length in zip(reqs, extend_lens_list):
@@ -1374,14 +1002,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 reqs,
                 max_seqlen_k,
                 table_indices=table_indices,
-                use_cache=batch.is_decode and _swa_metadata_page_table_cache_enabled(),
-                timing_base=timing_base,
+                use_cache=batch.is_decode,
             )
-            if swa_independent and not swa_direct_token_metadata
+            if not batch.is_decode
             else None
         )
 
-        if component_ownership and batch.is_decode:
+        if batch.is_decode:
             component_tables = self._make_component_page_tables_cached(
                 reqs,
                 max_seqlen_k,
@@ -1390,150 +1017,83 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 has_c128=has_c128,
             )
         else:
-            component_tables = (
-                self._make_component_page_tables(reqs, max_seqlen_k)
-                if component_ownership
-                else None
-            )
-        c4_page_table = None if component_tables is None else component_tables[0]
-        c128_page_table = None if component_tables is None else component_tables[1]
-        c4_indexer_page_table = None if component_tables is None else component_tables[2]
-        swa_source_elided = False
-        c4_sparse_source_elided = False
-        c128_source_elided = False
-        deforested = None
-        if deforested is not None:
-            page_table = deforested.page_table
-            swa_page_indices = deforested.swa_page_indices
-            swa_topk_lengths = deforested.swa_topk_lengths
-            c4_topk_lengths_raw = deforested.c4_topk_lengths_raw
-            c4_topk_lengths_clamp1 = deforested.c4_topk_lengths_clamp1
-            c4_sparse_topk_lengths = deforested.c4_sparse_topk_lengths
-            c4_sparse_raw_indices = deforested.c4_sparse_raw_indices
-            c4_sparse_page_indices = deforested.c4_sparse_page_indices
-            c4_sparse_full_indices = deforested.c4_sparse_full_indices
-            c128_topk_lengths_clamp1 = deforested.c128_topk_lengths_clamp1
-            c128_raw_indices = deforested.c128_raw_indices
-            c128_page_indices = deforested.c128_page_indices
-            c128_full_indices = deforested.c128_full_indices
-        else:
-            page_table = self._make_page_table(table_indices, max_seqlen_k)
-            swa_source_elided = self._should_elide_index_source_for_graph(
-                batch,
-                component_ownership=component_ownership,
-                enabled=True,
-                group="swa",
-            )
-            if swa_source_elided:
-                swa_page_indices = self._empty_index_source_placeholder(rows)
-            else:
-                if swa_direct_token_metadata:
-                    swa_page_indices = self._make_swa_indices_direct_token_metadata(
-                        table_indices,
-                        positions,
-                    )
-                elif swa_page_table is not None:
-                    swa_page_indices = self._make_swa_indices_from_page_table(
-                        swa_page_table,
-                        positions,
-                    )
-                else:
-                    swa_page_indices = self._make_swa_indices(table_indices, positions)
-            swa_topk_lengths = torch.clamp(seq_lens, max=self.window_size)
-
-            c4_topk_lengths_raw = torch.div(seq_lens, 4, rounding_mode="floor")
-            c4_topk_lengths_clamp1 = c4_topk_lengths_raw.clamp_min(1)
-            c4_sparse_topk_lengths = c4_topk_lengths_raw.clamp(min=0, max=self.index_topk)
-            c4_sparse_source_elided = self._should_elide_index_source_for_graph(
-                batch,
-                component_ownership=component_ownership,
-                enabled=has_c4,
-                group="c4",
-            )
-            if c4_sparse_source_elided:
-                c4_sparse_raw_indices = self._empty_index_source_placeholder(rows)
-                c4_sparse_page_indices = self._empty_index_source_placeholder(rows)
-                c4_sparse_full_indices = self._empty_index_source_placeholder(rows)
-            else:
-                (
-                    c4_sparse_raw_indices,
-                    c4_sparse_page_indices,
-                    c4_sparse_full_indices,
-                ) = self._make_sparse_compressed_indices(
-                    table_indices,
-                    c4_topk_lengths_raw,
-                    4,
-                    component_page_table=c4_page_table,
-                )
-
-            c128_lengths_raw = torch.div(seq_lens, 128, rounding_mode="floor")
-            c128_topk_lengths_clamp1 = c128_lengths_raw.clamp_min(1)
-            c128_source_elided = self._should_elide_index_source_for_graph(
-                batch,
-                component_ownership=component_ownership,
-                enabled=has_c128,
-                group="c128",
-            )
-            if c128_source_elided:
-                c128_raw_indices = self._empty_index_source_placeholder(rows)
-                c128_page_indices = self._empty_index_source_placeholder(rows)
-                c128_full_indices = self._empty_index_source_placeholder(rows)
-            elif self._release_eager_c128_one_surface_configured(
-                batch,
-                has_c128=has_c128,
-                component_ownership=component_ownership,
-            ):
-                (
-                    c128_raw_indices,
-                    c128_page_indices,
-                    c128_full_indices,
-                ) = self._build_release_eager_c128_one_surface(
-                    c128_page_table,
-                    c128_lengths_raw,
-                    max_seqlen_k=max_seqlen_k,
-                    rows=rows,
-                    phase=batch.phase,
-                )
-            else:
-                c128_raw_indices, c128_page_indices, c128_full_indices = (
-                    self._materialize_c128_raw_page_full_oracle(
-                        table_indices,
-                        c128_lengths_raw,
-                        component_page_table=c128_page_table,
-                    )
-                )
-
-        if component_ownership and component_tables is not None:
-            c4_out_loc = self._component_write_locs_from_page_table(
-                c4_page_table,
+            component_tables = self._make_component_page_tables(reqs, max_seqlen_k)
+        c4_page_table, c128_page_table, c4_indexer_page_table = component_tables
+        page_table = self._make_page_table(table_indices, max_seqlen_k)
+        if batch.is_decode:
+            swa_page_indices = self._make_swa_indices_direct_token_metadata(
+                table_indices,
                 positions,
-                4,
             )
-            c128_out_loc = self._component_write_locs_from_page_table(
+        elif swa_page_table is not None:
+            swa_page_indices = self._make_swa_indices_from_page_table(
+                swa_page_table,
+                positions,
+            )
+        else:
+            swa_page_indices = self._make_swa_indices(table_indices, positions)
+        swa_topk_lengths = torch.clamp(seq_lens, max=self.window_size)
+
+        c4_topk_lengths_raw = torch.div(seq_lens, 4, rounding_mode="floor")
+        c4_topk_lengths_clamp1 = c4_topk_lengths_raw.clamp_min(1)
+        c4_sparse_topk_lengths = c4_topk_lengths_raw.clamp(min=0, max=self.index_topk)
+        (
+            c4_sparse_raw_indices,
+            c4_sparse_page_indices,
+            c4_sparse_full_indices,
+        ) = self._make_sparse_compressed_indices(
+            table_indices,
+            c4_topk_lengths_raw,
+            4,
+            component_page_table=c4_page_table,
+        )
+
+        c128_lengths_raw = torch.div(seq_lens, 128, rounding_mode="floor")
+        c128_topk_lengths_clamp1 = c128_lengths_raw.clamp_min(1)
+        if self._release_eager_c128_one_surface_configured(
+            batch,
+            has_c128=has_c128,
+        ):
+            (
+                c128_raw_indices,
+                c128_page_indices,
+                c128_full_indices,
+            ) = self._build_release_eager_c128_one_surface(
                 c128_page_table,
-                positions,
-                128,
+                c128_lengths_raw,
+                max_seqlen_k=max_seqlen_k,
+                rows=rows,
+                phase=batch.phase,
             )
-            c4_indexer_out_loc = self._component_write_locs_from_page_table(
-                c4_indexer_page_table,
-                positions,
-                4,
+        elif self.device.type != "cuda":
+            c128_raw_indices, c128_page_indices, c128_full_indices = (
+                self._materialize_c128_raw_page_full_reference(
+                    table_indices,
+                    c128_lengths_raw,
+                    component_page_table=c128_page_table,
+                )
             )
         else:
-            c4_out_loc = self.kvcache.compressed_locs_from_full_locs(
-                raw_out_loc,
-                4,
-                positions,
+            raise RuntimeError(
+                "DSV4 CUDA eager metadata requires page_size=256 and the "
+                "one-surface C128 metadata kernel."
             )
-            c128_out_loc = self.kvcache.compressed_locs_from_full_locs(
-                raw_out_loc,
-                128,
-                positions,
-            )
-            c4_indexer_out_loc = self.kvcache.indexer_locs_from_full_locs(
-                raw_out_loc,
-                positions,
-            )
+
+        c4_out_loc = self._component_write_locs_from_page_table(
+            c4_page_table,
+            positions,
+            4,
+        )
+        c128_out_loc = self._component_write_locs_from_page_table(
+            c128_page_table,
+            positions,
+            128,
+        )
+        c4_indexer_out_loc = self._component_write_locs_from_page_table(
+            c4_indexer_page_table,
+            positions,
+            4,
+        )
         swa_out_loc = self._make_swa_out_loc_for_store(raw_out_loc)
         if c4_out_loc.numel() == 0:
             c4_out_loc = None
@@ -1569,13 +1129,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
             c128_page_indices=c128_page_indices,
             c128_full_indices=c128_full_indices,
             swa_out_loc=swa_out_loc,
-            component_loc_ownership=component_ownership,
             c4_page_table=c4_page_table,
             c128_page_table=c128_page_table,
             c4_indexer_page_table=c4_indexer_page_table,
-            swa_source_elided_for_graph=swa_source_elided,
-            c4_sparse_source_elided_for_graph=c4_sparse_source_elided,
-            c128_source_elided_for_graph=c128_source_elided,
             swa_ownership_version=self._current_swa_ownership_version(),
         )
 
@@ -1584,7 +1140,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 page_size=self.page_size,
                 page_table=(
                     core.c4_indexer_page_table
-                    if component_ownership and core.c4_indexer_page_table is not None
+                    if core.c4_indexer_page_table is not None
                     else core.page_table
                 ),
                 c4_seq_lens=core.c4_topk_lengths_raw,
@@ -1754,23 +1310,17 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
         rows = sum(req.extend_len for req in reqs)
-        {"phase": "decode", "rows": int(rows), "table_width": int(table_len)}
         self._ensure_component_page_table_cache(
             table_len,
             has_c4=has_c4,
             has_c128=has_c128,
         )
-        dirty = 0
-        clean = 0
         for req in reqs:
-            if self._refresh_component_page_table_cache_row(
+            self._refresh_component_page_table_cache_row(
                 req,
                 has_c4=has_c4,
                 has_c128=has_c128,
-            ):
-                dirty += 1
-            else:
-                clean += 1
+            )
 
         row_indices = table_indices.to(device=self.device, dtype=torch.long)
 
@@ -1893,34 +1443,28 @@ class DSV4AttentionBackend(BaseAttnBackend):
         *,
         table_indices: torch.Tensor,
         use_cache: bool,
-        timing_base: dict[str, int | str | bool],
     ) -> torch.Tensor:
         if use_cache:
             return self._make_swa_page_tables_cached(
                 reqs,
                 max_seq_len,
                 table_indices,
-                timing_base=timing_base,
             )
         return self._make_swa_page_tables_uncached(
             reqs,
             max_seq_len,
-            timing_base=timing_base,
         )
 
     def _make_swa_page_tables_uncached(
         self,
         reqs,
         max_seq_len: int,
-        *,
-        timing_base: dict[str, int | str | bool],
     ) -> torch.Tensor:
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
         rows = sum(req.extend_len for req in reqs)
         chunks: list[torch.Tensor] = []
-        profile = None
         for req in reqs:
-            row = self._build_swa_page_table_row(req, table_len, profile=profile)
+            row = self._build_swa_page_table_row(req, table_len)
             for _ in range(req.extend_len):
                 chunks.append(row)
         if not chunks:
@@ -1933,21 +1477,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
         reqs,
         max_seq_len: int,
         table_indices: torch.Tensor,
-        *,
-        timing_base: dict[str, int | str | bool],
     ) -> torch.Tensor:
         table_len = div_ceil(max(max_seq_len, 1), self.page_size)
         rows = sum(req.extend_len for req in reqs)
-        profile = None
         self._ensure_swa_page_table_cache(table_len)
 
-        dirty = 0
-        clean = 0
         for req in reqs:
-            if self._refresh_swa_page_table_cache_row(req, profile=profile):
-                dirty += 1
-            else:
-                clean += 1
+            self._refresh_swa_page_table_cache_row(req)
 
         row_indices = table_indices.to(device=self.device, dtype=torch.long)
         if rows == 0:
@@ -2013,29 +1549,24 @@ class DSV4AttentionBackend(BaseAttnBackend):
     def _refresh_swa_page_table_cache_row(
         self,
         req,
-        *,
-        profile: dict[str, float] | None,
-    ) -> bool:
+    ) -> None:
         table_idx = int(req.table_idx)
         signature = self._swa_page_table_cache_signature(req)
         if self._swa_page_table_cache_signatures.get(table_idx) == signature:
-            return False
+            return
         assert self._swa_page_table_cache is not None
         width = self._swa_page_table_cache_width
-        row = self._build_swa_page_table_row(req, width, profile=profile)
+        row = self._build_swa_page_table_row(req, width)
         dst = self._swa_page_table_cache[table_idx]
         dst.fill_(-1)
         if row.numel() > 0:
             dst[: row.numel()].copy_(row)
         self._swa_page_table_cache_signatures[table_idx] = signature
-        return True
 
     def _build_swa_page_table_row(
         self,
         req,
         table_len: int,
-        *,
-        profile: dict[str, float] | None = None,
     ) -> torch.Tensor:
         table = torch.full((table_len,), -1, dtype=torch.int32, device=self.device)
         if int(getattr(req, "uid", 0)) < 0:
@@ -2110,22 +1641,10 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 "DSV4 direct SWA token metadata requires "
                 "DeepSeekV4KVCache.translate_full_locs_to_swa_locs."
             )
-        rows = int(positions.numel())
-        {
-            "phase": "decode",
-            "rows": rows,
-            "window_size": int(self.window_size),
-            "direct_token_metadata": True,
-        }
         full_locs = self._make_swa_indices(table_indices, positions)
         return translate(full_locs).to(device=self.device, dtype=torch.int32)
 
     def _make_swa_out_loc_for_store(self, raw_out_loc: torch.Tensor) -> torch.Tensor | None:
-        if not (
-            _swa_direct_replay_metadata_fused_enabled()
-            and bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
-        ):
-            return None
         translate = getattr(self.kvcache, "translate_full_locs_to_swa_locs", None)
         if not callable(translate):
             raise RuntimeError(
@@ -2229,14 +1748,14 @@ class DSV4AttentionBackend(BaseAttnBackend):
             _pad_last_dim(full.to(torch.int32), value=-1),
         )
 
-    def _materialize_c128_raw_page_full_oracle(
+    def _materialize_c128_raw_page_full_reference(
         self,
         table_indices: torch.Tensor,
         lengths: torch.Tensor,
         *,
         component_page_table: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Explicit legacy/debug materialization; never a release eager fallback."""
+        """CPU-only reference used by metadata unit tests."""
         return self._make_all_compressed_indices(
             table_indices,
             lengths,
@@ -2351,7 +1870,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
         out = ctx_page_table[rows, clamped].to(torch.int32)
         return torch.where(valid, out, torch.full_like(out, -1))
 
-    def _fallback_attention(
+    def _sparse_attention(
         self,
         q: torch.Tensor,
         layer_id: int,
@@ -2359,77 +1878,37 @@ class DSV4AttentionBackend(BaseAttnBackend):
         compress_ratio: DSV4CompressRatio,
         attn_sink: torch.Tensor | None,
     ) -> torch.Tensor:
-        fast = self._sparse_attention_two_source(
+        return self._sparse_attention_two_source(
             q,
             layer_id,
             metadata,
             compress_ratio,
             attn_sink,
         )
-        if fast is not None:
-            return fast
-        cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
-        context_indices = self._context_metadata_for_queries(metadata, q.shape[0], compress_ratio)
-        return dsv4_kernel.paged_mqa_attention_fallback(
-            q,
-            cache,
-            context_indices,
-            softmax_scale=self.softmax_scale,
-            attn_sink=attn_sink,
-        )
 
-    def _two_source_attention_torch(
-        self,
+    @staticmethod
+    def _require_release_index_metadata(
+        component: str,
         q: torch.Tensor,
-        swa_cache: torch.Tensor,
-        swa_indices: torch.Tensor,
-        swa_lengths: torch.Tensor,
-        *,
-        compressed_cache: torch.Tensor | None,
-        compressed_indices: torch.Tensor | None,
-        compressed_lengths: torch.Tensor | None,
-        attn_sink: torch.Tensor | None,
-    ) -> torch.Tensor:
-        out = torch.empty_like(q)
-        sink = (
-            attn_sink[: q.shape[1]].to(device=q.device, dtype=torch.float32)
-            if attn_sink is not None
-            else None
-        )
-        for row in range(q.shape[0]):
-            parts: list[torch.Tensor] = []
-            if (
-                compressed_cache is not None
-                and compressed_indices is not None
-                and compressed_lengths is not None
-            ):
-                comp_len = max(0, int(compressed_lengths[row].item()))
-                comp_idx = compressed_indices[row, :comp_len].to(device=q.device, dtype=torch.long)
-                comp_idx = comp_idx[comp_idx >= 0]
-                if comp_idx.numel() > 0:
-                    parts.append(compressed_cache[comp_idx].to(device=q.device, dtype=q.dtype))
-
-            swa_len = max(0, int(swa_lengths[row].item()))
-            swa_idx = swa_indices[row, :swa_len].to(device=q.device, dtype=torch.long)
-            swa_idx = swa_idx[swa_idx >= 0]
-            if swa_idx.numel() > 0:
-                parts.append(swa_cache[swa_idx].to(device=q.device, dtype=q.dtype))
-
-            if not parts:
-                out[row].zero_()
-                continue
-
-            candidates = torch.cat(parts, dim=0).float()
-            scores = torch.einsum("hd,td->ht", q[row].float(), candidates) * self.softmax_scale
-            if sink is None:
-                attn = torch.softmax(scores, dim=-1)
-            else:
-                max_score = torch.maximum(scores.max(dim=-1).values, sink)
-                exp_scores = torch.exp(scores - max_score[:, None])
-                denom = exp_scores.sum(dim=-1) + torch.exp(sink - max_score)
-                attn = exp_scores / denom[:, None]
-            out[row] = torch.einsum("ht,td->hd", attn, candidates).to(q.dtype)
-        return out
+        indices: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> None:
+        rows = q.shape[0]
+        if (
+            indices.device != q.device
+            or lengths.device != q.device
+            or indices.dtype is not torch.int32
+            or lengths.dtype is not torch.int32
+            or indices.ndim != 2
+            or lengths.ndim != 1
+            or indices.shape[0] != rows
+            or lengths.numel() != rows
+            or indices.stride(-1) != 1
+            or not lengths.is_contiguous()
+        ):
+            raise RuntimeError(
+                f"DSV4 {component} metadata does not satisfy the release sparse-attention ABI."
+            )
 
     def _sparse_attention_two_source(
         self,
@@ -2438,84 +1917,47 @@ class DSV4AttentionBackend(BaseAttnBackend):
         metadata: DSV4CoreAttentionMetadata,
         compress_ratio: DSV4CompressRatio,
         attn_sink: torch.Tensor | None,
-    ) -> torch.Tensor | None:
+    ) -> torch.Tensor:
         rows = q.shape[0]
         if rows == 0:
             return q.new_empty(q.shape)
         self._ensure_swa_metadata_current(metadata, context="sparse attention launch")
-        swa_indices_view = metadata.swa_page_indices[:rows]
-        swa_lengths_view = metadata.swa_topk_lengths[:rows]
-        use_swa_boundary_fast_path = (
-            _swa_direct_replay_metadata_fused_enabled()
-            and swa_indices_view.device == q.device
-            and swa_lengths_view.device == q.device
-            and swa_indices_view.dtype == torch.int32
-            and swa_lengths_view.dtype == torch.int32
+        swa_indices = metadata.swa_page_indices[:rows]
+        swa_lengths = metadata.swa_topk_lengths[:rows]
+        self._require_release_index_metadata(
+            "SWA",
+            q,
+            swa_indices,
+            swa_lengths,
         )
-        if use_swa_boundary_fast_path:
-            swa_indices = swa_indices_view
-            swa_lengths = swa_lengths_view
-        else:
-            swa_indices = swa_indices_view.to(device=q.device, dtype=torch.int32)
-            swa_lengths = swa_lengths_view.to(device=q.device, dtype=torch.int32)
-            swa_lengths = swa_lengths.clamp(max=swa_indices.shape[-1])
 
         compressed_cache = None
         compressed_indices = None
         compressed_lengths = None
-        use_compressed_boundary_fast_path = _swa_direct_replay_metadata_fused_enabled()
         if compress_ratio == 4:
             compressed_cache = self.kvcache.c4_cache(layer_id).to(q.dtype)
-            compressed_indices_view = metadata.c4_sparse_page_indices[:rows]
-            compressed_lengths_view = metadata.c4_sparse_topk_lengths[:rows]
-            if (
-                use_compressed_boundary_fast_path
-                and compressed_indices_view.device == q.device
-                and compressed_lengths_view.device == q.device
-                and compressed_indices_view.dtype == torch.int32
-                and compressed_lengths_view.dtype == torch.int32
-                and compressed_indices_view.stride(-1) == 1
-                and compressed_lengths_view.is_contiguous()
-                and compressed_lengths_view.numel() == rows
-            ):
-                compressed_indices = compressed_indices_view
-                compressed_lengths = compressed_lengths_view
-            else:
-                compressed_indices = compressed_indices_view.to(
-                    device=q.device,
-                    dtype=torch.int32,
-                )
-                compressed_lengths = compressed_lengths_view.to(
-                    device=q.device,
-                    dtype=torch.int32,
-                )
-                compressed_lengths = compressed_lengths.clamp(max=compressed_indices.shape[-1])
+            compressed_indices = metadata.c4_sparse_page_indices[:rows]
+            compressed_lengths = metadata.c4_sparse_topk_lengths[:rows]
+            self._require_release_index_metadata(
+                "C4",
+                q,
+                compressed_indices,
+                compressed_lengths,
+            )
         elif compress_ratio == 128:
             compressed_cache = self.kvcache.c128_cache(layer_id).to(q.dtype)
-            compressed_indices_view = metadata.c128_page_indices[:rows]
-            compressed_lengths_view = metadata.c128_topk_lengths_clamp1[:rows]
-            if (
-                use_compressed_boundary_fast_path
-                and compressed_indices_view.device == q.device
-                and compressed_lengths_view.device == q.device
-                and compressed_indices_view.dtype == torch.int32
-                and compressed_lengths_view.dtype == torch.int32
-                and compressed_indices_view.stride(-1) == 1
-                and compressed_lengths_view.is_contiguous()
-                and compressed_lengths_view.numel() == rows
-            ):
-                compressed_indices = compressed_indices_view
-                compressed_lengths = compressed_lengths_view
-            else:
-                compressed_indices = compressed_indices_view.to(
-                    device=q.device,
-                    dtype=torch.int32,
-                )
-                compressed_lengths = (compressed_indices >= 0).sum(dim=-1).to(torch.int32)
+            compressed_indices = metadata.c128_page_indices[:rows]
+            compressed_lengths = metadata.c128_topk_lengths_clamp1[:rows]
+            self._require_release_index_metadata(
+                "C128",
+                q,
+                compressed_indices,
+                compressed_lengths,
+            )
 
         if metadata.max_seqlen_q <= 1:
             splitk_swa_cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
-            fast = dsv4_kernel.dsv4_sparse_attention_two_source_splitk_bf16(
+            return dsv4_kernel.dsv4_sparse_attention_two_source_splitk_bf16(
                 q,
                 splitk_swa_cache,
                 swa_indices,
@@ -2526,11 +1968,9 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 softmax_scale=self.softmax_scale,
                 attn_sink=attn_sink,
             )
-            if fast is not None:
-                return fast
 
         base_swa_cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
-        fast = dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
+        return dsv4_kernel.dsv4_sparse_attention_two_source_bf16(
             q,
             base_swa_cache,
             swa_indices,
@@ -2541,61 +1981,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             softmax_scale=self.softmax_scale,
             attn_sink=attn_sink,
         )
-        if fast is not None:
-            return fast
-        if compressed_cache is None:
-            return None
-        fallback_swa_cache = self.kvcache.swa_cache(layer_id).to(q.dtype)
-        out = self._two_source_attention_torch(
-            q,
-            fallback_swa_cache,
-            swa_indices,
-            swa_lengths,
-            compressed_cache=compressed_cache,
-            compressed_indices=compressed_indices,
-            compressed_lengths=compressed_lengths,
-            attn_sink=attn_sink,
-        )
-        return out
-
-    def _context_metadata_for_queries(
-        self,
-        metadata: DSV4CoreAttentionMetadata,
-        rows: int,
-        compress_ratio: DSV4CompressRatio,
-    ) -> dsv4_kernel.DSV4PagedMQAMetadata:
-        context_indices = [
-            self._context_indices_for_query(metadata, row, compress_ratio) for row in range(rows)
-        ]
-        return dsv4_kernel.get_paged_mqa_logits_metadata_fallback(
-            context_indices,
-            device=self.device,
-        )
-
-    def _context_indices_for_query(
-        self,
-        metadata: DSV4CoreAttentionMetadata,
-        row: int,
-        compress_ratio: DSV4CompressRatio,
-    ) -> torch.Tensor:
-        pieces = []
-        if compress_ratio == 4:
-            pieces.append(metadata.c4_sparse_full_indices[row])
-        elif compress_ratio == 128:
-            pieces.append(metadata.c128_full_indices[row])
-        pieces.append(metadata.swa_page_indices[row])
-        values = torch.cat([x.reshape(-1) for x in pieces])
-        values = values[values >= 0]
-        if values.numel() <= 1:
-            return values
-        seen: set[int] = set()
-        ordered = []
-        for value in values.tolist():
-            ivalue = int(value)
-            if ivalue not in seen:
-                seen.add(ivalue)
-                ordered.append(ivalue)
-        return torch.tensor(ordered, dtype=torch.int32, device=values.device)
 
     def _empty_decode_metadata(self, max_bs: int, max_seq_len: int) -> DSV4AttentionMetadata:
         device = self.device
@@ -2605,8 +1990,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
         )
         c128_width = div_ceil(max(div_ceil(max_seq_len, 128), 1), _PAGE_INDEX_ALIGNMENT)
         c128_width *= _PAGE_INDEX_ALIGNMENT
-        component_ownership = bool(getattr(self.kvcache, "component_loc_ownership_enabled", False))
-        swa_independent = bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
         has_c4 = any(m.compress_ratio == 4 for m in self.kvcache.layer_mapping)
         has_c128 = any(m.compress_ratio == 128 for m in self.kvcache.layer_mapping)
 
@@ -2615,10 +1998,8 @@ class DSV4AttentionBackend(BaseAttnBackend):
 
         swa_index_width = div_ceil(self.window_size, _PAGE_INDEX_ALIGNMENT) * _PAGE_INDEX_ALIGNMENT
         swa_page_indices = empty_index(swa_index_width)
-        dummy_loc = 0
-        if swa_independent:
-            swa_rows = int(self.kvcache.swa_cache(0).shape[0])
-            dummy_loc = max(swa_rows - self.page_size, 0)
+        swa_rows = int(self.kvcache.swa_cache(0).shape[0])
+        dummy_loc = max(swa_rows - self.page_size, 0)
         swa_page_indices.fill_(dummy_loc)
 
         c4_sparse_raw_indices = empty_index(topk_width)
@@ -2644,30 +2025,16 @@ class DSV4AttentionBackend(BaseAttnBackend):
 
         c4_out_loc = torch.full((max_bs,), -1, dtype=torch.int32, device=device)
         c128_out_loc = torch.full((max_bs,), -1, dtype=torch.int32, device=device)
-        c4_indexer_out_loc = (
-            torch.full((max_bs,), -1, dtype=torch.int32, device=device)
-            if component_ownership
-            else c4_out_loc
-        )
-        swa_out_loc = (
-            torch.full((max_bs,), dummy_loc, dtype=torch.int32, device=device)
-            if swa_independent and _swa_direct_replay_metadata_fused_enabled()
-            else None
-        )
+        c4_indexer_out_loc = torch.full((max_bs,), -1, dtype=torch.int32, device=device)
+        swa_out_loc = torch.full((max_bs,), dummy_loc, dtype=torch.int32, device=device)
         c4_page_table = (
-            torch.zeros((max_bs, table_len), dtype=torch.int32, device=device)
-            if component_ownership and has_c4
-            else None
+            torch.zeros((max_bs, table_len), dtype=torch.int32, device=device) if has_c4 else None
         )
         c128_page_table = (
-            torch.zeros((max_bs, table_len), dtype=torch.int32, device=device)
-            if component_ownership and has_c128
-            else None
+            torch.zeros((max_bs, table_len), dtype=torch.int32, device=device) if has_c128 else None
         )
         c4_indexer_page_table = (
-            torch.zeros((max_bs, table_len), dtype=torch.int32, device=device)
-            if component_ownership and has_c4
-            else None
+            torch.zeros((max_bs, table_len), dtype=torch.int32, device=device) if has_c4 else None
         )
         core = DSV4CoreAttentionMetadata(
             raw_out_loc=torch.zeros(max_bs, dtype=torch.int32, device=device),
@@ -2706,7 +2073,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
             c128_page_indices=c128_page_indices,
             c128_full_indices=c128_full_indices,
             swa_out_loc=swa_out_loc,
-            component_loc_ownership=component_ownership,
             c4_page_table=c4_page_table,
             c128_page_table=c128_page_table,
             c4_indexer_page_table=c4_indexer_page_table,
@@ -2719,7 +2085,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 self.page_size,
                 (
                     core.c4_indexer_page_table
-                    if component_ownership and core.c4_indexer_page_table is not None
+                    if core.c4_indexer_page_table is not None
                     else core.page_table
                 ),
                 core.c4_topk_lengths_raw,
@@ -2731,393 +2097,6 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 128, core.c128_out_loc, core.seq_lens, core.positions
             ),
         )
-
-    def _copy_metadata_for_replay(
-        self,
-        dst: DSV4AttentionMetadata,
-        src: DSV4AttentionMetadata,
-        bs: int,
-    ) -> None:
-        dst_core = dst.core_metadata
-        src_core = src.core_metadata
-        self._ensure_swa_metadata_current(src_core, context="CUDA graph replay metadata copy")
-        dst_core.component_loc_ownership = src_core.component_loc_ownership
-        direct_swa_requested, direct_c4_requested, direct_c128_requested = (
-            self._direct_index_groups_for_replay(dst_core, src_core, bs)
-        )
-        {
-            "phase": "decode",
-            "rows": int(bs),
-            "component_loc_ownership": bool(src_core.component_loc_ownership),
-            "direct_swa": bool(direct_swa_requested),
-            "direct_c4": bool(direct_c4_requested),
-            "direct_c128": bool(direct_c128_requested),
-        }
-        copied_by_helper = dsv4_kernel.copy_decode_metadata_for_replay(
-            dst_raw_out_loc=dst_core.raw_out_loc,
-            src_raw_out_loc=src_core.raw_out_loc,
-            dst_seq_lens=dst_core.seq_lens,
-            src_seq_lens=src_core.seq_lens,
-            dst_req_seq_lens=dst_core.req_seq_lens,
-            src_req_seq_lens=src_core.req_seq_lens,
-            dst_extend_lens=dst_core.extend_lens,
-            src_extend_lens=src_core.extend_lens,
-            dst_positions=dst_core.positions,
-            src_positions=src_core.positions,
-            dst_req_table_indices=dst_core.req_table_indices,
-            src_req_table_indices=src_core.req_table_indices,
-            dst_swa_topk_lengths=dst_core.swa_topk_lengths,
-            src_swa_topk_lengths=src_core.swa_topk_lengths,
-            dst_c4_topk_lengths_raw=dst_core.c4_topk_lengths_raw,
-            src_c4_topk_lengths_raw=src_core.c4_topk_lengths_raw,
-            dst_c4_topk_lengths_clamp1=dst_core.c4_topk_lengths_clamp1,
-            src_c4_topk_lengths_clamp1=src_core.c4_topk_lengths_clamp1,
-            dst_c4_sparse_topk_lengths=dst_core.c4_sparse_topk_lengths,
-            src_c4_sparse_topk_lengths=src_core.c4_sparse_topk_lengths,
-            dst_c128_topk_lengths_clamp1=dst_core.c128_topk_lengths_clamp1,
-            src_c128_topk_lengths_clamp1=src_core.c128_topk_lengths_clamp1,
-            dst_cu_seqlens_q=dst_core.cu_seqlens_q,
-            src_cu_seqlens_q=src_core.cu_seqlens_q,
-            dst_page_table=dst_core.page_table,
-            src_page_table=src_core.page_table,
-            dst_swa_page_indices=dst_core.swa_page_indices,
-            src_swa_page_indices=src_core.swa_page_indices,
-            dst_c4_sparse_raw_indices=dst_core.c4_sparse_raw_indices,
-            src_c4_sparse_raw_indices=src_core.c4_sparse_raw_indices,
-            dst_c4_sparse_page_indices=dst_core.c4_sparse_page_indices,
-            src_c4_sparse_page_indices=src_core.c4_sparse_page_indices,
-            dst_c4_sparse_full_indices=dst_core.c4_sparse_full_indices,
-            src_c4_sparse_full_indices=src_core.c4_sparse_full_indices,
-            dst_c128_raw_indices=dst_core.c128_raw_indices,
-            src_c128_raw_indices=src_core.c128_raw_indices,
-            dst_c128_page_indices=dst_core.c128_page_indices,
-            src_c128_page_indices=src_core.c128_page_indices,
-            dst_c128_full_indices=dst_core.c128_full_indices,
-            src_c128_full_indices=src_core.c128_full_indices,
-            rows=bs,
-            graph_inputs_bound=self._capture_graph_inputs_bound,
-            skip_swa_page_indices=direct_swa_requested,
-            skip_c4_sparse_indices=direct_c4_requested,
-            skip_c128_indices=direct_c128_requested,
-        )
-        self._copy_component_page_tables_for_replay(dst_core, src_core, bs)
-        direct_swa_done = False
-        direct_c4_done = False
-        direct_c128_done = False
-        if direct_swa_requested or direct_c4_requested or direct_c128_requested:
-            direct_done = self._direct_index_metadata_for_replay(
-                dst_core,
-                src_core,
-                bs,
-                direct_swa=direct_swa_requested,
-                direct_c4=direct_c4_requested,
-                direct_c128=direct_c128_requested,
-            )
-            if direct_done:
-                direct_swa_done = direct_swa_requested
-                direct_c4_done = direct_c4_requested
-                direct_c128_done = direct_c128_requested
-            elif (
-                src_core.swa_source_elided_for_graph
-                or src_core.c4_sparse_source_elided_for_graph
-                or src_core.c128_source_elided_for_graph
-            ):
-                raise RuntimeError(
-                    "Optimized DSV4 elided eager index source metadata, but direct "
-                    "graph-buffer "
-                    "generation failed."
-                )
-            else:
-                self._copy_direct_index_fallback_from_source(
-                    dst_core,
-                    src_core,
-                    bs,
-                    copy_swa=direct_swa_requested,
-                    copy_c4=direct_c4_requested,
-                    copy_c128=direct_c128_requested,
-                )
-        self._copy_swa_out_loc_for_replay(dst_core, src_core, bs)
-        dst_core.swa_ownership_version = int(src_core.swa_ownership_version)
-        if copied_by_helper:
-            if not self._capture_compressed_locs_in_graph or src_core.component_loc_ownership:
-                self._copy_decode_write_locs_for_replay(dst_core, src_core, bs)
-            return
-        scalar_names = (
-            "raw_out_loc",
-            "seq_lens",
-            "req_seq_lens",
-            "extend_lens",
-            "positions",
-            "req_table_indices",
-            "swa_topk_lengths",
-            "c4_topk_lengths_raw",
-            "c4_topk_lengths_clamp1",
-            "c4_sparse_topk_lengths",
-            "c128_topk_lengths_clamp1",
-        )
-        for name in scalar_names:
-            if self._capture_graph_inputs_bound and name in {"raw_out_loc", "positions"}:
-                continue
-            getattr(dst_core, name)[:bs].copy_(getattr(src_core, name)[:bs])
-        dst_core.cu_seqlens_q[: bs + 1].copy_(src_core.cu_seqlens_q[: bs + 1])
-        self._copy_2d(dst_core.page_table, src_core.page_table, bs, fill=0)
-        for name in (
-            "swa_page_indices",
-            "c4_sparse_raw_indices",
-            "c4_sparse_page_indices",
-            "c4_sparse_full_indices",
-            "c128_raw_indices",
-            "c128_page_indices",
-            "c128_full_indices",
-        ):
-            if direct_swa_done and name == "swa_page_indices":
-                continue
-            if direct_c4_done and name.startswith("c4_sparse_"):
-                continue
-            if direct_c128_done and name.startswith("c128_"):
-                continue
-            self._copy_2d(getattr(dst_core, name), getattr(src_core, name), bs, fill=-1)
-        if not self._capture_compressed_locs_in_graph:
-            self._copy_decode_write_locs_for_replay(dst_core, src_core, bs)
-
-    def _direct_index_groups_for_replay(
-        self,
-        dst_core: DSV4CoreAttentionMetadata,
-        src_core: DSV4CoreAttentionMetadata,
-        rows: int,
-    ) -> tuple[bool, bool, bool]:
-        if not (rows > 0 and src_core.component_loc_ownership):
-            return False, False, False
-        if self.device.type != "cuda" or not dsv4_kernel.dsv4_triton_available():
-            return False, False, False
-        groups = _direct_graph_metadata_groups()
-        direct_swa = (
-            "swa" in groups
-            and src_core.swa_page_indices is not None
-            and (
-                not bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False))
-                or _swa_direct_replay_metadata_fused_enabled()
-            )
-        )
-        direct_c4 = (
-            "c4" in groups
-            and dst_core.c4_page_table is not None
-            and src_core.c4_page_table is not None
-            and dst_core.c4_sparse_raw_indices is not None
-        )
-        direct_c128 = (
-            "c128" in groups
-            and dst_core.c128_page_table is not None
-            and src_core.c128_page_table is not None
-            and dst_core.c128_raw_indices is not None
-        )
-        return direct_swa, direct_c4, direct_c128
-
-    def _direct_index_metadata_for_replay(
-        self,
-        dst_core: DSV4CoreAttentionMetadata,
-        src_core: DSV4CoreAttentionMetadata,
-        rows: int,
-        *,
-        direct_swa: bool,
-        direct_c4: bool,
-        direct_c128: bool,
-    ) -> bool:
-        approx_bytes = (
-            rows
-            * 4
-            * (
-                (dst_core.swa_page_indices.shape[1] if direct_swa else 0)
-                + (
-                    dst_core.c4_sparse_raw_indices.shape[1]
-                    + dst_core.c4_sparse_page_indices.shape[1]
-                    + dst_core.c4_sparse_full_indices.shape[1]
-                    if direct_c4
-                    else 0
-                )
-                + (
-                    dst_core.c128_raw_indices.shape[1]
-                    + dst_core.c128_page_indices.shape[1]
-                    + dst_core.c128_full_indices.shape[1]
-                    if direct_c128
-                    else 0
-                )
-            )
-        )
-        {
-            "phase": "decode",
-            "rows": int(rows),
-            "direct_swa": bool(direct_swa),
-            "direct_c4": bool(direct_c4),
-            "direct_c128": bool(direct_c128),
-            "approx_dst_bytes": int(approx_bytes),
-        }
-        ok = dsv4_kernel.direct_decode_index_metadata_for_replay(
-            ctx_page_table=get_global_ctx().page_table,
-            table_indices=src_core.req_table_indices,
-            positions=src_core.positions,
-            c4_page_table=src_core.c4_page_table,
-            c128_page_table=src_core.c128_page_table,
-            dst_swa_page_indices=dst_core.swa_page_indices,
-            dst_c4_sparse_raw_indices=dst_core.c4_sparse_raw_indices,
-            dst_c4_sparse_page_indices=dst_core.c4_sparse_page_indices,
-            dst_c4_sparse_full_indices=dst_core.c4_sparse_full_indices,
-            dst_c128_raw_indices=dst_core.c128_raw_indices,
-            dst_c128_page_indices=dst_core.c128_page_indices,
-            dst_c128_full_indices=dst_core.c128_full_indices,
-            rows=rows,
-            page_size=self.page_size,
-            window_size=self.window_size,
-            index_topk=self.index_topk,
-            direct_swa=direct_swa,
-            direct_c4=direct_c4,
-            direct_c128=direct_c128,
-            swa_full_to_swa_page=getattr(self.kvcache, "_full_to_swa_page", None),
-            swa_dummy_token_start=int(getattr(self.kvcache, "_dummy_token_start", -1)),
-            swa_dummy_page=int(getattr(self.kvcache, "_swa_dummy_page", -1)),
-            swa_independent=bool(getattr(self.kvcache, "swa_independent_lifecycle_enabled", False)),
-        )
-        return ok
-
-    def _copy_direct_index_fallback_from_source(
-        self,
-        dst_core: DSV4CoreAttentionMetadata,
-        src_core: DSV4CoreAttentionMetadata,
-        rows: int,
-        *,
-        copy_swa: bool,
-        copy_c4: bool,
-        copy_c128: bool,
-    ) -> None:
-        names = []
-        if copy_swa:
-            names.append("swa_page_indices")
-        if copy_c4:
-            names.extend(
-                (
-                    "c4_sparse_raw_indices",
-                    "c4_sparse_page_indices",
-                    "c4_sparse_full_indices",
-                )
-            )
-        if copy_c128:
-            names.extend(
-                (
-                    "c128_raw_indices",
-                    "c128_page_indices",
-                    "c128_full_indices",
-                )
-            )
-        for name in names:
-            self._copy_2d(getattr(dst_core, name), getattr(src_core, name), rows, fill=-1)
-
-    def _copy_component_page_tables_for_replay(
-        self,
-        dst_core: DSV4CoreAttentionMetadata,
-        src_core: DSV4CoreAttentionMetadata,
-        rows: int,
-    ) -> None:
-        for name in ("c4_page_table", "c128_page_table", "c4_indexer_page_table"):
-            dst = getattr(dst_core, name)
-            src = getattr(src_core, name)
-            if dst is None:
-                continue
-            if src is None:
-                dst[:rows].fill_(-1)
-            else:
-                self._copy_2d(dst, src, rows, fill=-1)
-
-    def _copy_decode_write_locs_for_replay(
-        self,
-        dst_core: DSV4CoreAttentionMetadata,
-        src_core: DSV4CoreAttentionMetadata,
-        rows: int,
-    ) -> None:
-        {
-            "phase": "decode",
-            "rows": int(rows),
-            "component_loc_ownership": bool(src_core.component_loc_ownership),
-        }
-        if src_core.component_loc_ownership:
-            copied = dsv4_kernel.copy_component_write_locs_for_replay(
-                c4_page_table=dst_core.c4_page_table,
-                c128_page_table=dst_core.c128_page_table,
-                c4_indexer_page_table=dst_core.c4_indexer_page_table,
-                positions=dst_core.positions,
-                c4_out_loc=dst_core.c4_out_loc,
-                c128_out_loc=dst_core.c128_out_loc,
-                c4_indexer_out_loc=dst_core.c4_indexer_out_loc,
-                rows=rows,
-                page_size=self.page_size,
-            )
-            rows * 4 * 3
-            if copied:
-                return
-            self._copy_masked_compact_write_locs(
-                dst_core.c4_out_loc,
-                src_core.c4_out_loc,
-                src_core.positions,
-                rows,
-                ratio=4,
-            )
-            self._copy_masked_compact_write_locs(
-                dst_core.c128_out_loc,
-                src_core.c128_out_loc,
-                src_core.positions,
-                rows,
-                ratio=128,
-            )
-            self._copy_masked_compact_write_locs(
-                dst_core.c4_indexer_out_loc,
-                src_core.c4_indexer_out_loc,
-                src_core.positions,
-                rows,
-                ratio=4,
-            )
-            return
-        dsv4_kernel.copy_masked_compressed_locs(
-            src_core.raw_out_loc,
-            src_core.positions,
-            dst_core.c4_out_loc,
-            dst_core.c128_out_loc,
-            rows,
-        )
-        rows * 4 * 2
-        if (
-            dst_core.c4_indexer_out_loc is not None
-            and dst_core.c4_indexer_out_loc is not dst_core.c4_out_loc
-            and dst_core.c4_out_loc is not None
-        ):
-            dst_core.c4_indexer_out_loc[:rows].copy_(dst_core.c4_out_loc[:rows])
-            if dst_core.c4_indexer_out_loc.shape[0] > rows:
-                dst_core.c4_indexer_out_loc[rows:].fill_(-1)
-
-    def _copy_masked_compact_write_locs(
-        self,
-        dst: torch.Tensor | None,
-        src: torch.Tensor | None,
-        positions: torch.Tensor,
-        rows: int,
-        *,
-        ratio: Literal[4, 128],
-    ) -> None:
-        if dst is None:
-            return
-        rows = min(rows, dst.shape[0], positions.numel())
-        if rows <= 0:
-            dst.fill_(-1)
-            return
-        dst[:rows].fill_(-1)
-        if dst.shape[0] > rows:
-            dst[rows:].fill_(-1)
-        if src is None or src.numel() == 0:
-            return
-        mask = (positions[:rows] + 1) % ratio == 0
-        count = min(int(mask.sum().item()), src.numel())
-        if count <= 0:
-            return
-        target_rows = torch.nonzero(mask, as_tuple=False).flatten()[:count]
-        dst[target_rows] = src[:count].to(device=dst.device, dtype=dst.dtype)
 
     def _copy_2d(self, dst: torch.Tensor, src: torch.Tensor, rows: int, *, fill: int) -> None:
         rows = min(rows, dst.shape[0], src.shape[0])

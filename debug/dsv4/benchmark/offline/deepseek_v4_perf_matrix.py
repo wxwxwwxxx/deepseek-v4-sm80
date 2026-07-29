@@ -254,9 +254,6 @@ class Variant:
     use_pynccl: bool = False
     allow_dsv4_cuda_graph: bool = False
     cuda_graph_capture_greedy_sample: bool = False
-    enable_dsv4_radix_prefix_cache: bool = False
-    enable_dsv4_component_loc_ownership: bool = False
-    enable_dsv4_swa_independent_lifecycle: bool = False
 
 
 DEFAULT_SCENARIOS: tuple[Scenario, ...] = (
@@ -916,9 +913,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
-        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name="v1_moe_v2",
@@ -1770,15 +1764,10 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         description=(
             "TARGET 08.29 promoted Route B prefix preset: A100 victory bundle, "
             "direct C4 graph metadata buffers, in-graph replay metadata prep, "
-            "and request-slot keyed component page-table lifetime caching. "
-            "Pair with --enable-dsv4-radix-prefix-cache, "
-            "--enable-dsv4-component-loc-ownership, --page-size 256, "
-            "--num-pages 128, and graph buckets 1 2 4 8 16."
+            "and request-slot keyed component page-table lifetime caching."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_VARIANT,
@@ -1792,8 +1781,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_INDEPENDENT_VARIANT,
@@ -1806,9 +1793,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
-        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_DIRECT_VARIANT,
@@ -1821,9 +1805,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
-        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SWA_REPLAY_METADATA_FUSED_VARIANT,
@@ -1836,9 +1817,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
-        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name=DSV4_PREFIX_ROUTE_B_LIFETIME_MARLIN_RELEASE_SAFE_ARENA_VARIANT,
@@ -1851,8 +1829,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name=DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_VARIANT,
@@ -1865,8 +1841,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name=DSV4_ROUTE_B_LIFETIME_MOE_REDUCE_BF16_INGRAPH_METADATA_VARIANT,
@@ -1883,23 +1857,16 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         use_pynccl=True,
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name=DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_VARIANT,
         env=dict(DSV4_ROUTE_B_LIFETIME_SWA_INDEPENDENT_ENV),
         description=(
             "TARGET 08.31 opt-in: promoted Route B lifetime prefix preset plus "
-            "independent SWA lifecycle. Pair with --enable-dsv4-radix-prefix-cache, "
-            "--enable-dsv4-component-loc-ownership, and "
-            "--enable-dsv4-swa-independent-lifecycle."
+            "independent SWA lifecycle."
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
-        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name=DSV4_ROUTE_B_LIFETIME_SWA_DIRECT_VARIANT,
@@ -1911,9 +1878,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
-        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name=DSV4_ROUTE_B_LIFETIME_SWA_REPLAY_METADATA_FUSED_VARIANT,
@@ -1924,9 +1888,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
-        enable_dsv4_swa_independent_lifecycle=True,
     ),
     Variant(
         name=DSV4_ROUTE_B_LIFETIME_LEGACY_VARIANT,
@@ -1938,8 +1899,6 @@ RUNTIME_VARIANTS: tuple[Variant, ...] = (
         ),
         allow_dsv4_cuda_graph=True,
         cuda_graph_capture_greedy_sample=True,
-        enable_dsv4_radix_prefix_cache=True,
-        enable_dsv4_component_loc_ownership=True,
     ),
     Variant(
         name="target0762_woabf16bmmcache",
@@ -2056,7 +2015,7 @@ OPERATOR_REFERENCE_COUNTER_NAMES = {
     "k_norm_rope_cache_fallback",
     "linear_bf16_fp32_fallback",
     "mega_moe_pre_dispatch_fallback",
-    "moe_gate_fallback",
+    "moe_gate",
     "norm_rope_inplace_fallback",
     "paged_mqa_attention_fallback",
     "plan_topk_v2_fallback",
@@ -2090,7 +2049,7 @@ BOTTLENECK_COUNTER_GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "MoE / expert GEMM": (
         "mega_moe_pre_dispatch_fallback",
-        "moe_gate_fallback",
+        "moe_gate",
         "quantized_linear_ref",
         "silu_and_mul_clamp_fallback",
     ),
@@ -3251,11 +3210,6 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
     variant_graph_greedy_sample = any(
         variant.cuda_graph_capture_greedy_sample for variant in variants
     )
-    variant_prefix = any(variant.enable_dsv4_radix_prefix_cache for variant in variants)
-    variant_component = any(variant.enable_dsv4_component_loc_ownership for variant in variants)
-    variant_swa_independent = any(
-        variant.enable_dsv4_swa_independent_lifecycle for variant in variants
-    )
     if (
         variant_pynccl
         and not all(variant.use_pynccl for variant in variants)
@@ -3279,49 +3233,12 @@ def _runtime_options(args: argparse.Namespace, variants: Sequence[Variant]) -> d
         cuda_graph_capture_greedy_sample = variant_graph_greedy_sample
     else:
         cuda_graph_capture_greedy_sample = bool(args.cuda_graph_capture_greedy_sample)
-    if (
-        variant_prefix
-        and not all(variant.enable_dsv4_radix_prefix_cache for variant in variants)
-        and not args.enable_dsv4_radix_prefix_cache
-    ):
-        raise SystemExit(
-            "DSV4 radix-prefix variants must be run separately or with "
-            "--enable-dsv4-radix-prefix-cache."
-        )
-    if (
-        variant_component
-        and not all(variant.enable_dsv4_component_loc_ownership for variant in variants)
-        and not args.enable_dsv4_component_loc_ownership
-    ):
-        raise SystemExit(
-            "DSV4 component-ownership variants must be run separately or with "
-            "--enable-dsv4-component-loc-ownership."
-        )
-    if (
-        variant_swa_independent
-        and not all(variant.enable_dsv4_swa_independent_lifecycle for variant in variants)
-        and not args.enable_dsv4_swa_independent_lifecycle
-    ):
-        raise SystemExit(
-            "DSV4 SWA independent lifecycle variants must be run separately or with "
-            "--enable-dsv4-swa-independent-lifecycle."
-        )
-    enable_dsv4_radix_prefix_cache = bool(args.enable_dsv4_radix_prefix_cache or variant_prefix)
-    enable_dsv4_component_loc_ownership = bool(
-        args.enable_dsv4_component_loc_ownership or variant_component
-    )
-    enable_dsv4_swa_independent_lifecycle = bool(
-        args.enable_dsv4_swa_independent_lifecycle or variant_swa_independent
-    )
     return {
         "use_pynccl": bool(args.use_pynccl or variant_pynccl),
         "allow_dsv4_cuda_graph": allow_dsv4_cuda_graph,
         "cuda_graph_bs": cuda_graph_bs,
         "cuda_graph_max_bs": args.cuda_graph_max_bs,
         "cuda_graph_capture_greedy_sample": cuda_graph_capture_greedy_sample,
-        "enable_dsv4_radix_prefix_cache": enable_dsv4_radix_prefix_cache,
-        "enable_dsv4_component_loc_ownership": enable_dsv4_component_loc_ownership,
-        "enable_dsv4_swa_independent_lifecycle": enable_dsv4_swa_independent_lifecycle,
     }
 
 
@@ -4157,9 +4074,7 @@ def _host_sequence_ownership_snapshot(llm, reqs=()) -> dict[str, Any]:
     return {
         "c4_owner_count": int(getattr(kv_cache, "c4_sequence_owner_count", 0)),
         "c128_owner_count": int(getattr(kv_cache, "c128_sequence_owner_count", 0)),
-        "swa_independent_lifecycle": bool(
-            getattr(kv_cache, "swa_independent_lifecycle_enabled", False)
-        ),
+        "swa_independent_lifecycle": True,
         "swa_ownership_version": int(getattr(kv_cache, "swa_ownership_version", 0)),
         "reqs": entries,
     }
@@ -5133,13 +5048,9 @@ def run_case(
             "max_input_len": scenario.max_input_len,
             "scenario_required_total_seq_len": scenario.max_seq_len,
             "scheduler_supports_interleaved_arrivals": False,
-            "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
-            "component_loc_ownership_enabled": runtime_options[
-                "enable_dsv4_component_loc_ownership"
-            ],
-            "swa_independent_lifecycle_enabled": runtime_options[
-                "enable_dsv4_swa_independent_lifecycle"
-            ],
+            "radix_prefix_enabled": True,
+            "component_loc_ownership_enabled": True,
+            "swa_independent_lifecycle_enabled": True,
         },
         "classification": run_classification(
             tp_size=tp_size,
@@ -5180,13 +5091,9 @@ def run_case(
             ),
             "max_running_req": load_init.get("max_running_req_rank0", {}),
             "token_id_range": args.token_id_range,
-            "radix_prefix_enabled": runtime_options["enable_dsv4_radix_prefix_cache"],
-            "enable_dsv4_component_loc_ownership": runtime_options[
-                "enable_dsv4_component_loc_ownership"
-            ],
-            "enable_dsv4_swa_independent_lifecycle": (
-                runtime_options["enable_dsv4_swa_independent_lifecycle"]
-            ),
+            "radix_prefix_enabled": True,
+            "component_loc_ownership_enabled": True,
+            "swa_independent_lifecycle_enabled": True,
             "prefix_cache_metrics": final_prefix_cache_metrics,
             "model_prepare_report_rank0": getattr(llm.engine, "model_prepare_report", {}),
             "kv_capacity_plan_report": getattr(llm.engine, "kv_capacity_plan_report", {}),
@@ -5249,11 +5156,6 @@ def _init_llm(
         cuda_graph_bs=runtime_options["cuda_graph_bs"],
         cuda_graph_max_bs=runtime_options["cuda_graph_max_bs"],
         cuda_graph_capture_greedy_sample=runtime_options["cuda_graph_capture_greedy_sample"],
-        enable_dsv4_radix_prefix_cache=runtime_options["enable_dsv4_radix_prefix_cache"],
-        enable_dsv4_component_loc_ownership=runtime_options["enable_dsv4_component_loc_ownership"],
-        enable_dsv4_swa_independent_lifecycle=runtime_options[
-            "enable_dsv4_swa_independent_lifecycle"
-        ],
         **kwargs,
     )
     llm.bench_admit_all_at_once = bool(args.admit_all_at_once)
@@ -5443,15 +5345,9 @@ def run_matrix(args: argparse.Namespace) -> int:
                         "requested_max_extend_tokens": args.max_extend_tokens,
                         "use_serving_max_extend_tokens": args.use_serving_max_extend_tokens,
                         "budget_resolution": asdict(budget_resolution),
-                        "enable_dsv4_radix_prefix_cache": runtime_options[
-                            "enable_dsv4_radix_prefix_cache"
-                        ],
-                        "enable_dsv4_component_loc_ownership": (
-                            runtime_options["enable_dsv4_component_loc_ownership"]
-                        ),
-                        "enable_dsv4_swa_independent_lifecycle": (
-                            runtime_options["enable_dsv4_swa_independent_lifecycle"]
-                        ),
+                        "radix_prefix_enabled": True,
+                        "component_loc_ownership_enabled": True,
+                        "swa_independent_lifecycle_enabled": True,
                         "prefix_cache_metrics": llm.cache_manager.prefix_metrics_snapshot(),
                         "classification": run_classification(
                             tp_size=tp_size,
@@ -5618,29 +5514,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Debug control for an exact eager comparison of the canonical release "
             "variant. This overrides the release variant's graph default."
-        ),
-    )
-    parser.add_argument(
-        "--enable-dsv4-radix-prefix-cache",
-        action="store_true",
-        help="Explicitly opt in to DeepSeek V4 radix prefix cache.",
-    )
-    parser.add_argument(
-        "--enable-dsv4-component-loc-ownership",
-        action="store_true",
-        help=(
-            "Explicitly enable TARGET 08.21.2 DSV4 Route B component loc ownership. "
-            "Requires --enable-dsv4-radix-prefix-cache; Route B decode metadata "
-            "deforest/direct graph metadata buffers remain separate env opt-ins."
-        ),
-    )
-    parser.add_argument(
-        "--enable-dsv4-swa-independent-lifecycle",
-        action="store_true",
-        help=(
-            "Explicitly enable TARGET 08.31 DSV4 independent SWA lifecycle. "
-            "Requires --enable-dsv4-radix-prefix-cache and "
-            "--enable-dsv4-component-loc-ownership."
         ),
     )
     parser.add_argument(

@@ -22,9 +22,12 @@ from typing import Any, Callable
 import torch
 
 ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "python"))
 
 from minisgl.kernel import deepseek_v4 as dsv4_kernel  # noqa: E402
+
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference  # noqa: E402
 
 
 def _pctl(values: list[float], fraction: float) -> float:
@@ -122,11 +125,15 @@ def _indexer_case(
     page_size = model_page_size // ratio
     c4_context = context // ratio
     prefix = context - query_rows
-    c4_lens = torch.div(
-        torch.arange(prefix + 1, context + 1, device="cuda", dtype=torch.int64),
-        ratio,
-        rounding_mode="floor",
-    ).clamp_min(1).to(torch.int32)
+    c4_lens = (
+        torch.div(
+            torch.arange(prefix + 1, context + 1, device="cuda", dtype=torch.int64),
+            ratio,
+            rounding_mode="floor",
+        )
+        .clamp_min(1)
+        .to(torch.int32)
+    )
     pages = math.ceil(c4_context / page_size)
     page_row = torch.arange(pages, device="cuda", dtype=torch.int32)
     page_table = page_row.unsqueeze(0).expand(query_rows, -1).contiguous()
@@ -140,7 +147,7 @@ def _indexer_case(
         query_rows, 64, device="cuda", dtype=torch.float32, generator=generator
     )
     positions = torch.arange(prefix, context, device="cuda", dtype=torch.int64)
-    q = dsv4_kernel.indexer_q_rope_fp8_fallback(
+    q = dsv4_reference.indexer_q_rope_fp8_fallback(
         q_bf16,
         raw_weights,
         positions,
@@ -152,14 +159,14 @@ def _indexer_case(
     cache_bf16 = torch.randn(
         pages * page_size, 128, device="cuda", dtype=torch.bfloat16, generator=generator
     )
-    cache_values, cache_scales = dsv4_kernel.quantize_indexer_fp8_cache_ref(cache_bf16)
-    packed_cache = dsv4_kernel.pack_indexer_fp8_paged_cache_ref(
+    cache_values, cache_scales = dsv4_reference.quantize_indexer_fp8_cache_ref(cache_bf16)
+    packed_cache = dsv4_reference.pack_indexer_fp8_paged_cache_ref(
         cache_values, cache_scales, page_size=page_size
     )
     del cache_bf16, cache_values, cache_scales, q_bf16, raw_weights
 
     def run():
-        return dsv4_kernel.indexer_select_fp8_paged_fallback(
+        return dsv4_reference.indexer_select_fp8_paged_fallback(
             q.q_values,
             q.weights,
             packed_cache,
@@ -175,7 +182,7 @@ def _indexer_case(
     # but on 16 rows so it cannot enter bounded slicing.  This checks that the
     # production bounded composition preserves exact index sets.
     oracle_rows = 16
-    oracle = dsv4_kernel.indexer_select_fp8_paged_fallback(
+    oracle = dsv4_reference.indexer_select_fp8_paged_fallback(
         q.q_values[-oracle_rows:],
         q.weights[-oracle_rows:],
         packed_cache,
@@ -185,9 +192,7 @@ def _indexer_case(
         width=512,
         ratio=ratio,
     )
-    parity = _exact_topk_sets(
-        actual.topk.raw_indices[-oracle_rows:], oracle.topk.raw_indices
-    )
+    parity = _exact_topk_sets(actual.topk.raw_indices[-oracle_rows:], oracle.topk.raw_indices)
     backend = actual.backend
     del actual, oracle
 
@@ -197,9 +202,7 @@ def _indexer_case(
 
     max_logits_bytes = 512 * 1024 * 1024
     is_bounded = query_rows * c4_context * 4 > max_logits_bytes
-    slice_rows = (
-        max(1, max_logits_bytes // (c4_context * 4)) if is_bounded else query_rows
-    )
+    slice_rows = max(1, max_logits_bytes // (c4_context * 4)) if is_bounded else query_rows
     slices = math.ceil(query_rows / slice_rows)
     valid_pairs = int(c4_lens.to(torch.int64).sum().item())
     flops = valid_pairs * 64 * (2 * 128 + 2)
@@ -259,16 +262,18 @@ def _c128_case(
     compressed_cache = torch.randn(
         c128_width, dim, device="cuda", dtype=torch.bfloat16, generator=generator
     )
-    swa_indices = torch.arange(swa_width, device="cuda", dtype=torch.int32).expand(
-        query_rows, -1
-    ).contiguous()
-    compressed_indices = torch.arange(
-        c128_width, device="cuda", dtype=torch.int32
-    ).expand(query_rows, -1).contiguous()
-    swa_lengths = torch.full((query_rows,), swa_width, device="cuda", dtype=torch.int32)
-    compressed_lengths = torch.full(
-        (query_rows,), c128_width, device="cuda", dtype=torch.int32
+    swa_indices = (
+        torch.arange(swa_width, device="cuda", dtype=torch.int32)
+        .expand(query_rows, -1)
+        .contiguous()
     )
+    compressed_indices = (
+        torch.arange(c128_width, device="cuda", dtype=torch.int32)
+        .expand(query_rows, -1)
+        .contiguous()
+    )
+    swa_lengths = torch.full((query_rows,), swa_width, device="cuda", dtype=torch.int32)
+    compressed_lengths = torch.full((query_rows,), c128_width, device="cuda", dtype=torch.int32)
     attn_sink = torch.randn(heads, device="cuda", dtype=torch.float32, generator=generator)
 
     def run():

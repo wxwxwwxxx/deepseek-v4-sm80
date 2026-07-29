@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import torch
-
 import minisgl.core as core
+import torch
 from minisgl.core import SamplingParams
 from minisgl.scheduler.cache import CacheManager
 from minisgl.scheduler.prefill import ChunkedReq, PrefillAdder
@@ -12,9 +11,6 @@ from minisgl.scheduler.utils import PendingReq
 
 
 class _FakeDsv4KVCache:
-    component_loc_ownership_enabled = True
-    swa_independent_lifecycle_enabled = True
-
     def __init__(self, *, component_pages: int, swa_pages: int):
         self._component_pages = component_pages
         self._swa_pages = swa_pages
@@ -82,7 +78,6 @@ def test_dsv4_swa_tail_pages_do_not_cap_full_request_admission_capacity():
             num_pages=100,
             page_size=page_size,
             page_table=torch.empty((1,), dtype=torch.int32),
-            type="radix",
             kv_cache=_FakeDsv4KVCache(component_pages=80, swa_pages=2),
         )
 

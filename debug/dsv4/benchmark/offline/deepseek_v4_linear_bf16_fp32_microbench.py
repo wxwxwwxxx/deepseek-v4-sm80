@@ -11,12 +11,13 @@ from typing import Any
 
 import torch
 
-
 ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "python"))
 
 from minisgl.kernel import deepseek_v4 as dsv4_kernel  # noqa: E402
 
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference  # noqa: E402
 
 SHAPES = {
     "hc_pre": (16384, 24),
@@ -88,23 +89,23 @@ def _bench_case(
     weight_bf16 = weight_fp32.to(torch.bfloat16).contiguous()
 
     with _with_env(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, None):
-        expected_fp32 = dsv4_kernel.linear_bf16_fp32_fallback(x, weight_fp32)
+        expected_fp32 = dsv4_reference.linear_bf16_fp32_fallback(x, weight_fp32)
         fallback_fp32_ms = _bench_cuda(
-            lambda: dsv4_kernel.linear_bf16_fp32_fallback(x, weight_fp32),
+            lambda: dsv4_reference.linear_bf16_fp32_fallback(x, weight_fp32),
             warmup=warmup,
             iters=iters,
         )
-        expected_bf16_weight = dsv4_kernel.linear_bf16_fp32_fallback(x, weight_bf16)
+        expected_bf16_weight = dsv4_reference.linear_bf16_fp32_fallback(x, weight_bf16)
         fallback_bf16_weight_ms = _bench_cuda(
-            lambda: dsv4_kernel.linear_bf16_fp32_fallback(x, weight_bf16),
+            lambda: dsv4_reference.linear_bf16_fp32_fallback(x, weight_bf16),
             warmup=warmup,
             iters=iters,
         )
 
     with _with_env(dsv4_kernel.DSV4_LINEAR_BF16_FP32_TOGGLE, "1"):
-        actual = dsv4_kernel.linear_bf16_fp32_fallback(x, weight_bf16)
+        actual = dsv4_reference.linear_bf16_fp32_fallback(x, weight_bf16)
         opt_in_ms = _bench_cuda(
-            lambda: dsv4_kernel.linear_bf16_fp32_fallback(x, weight_bf16),
+            lambda: dsv4_reference.linear_bf16_fp32_fallback(x, weight_bf16),
             warmup=warmup,
             iters=iters,
         )
@@ -124,9 +125,7 @@ def _bench_case(
         "fallback_bf16_weight_ms": fallback_bf16_weight_ms,
         "opt_in_bf16_weight_mm_ms": opt_in_ms,
         "weight_fp32_to_bf16_once_ms": cast_once_ms,
-        "speedup_vs_current_fp32_weight": fallback_fp32_ms / opt_in_ms
-        if opt_in_ms > 0
-        else None,
+        "speedup_vs_current_fp32_weight": fallback_fp32_ms / opt_in_ms if opt_in_ms > 0 else None,
         "speedup_vs_bf16_weight_fallback": fallback_bf16_weight_ms / opt_in_ms
         if opt_in_ms > 0
         else None,

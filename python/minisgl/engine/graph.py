@@ -125,7 +125,6 @@ class GraphRunner:
         max_seq_len: int,
         vocab_size: int,
         dummy_req: Req,
-        capture_fail_open: bool = False,
         capture_greedy_sample: bool = False,
         reasoning_token_ids: ReasoningTokenIds | None = None,
     ) -> None:
@@ -137,7 +136,6 @@ class GraphRunner:
         self.dummy_req = dummy_req
         self.stream = stream
         self.device = device
-        self.capture_fail_open = capture_fail_open
         self.capture_greedy_sample = capture_greedy_sample
         self.reasoning_token_ids = reasoning_token_ids
         self.exact_bs_only = False
@@ -186,14 +184,8 @@ class GraphRunner:
             }
             self.graph_map = {}
             self.max_graph_bs = 0
-            if capture_fail_open:
-                logger.error(
-                    "CUDA graph capture failed; falling back to eager decode because "
-                    f"capture_fail_open=True. Blocker: {type(exc).__name__}: {exc}"
-                )
-            else:
-                logger.error(f"CUDA graph capture failed: {type(exc).__name__}: {exc}")
-                raise
+            logger.error(f"CUDA graph capture failed: {type(exc).__name__}: {exc}")
+            raise
 
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
@@ -238,8 +230,7 @@ class GraphRunner:
         self.capture_status["capture_buffer_bytes"] = self.buffer.nbytes()
         if self.buffer.reasoning_states is not None:
             self.capture_status["reasoning_state_buffer_bytes"] = (
-                self.buffer.reasoning_states.numel()
-                * self.buffer.reasoning_states.element_size()
+                self.buffer.reasoning_states.numel() * self.buffer.reasoning_states.element_size()
             )
         bind_capture_graph_inputs = getattr(self.attn_backend, "bind_capture_graph_inputs", None)
         if bind_capture_graph_inputs is not None:
@@ -250,19 +241,6 @@ class GraphRunner:
             )
         stage_capture_metadata = getattr(
             self.attn_backend, "stage_capture_metadata_for_graph", None
-        )
-        self.capture_status["capture_compressed_locs_in_graph"] = bool(
-            getattr(self.attn_backend, "capture_compressed_locs_in_graph", False)
-        )
-        self.capture_status["capture_compressed_locs_in_graph_disabled_by_env"] = bool(
-            getattr(self.attn_backend, "capture_compressed_locs_in_graph_disabled_by_env", False)
-        )
-        self.capture_status["capture_compressed_locs_in_graph_component_guarded"] = bool(
-            getattr(
-                self.attn_backend,
-                "capture_compressed_locs_in_graph_component_guarded",
-                False,
-            )
         )
         self.capture_status["prep_metadata_in_graph_requested"] = bool(
             getattr(self.attn_backend, "prep_metadata_in_graph_requested", False)
@@ -275,6 +253,16 @@ class GraphRunner:
             "prep_metadata_in_graph_unsupported_reason",
             None,
         )
+        if not self.capture_status["prep_metadata_in_graph"]:
+            reason = self.capture_status["prep_metadata_in_graph_unsupported_reason"] or "unknown"
+            raise RuntimeError(
+                "CUDA graph requires in-graph DSV4 metadata preparation; "
+                f"unsupported_reason={reason}."
+            )
+        if stage_capture_metadata is None:
+            raise RuntimeError(
+                "CUDA graph requires a bound DSV4 in-graph metadata staging entrypoint."
+            )
 
         pbar = tqdm(
             sorted(self.graph_bs_list, reverse=True),

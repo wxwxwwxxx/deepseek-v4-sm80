@@ -28,9 +28,8 @@ class EngineConfig:
         default=None, init=False, repr=False
     )
     allow_dsv4_cuda_graph: bool = False
-    cuda_graph_capture_fail_open: bool = False
     cuda_graph_capture_greedy_sample: bool = False
-    page_size: int = 1
+    page_size: int = 256
     memory_ratio: float = 0.9
     distributed_timeout: float = 60.0
     use_dummy_weight: bool = False

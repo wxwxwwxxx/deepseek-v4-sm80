@@ -4,7 +4,8 @@ import math
 
 import pytest
 import torch
-from minisgl.kernel import deepseek_v4 as dsv4_kernel
+
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference
 
 
 def _sm80() -> bool:
@@ -43,20 +44,30 @@ def _reference(
 
 def _assert_contract(scores, seq_lens, page_table, *, width, page_size=64, ratio=4):
     expected = _reference(
-        scores.cpu(), seq_lens.cpu(), page_table.cpu(),
-        width=width, page_size=page_size, ratio=ratio,
+        scores.cpu(),
+        seq_lens.cpu(),
+        page_table.cpu(),
+        width=width,
+        page_size=page_size,
+        ratio=ratio,
     )
     before = (scores.clone(), seq_lens.clone(), page_table.clone())
     outputs = []
     for _ in range(20):
-        out = dsv4_kernel.topk_transform_512_full_fallback(
-            scores, seq_lens, page_table,
-            page_size=page_size, width=width, ratio=ratio,
+        out = dsv4_reference.topk_transform_512_full_fallback(
+            scores,
+            seq_lens,
+            page_table,
+            page_size=page_size,
+            width=width,
+            ratio=ratio,
         )
         torch.cuda.synchronize()
         actual = (
-            out.raw_indices.cpu(), out.page_indices.cpu(),
-            out.full_indices.cpu(), out.topk_lens.cpu(),
+            out.raw_indices.cpu(),
+            out.page_indices.cpu(),
+            out.full_indices.cpu(),
+            out.topk_lens.cpu(),
         )
         for lhs, rhs in zip(actual, expected, strict=True):
             assert torch.equal(lhs, rhs)
@@ -77,10 +88,7 @@ def test_dsv4_topk_candidate_b_lengths_ties_and_noncontiguous_pages():
     rows = len(lengths)
     base = torch.arange(max_len, dtype=torch.float32)
     scores = torch.stack(
-        [
-            torch.sin(base * 0.017 + row) + torch.cos(base * 0.031 - row) * 0.2
-            for row in range(rows)
-        ]
+        [torch.sin(base * 0.017 + row) + torch.cos(base * 0.031 - row) * 0.2 for row in range(rows)]
     )
     scores[2, :511] = 1.0  # all equal
     scores[3, :32] = 3.0  # ties fully above the cutoff
@@ -93,10 +101,8 @@ def test_dsv4_topk_candidate_b_lengths_ties_and_noncontiguous_pages():
     repeated = torch.tensor(0.75, dtype=torch.float32).view(torch.int32).item()
     scores[6, 500:540].view(torch.int32).fill_(repeated)  # repeated bit pattern
     page_table = torch.arange((max_len + 63) // 64, dtype=torch.int32)[None].repeat(rows, 1)
-    page_table = (page_table.flip(1) + torch.arange(rows, dtype=torch.int32)[:, None] * 97)
-    _assert_contract(
-        scores.cuda(), lengths.cuda(), page_table.cuda(), width=width
-    )
+    page_table = page_table.flip(1) + torch.arange(rows, dtype=torch.int32)[:, None] * 97
+    _assert_contract(scores.cuda(), lengths.cuda(), page_table.cuda(), width=width)
 
 
 @pytest.mark.skipif(not _sm80(), reason="requires an sm80 CUDA device")
@@ -106,9 +112,7 @@ def test_dsv4_topk_candidate_b_width_1024_and_nonfinite_reporting():
     scores = torch.stack([torch.sin(base * 0.013 + row) for row in range(4)])
     scores[2, :1025] = 0.5
     page_table = torch.arange(25, dtype=torch.int32)[None].repeat(4, 1) + 200
-    _assert_contract(
-        scores.cuda(), lengths.cuda(), page_table.cuda(), width=1024
-    )
+    _assert_contract(scores.cuda(), lengths.cuda(), page_table.cuda(), width=1024)
 
     bad_scores = torch.zeros(2, 514, dtype=torch.float32, device="cuda")
     bad_scores[0, 100] = float("inf")
@@ -131,7 +135,7 @@ def test_dsv4_topk_candidate_b_cuda_graph_replay(rows: int):
 
     # Build the extension and graph pool before capture, then require replay to
     # preserve exact outputs and stable graph-pool allocation.
-    eager = dsv4_kernel.topk_transform_512_full_fallback(
+    eager = dsv4_reference.topk_transform_512_full_fallback(
         scores, seq_lens, page_table, page_size=64, width=512, ratio=4
     )
     torch.cuda.synchronize()
@@ -139,7 +143,7 @@ def test_dsv4_topk_candidate_b_cuda_graph_replay(rows: int):
     torch.cuda.synchronize()
     before = torch.cuda.memory_allocated()
     with torch.cuda.graph(graph):
-        captured = dsv4_kernel.topk_transform_512_full_fallback(
+        captured = dsv4_reference.topk_transform_512_full_fallback(
             scores, seq_lens, page_table, page_size=64, width=512, ratio=4
         )
     torch.cuda.synchronize()
@@ -149,8 +153,10 @@ def test_dsv4_topk_candidate_b_cuda_graph_replay(rows: int):
         graph.replay()
         torch.cuda.synchronize()
         current = (
-            captured.raw_indices.cpu(), captured.page_indices.cpu(),
-            captured.full_indices.cpu(), captured.topk_lens.cpu(),
+            captured.raw_indices.cpu(),
+            captured.page_indices.cpu(),
+            captured.full_indices.cpu(),
+            captured.topk_lens.cpu(),
         )
         if first is None:
             first = current

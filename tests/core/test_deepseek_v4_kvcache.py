@@ -73,8 +73,6 @@ def _make_dsv4_pool(
     *,
     num_pages: int = 8,
     page_size: int = 4,
-    enable_component_loc_ownership: bool = False,
-    enable_swa_independent_lifecycle: bool = False,
     max_running_req: int | None = None,
     dsv4_dummy_token_start: int | None = None,
 ) -> DeepSeekV4KVCache:
@@ -83,9 +81,8 @@ def _make_dsv4_pool(
         num_pages=num_pages,
         page_size=page_size,
         device=torch.device("cpu"),
-        enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
-        enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
         max_running_req=max_running_req,
+        dsv4_swa_num_pages=num_pages,
         dsv4_dummy_token_start=dsv4_dummy_token_start,
     )
     assert isinstance(pool, DeepSeekV4KVCache)
@@ -96,16 +93,13 @@ def _make_cache_manager(
     pool: DeepSeekV4KVCache,
     num_pages: int,
     page_size: int,
-    *,
-    cache_type: str = "radix",
 ) -> CacheManager:
     page_table = torch.empty((4, num_pages * page_size), dtype=torch.int32)
-    if cache_type == "radix":
-        ctx = core.Context(page_size=page_size)
-        ctx.page_table = page_table
-        ctx.kv_cache = pool
-        core.set_global_ctx(ctx)
-    return CacheManager(num_pages, page_size, page_table, type=cache_type, kv_cache=pool)
+    ctx = core.Context(page_size=page_size)
+    ctx.page_table = page_table
+    ctx.kv_cache = pool
+    core.set_global_ctx(ctx)
+    return CacheManager(num_pages, page_size, page_table, kv_cache=pool)
 
 
 def _allocate_req(cm: CacheManager, uid: int, input_len: int) -> Req:
@@ -180,8 +174,8 @@ def _evict_all_prefix(cm: CacheManager, pool: DeepSeekV4KVCache, page_size: int)
         pool.on_token_indices_freed(
             valid,
             page_size,
-            free_components=not pool.component_loc_ownership_enabled,
-            free_swa=not pool.swa_independent_lifecycle_enabled,
+            free_components=False,
+            free_swa=False,
         )
         cm.free_slots = torch.cat([cm.free_slots, valid[::page_size]])
     cm.check_integrity()
@@ -218,10 +212,8 @@ def test_deepseek_v4_pool_factory_defaults_to_bf16_and_maps_layers():
         8,
     )
     assert pool.attention_compress_state(2).last_dim == 16
-    assert (
-        pool.attention_compress_state(2).kv_score_buffer.kv_score.dtype
-        is torch.float32
-    )
+    assert pool.attention_compress_state(2).kv_score_buffer.kv_score.dtype is torch.float32
+
 
 def test_deepseek_v4_memory_estimator_excludes_fixed_sequence_state():
     cfg = _tiny_dsv4_config([4, 128, 0])
@@ -344,14 +336,11 @@ def test_c4_sequence_slot_owner_no_clear_attention_indexer_dummy_and_reuse():
 
     # Stable request slots do not follow transient batch-row reorder.
     attention[: pool.C4_STATE_RING_SIZE].fill_(20)
-    attention[
-        pool.C4_STATE_RING_SIZE : 2 * pool.C4_STATE_RING_SIZE
-    ].fill_(21)
+    attention[pool.C4_STATE_RING_SIZE : 2 * pool.C4_STATE_RING_SIZE].fill_(21)
     reordered = torch.tensor([1, 0])
     assert torch.all(
         attention[
-            reordered[0] * pool.C4_STATE_RING_SIZE :
-            (reordered[0] + 1) * pool.C4_STATE_RING_SIZE
+            reordered[0] * pool.C4_STATE_RING_SIZE : (reordered[0] + 1) * pool.C4_STATE_RING_SIZE
         ]
         == 21
     )
@@ -413,10 +402,9 @@ def test_dsv4_radix_all_reusable_boundaries_are_128_aligned_and_do_not_own_c128_
         [4, 128],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=False,
         max_running_req=2,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
     pool.acquire_c128_sequence_slot(0, 20)
     c128_state = pool.attention_compress_state(1).kv_score_buffer.kv_score
     c128_state[:17].fill_(7)
@@ -465,15 +453,11 @@ def test_deepseek_v4_allocated_page_clear_uses_component_release_policy():
     assert _clear_allocated_kv_modes() == {"component"}
 
 
-@pytest.mark.parametrize("enable_component_loc_ownership", [False, True])
-def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_slots(
-    enable_component_loc_ownership: bool,
-):
+def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_slots():
     pool = _make_dsv4_pool(
         [4, 128, 0],
         num_pages=4,
         page_size=256,
-        enable_component_loc_ownership=enable_component_loc_ownership,
     )
 
     pool.swa_cache(2).fill_(3)
@@ -514,11 +498,13 @@ def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_sl
 
 def test_deepseek_v4_pool_can_write_and_read_all_cache_components():
     pool = _make_dsv4_pool([0, 4, 128], num_pages=8, page_size=4)
+    pool.on_pages_allocated(torch.tensor([0], dtype=torch.int32), page_size=4)
 
     loc = torch.tensor([0, 3], dtype=torch.int32)
     swa_kv = torch.arange(16, dtype=torch.float32).view(2, 8).to(torch.bfloat16)
     pool.store_swa(0, swa_kv, loc)
-    assert torch.equal(pool.swa_cache(0)[loc.long()], swa_kv)
+    swa_loc = pool.translate_full_locs_to_swa_locs(loc)
+    assert torch.equal(pool.swa_cache(0)[swa_loc.long()], swa_kv)
 
     c4_loc = torch.tensor([0, 1], dtype=torch.int32)
     c4_kv = torch.full((2, 8), 2.0, dtype=torch.bfloat16)
@@ -536,7 +522,8 @@ def test_deepseek_v4_pool_can_write_and_read_all_cache_components():
 
 
 def test_deepseek_v4_compressed_location_mapping_uses_full_token_namespace():
-    pool = _make_dsv4_pool([4, 128], num_pages=64, page_size=4)
+    pool = _make_dsv4_pool([4, 128], num_pages=3, page_size=128)
+    pool.on_pages_allocated(torch.tensor([0, 128], dtype=torch.int32), page_size=128)
     full_locs = torch.arange(0, 256, dtype=torch.int32)
     positions = torch.arange(0, 256, dtype=torch.int32)
 
@@ -554,7 +541,7 @@ def test_deepseek_v4_radix_prefix_cache_tracks_full_partial_miss_and_components(
     page_size = 128
     num_pages = 8
     pool = _make_dsv4_pool([0, 4, 128], num_pages=num_pages, page_size=page_size)
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     base = torch.arange(450, dtype=torch.int32)
     _cache_finished_prompt(cm, 0, base)
@@ -569,9 +556,7 @@ def test_deepseek_v4_radix_prefix_cache_tracks_full_partial_miss_and_components(
     assert repeat_base.cache_handle.cached_len == 384
 
     miss_ids = torch.arange(260, dtype=torch.int32) + 20_000
-    miss_handle = cm.match_req(
-        PendingReq(3, miss_ids, SamplingParams(max_tokens=1))
-    ).cuda_handle
+    miss_handle = cm.match_req(PendingReq(3, miss_ids, SamplingParams(max_tokens=1))).cuda_handle
     assert miss_handle.cached_len == 0
 
     snapshot = cm.prefix_metrics_snapshot()
@@ -586,22 +571,20 @@ def test_deepseek_v4_radix_prefix_cache_tracks_full_partial_miss_and_components(
     assert snapshot["dsv4_retention"]["c128_slots"] == 4
     assert snapshot["dsv4_retention"]["c4_indexer_slots"] == 128
     assert snapshot["dsv4_retention"]["page_size_c128_aligned"]
-    assert pool.allocation_counts.full_slots == 512
+    assert pool.allocation_counts.full_slots == 256
 
 
 def test_deepseek_v4_radix_prefix_swa_window_128_boundary_is_page_safe():
     page_size = 128
     num_pages = 4
     pool = _make_dsv4_pool([0, 4, 128], num_pages=num_pages, page_size=page_size)
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     prompt_at_boundary = torch.arange(129, dtype=torch.int32)
     _cache_finished_prompt(cm, 0, prompt_at_boundary)
 
     below = torch.arange(127, dtype=torch.int32)
-    below_handle = cm.match_req(
-        PendingReq(1, below, SamplingParams(max_tokens=1))
-    ).cuda_handle
+    below_handle = cm.match_req(PendingReq(1, below, SamplingParams(max_tokens=1))).cuda_handle
     assert below_handle.cached_len == 0
 
     at_handle = cm.match_req(
@@ -612,9 +595,7 @@ def test_deepseek_v4_radix_prefix_swa_window_128_boundary_is_page_safe():
     cm.unlock(at_handle)
 
     above = torch.arange(130, dtype=torch.int32)
-    above_handle = cm.match_req(
-        PendingReq(3, above, SamplingParams(max_tokens=1))
-    ).cuda_handle
+    above_handle = cm.match_req(PendingReq(3, above, SamplingParams(max_tokens=1))).cuda_handle
     assert above_handle.cached_len == 128
     cm.lock(above_handle)
     cm.unlock(above_handle)
@@ -623,9 +604,7 @@ def test_deepseek_v4_radix_prefix_swa_window_128_boundary_is_page_safe():
     assert snapshot["dsv4_retention"]["c4_slots"] == 32
     assert snapshot["dsv4_retention"]["c128_slots"] == 1
     assert snapshot["dsv4_retention"]["c4_checkpoint_slots"] == pool.C4_CHECKPOINT_ROWS
-    assert snapshot["dsv4_retention"]["c4_sequence_state_bytes"] == (
-        pool.c4_sequence_state_bytes
-    )
+    assert snapshot["dsv4_retention"]["c4_sequence_state_bytes"] == (pool.c4_sequence_state_bytes)
     assert snapshot["dsv4_retention"]["c128_sequence_state_bytes"] == (
         pool.c128_sequence_state_bytes
     )
@@ -635,14 +614,14 @@ def test_deepseek_v4_radix_prefix_repeated_hit_evict_cycle_has_no_leak():
     page_size = 128
     num_pages = 4
     pool = _make_dsv4_pool([4, 128, 0], num_pages=num_pages, page_size=page_size)
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     prompt = torch.arange(260, dtype=torch.int32)
     for cycle in range(3):
         _cache_finished_prompt(cm, cycle * 2, prompt + cycle * 10_000)
         hit_req = _cache_finished_prompt(cm, cycle * 2 + 1, prompt + cycle * 10_000)
         assert hit_req.cache_handle.cached_len == 256
-        assert pool.allocation_counts.full_slots == 256
+        assert pool.allocation_counts.full_slots == page_size
         _evict_all_prefix(cm, pool, page_size)
         assert cm.prefix_cache.size_info.total_size == 0
         pool.assert_no_leak()
@@ -659,9 +638,8 @@ def test_dsv4_component_loc_ownership_releases_full_head_without_stale_component
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     prompt = torch.arange(260, dtype=torch.int32)
     _cache_finished_prompt(cm, 0, prompt)
@@ -699,8 +677,7 @@ def test_dsv4_component_loc_ownership_releases_full_head_without_stale_component
     assert reused_components is not None
     assert reused_components.c4_pages[0].item() not in retained_c4_pages.tolist()
     assert (
-        reused_components.c4_checkpoint_pages[0].item()
-        not in retained_c4_checkpoint_pages.tolist()
+        reused_components.c4_checkpoint_pages[0].item() not in retained_c4_checkpoint_pages.tolist()
     )
     _finish_req(cm, reuse)
     cm.check_integrity()
@@ -716,20 +693,16 @@ def test_dsv4_component_loc_ownership_retains_checkpoint_but_keeps_swa_safe_boun
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     prompt = torch.arange(260, dtype=torch.int32)
     _cache_finished_prompt(cm, 0, prompt)
 
-    # A 256-token request matches only the first 255 tokens, which page-aligns
-    # to the first page. That page has an independent checkpoint, but no live SWA data,
-    # so the fixed point must still reject the hit.
-    guarded = cm.match_req(
-        PendingReq(1, prompt[:256], SamplingParams(max_tokens=1))
-    ).cuda_handle
-    assert guarded.cached_len == 0
+    # A 256-token request can reuse its first page because component checkpoints
+    # and the independent SWA handle remain live under the structural contract.
+    guarded = cm.match_req(PendingReq(1, prompt[:256], SamplingParams(max_tokens=1))).cuda_handle
+    assert guarded.cached_len == page_size
 
     # A 257-token request matches two full pages. The final page is the retained
     # live SWA tail, while checkpoint pages are owned independently along the path.
@@ -753,11 +726,9 @@ def test_dsv4_swa_independent_lifecycle_tombstones_swa_without_component_invalid
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=3,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     prompt = torch.arange(513, dtype=torch.int32)
     _cache_finished_prompt(cm, 0, prompt)
@@ -798,11 +769,9 @@ def test_dsv4_swa_capacity_pressure_can_release_prefix_swa_only():
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=3,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     prompts = [torch.arange(257, dtype=torch.int32) + i * 1000 for i in range(3)]
     for uid, prompt in enumerate(prompts):
@@ -838,8 +807,6 @@ def test_dsv4_active_swa_release_preserves_component_mappings():
         [4, 128, 0],
         num_pages=8,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=3,
     )
     page_starts = torch.tensor([0, page_size, page_size * 2], dtype=torch.int32)
@@ -890,11 +857,9 @@ def test_dsv4_active_swa_release_respects_cache_protected_len():
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=8,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     allocated = cm._page_to_token(cm._allocate(8))
     cm.page_table[0, : allocated.numel()].copy_(allocated)
@@ -953,11 +918,9 @@ def test_dsv4_active_swa_release_uses_monotonic_frontier():
         [4, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=6,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
     req = _allocate_req_with_ids(
         cm,
         0,
@@ -996,11 +959,9 @@ def test_dsv4_finished_cache_req_commits_swa_tombstone_from_frontier():
         [4, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=6,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
     req = _allocate_req_with_ids(
         cm,
         0,
@@ -1032,11 +993,9 @@ def test_dsv4_unfinished_cache_req_commits_swa_tombstone_from_frontier():
         [4, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=6,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
     req = _allocate_req_with_ids(
         cm,
         0,
@@ -1066,11 +1025,9 @@ def test_dsv4_swa_pressure_eviction_versions_metadata():
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=3,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
     prompt = torch.arange(3 * page_size + 1, dtype=torch.int32)
     _cache_finished_prompt(cm, 0, prompt)
 
@@ -1089,8 +1046,6 @@ def test_dsv4_swa_double_free_guard_still_rejects_duplicate_owner():
         [4, 128, 0],
         num_pages=8,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=2,
     )
     page_starts = torch.tensor([0], dtype=torch.int32)
@@ -1121,14 +1076,14 @@ def test_dsv4_swa_independent_dummy_full_sentinel_maps_to_swa_dummy_only():
         [0, 4, 128],
         num_pages=8,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=2,
     )
     dummy_full_loc = torch.tensor([pool.num_tokens], dtype=torch.int32)
 
     swa_locs = pool.translate_full_locs_to_swa_locs(dummy_full_loc)
-    assert swa_locs.tolist() == [(pool.runtime_swa_counters()["swa_capacity_pages"] - 1) * page_size]
+    assert swa_locs.tolist() == [
+        (pool.runtime_swa_counters()["swa_capacity_pages"] - 1) * page_size
+    ]
 
     swa_pages = pool.swa_pages_from_full_page_starts(dummy_full_loc, page_size)
     assert swa_pages is not None
@@ -1150,8 +1105,6 @@ def test_dsv4_swa_independent_translate_full_locs_is_vectorized_for_mixed_rows()
         [0, 4],
         num_pages=8,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=2,
     )
     allocated_page_starts = torch.tensor([4, 12], dtype=torch.int32)
@@ -1182,8 +1135,6 @@ def test_dsv4_swa_independent_engine_dummy_page_maps_to_swa_dummy_only():
         [0, 4, 128],
         num_pages=planned_pages + 1,
         page_size=page_size,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
         max_running_req=2,
         dsv4_dummy_token_start=dummy_full_loc,
     )
@@ -1217,9 +1168,9 @@ def test_dsv4_swa_independent_engine_dummy_page_maps_to_swa_dummy_only():
     ("prompt_len", "expected_hit"),
     [
         (257, 256),
-        (512, 0),
+        (512, 256),
         (513, 512),
-        (768, 0),
+        (768, 512),
         (769, 768),
     ],
 )
@@ -1233,9 +1184,8 @@ def test_dsv4_component_lifecycle_serving_boundaries_do_not_reuse_stale_mappings
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     prompt = torch.arange(prompt_len, dtype=torch.int32)
     _cache_serving_prompt(cm, 0, prompt)
@@ -1261,9 +1211,8 @@ def test_dsv4_component_lifecycle_does_not_build_handles_for_tombstoned_heads(
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
     calls: list[torch.Tensor] = []
     original_make_handles = pool.make_component_page_handles
 
@@ -1308,15 +1257,12 @@ def test_dsv4_component_lifecycle_partial_and_mixed_hit_miss_batches_are_safe():
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     warm_prefix = torch.arange(257, dtype=torch.int32)
     _cache_serving_prompt(cm, 0, warm_prefix)
-    partial = torch.cat(
-        [warm_prefix, torch.arange(512, dtype=torch.int32) + 10_000]
-    )
+    partial = torch.cat([warm_prefix, torch.arange(512, dtype=torch.int32) + 10_000])
     partial_req = _allocate_req_with_ids(cm, 1, partial, output_len=2)
     assert partial_req.cache_handle.cached_len == page_size
     _complete_one_generated(partial_req, 41_000)
@@ -1352,9 +1298,8 @@ def test_dsv4_component_lifecycle_multi_prefix_sustained_reuse_and_evict():
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     prefixes = [torch.arange(512, dtype=torch.int32) + i * 10_000 for i in range(4)]
     uid = 0
@@ -1380,9 +1325,8 @@ def test_dsv4_component_lifecycle_repeated_hit_evict_has_no_double_free_or_leak(
         [4, 128, 0],
         num_pages=num_pages,
         page_size=page_size,
-        enable_component_loc_ownership=True,
     )
-    cm = _make_cache_manager(pool, num_pages, page_size, cache_type="radix")
+    cm = _make_cache_manager(pool, num_pages, page_size)
 
     for cycle in range(3):
         prompt = torch.arange(513, dtype=torch.int32) + cycle * 10_000

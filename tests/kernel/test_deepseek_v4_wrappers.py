@@ -13,6 +13,8 @@ from minisgl.kvcache import create_kvcache_pool
 from minisgl.kvcache.deepseek_v4_pool import DeepSeekV4KVCache
 from minisgl.models.config import ModelConfig, RotaryConfig
 
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference
+
 
 def _has_sm80_cuda() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
@@ -20,6 +22,11 @@ def _has_sm80_cuda() -> bool:
 
 def _clear_dsv4_sm80_env(monkeypatch: pytest.MonkeyPatch) -> None:
     del monkeypatch
+
+
+def test_release_kernel_module_does_not_export_debug_references():
+    assert set(dsv4_reference.__all__).isdisjoint(vars(dsv4_kernel))
+    assert "debug.dsv4" not in inspect.getsource(dsv4_kernel)
 
 
 def _assert_full_topk_transform(
@@ -99,7 +106,7 @@ def test_indexer_fp8_quantized_logits_and_topk_match_reference():
     q = torch.rand(rows, heads, dim, dtype=torch.float32).to(torch.bfloat16)
     weights = torch.rand(rows, heads, dtype=torch.float32)
     positions = torch.arange(rows, dtype=torch.int64)
-    query = dsv4_kernel.indexer_q_rope_fp8_fallback(
+    query = dsv4_reference.indexer_q_rope_fp8_fallback(
         q,
         weights,
         positions,
@@ -112,8 +119,8 @@ def test_indexer_fp8_quantized_logits_and_topk_match_reference():
     assert query.weights.dtype is torch.float32
 
     cache = torch.rand(12, dim, dtype=torch.float32).to(torch.bfloat16)
-    cache_values, cache_scales = dsv4_kernel.quantize_indexer_fp8_cache_ref(cache)
-    cache_dequant = dsv4_kernel.dequantize_indexer_fp8_cache_ref(
+    cache_values, cache_scales = dsv4_reference.quantize_indexer_fp8_cache_ref(cache)
+    cache_dequant = dsv4_reference.dequantize_indexer_fp8_cache_ref(
         cache_values,
         cache_scales,
         out_dtype=torch.float32,
@@ -155,7 +162,7 @@ def test_indexer_fp8_paged_logits_and_topk_match_reference():
     q = torch.rand(rows, heads, dim, dtype=torch.float32).to(torch.bfloat16)
     weights = torch.rand(rows, heads, dtype=torch.float32)
     positions = torch.arange(rows, dtype=torch.int64)
-    query = dsv4_kernel.indexer_q_rope_fp8_fallback(
+    query = dsv4_reference.indexer_q_rope_fp8_fallback(
         q,
         weights,
         positions,
@@ -165,11 +172,11 @@ def test_indexer_fp8_paged_logits_and_topk_match_reference():
         head_scale=heads**-0.5,
     )
     cache = torch.rand(12, dim, dtype=torch.float32).to(torch.bfloat16)
-    packed_cache = dsv4_kernel.quantize_indexer_fp8_paged_cache_ref(
+    packed_cache = dsv4_reference.quantize_indexer_fp8_paged_cache_ref(
         cache,
         page_size=page_size,
     )
-    cache_dequant = dsv4_kernel.dequantize_indexer_fp8_paged_cache_ref(
+    cache_dequant = dsv4_reference.dequantize_indexer_fp8_paged_cache_ref(
         packed_cache,
         page_size=page_size,
         dim=dim,
@@ -191,7 +198,7 @@ def test_indexer_fp8_paged_logits_and_topk_match_reference():
         page_table,
         page_size=page_size,
     )
-    actual = dsv4_kernel.indexer_fp8_paged_logits_fallback(
+    actual = dsv4_reference.indexer_fp8_paged_logits_fallback(
         query.q_values,
         packed_cache,
         seq_lens,
@@ -201,7 +208,7 @@ def test_indexer_fp8_paged_logits_and_topk_match_reference():
     )
     assert torch.allclose(actual, expected, atol=1e-5, rtol=1e-5)
 
-    selected = dsv4_kernel.indexer_select_fp8_paged_fallback(
+    selected = dsv4_reference.indexer_select_fp8_paged_fallback(
         query.q_values,
         query.weights,
         packed_cache,
@@ -239,9 +246,9 @@ def test_indexer_fp8_paged_select_bounds_full_logits_workspace(monkeypatch):
         score_width = int(lens.max().item())
         return torch.arange(score_width, dtype=torch.float32).expand(q.shape[0], -1).clone()
 
-    monkeypatch.setattr(dsv4_kernel, "indexer_fp8_paged_logits_fallback", fake_logits)
-    monkeypatch.setattr(dsv4_kernel, "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT", 8)
-    oracle = dsv4_kernel.indexer_select_fp8_paged_fallback(
+    monkeypatch.setattr(dsv4_reference, "indexer_fp8_paged_logits_fallback", fake_logits)
+    monkeypatch.setattr(dsv4_reference, "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT", 8)
+    oracle = dsv4_reference.indexer_select_fp8_paged_fallback(
         q_values,
         weights,
         packed_cache,
@@ -252,8 +259,8 @@ def test_indexer_fp8_paged_select_bounds_full_logits_workspace(monkeypatch):
         ratio=4,
     )
 
-    monkeypatch.setattr(dsv4_kernel, "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT", 1)
-    bounded = dsv4_kernel.indexer_select_fp8_paged_fallback(
+    monkeypatch.setattr(dsv4_reference, "DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT", 1)
+    bounded = dsv4_reference.indexer_select_fp8_paged_fallback(
         q_values,
         weights,
         packed_cache,
@@ -278,12 +285,8 @@ def test_remap_indexer_topk_locs_triton(monkeypatch):
         device="cuda",
         dtype=torch.int32,
     )
-    component_table = torch.tensor(
-        [[3, 7, 9], [4, 8, 10]], device="cuda", dtype=torch.int32
-    )
-    full_table = torch.tensor(
-        [[11, 12, 13], [14, 15, 16]], device="cuda", dtype=torch.int32
-    )
+    component_table = torch.tensor([[3, 7, 9], [4, 8, 10]], device="cuda", dtype=torch.int32)
+    full_table = torch.tensor([[11, 12, 13], [14, 15, 16]], device="cuda", dtype=torch.int32)
     out = dsv4_kernel.remap_indexer_topk_locs(
         raw,
         component_table,
@@ -414,399 +417,28 @@ def _tiny_dsv4_cache_config(compress_ratios: list[int]) -> ModelConfig:
     )
 
 
-
-
-
-
-
-
-
-
-
-
 def test_dsv4_sm80_marlin_is_the_only_expert_backend():
     assert dsv4_kernel.DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 == "marlin_wna16"
 
 
-def test_dsv4_capability_detection_keeps_sm80_gates_explicit():
+def test_dsv4_capability_detection_keeps_ampere_gate_explicit():
     caps = dsv4_kernel.detect_dsv4_kernel_capabilities()
 
     if caps.cuda_capability is not None:
-        assert caps.is_sm80 is (caps.cuda_capability == (8, 0))
+        assert caps.is_ampere is (caps.cuda_capability in {(8, 0), (8, 6)})
     assert isinstance(caps.triton_available, bool)
     assert caps.triton_error is None or isinstance(caps.triton_error, str)
     assert set(vars(caps)) == {
         "cuda_available",
         "cuda_capability",
-        "is_sm80",
+        "is_ampere",
         "triton_available",
         "triton_error",
     }
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_copy_decode_metadata_for_replay_matches_legacy_copy(monkeypatch):
-    device = torch.device("cuda")
-    rows = 3
-    one_d_names = (
-        "raw_out_loc",
-        "seq_lens",
-        "req_seq_lens",
-        "extend_lens",
-        "positions",
-        "req_table_indices",
-        "swa_topk_lengths",
-        "c4_topk_lengths_raw",
-        "c4_topk_lengths_clamp1",
-        "c4_sparse_topk_lengths",
-        "c128_topk_lengths_clamp1",
-    )
-    two_d_specs = {
-        "page_table": (2, 5, 0),
-        "swa_page_indices": (4, 6, -1),
-        "c4_sparse_raw_indices": (3, 8, -1),
-        "c4_sparse_page_indices": (5, 8, -1),
-        "c4_sparse_full_indices": (4, 8, -1),
-        "c128_raw_indices": (2, 4, -1),
-        "c128_page_indices": (3, 4, -1),
-        "c128_full_indices": (1, 4, -1),
-    }
-
-    def make_args(graph_inputs_bound: bool) -> tuple[dict[str, torch.Tensor | int | bool], dict]:
-        args: dict[str, torch.Tensor | int | bool] = {}
-        expected: dict[str, torch.Tensor] = {}
-        counter = 1
-        for name in one_d_names:
-            src = torch.arange(counter, counter + rows, device=device, dtype=torch.int32)
-            dst = torch.full((rows,), -9999, device=device, dtype=torch.int32)
-            args[f"src_{name}"] = src
-            args[f"dst_{name}"] = dst
-            if graph_inputs_bound and name in {"raw_out_loc", "positions"}:
-                expected[name] = dst.clone()
-            else:
-                expected[name] = src.clone()
-            counter += 100
-        src_cu = torch.arange(7000, 7000 + rows + 1, device=device, dtype=torch.int32)
-        dst_cu = torch.full((rows + 1,), -9999, device=device, dtype=torch.int32)
-        args["src_cu_seqlens_q"] = src_cu
-        args["dst_cu_seqlens_q"] = dst_cu
-        expected["cu_seqlens_q"] = src_cu.clone()
-
-        for name, (src_width, dst_width, fill) in two_d_specs.items():
-            src = (
-                torch.arange(
-                    counter,
-                    counter + rows * src_width,
-                    device=device,
-                    dtype=torch.int32,
-                )
-                .reshape(rows, src_width)
-                .contiguous()
-            )
-            dst = torch.full((rows, dst_width), -9999, device=device, dtype=torch.int32)
-            args[f"src_{name}"] = src
-            args[f"dst_{name}"] = dst
-            exp = torch.full_like(dst, fill)
-            exp[:, : min(src_width, dst_width)] = src[:, : min(src_width, dst_width)]
-            expected[name] = exp
-            counter += 1000
-        args["rows"] = rows
-        args["graph_inputs_bound"] = graph_inputs_bound
-        return args, expected
-
-    for graph_inputs_bound in (False, True):
-        args, expected = make_args(graph_inputs_bound)
-        assert dsv4_kernel.copy_decode_metadata_for_replay(**args)
-        torch.cuda.synchronize()
-        for name in one_d_names:
-            assert torch.equal(args[f"dst_{name}"], expected[name])
-        assert torch.equal(args["dst_cu_seqlens_q"], expected["cu_seqlens_q"])
-        for name in two_d_specs:
-            assert torch.equal(args[f"dst_{name}"], expected[name])
-
-
-@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_copy_decode_metadata_for_replay_can_skip_c4_sparse(monkeypatch):
-    device = torch.device("cuda")
-    rows = 2
-
-    def vec(offset: int) -> torch.Tensor:
-        return torch.arange(offset, offset + rows, device=device, dtype=torch.int32)
-
-    args = {
-        "dst_raw_out_loc": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_raw_out_loc": vec(10),
-        "dst_seq_lens": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_seq_lens": vec(20),
-        "dst_req_seq_lens": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_req_seq_lens": vec(30),
-        "dst_extend_lens": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_extend_lens": vec(40),
-        "dst_positions": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_positions": vec(50),
-        "dst_req_table_indices": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_req_table_indices": vec(60),
-        "dst_swa_topk_lengths": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_swa_topk_lengths": vec(70),
-        "dst_c4_topk_lengths_raw": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_c4_topk_lengths_raw": vec(80),
-        "dst_c4_topk_lengths_clamp1": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_c4_topk_lengths_clamp1": vec(90),
-        "dst_c4_sparse_topk_lengths": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_c4_sparse_topk_lengths": vec(100),
-        "dst_c128_topk_lengths_clamp1": torch.full((rows,), -999, device=device, dtype=torch.int32),
-        "src_c128_topk_lengths_clamp1": vec(110),
-        "dst_cu_seqlens_q": torch.full((rows + 1,), -999, device=device, dtype=torch.int32),
-        "src_cu_seqlens_q": torch.arange(120, 120 + rows + 1, device=device, dtype=torch.int32),
-        "dst_page_table": torch.full((rows, 2), -999, device=device, dtype=torch.int32),
-        "src_page_table": torch.arange(
-            200, 200 + rows * 2, device=device, dtype=torch.int32
-        ).reshape(rows, 2),
-        "dst_swa_page_indices": torch.full((rows, 3), -999, device=device, dtype=torch.int32),
-        "src_swa_page_indices": torch.arange(
-            300, 300 + rows * 3, device=device, dtype=torch.int32
-        ).reshape(rows, 3),
-        "dst_c4_sparse_raw_indices": torch.full((rows, 4), -777, device=device, dtype=torch.int32),
-        "src_c4_sparse_raw_indices": torch.arange(
-            400, 400 + rows, device=device, dtype=torch.int32
-        ).reshape(rows, 1),
-        "dst_c4_sparse_page_indices": torch.full((rows, 4), -778, device=device, dtype=torch.int32),
-        "src_c4_sparse_page_indices": torch.arange(
-            500, 500 + rows, device=device, dtype=torch.int32
-        ).reshape(rows, 1),
-        "dst_c4_sparse_full_indices": torch.full((rows, 4), -779, device=device, dtype=torch.int32),
-        "src_c4_sparse_full_indices": torch.arange(
-            600, 600 + rows, device=device, dtype=torch.int32
-        ).reshape(rows, 1),
-        "dst_c128_raw_indices": torch.full((rows, 2), -999, device=device, dtype=torch.int32),
-        "src_c128_raw_indices": torch.arange(
-            700, 700 + rows * 2, device=device, dtype=torch.int32
-        ).reshape(rows, 2),
-        "dst_c128_page_indices": torch.full((rows, 2), -999, device=device, dtype=torch.int32),
-        "src_c128_page_indices": torch.arange(
-            800, 800 + rows * 2, device=device, dtype=torch.int32
-        ).reshape(rows, 2),
-        "dst_c128_full_indices": torch.full((rows, 2), -999, device=device, dtype=torch.int32),
-        "src_c128_full_indices": torch.arange(
-            900, 900 + rows * 2, device=device, dtype=torch.int32
-        ).reshape(rows, 2),
-        "rows": rows,
-        "graph_inputs_bound": False,
-        "skip_c4_sparse_indices": True,
-    }
-    expected_c4 = {
-        "dst_c4_sparse_raw_indices": args["dst_c4_sparse_raw_indices"].clone(),
-        "dst_c4_sparse_page_indices": args["dst_c4_sparse_page_indices"].clone(),
-        "dst_c4_sparse_full_indices": args["dst_c4_sparse_full_indices"].clone(),
-    }
-
-    assert dsv4_kernel.copy_decode_metadata_for_replay(**args)
-    torch.cuda.synchronize()
-
-    assert torch.equal(args["dst_seq_lens"], args["src_seq_lens"])
-    assert torch.equal(args["dst_page_table"], args["src_page_table"])
-    assert torch.equal(args["dst_c128_raw_indices"], args["src_c128_raw_indices"])
-    for name, expected in expected_c4.items():
-        assert torch.equal(args[name], expected)
-
-
-@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-
-
-@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_direct_decode_index_metadata_for_replay_matches_oracle(monkeypatch):
-    device = torch.device("cuda")
-    rows = 3
-    page_size = 128
-    window_size = 8
-    index_topk = 5
-    max_seqlen_k = 384
-
-    ctx_page_table = torch.stack(
-        [
-            torch.arange(0, max_seqlen_k, dtype=torch.int32),
-            torch.arange(1024, 1024 + max_seqlen_k, dtype=torch.int32),
-            torch.arange(2048, 2048 + max_seqlen_k, dtype=torch.int32),
-        ]
-    ).to(device)
-    ctx_page_table[0, :page_size] = -1
-    table_indices = torch.arange(rows, dtype=torch.int32, device=device)
-    positions = torch.tensor([255, 256, 383], dtype=torch.int32, device=device)
-    c4_page_table = torch.tensor(
-        [[10, 11, 12], [13, -1, 15], [16, 17, 18]],
-        dtype=torch.int32,
-        device=device,
-    )
-    c128_page_table = torch.tensor(
-        [[20, 21, 22], [-1, 31, 32], [40, 41, 42]],
-        dtype=torch.int32,
-        device=device,
-    )
-    dst_swa = torch.full((rows, 8), -91, dtype=torch.int32, device=device)
-    dst_c4_raw = torch.full((rows, 8), -92, dtype=torch.int32, device=device)
-    dst_c4_page = torch.full_like(dst_c4_raw, -93)
-    dst_c4_full = torch.full_like(dst_c4_raw, -94)
-    dst_c128_raw = torch.full((rows, 8), -95, dtype=torch.int32, device=device)
-    dst_c128_page = torch.full_like(dst_c128_raw, -96)
-    dst_c128_full = torch.full_like(dst_c128_raw, -97)
-
-    assert dsv4_kernel.direct_decode_index_metadata_for_replay(
-        ctx_page_table=ctx_page_table,
-        table_indices=table_indices,
-        positions=positions,
-        c4_page_table=c4_page_table,
-        c128_page_table=c128_page_table,
-        dst_swa_page_indices=dst_swa,
-        dst_c4_sparse_raw_indices=dst_c4_raw,
-        dst_c4_sparse_page_indices=dst_c4_page,
-        dst_c4_sparse_full_indices=dst_c4_full,
-        dst_c128_raw_indices=dst_c128_raw,
-        dst_c128_page_indices=dst_c128_page,
-        dst_c128_full_indices=dst_c128_full,
-        rows=rows,
-        page_size=page_size,
-        window_size=window_size,
-        index_topk=index_topk,
-        direct_swa=True,
-        direct_c4=True,
-        direct_c128=True,
-    )
-    torch.cuda.synchronize()
-
-    cpu_ctx = ctx_page_table.cpu()
-    cpu_c4 = c4_page_table.cpu()
-    cpu_c128 = c128_page_table.cpu()
-    c4_page_size = page_size // 4
-    c128_page_size = max(page_size // 128, 1)
-    for row, pos in enumerate(positions.cpu().tolist()):
-        expected_swa = []
-        for offset in range(dst_swa.shape[1]):
-            logical = pos - offset
-            expected_swa.append(int(cpu_ctx[row, logical].item()) if logical >= 0 else -1)
-        assert dst_swa[row].cpu().tolist() == expected_swa
-
-        c4_len = (pos + 1) // 4
-        c4_raw = list(range(max(c4_len - index_topk, 0), c4_len))
-        expected_c4_raw = c4_raw + [-1] * (dst_c4_raw.shape[1] - len(c4_raw))
-        expected_c4_page = []
-        expected_c4_full = []
-        for raw in c4_raw:
-            logical_page = raw // c4_page_size
-            offset = raw % c4_page_size
-            component_page = int(cpu_c4[row, logical_page].item())
-            expected_c4_page.append(
-                component_page * c4_page_size + offset if component_page >= 0 else -1
-            )
-            full = int(cpu_ctx[row, raw * 4 + 3].item())
-            expected_c4_full.append(full if full >= 0 else -1)
-        expected_c4_page += [-1] * (dst_c4_page.shape[1] - len(expected_c4_page))
-        expected_c4_full += [-1] * (dst_c4_full.shape[1] - len(expected_c4_full))
-        assert dst_c4_raw[row].cpu().tolist() == expected_c4_raw
-        assert dst_c4_page[row].cpu().tolist() == expected_c4_page
-        assert dst_c4_full[row].cpu().tolist() == expected_c4_full
-
-        c128_len = (pos + 1) // 128
-        expected_c128_raw = list(range(c128_len)) + [-1] * (dst_c128_raw.shape[1] - c128_len)
-        expected_c128_page = []
-        expected_c128_full = []
-        for raw in range(c128_len):
-            logical_page = raw // c128_page_size
-            offset = raw % c128_page_size
-            component_page = int(cpu_c128[row, logical_page].item())
-            expected_c128_page.append(
-                component_page * c128_page_size + offset if component_page >= 0 else -1
-            )
-            full = int(cpu_ctx[row, raw * 128 + 127].item())
-            expected_c128_full.append(full if full >= 0 else -1)
-        expected_c128_page += [-1] * (dst_c128_page.shape[1] - len(expected_c128_page))
-        expected_c128_full += [-1] * (dst_c128_full.shape[1] - len(expected_c128_full))
-        assert dst_c128_raw[row].cpu().tolist() == expected_c128_raw
-        assert dst_c128_page[row].cpu().tolist() == expected_c128_page
-        assert dst_c128_full[row].cpu().tolist() == expected_c128_full
-
-
-@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_direct_decode_index_metadata_for_replay_swa_independent_matches_oracle(monkeypatch):
-    device = torch.device("cuda")
-    rows = 3
-    page_size = 128
-    window_size = 8
-    index_topk = 5
-    num_pages = 64
-    dummy_token_start = num_pages * page_size
-    swa_dummy_page = num_pages - 1
-
-    ctx_page_table = torch.stack(
-        [
-            torch.arange(0, 512, dtype=torch.int32),
-            torch.arange(1024, 1536, dtype=torch.int32),
-            torch.arange(2048, 2560, dtype=torch.int32),
-        ]
-    ).to(device)
-    ctx_page_table[1, 125] = -1
-    ctx_page_table[2, 376] = dummy_token_start
-    table_indices = torch.arange(rows, dtype=torch.int32, device=device)
-    positions = torch.tensor([127, 130, 383], dtype=torch.int32, device=device)
-    full_to_swa_page = torch.remainder(
-        torch.arange(num_pages, dtype=torch.int32, device=device) * 7 + 5,
-        num_pages - 1,
-    )
-    full_to_swa_page[::9] = -1
-    dst_swa = torch.full((rows, window_size), -91, dtype=torch.int32, device=device)
-    dummy2d = torch.empty((rows, 1), dtype=torch.int32, device=device)
-
-    assert dsv4_kernel.direct_decode_index_metadata_for_replay(
-        ctx_page_table=ctx_page_table,
-        table_indices=table_indices,
-        positions=positions,
-        c4_page_table=None,
-        c128_page_table=None,
-        dst_swa_page_indices=dst_swa,
-        dst_c4_sparse_raw_indices=dummy2d,
-        dst_c4_sparse_page_indices=dummy2d,
-        dst_c4_sparse_full_indices=dummy2d,
-        dst_c128_raw_indices=dummy2d,
-        dst_c128_page_indices=dummy2d,
-        dst_c128_full_indices=dummy2d,
-        rows=rows,
-        page_size=page_size,
-        window_size=window_size,
-        index_topk=index_topk,
-        direct_swa=True,
-        direct_c4=False,
-        direct_c128=False,
-        swa_full_to_swa_page=full_to_swa_page,
-        swa_dummy_token_start=dummy_token_start,
-        swa_dummy_page=swa_dummy_page,
-        swa_independent=True,
-    )
-    torch.cuda.synchronize()
-
-    cpu_ctx = ctx_page_table.cpu()
-    cpu_map = full_to_swa_page.cpu()
-    for row, pos in enumerate(positions.cpu().tolist()):
-        expected = []
-        for offset in range(window_size):
-            logical = pos - offset
-            if logical < 0:
-                expected.append(-1)
-                continue
-            full_loc = int(cpu_ctx[row, logical].item())
-            if full_loc == dummy_token_start:
-                expected.append(swa_dummy_page * page_size)
-                continue
-            full_page = full_loc // page_size
-            page_offset = full_loc % page_size
-            if full_loc < 0 or full_page < 0 or full_page >= num_pages:
-                expected.append(-1)
-                continue
-            swa_page = int(cpu_map[full_page].item())
-            expected.append(swa_page * page_size + page_offset if swa_page >= 0 else -1)
-        assert dst_swa[row].cpu().tolist() == expected
-
-
-@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(monkeypatch):
+def test_prep_decode_metadata_in_graph_matches_structural_release_contract(monkeypatch):
     device = torch.device("cuda")
     rows = 3
     page_size = 128
@@ -828,7 +460,9 @@ def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(mon
     ctx_page_table[2, 376] = dummy_token_start
     table_indices = torch.arange(rows, dtype=torch.int32, device=device)
     positions = torch.tensor([127, 130, 383], dtype=torch.int32, device=device)
-    raw_out_loc = torch.tensor([127, dummy_token_start, 2048 + 383], dtype=torch.int32, device=device)
+    raw_out_loc = torch.tensor(
+        [127, dummy_token_start, 2048 + 383], dtype=torch.int32, device=device
+    )
     # The scheduler watermark intentionally trails the decode token.  Online
     # C4 and C128 producers still make current-boundary rows readable inside
     # the captured graph before attention consumes this metadata.
@@ -868,39 +502,6 @@ def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(mon
     dst_c4_indexer_out = torch.full((rows,), -33, dtype=torch.int32, device=device)
     dst_swa_out = torch.full((rows,), -34, dtype=torch.int32, device=device)
 
-    oracle_swa = torch.full_like(dst_swa, -41)
-    oracle_c4_raw = torch.full_like(dst_c4_raw, -42)
-    oracle_c4_page = torch.full_like(dst_c4_page, -43)
-    oracle_c4_full = torch.full_like(dst_c4_full, -44)
-    oracle_c128_raw = torch.full_like(dst_c128_raw, -45)
-    oracle_c128_page = torch.full_like(dst_c128_page, -46)
-    oracle_c128_full = torch.full_like(dst_c128_full, -47)
-
-    assert dsv4_kernel.direct_decode_index_metadata_for_replay(
-        ctx_page_table=ctx_page_table,
-        table_indices=table_indices,
-        positions=positions,
-        c4_page_table=c4_page_table,
-        c128_page_table=c128_page_table,
-        dst_swa_page_indices=oracle_swa,
-        dst_c4_sparse_raw_indices=oracle_c4_raw,
-        dst_c4_sparse_page_indices=oracle_c4_page,
-        dst_c4_sparse_full_indices=oracle_c4_full,
-        dst_c128_raw_indices=oracle_c128_raw,
-        dst_c128_page_indices=oracle_c128_page,
-        dst_c128_full_indices=oracle_c128_full,
-        rows=rows,
-        page_size=page_size,
-        window_size=window_size,
-        index_topk=index_topk,
-        direct_swa=True,
-        direct_c4=True,
-        direct_c128=True,
-        swa_full_to_swa_page=full_to_swa_page,
-        swa_dummy_token_start=dummy_token_start,
-        swa_dummy_page=swa_dummy_page,
-        swa_independent=True,
-    )
     assert dsv4_kernel.prep_decode_metadata_in_graph(
         ctx_page_table=ctx_page_table,
         table_indices=table_indices,
@@ -934,17 +535,8 @@ def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(mon
         swa_full_to_swa_page=full_to_swa_page,
         swa_dummy_token_start=dummy_token_start,
         swa_dummy_page=swa_dummy_page,
-        swa_independent=True,
     )
     torch.cuda.synchronize()
-
-    assert torch.equal(dst_swa, oracle_swa)
-    assert torch.equal(dst_c4_raw, oracle_c4_raw)
-    assert torch.equal(dst_c4_page, oracle_c4_page)
-    assert torch.equal(dst_c4_full, oracle_c4_full)
-    assert torch.equal(dst_c128_raw, oracle_c128_raw)
-    assert torch.equal(dst_c128_page, oracle_c128_page)
-    assert torch.equal(dst_c128_full, oracle_c128_full)
 
     cpu_positions = positions.cpu()
     seq_lens = cpu_positions + 1
@@ -956,6 +548,59 @@ def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(mon
     assert dst_c4_clamp_lens.cpu().tolist() == [max(x, 1) for x in c4_raw_lens]
     assert dst_c4_sparse_lens.cpu().tolist() == [min(x, index_topk) for x in c4_raw_lens]
     assert dst_c128_clamp_lens.cpu().tolist() == [max(x, 1) for x in c128_raw_lens]
+
+    def expected_sparse_indices(
+        *,
+        row: int,
+        ratio: int,
+        raw_len: int,
+        component_table: torch.Tensor,
+        width: int,
+        sparse: bool,
+    ) -> tuple[list[int], list[int], list[int]]:
+        active = min(raw_len, index_topk) if sparse else max(raw_len, 1)
+        start = max(raw_len - index_topk, 0) if sparse else 0
+        component_page_size = max(page_size // ratio, 1)
+        expected_raw = [-1] * width
+        expected_page = [-1] * width
+        expected_full = [-1] * width
+        for offset in range(min(active, width)):
+            raw = start + offset
+            expected_raw[offset] = raw
+            full_pos = raw * ratio + ratio - 1
+            if full_pos < max_seqlen_k:
+                expected_full[offset] = int(ctx_page_table[row, full_pos].item())
+            logical_page = raw // component_page_size
+            component_offset = raw % component_page_size
+            page = int(component_table[row, logical_page].item())
+            if page >= 0:
+                expected_page[offset] = page * component_page_size + component_offset
+        return expected_raw, expected_page, expected_full
+
+    for row, raw_len in enumerate(c4_raw_lens):
+        raw, page, full = expected_sparse_indices(
+            row=row,
+            ratio=4,
+            raw_len=raw_len,
+            component_table=c4_page_table,
+            width=dst_c4_raw.shape[1],
+            sparse=True,
+        )
+        assert dst_c4_raw[row].cpu().tolist() == raw
+        assert dst_c4_page[row].cpu().tolist() == page
+        assert dst_c4_full[row].cpu().tolist() == full
+    for row, raw_len in enumerate(c128_raw_lens):
+        raw, page, full = expected_sparse_indices(
+            row=row,
+            ratio=128,
+            raw_len=raw_len,
+            component_table=c128_page_table,
+            width=dst_c128_raw.shape[1],
+            sparse=False,
+        )
+        assert dst_c128_raw[row].cpu().tolist() == raw
+        assert dst_c128_page[row].cpu().tolist() == page
+        assert dst_c128_full[row].cpu().tolist() == full
 
     def expected_component_out(table: torch.Tensor, pos: int, ratio: int) -> int:
         seq_len = pos + 1
@@ -1001,61 +646,13 @@ def test_prep_decode_metadata_in_graph_swa_independent_matches_direct_oracle(mon
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-
-
-@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-def test_copy_component_write_locs_for_replay_from_component_tables(monkeypatch):
-    device = torch.device("cuda")
-    rows = 5
-    page_size = 128
-    c4_page_table = torch.tensor(
-        [[7, 8], [9, 10], [11, 12], [13, 14], [15, -1]],
-        dtype=torch.int32,
-        device=device,
-    )
-    c128_page_table = torch.tensor(
-        [[17, 18], [19, 20], [21, 22], [23, 24], [25, -1]],
-        dtype=torch.int32,
-        device=device,
-    )
-    c4_indexer_page_table = torch.tensor(
-        [[27, 28], [29, 30], [31, 32], [33, 34], [35, -1]],
-        dtype=torch.int32,
-        device=device,
-    )
-    positions = torch.tensor([3, 4, 127, 128, 255], dtype=torch.int32, device=device)
-    c4_out = torch.full((rows,), -999, dtype=torch.int32, device=device)
-    c128_out = torch.full((rows,), -999, dtype=torch.int32, device=device)
-    c4_indexer_out = torch.full((rows,), -999, dtype=torch.int32, device=device)
-
-    assert dsv4_kernel.copy_component_write_locs_for_replay(
-        c4_page_table=c4_page_table,
-        c128_page_table=c128_page_table,
-        c4_indexer_page_table=c4_indexer_page_table,
-        positions=positions,
-        c4_out_loc=c4_out,
-        c128_out_loc=c128_out,
-        c4_indexer_out_loc=c4_indexer_out,
-        rows=rows,
-        page_size=page_size,
-    )
-    torch.cuda.synchronize()
-
-    assert c4_out.cpu().tolist() == [7 * 32, -1, 11 * 32 + 31, -1, -1]
-    assert c128_out.cpu().tolist() == [-1, -1, 21, -1, -1]
-    assert c4_indexer_out.cpu().tolist() == [27 * 32, -1, 31 * 32 + 31, -1, -1]
-
-
-
-
-@pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_linear_bf16_fp32_upstream_opt_in_matches_bf16_mm(monkeypatch):
     device = torch.device("cuda")
     torch.manual_seed(23)
     x = torch.randn(3, 2, 128, device=device, dtype=torch.bfloat16)
     weight_bf16 = torch.randn(5, 128, device=device, dtype=torch.bfloat16)
 
-    actual = dsv4_kernel.linear_bf16_fp32_fallback(x, weight_bf16)
+    actual = dsv4_reference.linear_bf16_fp32_fallback(x, weight_bf16)
     expected = torch.mm(
         x.reshape(-1, x.shape[-1]).contiguous(),
         weight_bf16.contiguous().t(),
@@ -1066,7 +663,7 @@ def test_linear_bf16_fp32_upstream_opt_in_matches_bf16_mm(monkeypatch):
     assert torch.allclose(actual, expected)
 
     weight_fp32 = weight_bf16.float()
-    fp32_weight_actual = dsv4_kernel.linear_bf16_fp32_fallback(x, weight_fp32)
+    fp32_weight_actual = dsv4_reference.linear_bf16_fp32_fallback(x, weight_fp32)
     fp32_weight_expected = F.linear(x.float(), weight_fp32)
     assert torch.allclose(fp32_weight_actual, fp32_weight_expected)
 
@@ -1112,7 +709,7 @@ def test_hc_head_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path
     scale = torch.tensor([0.1], device=device, dtype=torch.float32)
     base = (torch.randn(hc_mult, device=device) * 0.01).contiguous()
 
-    expected = dsv4_kernel.hc_head_fallback(
+    expected = dsv4_reference.hc_head_fallback(
         x,
         fn_fp32,
         scale,
@@ -1121,7 +718,7 @@ def test_hc_head_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path
         norm_eps=1e-6,
     )
 
-    actual = dsv4_kernel.hc_head_fallback(
+    actual = dsv4_reference.hc_head_fallback(
         x,
         fn_bf16,
         scale,
@@ -1149,7 +746,7 @@ def test_hc_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
     scale = torch.tensor([0.15, 0.1, 0.08], device=device, dtype=torch.float32)
     base = (torch.randn(mix_hc, device=device) * 0.01).contiguous()
 
-    expected_y, expected_post, expected_comb = dsv4_kernel.hc_pre_fallback(
+    expected_y, expected_post, expected_comb = dsv4_reference.hc_pre_fallback(
         x,
         fn,
         scale,
@@ -1160,14 +757,14 @@ def test_hc_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
         norm_eps=1e-6,
     )
     post_input = torch.randn(tokens, hidden, device=device, dtype=torch.bfloat16)
-    expected_post_out = dsv4_kernel.hc_post_fallback(
+    expected_post_out = dsv4_reference.hc_post_fallback(
         post_input,
         x,
         expected_post,
         expected_comb,
     )
 
-    actual_y, actual_post, actual_comb = dsv4_kernel.hc_pre_fallback(
+    actual_y, actual_post, actual_comb = dsv4_reference.hc_pre_fallback(
         x,
         fn,
         scale,
@@ -1177,7 +774,7 @@ def test_hc_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
         eps=1e-6,
         norm_eps=1e-6,
     )
-    actual_post_out = dsv4_kernel.hc_post_fallback(
+    actual_post_out = dsv4_reference.hc_post_fallback(
         post_input,
         x,
         actual_post,
@@ -1207,7 +804,7 @@ def test_hc_graph_cleanup_opt_in_matches_current_hc_path(monkeypatch):
     base = (torch.randn(mix_hc, device=device) * 0.01).contiguous()
     post_input = torch.randn(tokens, hidden, device=device, dtype=torch.bfloat16)
 
-    expected_y, expected_post, expected_comb = dsv4_kernel.hc_pre_fallback(
+    expected_y, expected_post, expected_comb = dsv4_reference.hc_pre_fallback(
         x,
         fn,
         scale,
@@ -1217,14 +814,14 @@ def test_hc_graph_cleanup_opt_in_matches_current_hc_path(monkeypatch):
         eps=1e-6,
         norm_eps=1e-6,
     )
-    expected_post_out = dsv4_kernel.hc_post_fallback(
+    expected_post_out = dsv4_reference.hc_post_fallback(
         post_input,
         x,
         expected_post,
         expected_comb,
     )
 
-    actual_y, actual_post, actual_comb = dsv4_kernel.hc_pre_fallback(
+    actual_y, actual_post, actual_comb = dsv4_reference.hc_pre_fallback(
         x,
         fn,
         scale,
@@ -1234,7 +831,7 @@ def test_hc_graph_cleanup_opt_in_matches_current_hc_path(monkeypatch):
         eps=1e-6,
         norm_eps=1e-6,
     )
-    actual_post_out = dsv4_kernel.hc_post_fallback(
+    actual_post_out = dsv4_reference.hc_post_fallback(
         post_input,
         x,
         actual_post,
@@ -1270,7 +867,7 @@ def test_hc_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path(monk
     base = (torch.randn(mix_hc, device=device) * 0.01).contiguous()
     post_input = torch.randn(tokens, hidden, device=device, dtype=torch.bfloat16)
 
-    expected_y, expected_post, expected_comb = dsv4_kernel.hc_pre_fallback(
+    expected_y, expected_post, expected_comb = dsv4_reference.hc_pre_fallback(
         x,
         fn_fp32,
         scale,
@@ -1280,14 +877,14 @@ def test_hc_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path(monk
         eps=1e-6,
         norm_eps=1e-6,
     )
-    expected_post_out = dsv4_kernel.hc_post_fallback(
+    expected_post_out = dsv4_reference.hc_post_fallback(
         post_input,
         x,
         expected_post,
         expected_comb,
     )
 
-    actual_y, actual_post, actual_comb = dsv4_kernel.hc_pre_fallback(
+    actual_y, actual_post, actual_comb = dsv4_reference.hc_pre_fallback(
         x,
         fn_bf16,
         scale,
@@ -1297,7 +894,7 @@ def test_hc_graph_cleanup_with_bf16_linear_matches_default_fp32_weight_path(monk
         eps=1e-6,
         norm_eps=1e-6,
     )
-    actual_post_out = dsv4_kernel.hc_post_fallback(
+    actual_post_out = dsv4_reference.hc_post_fallback(
         post_input,
         x,
         actual_post,
@@ -1318,17 +915,15 @@ def test_rms_norm_sm80_triton_opt_in_matches_torch_fallback(monkeypatch):
 
     x = torch.randn(5, 4, 128, device=device, dtype=torch.bfloat16)
     weight = torch.randn(128, device=device, dtype=torch.bfloat16)
-    expected = dsv4_kernel.rms_norm_fallback(x, weight, eps=1e-6)
+    expected = dsv4_reference.rms_norm_fallback(x, weight, eps=1e-6)
 
-    actual = dsv4_kernel.rms_norm_fallback(x, weight, eps=1e-6)
+    actual = dsv4_reference.rms_norm_fallback(x, weight, eps=1e-6)
 
     assert actual.dtype is torch.bfloat16
     assert torch.allclose(actual, expected, atol=5e-3, rtol=5e-3)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-
-
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_q_kv_norm_rope_cache_sm80_triton_opt_in_matches_fallback(monkeypatch):
     device = torch.device("cuda")
@@ -1351,14 +946,14 @@ def test_q_kv_norm_rope_cache_sm80_triton_opt_in_matches_fallback(monkeypatch):
     actual_kv = kv.clone()
     actual_cache = torch.empty_like(expected_cache)
 
-    dsv4_kernel.q_norm_rope_fallback(
+    dsv4_reference.q_norm_rope_fallback(
         expected_q,
         positions,
         rms_norm_eps=1e-6,
         rotary_dim=rotary_dim,
         base=10000.0,
     )
-    dsv4_kernel.k_norm_rope_cache_fallback(
+    dsv4_reference.k_norm_rope_cache_fallback(
         expected_kv,
         positions,
         norm_weight=weight,
@@ -1369,7 +964,7 @@ def test_q_kv_norm_rope_cache_sm80_triton_opt_in_matches_fallback(monkeypatch):
         base=10000.0,
     )
 
-    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+    assert dsv4_reference.q_kv_norm_rope_cache_fallback(
         actual_q,
         actual_kv,
         positions,
@@ -1412,14 +1007,14 @@ def test_q_kv_norm_rope_cache_accepts_strided_kv_view(monkeypatch):
     actual_q = q.clone()
     actual_cache = torch.empty_like(expected_cache)
 
-    dsv4_kernel.q_norm_rope_fallback(
+    dsv4_reference.q_norm_rope_fallback(
         expected_q,
         positions,
         rms_norm_eps=1e-6,
         rotary_dim=rotary_dim,
         base=10000.0,
     )
-    dsv4_kernel.k_norm_rope_cache_fallback(
+    dsv4_reference.k_norm_rope_cache_fallback(
         expected_kv,
         positions,
         norm_weight=weight,
@@ -1430,7 +1025,7 @@ def test_q_kv_norm_rope_cache_accepts_strided_kv_view(monkeypatch):
         base=10000.0,
     )
 
-    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+    assert dsv4_reference.q_kv_norm_rope_cache_fallback(
         actual_q,
         kv_view,
         positions,
@@ -1467,7 +1062,7 @@ def test_q_kv_norm_rope_cache_publishes_official_swa_fp8_qat(monkeypatch, tokens
     reference_kv = kv.clone()
     reference_cache = torch.full_like(cache, sentinel)
 
-    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+    assert dsv4_reference.q_kv_norm_rope_cache_fallback(
         reference_q,
         reference_kv,
         positions,
@@ -1482,11 +1077,9 @@ def test_q_kv_norm_rope_cache_publishes_official_swa_fp8_qat(monkeypatch, tokens
         publish_swa_qat=False,
     )
     expected = reference_kv.clone()
-    expected[:, :448] = dsv4_kernel.quantize_fp8_activation_ref(
-        expected[:, :448], block_size=64
-    )
+    expected[:, :448] = dsv4_reference.quantize_fp8_activation_ref(expected[:, :448], block_size=64)
 
-    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+    assert dsv4_reference.q_kv_norm_rope_cache_fallback(
         q,
         kv,
         positions,
@@ -1526,7 +1119,7 @@ def test_q_kv_norm_rope_cache_qat_preserves_strides_masking_and_repeated_owner(m
     sentinel = torch.tensor(-91.0, device=device, dtype=torch.bfloat16)
     cache = torch.full((10, 512), sentinel, device=device, dtype=torch.bfloat16)
 
-    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+    assert dsv4_reference.q_kv_norm_rope_cache_fallback(
         q,
         kv,
         positions,
@@ -1540,9 +1133,7 @@ def test_q_kv_norm_rope_cache_qat_preserves_strides_masking_and_repeated_owner(m
     )
     valid = out_loc >= 0
     expected = kv[valid].clone()
-    expected[:, :448] = dsv4_kernel.quantize_fp8_activation_ref(
-        expected[:, :448], block_size=64
-    )
+    expected[:, :448] = dsv4_reference.quantize_fp8_activation_ref(expected[:, :448], block_size=64)
     assert torch.equal(cache[out_loc[valid]], expected)
     assert torch.all(cache[torch.tensor([0, 2, 4, 5, 6, 8, 9], device=device)] == sentinel)
 
@@ -1551,7 +1142,7 @@ def test_q_kv_norm_rope_cache_qat_preserves_strides_masking_and_repeated_owner(m
     next_q = torch.randn(1, 16, 512, device=device, dtype=torch.bfloat16)
     next_kv = torch.randn(1, 512, device=device, dtype=torch.bfloat16)
     before_other_rows = cache[torch.tensor([1, 7], device=device)].clone()
-    assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+    assert dsv4_reference.q_kv_norm_rope_cache_fallback(
         next_q,
         next_kv,
         torch.tensor([704], device=device, dtype=torch.long),
@@ -1564,7 +1155,7 @@ def test_q_kv_norm_rope_cache_qat_preserves_strides_masking_and_repeated_owner(m
         publish_swa_qat=True,
     )
     next_expected = next_kv.clone()
-    next_expected[:, :448] = dsv4_kernel.quantize_fp8_activation_ref(
+    next_expected[:, :448] = dsv4_reference.quantize_fp8_activation_ref(
         next_expected[:, :448], block_size=64
     )
     assert torch.equal(cache[3], next_expected[0])
@@ -1584,7 +1175,7 @@ def test_q_kv_norm_rope_cache_qat_graph_replay_matches_eager(monkeypatch):
     out_loc = torch.tensor([7, 1, 5, 3], device=device, dtype=torch.long)
 
     def run(q, kv, cache):
-        assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+        assert dsv4_reference.q_kv_norm_rope_cache_fallback(
             q,
             kv,
             positions,
@@ -1648,7 +1239,7 @@ def test_q_kv_norm_rope_cache_qat_chunked_prefill_matches_single_production(
     }
 
     def produce(q, kv, cache, token_slice):
-        assert dsv4_kernel.q_kv_norm_rope_cache_fallback(
+        assert dsv4_reference.q_kv_norm_rope_cache_fallback(
             q[token_slice],
             kv[token_slice],
             positions[token_slice],
@@ -1691,7 +1282,7 @@ def test_k_norm_rope_cache_torch_fallback_publishes_swa_qat(monkeypatch):
     reference_kv = kv.clone()
     reference_cache = torch.full_like(cache, -91.0)
 
-    dsv4_kernel.k_norm_rope_cache_fallback(
+    dsv4_reference.k_norm_rope_cache_fallback(
         reference_kv,
         positions,
         norm_weight=weight,
@@ -1703,11 +1294,9 @@ def test_k_norm_rope_cache_torch_fallback_publishes_swa_qat(monkeypatch):
         publish_swa_qat=False,
     )
     expected = reference_kv.clone()
-    expected[:, :448] = dsv4_kernel.quantize_fp8_activation_ref(
-        expected[:, :448], block_size=64
-    )
+    expected[:, :448] = dsv4_reference.quantize_fp8_activation_ref(expected[:, :448], block_size=64)
 
-    dsv4_kernel.k_norm_rope_cache_fallback(
+    dsv4_reference.k_norm_rope_cache_fallback(
         kv,
         positions,
         norm_weight=weight,
@@ -1731,8 +1320,9 @@ def test_attention_uses_classwide_single_production_swa_qat_contract():
 
     assert "self.head_dim - self.rope_head_dim == 448" in init_source
     assert "self.layer_id == 0" not in forward_source
-    assert "kv_qat_completed =" in forward_source
-    assert "and not kv_qat_completed" in forward_source
+    assert "q_kv_norm_rope_cache" in forward_source
+    assert "publish_swa_qat=self._produce_swa_qat" in forward_source
+    assert "k_norm_rope_cache_fallback" not in forward_source
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
@@ -1745,20 +1335,16 @@ def test_fp8_activation_quant_triton_matches_torch_reference(monkeypatch):
 
     x = torch.randn(5, 256, device=device, dtype=torch.bfloat16)
     x[0, ::17] *= 5
-    expected = dsv4_kernel.quantize_fp8_activation_ref(x, block_size=128)
+    expected = dsv4_reference.quantize_fp8_activation_ref(x, block_size=128)
 
-    actual = dsv4_kernel.quantize_fp8_activation_ref(x, block_size=128)
+    actual = dsv4_reference.quantize_fp8_activation_ref(x, block_size=128)
 
     assert actual.dtype is torch.bfloat16
     assert torch.allclose(actual, expected, atol=1e-2, rtol=0.0)
 
 
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-
-
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
-
-
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_quantized_linear_fp8_pair_shared_activation_matches_fallback(monkeypatch):
     device = torch.device("cuda")
@@ -1789,9 +1375,9 @@ def test_quantized_linear_fp8_pair_shared_activation_matches_fallback(monkeypatc
         dtype=torch.float32,
     ).to(dsv4_kernel.e8m0_dtype())
 
-    expected_a = dsv4_kernel.quantized_linear_ref(x, weight_a, scale_a, weight_kind="fp8")
-    expected_b = dsv4_kernel.quantized_linear_ref(x, weight_b, scale_b, weight_kind="fp8")
-    actual_a, actual_b = dsv4_kernel.quantized_linear_fp8_pair_shared_activation_ref(
+    expected_a = dsv4_reference.quantized_linear_ref(x, weight_a, scale_a, weight_kind="fp8")
+    expected_b = dsv4_reference.quantized_linear_ref(x, weight_b, scale_b, weight_kind="fp8")
+    actual_a, actual_b = dsv4_reference.quantized_linear_fp8_pair_shared_activation_ref(
         x, weight_a, scale_a, weight_b, scale_b
     )
 
@@ -1829,7 +1415,7 @@ def test_fused_wqa_wkv_cached_weight_matches_shared_activation(monkeypatch):
         dtype=torch.float32,
     ).to(dsv4_kernel.e8m0_dtype())
 
-    expected_a, expected_b = dsv4_kernel.quantized_linear_fp8_pair_shared_activation_ref(
+    expected_a, expected_b = dsv4_reference.quantized_linear_fp8_pair_shared_activation_ref(
         x, weight_a, scale_a, weight_b, scale_b
     )
 
@@ -1848,7 +1434,7 @@ def test_fused_wqa_wkv_cached_weight_matches_shared_activation(monkeypatch):
         allow_build=True,
     )
     assert cached is not None
-    qkv = F.linear(dsv4_kernel.quantize_fp8_activation_ref(x), cached)
+    qkv = F.linear(dsv4_reference.quantize_fp8_activation_ref(x), cached)
     actual_a, actual_b = qkv.split([weight_a.shape[0], weight_b.shape[0]], dim=-1)
 
     assert torch.equal(actual_a, expected_a)
@@ -1884,18 +1470,18 @@ def test_fused_wqa_wkv_cached_weight_matches_shared_activation(monkeypatch):
 def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
     x = torch.randn(2, 4, dtype=torch.float32)
     weight = torch.randn(3, 4, dtype=torch.float32)
-    y = dsv4_kernel.quantized_linear_ref(x, weight, None, weight_kind="bf16")
+    y = dsv4_reference.quantized_linear_ref(x, weight, None, weight_kind="bf16")
     assert torch.allclose(y, F.linear(x, weight))
 
     rope_x = torch.randn(3, 2, 4, dtype=torch.float32)
     positions = torch.arange(3, dtype=torch.int64)
-    rotated = dsv4_kernel.apply_rotary_tail(
+    rotated = dsv4_reference.apply_rotary_tail(
         rope_x.clone(),
         positions,
         rotary_dim=2,
         base=10000.0,
     )
-    restored = dsv4_kernel.apply_rotary_tail(
+    restored = dsv4_reference.apply_rotary_tail(
         rotated.clone(),
         positions,
         rotary_dim=2,
@@ -1912,14 +1498,14 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
     expected_q_fp32 = expected_q_rope.float()
     expected_q_scale = torch.rsqrt(expected_q_fp32.square().mean(-1, keepdim=True) + 1e-6)
     expected_q_rope.copy_((expected_q_fp32 * expected_q_scale).to(expected_q_rope.dtype))
-    dsv4_kernel.apply_rotary_tail(
+    dsv4_reference.apply_rotary_tail(
         expected_q_rope,
         q_positions,
         rotary_dim=4,
         base=10000.0,
     )
     q_rope_ptr = q_rope.data_ptr()
-    returned_q_rope = dsv4_kernel.q_norm_rope_fallback(
+    returned_q_rope = dsv4_reference.q_norm_rope_fallback(
         q_rope,
         q_positions,
         rms_norm_eps=1e-6,
@@ -1931,17 +1517,17 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
 
     q = torch.randn(2, 2, 4, dtype=torch.float32)
     cache = torch.randn(4, 4, dtype=torch.float32)
-    out = dsv4_kernel.paged_mqa_attention_fallback(
+    out = dsv4_reference.paged_mqa_attention_fallback(
         q,
         cache,
         [torch.tensor([0, 1], dtype=torch.int32), torch.tensor([1, 2], dtype=torch.int32)],
         softmax_scale=0.5,
         attn_sink=torch.zeros(2),
     )
-    metadata = dsv4_kernel.get_paged_mqa_logits_metadata_fallback(
+    metadata = dsv4_reference.get_paged_mqa_logits_metadata_fallback(
         [torch.tensor([0, 1], dtype=torch.int32), torch.tensor([1, 2], dtype=torch.int32)]
     )
-    metadata_out = dsv4_kernel.paged_mqa_attention_fallback(
+    metadata_out = dsv4_reference.paged_mqa_attention_fallback(
         q,
         cache,
         metadata,
@@ -1962,7 +1548,7 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
     normed = expected_kv.float()
     normed = normed * torch.rsqrt(normed.square().mean(-1, keepdim=True) + 1e-6)
     expected_kv.copy_((normed * norm_weight.float()).to(expected_kv.dtype))
-    dsv4_kernel.apply_rotary_tail(
+    dsv4_reference.apply_rotary_tail(
         expected_kv,
         kv_positions,
         rotary_dim=4,
@@ -1972,7 +1558,7 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
     expected_cache[kv_loc.long()] = expected_kv.to(expected_cache.dtype)
     actual_kv = kv.clone()
     actual_cache = torch.zeros_like(expected_cache)
-    returned_kv = dsv4_kernel.k_norm_rope_cache_fallback(
+    returned_kv = dsv4_reference.k_norm_rope_cache_fallback(
         actual_kv,
         kv_positions,
         norm_weight=norm_weight,
@@ -2019,7 +1605,7 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
     expected_compressed_kv.copy_(
         (compressed_norm * compressed_weight.float()).to(expected_compressed_kv.dtype)
     )
-    dsv4_kernel.apply_rotary_tail(
+    dsv4_reference.apply_rotary_tail(
         expected_compressed_kv,
         compressed_positions,
         rotary_dim=4,
@@ -2032,7 +1618,7 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
     )
     actual_compressed_kv = compressed_kv.clone()
     actual_compressed_cache = FakeCompressedCache()
-    dsv4_kernel.compress_norm_rope_store_fallback(
+    dsv4_reference.compress_norm_rope_store_fallback(
         actual_compressed_cache,
         0,
         actual_compressed_kv,
@@ -2049,7 +1635,7 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
     indexer_kv = torch.randn(2, 4, dtype=torch.float32)
     indexer_positions = torch.tensor([3, 7], dtype=torch.int64)
     indexer_loc = torch.tensor([1, 4], dtype=torch.int32)
-    expected_indexer_kv = dsv4_kernel.apply_rotary_tail(
+    expected_indexer_kv = dsv4_reference.apply_rotary_tail(
         indexer_kv.clone(),
         indexer_positions,
         rotary_dim=2,
@@ -2060,7 +1646,7 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
         expected_indexer_cache.indexer.dtype
     )
     actual_indexer_cache = FakeCompressedCache()
-    dsv4_kernel.store_indexer_fallback(
+    dsv4_reference.store_indexer_fallback(
         actual_indexer_cache,
         0,
         expected_indexer_kv,
@@ -2085,7 +1671,7 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
         ],
         dtype=torch.int32,
     )
-    full_topk = dsv4_kernel.topk_transform_512_full_fallback(
+    full_topk = dsv4_reference.topk_transform_512_full_fallback(
         scores,
         seq_lens,
         page_table,
@@ -2111,7 +1697,7 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
         dsv4_kernel.scale_dim(8),
         dtype=torch.float32,
     ).to(dsv4_kernel.e8m0_dtype())
-    wo_out = dsv4_kernel.wo_a_grouped_projection_fallback(
+    wo_out = dsv4_reference.wo_a_grouped_projection_fallback(
         wo_o,
         wo_weight,
         wo_scale,
@@ -2165,7 +1751,7 @@ def test_dsv4_rotary_yarn_fallback_matches_configured_ramp_range():
         dim=-1,
     ).flatten(-2)
 
-    actual = dsv4_kernel.apply_rotary_tail(
+    actual = dsv4_reference.apply_rotary_tail(
         x.clone(),
         positions,
         rotary_dim=rotary_dim,
@@ -2209,7 +1795,7 @@ def test_dsv4_compress_forward_keeps_request_contiguous_windows():
             dtype=torch.bfloat16,
         )
 
-        fallback = dsv4_kernel.compress_forward_fallback(
+        fallback = dsv4_reference.compress_forward_fallback(
             x,
             positions,
             ratio=ratio,
@@ -2219,7 +1805,7 @@ def test_dsv4_compress_forward_keeps_request_contiguous_windows():
             wkv_gate=MarkerWkvGate(coff * head_dim),
             norm=IdentityNorm(),
         )
-        vectorized = dsv4_kernel._compress_forward_vectorized(
+        vectorized = dsv4_reference._compress_forward_vectorized(
             x,
             positions,
             ratio=ratio,
@@ -2241,14 +1827,14 @@ def test_dsv4_compress_forward_keeps_request_contiguous_windows():
 def test_indexer_bf16_query_logits_and_topk_are_fallback_clean():
     q = torch.randn(3, 2, 4, dtype=torch.float32)
     positions = torch.tensor([0, 3, 7], dtype=torch.int64)
-    expected_q = dsv4_kernel.apply_rotary_tail(
+    expected_q = dsv4_reference.apply_rotary_tail(
         q.clone(),
         positions,
         rotary_dim=2,
         base=10000.0,
     )
-    expected_q = dsv4_kernel.hadamard_transform_ref(expected_q)
-    actual_q = dsv4_kernel.indexer_q_rope_hadamard_bf16_fallback(
+    expected_q = dsv4_reference.hadamard_transform_ref(expected_q)
+    actual_q = dsv4_reference.indexer_q_rope_hadamard_bf16_fallback(
         q.clone(),
         positions,
         rotary_dim=2,
@@ -2279,7 +1865,7 @@ def test_indexer_bf16_query_logits_and_topk_are_fallback_clean():
     weights = torch.tensor([[1.0, 1.0], [0.5, 1.0]], dtype=torch.float32)
     seq_lens = torch.tensor([5, 4], dtype=torch.int32)
     page_table = torch.tensor([[0, 1], [1, 0]], dtype=torch.int32)
-    logits = dsv4_kernel.indexer_bf16_logits_fallback(
+    logits = dsv4_reference.indexer_bf16_logits_fallback(
         q_logits,
         cache,
         seq_lens,
@@ -2297,7 +1883,7 @@ def test_indexer_bf16_query_logits_and_topk_are_fallback_clean():
     )
     assert torch.allclose(logits, expected_logits)
 
-    selected = dsv4_kernel.indexer_select_bf16_fallback(
+    selected = dsv4_reference.indexer_select_bf16_fallback(
         q_logits,
         weights,
         cache,
@@ -2336,7 +1922,7 @@ def test_topk_transform_full_reports_lens_in_torch_fallback():
         dtype=torch.int32,
     )
 
-    topk = dsv4_kernel.topk_transform_512_full_fallback(
+    topk = dsv4_reference.topk_transform_512_full_fallback(
         scores,
         seq_lens,
         page_table,
@@ -2372,7 +1958,7 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
     c4_weight = torch.linspace(0.5, 1.25, 8, dtype=torch.float32)
     c4_positions = torch.tensor([3, 7], dtype=torch.int64)
     c4_loc = torch.tensor([0, 3], dtype=torch.int32)
-    expected_c4 = dsv4_kernel.norm_rope_inplace_fallback(
+    expected_c4 = dsv4_reference.norm_rope_inplace_fallback(
         c4_kv.clone(),
         c4_positions,
         weight=c4_weight,
@@ -2380,7 +1966,7 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
         rotary_dim=4,
         base=10000.0,
     )
-    dsv4_kernel.compress_norm_rope_store_fallback(
+    dsv4_reference.compress_norm_rope_store_fallback(
         pool,
         0,
         c4_kv,
@@ -2398,7 +1984,7 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
     c128_weight = torch.linspace(0.75, 1.5, 8, dtype=torch.float32)
     c128_positions = torch.tensor([127, 255], dtype=torch.int64)
     c128_loc = torch.tensor([0, 1], dtype=torch.int32)
-    expected_c128 = dsv4_kernel.norm_rope_inplace_fallback(
+    expected_c128 = dsv4_reference.norm_rope_inplace_fallback(
         c128_kv.clone(),
         c128_positions,
         weight=c128_weight,
@@ -2406,7 +1992,7 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
         rotary_dim=4,
         base=10000.0,
     )
-    dsv4_kernel.compress_norm_rope_store_fallback(
+    dsv4_reference.compress_norm_rope_store_fallback(
         pool,
         1,
         c128_kv,
@@ -2424,7 +2010,7 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
     indexer_weight = torch.linspace(0.8, 1.1, 4, dtype=torch.float32)
     indexer_positions = torch.tensor([3, 7], dtype=torch.int64)
     indexer_loc = torch.tensor([1, 4], dtype=torch.int32)
-    expected_indexer = dsv4_kernel.norm_rope_inplace_fallback(
+    expected_indexer = dsv4_reference.norm_rope_inplace_fallback(
         indexer_kv.clone(),
         indexer_positions,
         weight=indexer_weight,
@@ -2432,7 +2018,7 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
         rotary_dim=2,
         base=10000.0,
     )
-    dsv4_kernel.compress_norm_rope_store_fallback(
+    dsv4_reference.compress_norm_rope_store_fallback(
         pool,
         0,
         indexer_kv,
@@ -2445,7 +2031,7 @@ def test_compress_norm_rope_store_writes_real_c4_c128_and_indexer_caches():
         cache_type="indexer",
     )
     assert torch.allclose(indexer_kv, expected_indexer, atol=1e-5, rtol=1e-5)
-    indexer_fp8 = dsv4_kernel.dequantize_indexer_fp8_paged_cache_ref(
+    indexer_fp8 = dsv4_reference.dequantize_indexer_fp8_paged_cache_ref(
         pool.indexer_fp8_paged_cache(0),
         page_size=pool.indexer_fp8_page_size,
         dim=expected_indexer.shape[-1],
@@ -2524,6 +2110,7 @@ def test_dsv4_moe_v2_execution_plan_cpu():
     assert torch.allclose(plan.route_weights.cpu(), weights.float().reshape(-1))
     assert plan.route_plan.sorted_route_ids.tolist() == [2, 5, 1, 6, 0, 4]
 
+
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_swiglu_bf16_output_matches_fp32_then_cast():
     from minisgl.kernel.triton import deepseek_v4 as triton_dsv4
@@ -2594,24 +2181,18 @@ def test_dsv4_moe_live_route_mask_ignores_padded_rows(monkeypatch):
     _clear_dsv4_sm80_env(monkeypatch)
     device = torch.device("cuda")
     live_rows, padded_rows, topk, experts = 17, 24, 3, 8
-    live_ids = (torch.arange(live_rows * topk).view(live_rows, topk) % experts).to(
-        torch.int64
+    live_ids = (torch.arange(live_rows * topk).view(live_rows, topk) % experts).to(torch.int64)
+    live_weights = torch.arange(1, live_rows * topk + 1, dtype=torch.float32).view(live_rows, topk)
+    ids_a = torch.cat([live_ids, torch.zeros(padded_rows - live_rows, topk, dtype=torch.int64)]).to(
+        device
     )
-    live_weights = torch.arange(
-        1, live_rows * topk + 1, dtype=torch.float32
-    ).view(live_rows, topk)
-    ids_a = torch.cat(
-        [live_ids, torch.zeros(padded_rows - live_rows, topk, dtype=torch.int64)]
-    ).to(device)
-    ids_b = torch.cat(
-        [live_ids, torch.full((padded_rows - live_rows, topk), experts - 1)]
-    ).to(device)
-    weights_a = torch.cat(
-        [live_weights, torch.ones(padded_rows - live_rows, topk)]
-    ).to(device)
-    weights_b = torch.cat(
-        [live_weights, torch.full((padded_rows - live_rows, topk), 17.0)]
-    ).to(device)
+    ids_b = torch.cat([live_ids, torch.full((padded_rows - live_rows, topk), experts - 1)]).to(
+        device
+    )
+    weights_a = torch.cat([live_weights, torch.ones(padded_rows - live_rows, topk)]).to(device)
+    weights_b = torch.cat([live_weights, torch.full((padded_rows - live_rows, topk), 17.0)]).to(
+        device
+    )
     live_count = torch.tensor([live_rows], dtype=torch.int32, device=device)
 
     masked_weights_a, masked_ids_a = dsv4_kernel.mask_moe_routes_live_rows(
@@ -2620,12 +2201,8 @@ def test_dsv4_moe_live_route_mask_ignores_padded_rows(monkeypatch):
     masked_weights_b, masked_ids_b = dsv4_kernel.mask_moe_routes_live_rows(
         weights_b, ids_b, live_count
     )
-    plan_a = dsv4_kernel.build_moe_route_plan(
-        masked_ids_a, num_experts=experts, block_size_m=4
-    )
-    plan_b = dsv4_kernel.build_moe_route_plan(
-        masked_ids_b, num_experts=experts, block_size_m=4
-    )
+    plan_a = dsv4_kernel.build_moe_route_plan(masked_ids_a, num_experts=experts, block_size_m=4)
+    plan_b = dsv4_kernel.build_moe_route_plan(masked_ids_b, num_experts=experts, block_size_m=4)
     torch.cuda.synchronize()
 
     assert torch.equal(masked_ids_a[:live_rows].cpu(), live_ids)
@@ -2938,7 +2515,9 @@ def test_dsv4_sparse_attention_backend_reads_compressed_cache(monkeypatch):
             raise AssertionError("ratio 4 path must not read c128 cache")
 
     class FakeBackend:
-        _two_source_attention_torch = dsv4_attention.DSV4AttentionBackend._two_source_attention_torch
+        _require_release_index_metadata = staticmethod(
+            dsv4_attention.DSV4AttentionBackend._require_release_index_metadata
+        )
 
         def _ensure_swa_metadata_current(self, *args, **kwargs) -> None:
             return None
@@ -3073,6 +2652,10 @@ def test_dsv4_sparse_attention_backend_compressed_boundary_fast_path(monkeypatch
             return c128_cache
 
     class FakeBackend:
+        _require_release_index_metadata = staticmethod(
+            dsv4_attention.DSV4AttentionBackend._require_release_index_metadata
+        )
+
         def _ensure_swa_metadata_current(self, *args, **kwargs) -> None:
             return None
 
@@ -3172,14 +2755,14 @@ def test_dsv4_sparse_attention_backend_compressed_boundary_fast_path(monkeypatch
 @pytest.mark.skipif(not _has_sm80_cuda(), reason="requires an sm80 CUDA device")
 def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     _clear_dsv4_sm80_env(monkeypatch)
-    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", lambda: False)
+    monkeypatch.setattr(dsv4_reference, "dsv4_triton_available", lambda: False)
     device = torch.device("cuda")
     torch.manual_seed(37)
 
     gate = torch.randn(9, 129, device=device, dtype=torch.bfloat16)
     up = torch.randn_like(gate)
     weights = torch.rand(9, 1, device=device, dtype=torch.float32)
-    expected_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+    expected_swiglu = dsv4_reference.silu_and_mul_clamp_fallback(
         gate,
         up,
         swiglu_limit=2.0,
@@ -3188,7 +2771,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
 
     positions = torch.arange(6, device=device, dtype=torch.int64)
     rope_x = torch.randn(6, 2, 16, device=device, dtype=torch.float32)
-    expected_rope = dsv4_kernel.apply_rotary_tail(
+    expected_rope = dsv4_reference.apply_rotary_tail(
         rope_x.clone(),
         positions,
         rotary_dim=8,
@@ -3197,7 +2780,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         factor=2.0,
     )
     q = torch.randn(6, 2, 16, device=device, dtype=torch.bfloat16)
-    expected_q = dsv4_kernel.q_norm_rope_fallback(
+    expected_q = dsv4_reference.q_norm_rope_fallback(
         q.clone(),
         positions,
         rms_norm_eps=1e-6,
@@ -3212,7 +2795,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     k_positions = torch.tensor([0, 127, 255, 511, 777], device=device, dtype=torch.int64)
     k_loc = torch.tensor([3, 7, 11, 13, 19], device=device, dtype=torch.int32)
     expected_k_cache = torch.zeros(32, 16, device=device, dtype=torch.bfloat16)
-    expected_k = dsv4_kernel.k_norm_rope_cache_fallback(
+    expected_k = dsv4_reference.k_norm_rope_cache_fallback(
         kv.clone(),
         k_positions,
         norm_weight=k_weight,
@@ -3244,7 +2827,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     compressed_loc = torch.tensor([4, 8, 12, -1, 20], device=device, dtype=torch.int32)
     expected_compressed_cache = FakeCompressedCache()
     expected_compressed = compressed.clone()
-    dsv4_kernel.compress_norm_rope_store_fallback(
+    dsv4_reference.compress_norm_rope_store_fallback(
         expected_compressed_cache,
         0,
         expected_compressed,
@@ -3274,7 +2857,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     compress_x = torch.randn(12, 4, device=device, dtype=torch.bfloat16)
     ape = torch.randn(4, 8, device=device, dtype=torch.float32)
     compress_positions = torch.arange(12, device=device, dtype=torch.int64)
-    expected_compress = dsv4_kernel.compress_forward_fallback(
+    expected_compress = dsv4_reference.compress_forward_fallback(
         compress_x,
         compress_positions,
         ratio=4,
@@ -3288,7 +2871,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     topk_scores = torch.randn(3, 1024, device=device, dtype=torch.float32)
     topk_seq_lens = torch.tensor([16, 900, 1024], device=device, dtype=torch.int32)
     topk_page_table = torch.arange(3 * 16, device=device, dtype=torch.int32).reshape(3, 16) + 100
-    expected_topk = dsv4_kernel.topk_transform_512_full_fallback(
+    expected_topk = dsv4_reference.topk_transform_512_full_fallback(
         topk_scores,
         topk_seq_lens,
         topk_page_table,
@@ -3306,11 +2889,11 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         torch.tensor([2, 4, 4, 6, 8, 16, 32, 64], device=device, dtype=torch.int32),
     ]
     attn_sink = torch.randn(3, device=device, dtype=torch.float32)
-    attn_metadata = dsv4_kernel.get_paged_mqa_logits_metadata_fallback(
+    attn_metadata = dsv4_reference.get_paged_mqa_logits_metadata_fallback(
         attn_contexts,
         device=device,
     )
-    expected_attn = dsv4_kernel.paged_mqa_attention_fallback(
+    expected_attn = dsv4_reference.paged_mqa_attention_fallback(
         q_attn,
         cache_attn,
         attn_contexts,
@@ -3323,7 +2906,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     indexer_weights = torch.randn(3, 4, device=device, dtype=torch.float32)
     indexer_seq_lens = torch.tensor([16, 64, 97], device=device, dtype=torch.int32)
     indexer_page_table = torch.tensor([[0, 1], [0, 1], [0, 1]], device=device, dtype=torch.int32)
-    expected_indexer_logits = dsv4_kernel.indexer_bf16_logits_fallback(
+    expected_indexer_logits = dsv4_reference.indexer_bf16_logits_fallback(
         q_indexer,
         indexer_cache,
         indexer_seq_lens,
@@ -3357,15 +2940,15 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         attn_sink=sparse_sink,
     )
 
-    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", lambda: True)
+    monkeypatch.setattr(dsv4_reference, "dsv4_triton_available", lambda: True)
 
-    actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+    actual_swiglu = dsv4_reference.silu_and_mul_clamp_fallback(
         gate,
         up,
         swiglu_limit=2.0,
         weights=weights,
     )
-    actual_rope = dsv4_kernel.apply_rotary_tail(
+    actual_rope = dsv4_reference.apply_rotary_tail(
         rope_x.clone(),
         positions,
         rotary_dim=8,
@@ -3373,7 +2956,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         original_seq_len=4096,
         factor=2.0,
     )
-    actual_q = dsv4_kernel.q_norm_rope_fallback(
+    actual_q = dsv4_reference.q_norm_rope_fallback(
         q.clone(),
         positions,
         rms_norm_eps=1e-6,
@@ -3383,7 +2966,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         factor=2.0,
     )
     actual_k_cache = torch.zeros_like(expected_k_cache)
-    actual_k = dsv4_kernel.k_norm_rope_cache_fallback(
+    actual_k = dsv4_reference.k_norm_rope_cache_fallback(
         kv.clone(),
         k_positions,
         norm_weight=k_weight,
@@ -3397,7 +2980,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
     )
     actual_compressed_cache = FakeCompressedCache()
     actual_compressed = compressed.clone()
-    dsv4_kernel.compress_norm_rope_store_fallback(
+    dsv4_reference.compress_norm_rope_store_fallback(
         actual_compressed_cache,
         0,
         actual_compressed,
@@ -3410,7 +2993,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         original_seq_len=4096,
         factor=2.0,
     )
-    actual_compress = dsv4_kernel.compress_forward_fallback(
+    actual_compress = dsv4_reference.compress_forward_fallback(
         compress_x,
         compress_positions,
         ratio=4,
@@ -3420,7 +3003,7 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         wkv_gate=FakeWkvGate(),
         norm=IdentityNorm(),
     )
-    actual_topk = dsv4_kernel.topk_transform_512_full_fallback(
+    actual_topk = dsv4_reference.topk_transform_512_full_fallback(
         topk_scores,
         topk_seq_lens,
         topk_page_table,
@@ -3428,14 +3011,14 @@ def test_dsv4_sm80_v0_bf16_bundle_kernels_match_fallbacks(monkeypatch):
         width=512,
         ratio=4,
     )
-    actual_attn = dsv4_kernel.paged_mqa_attention_fallback(
+    actual_attn = dsv4_reference.paged_mqa_attention_fallback(
         q_attn,
         cache_attn,
         attn_metadata,
         softmax_scale=0.125,
         attn_sink=attn_sink,
     )
-    actual_indexer_logits = dsv4_kernel.indexer_bf16_logits_fallback(
+    actual_indexer_logits = dsv4_reference.indexer_bf16_logits_fallback(
         q_indexer,
         indexer_cache,
         indexer_seq_lens,
@@ -3499,15 +3082,13 @@ def test_dsv4_sm80_optimized_kernels_match_local_torch_references(monkeypatch):
     q = torch.randn(7, 2, 16, device=device, dtype=torch.float32)
     scores = torch.randn(3, 1024, device=device, dtype=torch.float32)
     seq_lens = torch.tensor([16, 900, 1024], device=device, dtype=torch.int32)
-    page_table = (
-        torch.arange(3 * 16, device=device, dtype=torch.int32).reshape(3, 16) + 100
-    )
+    page_table = torch.arange(3 * 16, device=device, dtype=torch.int32).reshape(3, 16) + 100
 
-    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", lambda: False)
-    expected_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+    monkeypatch.setattr(dsv4_reference, "dsv4_triton_available", lambda: False)
+    expected_swiglu = dsv4_reference.silu_and_mul_clamp_fallback(
         gate, up, swiglu_limit=2.0, weights=weights
     )
-    expected_q = dsv4_kernel.q_norm_rope_fallback(
+    expected_q = dsv4_reference.q_norm_rope_fallback(
         q.clone(),
         positions,
         rms_norm_eps=1e-6,
@@ -3516,15 +3097,15 @@ def test_dsv4_sm80_optimized_kernels_match_local_torch_references(monkeypatch):
         original_seq_len=4096,
         factor=2.0,
     )
-    expected_topk = dsv4_kernel.topk_transform_512_full_fallback(
+    expected_topk = dsv4_reference.topk_transform_512_full_fallback(
         scores, seq_lens, page_table, page_size=64, width=512, ratio=4
     )
 
-    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", lambda: True)
-    actual_swiglu = dsv4_kernel.silu_and_mul_clamp_fallback(
+    monkeypatch.setattr(dsv4_reference, "dsv4_triton_available", lambda: True)
+    actual_swiglu = dsv4_reference.silu_and_mul_clamp_fallback(
         gate, up, swiglu_limit=2.0, weights=weights
     )
-    actual_q = dsv4_kernel.q_norm_rope_fallback(
+    actual_q = dsv4_reference.q_norm_rope_fallback(
         q.clone(),
         positions,
         rms_norm_eps=1e-6,
@@ -3533,7 +3114,7 @@ def test_dsv4_sm80_optimized_kernels_match_local_torch_references(monkeypatch):
         original_seq_len=4096,
         factor=2.0,
     )
-    actual_topk = dsv4_kernel.topk_transform_512_full_fallback(
+    actual_topk = dsv4_reference.topk_transform_512_full_fallback(
         scores, seq_lens, page_table, page_size=64, width=512, ratio=4
     )
     torch.cuda.synchronize()

@@ -3,10 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import torch
+
+ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "python"))
+
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
+
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference  # noqa: E402
 
 
 def _time_cuda(fn, *, warmup: int, iters: int) -> float:
@@ -68,7 +76,7 @@ def run_case(batch: int, max_seq_len: int, width: int, *, iters: int, warmup: in
     scores, seq_lens, page_table = _make_inputs(batch, max_seq_len, page_size)
 
     os.environ.pop("MINISGL_DSV4_SM80_TOPK", None)
-    expected = dsv4_kernel.topk_transform_512_full_fallback(
+    expected = dsv4_reference.topk_transform_512_full_fallback(
         scores,
         seq_lens,
         page_table,
@@ -77,7 +85,7 @@ def run_case(batch: int, max_seq_len: int, width: int, *, iters: int, warmup: in
         ratio=4,
     )
     default_ms = _time_cuda(
-        lambda: dsv4_kernel.topk_transform_512_full_fallback(
+        lambda: dsv4_reference.topk_transform_512_full_fallback(
             scores,
             seq_lens,
             page_table,
@@ -90,7 +98,7 @@ def run_case(batch: int, max_seq_len: int, width: int, *, iters: int, warmup: in
     )
 
     os.environ["MINISGL_DSV4_SM80_TOPK"] = "1"
-    actual = dsv4_kernel.topk_transform_512_full_fallback(
+    actual = dsv4_reference.topk_transform_512_full_fallback(
         scores,
         seq_lens,
         page_table,
@@ -100,7 +108,7 @@ def run_case(batch: int, max_seq_len: int, width: int, *, iters: int, warmup: in
     )
     _assert_same_raw_sets(expected, actual)
     opt_in_ms = _time_cuda(
-        lambda: dsv4_kernel.topk_transform_512_full_fallback(
+        lambda: dsv4_reference.topk_transform_512_full_fallback(
             scores,
             seq_lens,
             page_table,

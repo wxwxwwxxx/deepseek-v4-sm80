@@ -3,6 +3,8 @@ from __future__ import annotations
 import functools
 from typing import Tuple
 
+DSV4_AMPERE_CAPABILITIES = frozenset({(8, 0), (8, 6)})
+
 
 @functools.cache
 def _get_torch_cuda_version() -> Tuple[int, int] | None:
@@ -19,6 +21,10 @@ def is_arch_supported(major: int, minor: int = 0) -> bool:
     if arch is None:
         return False
     return arch >= (major, minor)
+
+
+def is_dsv4_ampere_capability(capability: tuple[int, int] | None) -> bool:
+    return capability in DSV4_AMPERE_CAPABILITIES
 
 
 def is_sm90_supported() -> bool:

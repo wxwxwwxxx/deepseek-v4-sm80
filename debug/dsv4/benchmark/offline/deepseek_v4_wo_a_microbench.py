@@ -11,11 +11,13 @@ from typing import Any
 
 import torch
 
-
 ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "python"))
 
 from minisgl.kernel import deepseek_v4 as dsv4_kernel  # noqa: E402
+
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference  # noqa: E402
 
 
 def _parse_csv_ints(value: str) -> list[int]:
@@ -67,12 +69,16 @@ def _make_case(
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     o = torch.randn(tokens, groups, d_per_group, device=device, dtype=torch.bfloat16)
-    weight = torch.randn(
-        groups * rank,
-        d_per_group,
-        device=device,
-        dtype=torch.float32,
-    ).clamp(-4, 4).to(dsv4_kernel.fp8_dtype())
+    weight = (
+        torch.randn(
+            groups * rank,
+            d_per_group,
+            device=device,
+            dtype=torch.float32,
+        )
+        .clamp(-4, 4)
+        .to(dsv4_kernel.fp8_dtype())
+    )
     scale = (
         torch.rand(
             dsv4_kernel.scale_dim(groups * rank),
@@ -118,7 +124,7 @@ def _bench_case(
     )
 
     with _with_env("MINISGL_DSV4_SM80_WO_A_BF16", None):
-        expected = dsv4_kernel.wo_a_grouped_projection_fallback(
+        expected = dsv4_reference.wo_a_grouped_projection_fallback(
             o,
             weight,
             scale,
@@ -126,7 +132,7 @@ def _bench_case(
             o_lora_rank=rank,
         )
         fallback_ms = _bench_cuda(
-            lambda: dsv4_kernel.wo_a_grouped_projection_fallback(
+            lambda: dsv4_reference.wo_a_grouped_projection_fallback(
                 o,
                 weight,
                 scale,
@@ -138,7 +144,7 @@ def _bench_case(
         )
 
     with _with_env("MINISGL_DSV4_SM80_WO_A_BF16", "1"):
-        actual = dsv4_kernel.wo_a_grouped_projection_fallback(
+        actual = dsv4_reference.wo_a_grouped_projection_fallback(
             o,
             weight,
             scale,
@@ -146,7 +152,7 @@ def _bench_case(
             o_lora_rank=rank,
         )
         triton_ms = _bench_cuda(
-            lambda: dsv4_kernel.wo_a_grouped_projection_fallback(
+            lambda: dsv4_reference.wo_a_grouped_projection_fallback(
                 o,
                 weight,
                 scale,

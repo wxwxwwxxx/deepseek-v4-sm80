@@ -103,9 +103,7 @@ class RadixTreeNode:
             else self._dsv4_component_pages.slice_tokens(pos, self.length)
         )
         parent_swa = (
-            None
-            if self._dsv4_swa_pages is None
-            else self._dsv4_swa_pages.slice_tokens(0, pos)
+            None if self._dsv4_swa_pages is None else self._dsv4_swa_pages.slice_tokens(0, pos)
         )
         child_swa = (
             None
@@ -177,8 +175,6 @@ class RadixPrefixCache(BasePrefixCache):
         self.root_node.ref_count = 1  # root is always protected
         self.dsv4_component_evict_callback: Callable[[DSV4ComponentPageHandles | None], None] | None
         self.dsv4_component_evict_callback = None
-        self.dsv4_component_ownership_enabled = False
-        self.dsv4_swa_independent_lifecycle_enabled = False
         self.dsv4_swa_evict_callback: Callable[[DSV4SWAPageHandles | None, bool], None] | None
         self.dsv4_swa_evict_callback = None
 
@@ -203,7 +199,7 @@ class RadixPrefixCache(BasePrefixCache):
 
     def match_prefix(self, input_ids: torch.Tensor) -> MatchResult:
         node, prefix_len = self._tree_walk(input_ids)
-        if self.dsv4_component_ownership_enabled:
+        if self.dsv4_component_evict_callback is not None:
             node, prefix_len = self._dsv4_safe_match_boundary(node, prefix_len)
         return MatchResult(RadixCacheHandle(prefix_len, node))
 
@@ -213,12 +209,9 @@ class RadixPrefixCache(BasePrefixCache):
         indices: torch.Tensor,
         dsv4_component_pages: DSV4ComponentPageHandles | None = None,
         dsv4_swa_pages: DSV4SWAPageHandles | None = None,
-        dsv4_component_pages_builder: Callable[
-            [int, int], DSV4ComponentPageHandles | None
-        ]
+        dsv4_component_pages_builder: Callable[[int, int], DSV4ComponentPageHandles | None]
         | None = None,
-        dsv4_swa_pages_builder: Callable[[int, int], DSV4SWAPageHandles | None]
-        | None = None,
+        dsv4_swa_pages_builder: Callable[[int, int], DSV4SWAPageHandles | None] | None = None,
     ) -> InsertResult:
         if dsv4_component_pages is not None and dsv4_component_pages_builder is not None:
             raise ValueError(
@@ -237,10 +230,7 @@ class RadixPrefixCache(BasePrefixCache):
             new_node = RadixTreeNode(self.key_fn)
             if dsv4_component_pages_builder is not None:
                 new_components = dsv4_component_pages_builder(prefix_len, insert_len)
-                if (
-                    new_components is not None
-                    and new_components.length != insert_len - prefix_len
-                ):
+                if new_components is not None and new_components.length != insert_len - prefix_len:
                     raise ValueError(
                         "Radix DSV4 component builder returned length mismatch: "
                         f"new_segment={insert_len - prefix_len}, "
@@ -279,9 +269,9 @@ class RadixPrefixCache(BasePrefixCache):
     def evict(self, size: int) -> torch.Tensor:
         if size == 0:
             return self.empty_tensor
-        assert (
-            size <= self.evictable_size
-        ), f"Cannot evict {size}, only {self.evictable_size} is evictable"
+        assert size <= self.evictable_size, (
+            f"Cannot evict {size}, only {self.evictable_size} is evictable"
+        )
 
         leave_nodes = self._collect_leave_nodes_for_evict()
         heapq.heapify(leave_nodes)
@@ -289,9 +279,9 @@ class RadixPrefixCache(BasePrefixCache):
         evicted_size = 0
 
         while evicted_size < size:
-            assert (
-                leave_nodes
-            ), f"Cannot evict enough cache, need {size}, only {evicted_size} evicted"
+            assert leave_nodes, (
+                f"Cannot evict enough cache, need {size}, only {evicted_size} evicted"
+            )
             node = heapq.heappop(leave_nodes)
             assert node.ref_count == 0 and node.is_leaf() and not node.is_root()
             evicted_size += node.length
@@ -393,14 +383,14 @@ class RadixPrefixCache(BasePrefixCache):
         *,
         tail_tokens: int,
     ) -> torch.Tensor:
-        if not self.dsv4_component_ownership_enabled:
-            return self.empty_tensor
         assert isinstance(handle, RadixCacheHandle)
         path = self._path_from_root(handle.node)
         if not path:
             return self.empty_tensor
         tail_tokens = int(tail_tokens)
-        tail_tokens = 0 if tail_tokens <= 0 else align_down(max(tail_tokens, self.page_size), self.page_size)
+        tail_tokens = (
+            0 if tail_tokens <= 0 else align_down(max(tail_tokens, self.page_size), self.page_size)
+        )
         total_len = sum(node.length for node in path)
         releasable_until = align_down(max(total_len - tail_tokens, 0), self.page_size)
         if releasable_until <= 0:
@@ -436,14 +426,14 @@ class RadixPrefixCache(BasePrefixCache):
         *,
         tail_tokens: int,
     ) -> int:
-        if not self.dsv4_swa_independent_lifecycle_enabled:
-            return 0
         assert isinstance(handle, RadixCacheHandle)
         path = self._path_from_root(handle.node)
         if not path:
             return 0
         tail_tokens = int(tail_tokens)
-        tail_tokens = 0 if tail_tokens <= 0 else align_down(max(tail_tokens, self.page_size), self.page_size)
+        tail_tokens = (
+            0 if tail_tokens <= 0 else align_down(max(tail_tokens, self.page_size), self.page_size)
+        )
         total_len = sum(node.length for node in path)
         tombstone_until = align_down(max(total_len - tail_tokens, 0), self.page_size)
         if tombstone_until <= 0:
@@ -470,8 +460,6 @@ class RadixPrefixCache(BasePrefixCache):
         return tombstoned_pages
 
     def release_dsv4_evictable_swa_pages(self, pages: int) -> int:
-        if not self.dsv4_swa_independent_lifecycle_enabled:
-            return 0
         pages = int(pages)
         if pages <= 0:
             return 0
@@ -497,8 +485,6 @@ class RadixPrefixCache(BasePrefixCache):
         handle: BaseCacheHandle,
         swa_pages: torch.Tensor,
     ) -> int:
-        if not self.dsv4_swa_independent_lifecycle_enabled:
-            return 0
         assert isinstance(handle, RadixCacheHandle)
         if swa_pages.numel() == 0:
             return 0
@@ -527,8 +513,6 @@ class RadixPrefixCache(BasePrefixCache):
 
     @property
     def dsv4_evictable_live_full_tokens(self) -> int:
-        if not self.dsv4_component_ownership_enabled:
-            return self.evictable_size
         total = 0
         stack: List[RadixTreeNode] = [self.root_node]
         while stack:
@@ -540,8 +524,6 @@ class RadixPrefixCache(BasePrefixCache):
 
     @property
     def dsv4_evictable_component_tokens(self) -> int:
-        if not self.dsv4_component_ownership_enabled:
-            return self.evictable_size
         total = 0
         stack: List[RadixTreeNode] = [self.root_node]
         while stack:
@@ -557,14 +539,10 @@ class RadixPrefixCache(BasePrefixCache):
 
     @property
     def dsv4_evictable_swa_tokens(self) -> int:
-        if not self.dsv4_swa_independent_lifecycle_enabled:
-            return self.evictable_size
         return self._dsv4_swa_tokens_with_ref(ref_count_zero=True)
 
     @property
     def dsv4_protected_swa_tokens(self) -> int:
-        if not self.dsv4_swa_independent_lifecycle_enabled:
-            return self.protected_size
         return self._dsv4_swa_tokens_with_ref(ref_count_zero=False)
 
     def _dsv4_swa_tokens_with_ref(self, *, ref_count_zero: bool) -> int:
@@ -584,10 +562,7 @@ class RadixPrefixCache(BasePrefixCache):
         prefix_len: int,
     ) -> tuple[RadixTreeNode, int]:
         while not node.is_root():
-            if (
-                self._dsv4_node_has_live_tail(node)
-                and self._dsv4_path_has_state_or_live_tail(node)
-            ):
+            if self._dsv4_node_has_live_tail(node) and self._dsv4_path_has_state_or_live_tail(node):
                 return node, prefix_len
             prefix_len -= node.length
             node = node.parent
@@ -597,8 +572,7 @@ class RadixPrefixCache(BasePrefixCache):
         cur = node
         while not cur.is_root():
             if not (
-                self._dsv4_node_has_independent_state(cur)
-                or self._dsv4_node_has_live_tail(cur)
+                self._dsv4_node_has_independent_state(cur) or self._dsv4_node_has_live_tail(cur)
             ):
                 return False
             cur = cur.parent
@@ -609,12 +583,7 @@ class RadixPrefixCache(BasePrefixCache):
         return bool(handles is not None and handles.has_required_checkpoint_pages)
 
     def _dsv4_node_has_live_tail(self, node: RadixTreeNode) -> bool:
-        if self.dsv4_swa_independent_lifecycle_enabled:
-            return bool(node._dsv4_swa_pages is not None and node._dsv4_swa_pages.has_live_tail)
-        if node.length <= 0 or len(node.value) < self.page_size:
-            return False
-        tail = node.value[-self.page_size :]
-        return bool(torch.all(tail >= 0).item())
+        return bool(node._dsv4_swa_pages is not None and node._dsv4_swa_pages.has_live_tail)
 
     def _tree_walk(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int]:
         prefix_len = 0

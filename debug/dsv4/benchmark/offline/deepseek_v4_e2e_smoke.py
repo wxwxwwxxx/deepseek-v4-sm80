@@ -49,9 +49,6 @@ def _execution_settings(requested_use_pynccl: bool) -> tuple[bool, bool]:
 
 def _jsonable_release() -> dict[str, Any]:
     payload = asdict(DSV4_RELEASE)
-    payload["direct_graph_metadata_groups"] = sorted(
-        payload["direct_graph_metadata_groups"]
-    )
     return payload
 
 
@@ -93,7 +90,9 @@ def _tp_rank_size(args: argparse.Namespace) -> tuple[int, int]:
     if tp_size <= 0:
         raise ValueError("tensor parallel size must be positive")
     if not 0 <= tp_rank < tp_size:
-        raise ValueError(f"tp rank must satisfy 0 <= rank < size, got rank={tp_rank} size={tp_size}")
+        raise ValueError(
+            f"tp rank must satisfy 0 <= rank < size, got rank={tp_rank} size={tp_size}"
+        )
     if tp_size > 1 and env_world_size == 1 and args.tp_rank is None:
         raise ValueError(
             "multi-rank smoke requires torchrun or explicit per-process --tp-rank launch"

@@ -17,6 +17,8 @@ from minisgl.kernel import deepseek_v4 as dsv4_kernel
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.models.config import ModelConfig, RotaryConfig
 
+from debug.dsv4.kernel import deepseek_v4_reference as dsv4_reference
+
 
 def _tiny_dsv4_config(compress_ratios: list[int]) -> ModelConfig:
     return ModelConfig(
@@ -93,22 +95,25 @@ def _install_context(
     page_size: int,
     table_bases: list[int],
     max_len: int,
-    enable_component_loc_ownership: bool = False,
-    enable_swa_independent_lifecycle: bool = False,
 ) -> Context:
     ctx = Context(page_size=page_size)
+    highest_token = max(table_bases) + max_len
+    num_pages = max(512, (highest_token + page_size - 1) // page_size + 1)
     ctx.kv_cache = create_kvcache_pool(
         cfg,
-        num_pages=512,
+        num_pages=num_pages,
         page_size=page_size,
         device=torch.device("cpu"),
-        enable_dsv4_component_loc_ownership=enable_component_loc_ownership,
-        enable_dsv4_swa_independent_lifecycle=enable_swa_independent_lifecycle,
+        dsv4_swa_num_pages=num_pages,
     )
     page_table = torch.full((len(table_bases), max_len), -1, dtype=torch.int32)
     for row, base in enumerate(table_bases):
         page_table[row] = torch.arange(base, base + max_len, dtype=torch.int32)
     ctx.page_table = page_table
+    full_page_starts = torch.unique(
+        page_table.flatten().div(page_size, rounding_mode="floor") * page_size
+    )
+    ctx.kv_cache.on_pages_allocated(full_page_starts, page_size)
     core.set_global_ctx(ctx)
     ctx.attn_backend = create_attention_backend("dsv4", cfg)
     return ctx
@@ -119,18 +124,10 @@ def _prepare_batch(reqs: list[Req]) -> Batch:
     batch = Batch(reqs=reqs, phase="prefill")
     batch.padded_reqs = reqs
     batch.positions = torch.cat(
-        [
-            torch.arange(req.cached_len, req.device_len, dtype=torch.int32)
-            for req in reqs
-        ]
+        [torch.arange(req.cached_len, req.device_len, dtype=torch.int32) for req in reqs]
     )
     batch.out_loc = ctx.page_table[
-        torch.cat(
-            [
-                torch.full((req.extend_len,), req.table_idx, dtype=torch.long)
-                for req in reqs
-            ]
-        ),
+        torch.cat([torch.full((req.extend_len,), req.table_idx, dtype=torch.long) for req in reqs]),
         batch.positions.long(),
     ]
     batch.input_ids = torch.cat([req.input_ids[req.cached_len :] for req in reqs])
@@ -183,13 +180,16 @@ def test_dsv4_swa_window_boundaries_below_equal_and_above_128():
     assert int((meta.swa_page_indices[0] >= 0).sum().item()) == 127
     assert int((meta.swa_page_indices[1] >= 0).sum().item()) == 128
     assert int((meta.swa_page_indices[2] >= 0).sum().item()) == 128
-    assert meta.swa_page_indices[2, 0].item() == 512 + 129
-    assert meta.swa_page_indices[2, 127].item() == 512 + 2
+    expected = core.get_global_ctx().kv_cache.translate_full_locs_to_swa_locs(
+        torch.tensor([512 + 129, 512 + 2], dtype=torch.int32)
+    )
+    assert meta.swa_page_indices[2, 0].item() == expected[0].item()
+    assert meta.swa_page_indices[2, 127].item() == expected[1].item()
 
 
-def test_dsv4_ratio_dispatch_and_fallback_attention_shapes():
+def test_dsv4_ratio_dispatch_uses_release_sparse_attention(monkeypatch):
     cfg = _tiny_dsv4_config([0, 4, 128])
-    ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=260)
+    _install_context(cfg, page_size=128, table_bases=[0], max_len=384)
     batch = _prepare_batch([_req(0, 0, 256)])
     backend = core.get_global_ctx().attn_backend
     backend.prepare_metadata(batch)
@@ -199,11 +199,14 @@ def test_dsv4_ratio_dispatch_and_fallback_attention_shapes():
     assert meta.c4_out_loc[:3].tolist() == [3 // 4, 7 // 4, 11 // 4]
     assert meta.c128_out_loc.tolist() == [127 // 128, 255 // 128]
 
-    ctx.kv_cache.swa_cache(0).zero_()
-    ctx.kv_cache.swa_cache(1).zero_()
-    ctx.kv_cache.swa_cache(2).zero_()
-    ctx.kv_cache.c4_cache(1).zero_()
-    ctx.kv_cache.c128_cache(2).zero_()
+    seen_ratios = []
+
+    def fake_sparse(q, layer_id, metadata, ratio, attn_sink):
+        del layer_id, metadata, attn_sink
+        seen_ratios.append(ratio)
+        return q.clone()
+
+    monkeypatch.setattr(backend, "_sparse_attention", fake_sparse)
 
     q = torch.randn(256, 4, 8, dtype=torch.bfloat16)
     kv = torch.randn(256, 8, dtype=torch.bfloat16)
@@ -219,142 +222,39 @@ def test_dsv4_ratio_dispatch_and_fallback_attention_shapes():
         )
         assert out.shape == q.shape
         assert torch.isfinite(out.float()).all()
+    assert seen_ratios == [0, 4, 128]
 
 
-def test_dsv4_capture_replay_uses_fixed_masked_compressed_locs():
+def test_dsv4_graph_enabled_metadata_prep_fails_closed_without_cuda():
     cfg = _tiny_dsv4_config([4, 128])
-    ctx = _install_context(cfg, page_size=1, table_bases=[0, 512, 1024], max_len=260)
-    reqs = [
-        _req(0, 0, 4, cached_len=3),
-        _req(1, 1, 5, cached_len=4),
-        _req(2, 2, 128, cached_len=127),
-    ]
-    batch = _prepare_decode_batch(reqs)
+    ctx = _install_context(cfg, page_size=256, table_bases=[0], max_len=256)
     backend = ctx.attn_backend
-    backend.prepare_metadata(batch)
-    meta = batch.attn_metadata.core_metadata
-
-    assert meta.c4_out_loc.tolist() == [3 // 4, (1024 + 127) // 4]
-    assert meta.c128_out_loc.tolist() == [(1024 + 127) // 128]
-
-    backend.init_capture_graph(max_seq_len=260, bs_list=[4])
-    backend.prepare_for_replay(batch)
-    assert backend.capture is not None
-    capture = backend.capture.core_metadata
-
-    assert capture.c4_out_loc.tolist() == [3 // 4, -1, (1024 + 127) // 4, -1]
-    assert capture.c128_out_loc.tolist() == [-1, -1, (1024 + 127) // 128, -1]
-    assert backend.capture.c4_compress_metadata.write_loc is capture.c4_out_loc
-    assert backend.capture.c128_compress_metadata.write_loc is capture.c128_out_loc
-
-
-def test_dsv4_capture_replay_can_bind_graph_out_loc_and_positions():
-    cfg = _tiny_dsv4_config([4, 128])
-    ctx = _install_context(cfg, page_size=1, table_bases=[0, 512, 1024], max_len=260)
-    reqs = [
-        _req(0, 0, 4, cached_len=3),
-        _req(1, 1, 5, cached_len=4),
-        _req(2, 2, 128, cached_len=127),
-    ]
-    batch = _prepare_decode_batch(reqs)
-    backend = ctx.attn_backend
-    backend.prepare_metadata(batch)
-
-    backend.init_capture_graph(max_seq_len=260, bs_list=[4])
-    graph_out_loc = torch.full((4,), -123, dtype=torch.int32)
-    graph_positions = torch.full((4,), -456, dtype=torch.int32)
+    backend.init_capture_graph(max_seq_len=256, bs_list=[1])
     backend.bind_capture_graph_inputs(
-        input_ids=torch.empty(4, dtype=torch.int32),
-        out_loc=graph_out_loc,
-        positions=graph_positions,
+        input_ids=torch.empty(1, dtype=torch.int32),
+        out_loc=torch.full((1,), -1, dtype=torch.int32),
+        positions=torch.full((1,), -1, dtype=torch.int32),
     )
-    assert backend.capture is not None
-    capture = backend.capture.core_metadata
-    assert capture.raw_out_loc is graph_out_loc
-    assert capture.positions is graph_positions
-    assert backend.capture.c4_compress_metadata.positions is graph_positions
-    assert backend.capture.c128_compress_metadata.positions is graph_positions
+    assert not backend.prep_metadata_in_graph
+    assert backend.prep_metadata_in_graph_unsupported_reason == "non_cuda_device"
 
-    graph_out_loc[: batch.padded_size].copy_(batch.out_loc)
-    graph_positions[: batch.padded_size].copy_(batch.positions)
-    backend.prepare_for_replay(batch)
-
-    assert capture.raw_out_loc is graph_out_loc
-    assert capture.positions is graph_positions
-    assert capture.raw_out_loc.tolist() == batch.out_loc.tolist() + [-123]
-    assert capture.positions.tolist() == batch.positions.tolist() + [-456]
-    assert capture.c4_out_loc.tolist() == [3 // 4, -1, (1024 + 127) // 4, -1]
-    assert capture.c128_out_loc.tolist() == [-1, -1, (1024 + 127) // 128, -1]
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA graph input tensors")
-def test_dsv4_capture_replay_can_defer_compressed_locs_to_graph_hook(monkeypatch):
-    cfg = _tiny_dsv4_config([4, 128])
-    ctx = _install_context(cfg, page_size=1, table_bases=[0, 512, 1024], max_len=260)
-    reqs = [
-        _req(0, 0, 4, cached_len=3),
-        _req(1, 1, 5, cached_len=4),
-        _req(2, 2, 128, cached_len=127),
-    ]
-    batch = _prepare_decode_batch(reqs)
-    backend = ctx.attn_backend
-    backend.prepare_metadata(batch)
-
-    def fake_triton_enabled() -> bool:
-        return True
-
-    def fake_copy_masked_compressed_locs(
-        raw_out_loc: torch.Tensor,
-        positions: torch.Tensor,
-        c4_out_loc: torch.Tensor | None,
-        c128_out_loc: torch.Tensor | None,
-        rows: int,
-    ) -> None:
-        for dst, ratio in ((c4_out_loc, 4), (c128_out_loc, 128)):
-            assert dst is not None
-            values = torch.where(
-                (positions[:rows] + 1) % ratio == 0,
-                raw_out_loc[:rows].div(ratio, rounding_mode="floor"),
-                torch.full_like(raw_out_loc[:rows], -1),
-            )
-            dst[:rows].copy_(values)
-            dst[rows:].fill_(-1)
-
-    monkeypatch.setattr(dsv4_kernel, "dsv4_triton_available", fake_triton_enabled)
-    monkeypatch.setattr(
-        dsv4_kernel,
-        "copy_masked_compressed_locs",
-        fake_copy_masked_compressed_locs,
-    )
-
-    backend.init_capture_graph(max_seq_len=260, bs_list=[4])
-    graph_out_loc = torch.full((4,), -123, dtype=torch.int32, device="cuda")
-    graph_positions = torch.full((4,), -456, dtype=torch.int32, device="cuda")
-    backend.bind_capture_graph_inputs(
-        input_ids=torch.empty(4, dtype=torch.int32, device="cuda"),
-        out_loc=graph_out_loc,
-        positions=graph_positions,
-    )
-    assert backend.capture_compressed_locs_in_graph
-    assert backend.capture is not None
-    capture = backend.capture.core_metadata
-
-    graph_out_loc[: batch.padded_size].copy_(batch.out_loc)
-    graph_positions[: batch.padded_size].copy_(batch.positions)
-    backend.prepare_for_replay(batch)
-
-    assert capture.c4_out_loc.tolist() == [-1, -1, -1, -1]
-    assert capture.c128_out_loc.tolist() == [-1, -1, -1, -1]
-
-    capture_batch = Batch(reqs=[reqs[0]] * 4, phase="decode")
+    capture_batch = Batch(reqs=[_req(0, 0, 1)], phase="decode")
     capture_batch.padded_reqs = capture_batch.reqs
     backend.prepare_for_capture(capture_batch)
-    backend.stage_capture_metadata_for_graph(capture_batch)
-
-    assert capture.c4_out_loc.tolist() == [3 // 4, -1, (1024 + 127) // 4, -1]
-    assert capture.c128_out_loc.tolist() == [-1, -1, (1024 + 127) // 128, -1]
+    with pytest.raises(RuntimeError, match="unsupported_reason=non_cuda_device"):
+        backend.stage_capture_metadata_for_graph(capture_batch)
 
 
+def test_dsv4_explicit_graph_disabled_mode_needs_no_capture_surfaces():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=4, table_bases=[0], max_len=16)
+    backend = ctx.attn_backend
+
+    backend.init_capture_graph(max_seq_len=16, bs_list=[])
+
+    assert backend.capture is None
+    assert not backend.prep_metadata_in_graph
+    assert backend.prep_metadata_in_graph_unsupported_reason == "cuda_graph_disabled"
 
 
 def test_dsv4_masked_compressed_store_ignores_negative_locs():
@@ -365,13 +265,13 @@ def test_dsv4_masked_compressed_store_ignores_negative_locs():
     kv = torch.tensor([[11.0] + [0.0] * 7, [22.0] + [0.0] * 7], dtype=cache.dtype)
     loc = torch.tensor([-1, 2], dtype=torch.int32)
 
-    dsv4_kernel.store_compressed_fallback(ctx.kv_cache, 0, kv, loc)
+    dsv4_reference.store_compressed_fallback(ctx.kv_cache, 0, kv, loc)
 
     assert cache[2, 0].item() == pytest.approx(22.0)
     assert cache[-1, 0].item() == pytest.approx(0.0)
 
 
-def test_dsv4_indexer_select_updates_c4_sparse_metadata():
+def test_dsv4_indexer_select_updates_c4_sparse_metadata(monkeypatch):
     cfg = _tiny_dsv4_config([4])
     ctx = _install_context(cfg, page_size=4, table_bases=[0], max_len=16)
     batch = _prepare_decode_batch([_req(0, 0, 16, cached_len=15)])
@@ -379,24 +279,29 @@ def test_dsv4_indexer_select_updates_c4_sparse_metadata():
     backend.prepare_metadata(batch)
     assert isinstance(batch.attn_metadata, DSV4AttentionMetadata)
 
-    cache = ctx.kv_cache.indexer_cache(0)
-    cache.zero_()
-    cache[:4] = torch.tensor(
-        [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 3.0, 0.0, 0.0],
-            [4.0, 0.0, 0.0, 0.0],
-            [0.0, 2.0, 0.0, 0.0],
-        ],
-        dtype=cache.dtype,
+    selected = torch.tensor([[2, 1]], dtype=torch.int32)
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "indexer_select_fp8_paged",
+        lambda *args, **kwargs: dsv4_kernel.DSV4IndexerSelectOutput(
+            logits=torch.empty(0, 0),
+            topk=dsv4_kernel.DSV4TopKTransformOutput(
+                raw_indices=selected,
+                page_indices=selected,
+                full_indices=selected * 4 + 3,
+                backend="test",
+                topk_lens=torch.tensor([2], dtype=torch.int32),
+            ),
+            backend="test",
+        ),
     )
     q = torch.tensor(
         [[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]],
-        dtype=cache.dtype,
+        dtype=torch.bfloat16,
     )
     weights = torch.ones(1, 2, dtype=torch.float32)
 
-    out = backend.select_indexer(0, q, weights, batch)
+    out = backend.select_indexer_fp8(0, q, weights, batch)
 
     assert out is not None
     meta = batch.attn_metadata.core_metadata
@@ -407,7 +312,7 @@ def test_dsv4_indexer_select_updates_c4_sparse_metadata():
     assert meta.c4_sparse_raw_indices.shape[1] % 64 == 0
 
 
-def test_dsv4_indexer_select_preserves_metadata_buffer_identity():
+def test_dsv4_indexer_select_preserves_metadata_buffer_identity(monkeypatch):
     cfg = _tiny_dsv4_config([4])
     ctx = _install_context(cfg, page_size=4, table_bases=[0], max_len=16)
     backend = ctx.attn_backend
@@ -423,11 +328,26 @@ def test_dsv4_indexer_select_preserves_metadata_buffer_identity():
     full_indices = meta.c4_sparse_full_indices
     topk_lengths = meta.c4_sparse_topk_lengths
 
-    ctx.kv_cache.indexer_cache(0).zero_()
+    selected = torch.tensor([[0, 1]], dtype=torch.int32)
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "indexer_select_fp8_paged",
+        lambda *args, **kwargs: dsv4_kernel.DSV4IndexerSelectOutput(
+            logits=torch.empty(0, 0),
+            topk=dsv4_kernel.DSV4TopKTransformOutput(
+                raw_indices=selected,
+                page_indices=selected,
+                full_indices=selected * 4 + 3,
+                backend="test",
+                topk_lens=torch.tensor([2], dtype=torch.int32),
+            ),
+            backend="test",
+        ),
+    )
     q = torch.ones(1, cfg.index_n_heads, cfg.index_head_dim, dtype=torch.bfloat16)
     weights = torch.ones(1, cfg.index_n_heads, dtype=torch.float32)
 
-    out = backend.select_indexer(0, q, weights, batch)
+    out = backend.select_indexer_fp8(0, q, weights, batch)
 
     assert out is not None
     assert meta.c4_sparse_raw_indices is raw_indices
@@ -437,7 +357,7 @@ def test_dsv4_indexer_select_preserves_metadata_buffer_identity():
     assert meta.c4_sparse_topk_lengths[0].item() > 0
 
 
-def test_dsv4_indexer_select_uses_c4_attention_table_for_attention_rows():
+def test_dsv4_indexer_select_uses_c4_attention_table_for_attention_rows(monkeypatch):
     cfg = _tiny_dsv4_config([4])
     page_size = 128
     ctx = _install_context(
@@ -445,9 +365,7 @@ def test_dsv4_indexer_select_uses_c4_attention_table_for_attention_rows():
         page_size=page_size,
         table_bases=[0],
         max_len=page_size,
-        enable_component_loc_ownership=True,
     )
-    ctx.kv_cache.on_pages_allocated(torch.tensor([0], dtype=torch.int32), page_size)
     batch = _prepare_decode_batch([_req(0, 0, page_size, cached_len=page_size - 1)])
     backend = ctx.attn_backend
     backend.prepare_metadata(batch)
@@ -458,11 +376,26 @@ def test_dsv4_indexer_select_uses_c4_attention_table_for_attention_rows():
 
     meta.c4_page_table[0, 0] = 10
     meta.c4_indexer_page_table[0, 0] = 20
-    ctx.kv_cache.indexer_cache(0).zero_()
+    selected = torch.tensor([[0, 1]], dtype=torch.int32)
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "indexer_select_fp8_paged",
+        lambda *args, **kwargs: dsv4_kernel.DSV4IndexerSelectOutput(
+            logits=torch.empty(0, 0),
+            topk=dsv4_kernel.DSV4TopKTransformOutput(
+                raw_indices=selected,
+                page_indices=selected,
+                full_indices=selected * 4 + 3,
+                backend="test",
+                topk_lens=torch.tensor([2], dtype=torch.int32),
+            ),
+            backend="test",
+        ),
+    )
     q = torch.ones(1, cfg.index_n_heads, cfg.index_head_dim, dtype=torch.bfloat16)
     weights = torch.ones(1, cfg.index_n_heads, dtype=torch.float32)
 
-    out = backend.select_indexer(0, q, weights, batch)
+    out = backend.select_indexer_fp8(0, q, weights, batch)
 
     assert out is not None
     active = int(meta.c4_sparse_topk_lengths[0].item())
@@ -476,9 +409,7 @@ def test_dsv4_indexer_select_uses_c4_attention_table_for_attention_rows():
         meta.c4_page_table[0, logical_pages].to(torch.long) * component_page_size + offsets
     ).tolist()
     expected_indexer_locs = (
-        meta.c4_indexer_page_table[0, logical_pages].to(torch.long)
-        * component_page_size
-        + offsets
+        meta.c4_indexer_page_table[0, logical_pages].to(torch.long) * component_page_size + offsets
     ).tolist()
     expected_full_locs = ctx.page_table[0, raw * 4 + 3].tolist()
     assert meta.c4_sparse_page_indices[0, :active].tolist() == expected_attention_locs
@@ -486,7 +417,7 @@ def test_dsv4_indexer_select_uses_c4_attention_table_for_attention_rows():
     assert meta.c4_sparse_full_indices[0, :active].tolist() == expected_full_locs
 
 
-def test_dsv4_component_loc_ownership_metadata_uses_direct_component_tables():
+def test_dsv4_metadata_uses_structural_direct_component_tables():
     cfg = _tiny_dsv4_config([4, 128])
     page_size = 128
     ctx = _install_context(
@@ -494,10 +425,7 @@ def test_dsv4_component_loc_ownership_metadata_uses_direct_component_tables():
         page_size=page_size,
         table_bases=[0],
         max_len=384,
-        enable_component_loc_ownership=True,
     )
-    page_starts = torch.tensor([0, page_size, 2 * page_size], dtype=torch.int32)
-    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
     prefix_handles = ctx.kv_cache.make_component_page_handles(
         ctx.page_table[0, : 2 * page_size],
         page_size,
@@ -517,7 +445,6 @@ def test_dsv4_component_loc_ownership_metadata_uses_direct_component_tables():
     ctx.attn_backend.prepare_metadata(batch)
     meta = batch.attn_metadata.core_metadata
 
-    assert meta.component_loc_ownership
     assert meta.c128_page_indices[0, :2].tolist() == [0, 1]
     assert meta.c128_full_indices[0, :2].tolist() == [-1, 255]
     assert batch.attn_metadata.indexer_metadata.page_table[0, :3].tolist() == [0, 1, 2]
@@ -533,13 +460,7 @@ def test_dsv4_release_eager_c128_dispatches_one_surface_with_ragged_prefix_rows(
         page_size=page_size,
         table_bases=[0, 4 * page_size],
         max_len=2 * page_size,
-        enable_component_loc_ownership=True,
     )
-    page_starts = torch.tensor(
-        [0, page_size, 4 * page_size, 5 * page_size],
-        dtype=torch.int32,
-    )
-    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
     prefix_handles = ctx.kv_cache.make_component_page_handles(
         ctx.page_table[0, :page_size],
         page_size,
@@ -547,9 +468,7 @@ def test_dsv4_release_eager_c128_dispatches_one_surface_with_ragged_prefix_rows(
     assert prefix_handles is not None
 
     prefix_req = _req(0, 0, 258, cached_len=256)
-    prefix_req.cache_handle = SimpleNamespace(
-        get_dsv4_component_pages=lambda: prefix_handles
-    )
+    prefix_req.cache_handle = SimpleNamespace(get_dsv4_component_pages=lambda: prefix_handles)
     boundary_req = _req(1, 1, 129, cached_len=126)
     batch = _prepare_batch([prefix_req, boundary_req])
     backend = ctx.attn_backend
@@ -587,7 +506,7 @@ def test_dsv4_release_eager_c128_dispatches_one_surface_with_ragged_prefix_rows(
     monkeypatch.setattr(backend, "_build_release_eager_c128_one_surface", fake_one_surface)
     monkeypatch.setattr(
         backend,
-        "_materialize_c128_raw_page_full_oracle",
+        "_materialize_c128_raw_page_full_reference",
         lambda *args, **kwargs: pytest.fail("release eager path materialized raw/full"),
     )
 
@@ -619,7 +538,6 @@ def test_dsv4_release_eager_metadata_calls_native_c128_one_surface(monkeypatch):
         num_pages=8,
         page_size=page_size,
         device=device,
-        enable_dsv4_component_loc_ownership=True,
     )
     ctx.page_table = torch.arange(
         2 * page_size,
@@ -694,7 +612,7 @@ def test_dsv4_release_eager_c128_helper_unavailable_fails_closed(monkeypatch):
         dsv4_kernel,
         "detect_dsv4_kernel_capabilities",
         lambda: SimpleNamespace(
-            is_sm80=True,
+            is_ampere=True,
             triton_available=True,
             cuda_capability=(8, 0),
         ),
@@ -718,43 +636,33 @@ def test_dsv4_release_eager_c128_helper_unavailable_fails_closed(monkeypatch):
         )
 
 
-def test_dsv4_explicit_c128_oracle_keeps_legacy_raw_full_materialization(monkeypatch):
-    cfg = _tiny_dsv4_config([128])
-    page_size = 256
-    ctx = _install_context(
-        cfg,
-        page_size=page_size,
-        table_bases=[0],
-        max_len=2 * page_size,
-        enable_component_loc_ownership=True,
-    )
-    ctx.kv_cache.on_pages_allocated(
-        torch.tensor([0, page_size], dtype=torch.int32),
-        page_size,
-    )
-    batch = _prepare_batch([_req(0, 0, 258, cached_len=256)])
-    backend = ctx.attn_backend
-    monkeypatch.setattr(
-        backend,
-        "_explicit_c128_raw_full_oracle_requested",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        backend,
-        "_build_release_eager_c128_one_surface",
-        lambda *args, **kwargs: pytest.fail("explicit oracle used one-surface placeholders"),
+@pytest.mark.parametrize(
+    ("is_decode", "device_type", "expected"),
+    [
+        (False, "cpu", True),
+        (True, "cuda", True),
+        (True, "cpu", False),
+    ],
+)
+def test_dsv4_release_eager_c128_one_surface_phase_contract(
+    is_decode,
+    device_type,
+    expected,
+):
+    backend = object.__new__(DSV4AttentionBackend)
+    backend.device = torch.device(device_type)
+    backend.page_size = 256
+
+    assert (
+        backend._release_eager_c128_one_surface_configured(
+            SimpleNamespace(is_decode=is_decode),
+            has_c128=True,
+        )
+        is expected
     )
 
-    backend.prepare_metadata(batch)
-    meta = batch.attn_metadata.core_metadata
 
-    assert meta.c128_raw_indices.shape == (2, 64)
-    assert meta.c128_full_indices.shape == (2, 64)
-    assert meta.c128_raw_indices[:, :2].tolist() == [[0, 1], [0, 1]]
-    assert meta.c128_full_indices[:, :2].tolist() == [[127, 255], [127, 255]]
-
-
-def test_dsv4_release_toggle_does_not_change_decode_graph_c128_contract(monkeypatch):
+def test_dsv4_graph_replay_rejects_eager_full_metadata(monkeypatch):
     cfg = _tiny_dsv4_config([4, 128])
     page_size = 256
     ctx = _install_context(
@@ -762,11 +670,6 @@ def test_dsv4_release_toggle_does_not_change_decode_graph_c128_contract(monkeypa
         page_size=page_size,
         table_bases=[0],
         max_len=2 * page_size,
-        enable_component_loc_ownership=True,
-    )
-    ctx.kv_cache.on_pages_allocated(
-        torch.tensor([0, page_size], dtype=torch.int32),
-        page_size,
     )
     req = _req(0, 0, 256, cached_len=255)
     batch = _prepare_decode_batch([req])
@@ -787,23 +690,11 @@ def test_dsv4_release_toggle_does_not_change_decode_graph_c128_contract(monkeypa
 
     backend.init_capture_graph(max_seq_len=2 * page_size, bs_list=[1])
     assert backend.capture is not None
-    capture = backend.capture.core_metadata
-    pointers = (
-        capture.c128_raw_indices.data_ptr(),
-        capture.c128_page_indices.data_ptr(),
-        capture.c128_full_indices.data_ptr(),
-    )
-    backend.prepare_for_replay(batch)
-    assert pointers == (
-        capture.c128_raw_indices.data_ptr(),
-        capture.c128_page_indices.data_ptr(),
-        capture.c128_full_indices.data_ptr(),
-    )
-    assert capture.c128_raw_indices[0, :2].tolist() == [0, 1]
-    assert capture.c128_full_indices[0, :2].tolist() == [127, 255]
+    with pytest.raises(RuntimeError, match="requires raw in-graph DSV4 metadata"):
+        backend.prepare_for_replay(batch)
 
 
-def test_dsv4_component_loc_ownership_capture_replay_copies_direct_component_metadata():
+def test_dsv4_component_metadata_eager_path_uses_direct_tables():
     cfg = _tiny_dsv4_config([4, 128])
     page_size = 128
     base = 1024
@@ -812,10 +703,7 @@ def test_dsv4_component_loc_ownership_capture_replay_copies_direct_component_met
         page_size=page_size,
         table_bases=[base],
         max_len=384,
-        enable_component_loc_ownership=True,
     )
-    page_starts = torch.tensor([base, base + page_size], dtype=torch.int32)
-    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
     prefix_handles = ctx.kv_cache.make_component_page_handles(
         ctx.page_table[0, : 2 * page_size],
         page_size,
@@ -835,7 +723,6 @@ def test_dsv4_component_loc_ownership_capture_replay_copies_direct_component_met
     backend.prepare_metadata(batch)
     src = batch.attn_metadata.core_metadata
 
-    assert src.component_loc_ownership
     assert src.c4_out_loc.tolist() == [63]
     assert src.c128_out_loc.tolist() == [1]
     assert src.c4_indexer_out_loc.tolist() == [63]
@@ -843,23 +730,12 @@ def test_dsv4_component_loc_ownership_capture_replay_copies_direct_component_met
     assert int(batch.out_loc[0].item() // 128) == 9
 
     backend.init_capture_graph(max_seq_len=384, bs_list=[1])
-    backend.prepare_for_replay(batch)
-
-    assert backend.capture is not None
-    capture = backend.capture.core_metadata
-    assert capture.component_loc_ownership
-    assert capture.c4_page_table[0, :3].tolist() == [0, 1, -1]
-    assert capture.c128_page_table[0, :3].tolist() == [0, 1, -1]
-    assert capture.c4_indexer_page_table[0, :3].tolist() == [0, 1, -1]
-    assert capture.c4_out_loc.tolist() == [63]
-    assert capture.c128_out_loc.tolist() == [1]
-    assert capture.c4_indexer_out_loc.tolist() == [63]
-    assert capture.c4_indexer_out_loc is not capture.c4_out_loc
+    with pytest.raises(RuntimeError, match="requires raw in-graph DSV4 metadata"):
+        backend.prepare_for_replay(batch)
     assert batch.attn_metadata.indexer_metadata.page_table is src.c4_indexer_page_table
-    assert backend.capture.indexer_metadata.page_table is capture.c4_indexer_page_table
 
 
-def test_dsv4_graph_replay_exposes_online_c4_and_c128_current_boundaries():
+def test_dsv4_eager_metadata_exposes_online_c4_and_c128_current_boundaries():
     cfg = _tiny_dsv4_config([4, 128])
     page_size = 128
     ctx = _install_context(
@@ -867,10 +743,7 @@ def test_dsv4_graph_replay_exposes_online_c4_and_c128_current_boundaries():
         page_size=page_size,
         table_bases=[0],
         max_len=512,
-        enable_component_loc_ownership=True,
     )
-    page_starts = torch.arange(0, 4 * page_size, page_size, dtype=torch.int32)
-    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
     prefix_handles = ctx.kv_cache.make_component_page_handles(
         ctx.page_table[0, : 2 * page_size],
         page_size,
@@ -891,20 +764,6 @@ def test_dsv4_graph_replay_exposes_online_c4_and_c128_current_boundaries():
     assert src.c4_sparse_page_indices[0, :2].tolist() == [94, 95]
     assert src.c128_raw_indices[0, :3].tolist() == [0, 1, 2]
 
-    backend.init_capture_graph(max_seq_len=512, bs_list=[1])
-    backend.prepare_for_replay(batch)
-
-    assert backend.capture is not None
-    capture = backend.capture.core_metadata
-    assert src.c4_topk_lengths_raw.tolist() == [96]
-    assert src.c4_sparse_raw_indices[0, :2].tolist() == [94, 95]
-    assert capture.c4_topk_lengths_raw.tolist() == [96]
-    assert capture.c4_sparse_raw_indices[0, :2].tolist() == [94, 95]
-    assert capture.c4_sparse_page_indices[0, :2].tolist() == [94, 95]
-    assert capture.c128_raw_indices[0, :3].tolist() == [0, 1, 2]
-
-
-
 
 def test_dsv4_route_b_component_page_table_lifetime_cache_invalidates_lifecycle(
     monkeypatch,
@@ -916,12 +775,8 @@ def test_dsv4_route_b_component_page_table_lifetime_cache_invalidates_lifecycle(
         page_size=page_size,
         table_bases=[0, 4 * page_size, 8 * page_size],
         max_len=4 * page_size,
-        enable_component_loc_ownership=True,
     )
-    page_starts = torch.arange(0, 12 * page_size, page_size, dtype=torch.int32)
-    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
     backend = ctx.attn_backend
-
 
     def cache_handle(row: int, cached_pages: int, node_uuid: int) -> SimpleNamespace:
         prefix_len = cached_pages * page_size
@@ -970,33 +825,6 @@ def test_dsv4_route_b_component_page_table_lifetime_cache_invalidates_lifecycle(
     assert decode_c4_pages(grown_active_page) == [8, 9, 10, 11]
 
 
-def test_dsv4_component_loc_ownership_capture_locs_graph_hook_is_guarded(monkeypatch):
-    cfg = _tiny_dsv4_config([4, 128])
-    ctx = _install_context(
-        cfg,
-        page_size=128,
-        table_bases=[0],
-        max_len=256,
-        enable_component_loc_ownership=True,
-    )
-    backend = ctx.attn_backend
-    monkeypatch.setattr(
-        dsv4_kernel,
-        "dsv4_triton_available",
-        lambda: True,
-    )
-
-    backend.init_capture_graph(max_seq_len=256, bs_list=[4])
-    backend.bind_capture_graph_inputs(
-        input_ids=torch.empty(4, dtype=torch.int32),
-        out_loc=torch.full((4,), -1, dtype=torch.int32),
-        positions=torch.full((4,), -1, dtype=torch.int32),
-    )
-
-    assert backend.capture_compressed_locs_in_graph_component_guarded
-    assert not backend.capture_compressed_locs_in_graph
-
-
 def test_dsv4_metadata_repeats_page_table_for_multi_request_batch():
     cfg = _tiny_dsv4_config([4])
     _install_context(cfg, page_size=4, table_bases=[0, 64], max_len=12)
@@ -1020,11 +848,7 @@ def _install_independent_swa_context(page_size: int = 4, max_len: int = 16) -> C
         page_size=page_size,
         table_bases=[0],
         max_len=max_len,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
     )
-    page_starts = torch.arange(0, max_len, page_size, dtype=torch.int32)
-    ctx.kv_cache.on_pages_allocated(page_starts, page_size)
     return ctx
 
 
@@ -1037,12 +861,6 @@ def test_dsv4_independent_swa_page_table_cache_reuses_and_invalidates(monkeypatc
         page_size=page_size,
         table_bases=[0, max_len],
         max_len=max_len,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
-    )
-    ctx.kv_cache.on_pages_allocated(
-        torch.arange(0, 2 * max_len, page_size, dtype=torch.int32),
-        page_size,
     )
     backend = ctx.attn_backend
 
@@ -1073,7 +891,6 @@ def test_dsv4_independent_swa_page_table_cache_reuses_and_invalidates(monkeypatc
             req.device_len,
             table_indices=torch.tensor([req.table_idx], dtype=torch.int32),
             use_cache=True,
-            timing_base={},
         )
         logical_pages = (req.device_len + page_size - 1) // page_size
         assert backend._swa_page_table_cache is not None
@@ -1113,12 +930,6 @@ def test_dsv4_independent_swa_direct_token_metadata_matches_page_table_and_wins(
         page_size=page_size,
         table_bases=[base],
         max_len=max_len,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
-    )
-    ctx.kv_cache.on_pages_allocated(
-        torch.arange(base, base + max_len, page_size, dtype=torch.int32),
-        page_size,
     )
     backend = ctx.attn_backend
     req = _req(21, 0, 2 * page_size + 1, cached_len=2 * page_size)
@@ -1127,7 +938,6 @@ def test_dsv4_independent_swa_direct_token_metadata_matches_page_table_and_wins(
     table = backend._make_swa_page_tables_uncached(
         [req],
         req.device_len,
-        timing_base={},
     )
     expected = backend._make_swa_indices_from_page_table(table, batch.positions)
 
@@ -1140,33 +950,6 @@ def test_dsv4_independent_swa_direct_token_metadata_matches_page_table_and_wins(
     assert meta.swa_page_indices[0, 0].item() != ctx.page_table[0, req.device_len - 1].item()
 
 
-
-
-
-
-
-
-
-
-def test_dsv4_cuda_graph_replay_rejects_stale_swa_metadata_version():
-    ctx = _install_independent_swa_context(max_len=32)
-    req = _req(0, 0, 8, cached_len=7)
-    batch = _prepare_decode_batch([req])
-    backend = ctx.attn_backend
-    backend.prepare_metadata(batch)
-    backend.init_capture_graph(max_seq_len=16, bs_list=[1])
-    assert backend.capture is not None
-
-    ctx.kv_cache.release_swa_for_full_indices(
-        ctx.page_table[0, 4 * ctx.page_size : 5 * ctx.page_size],
-        ctx.page_size,
-        tombstone=True,
-    )
-
-    with pytest.raises(RuntimeError, match="ownership version is stale"):
-        backend._copy_metadata_for_replay(backend.capture, batch.attn_metadata, 1)
-
-
 def test_dsv4_raw_graph_metadata_copy_uses_source_swa_version_for_guard():
     cfg = _tiny_dsv4_config([4, 128])
     page_size = 4
@@ -1175,10 +958,7 @@ def test_dsv4_raw_graph_metadata_copy_uses_source_swa_version_for_guard():
         page_size=page_size,
         table_bases=[0],
         max_len=16,
-        enable_component_loc_ownership=True,
-        enable_swa_independent_lifecycle=True,
     )
-    ctx.kv_cache.on_pages_allocated(torch.arange(0, 16, page_size, dtype=torch.int32), page_size)
     backend = ctx.attn_backend
     backend.init_capture_graph(max_seq_len=16, bs_list=[1])
     assert backend.capture is not None
@@ -1198,34 +978,3 @@ def test_dsv4_raw_graph_metadata_copy_uses_source_swa_version_for_guard():
     raw.swa_ownership_version = current - 1
     with pytest.raises(RuntimeError, match="raw graph metadata ownership version is stale"):
         backend._copy_raw_decode_graph_metadata_for_replay(raw, rows=1)
-
-
-def test_dsv4_cuda_graph_replay_rebuilds_stale_swa_metadata_version():
-    ctx = _install_independent_swa_context(max_len=32)
-    req = _req(0, 0, 16, cached_len=15)
-    batch = _prepare_decode_batch([req])
-    backend = ctx.attn_backend
-    backend.prepare_metadata(batch)
-    backend.init_capture_graph(max_seq_len=16, bs_list=[1])
-    assert backend.capture is not None
-
-    ctx.kv_cache.release_swa_for_full_indices(
-        ctx.page_table[0, 4 * ctx.page_size : 5 * ctx.page_size],
-        ctx.page_size,
-        tombstone=True,
-    )
-    backend.prepare_for_replay(batch)
-
-    assert batch.attn_metadata.core_metadata.swa_ownership_version == ctx.kv_cache.swa_ownership_version
-    assert backend.capture.core_metadata.swa_ownership_version == ctx.kv_cache.swa_ownership_version
-
-
-def test_dsv4_cuda_graph_replay_keeps_direct_swa_disabled_under_independent():
-    ctx = _install_independent_swa_context()
-    req = _req(0, 0, 8, cached_len=7)
-    batch = _prepare_decode_batch([req])
-
-    ctx.attn_backend.prepare_metadata(batch)
-
-    meta = batch.attn_metadata.core_metadata
-    assert not meta.swa_source_elided_for_graph

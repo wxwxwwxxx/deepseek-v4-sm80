@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from minisgl.attention import create_attention_backend
+from minisgl.attention.deepseek_v4 import DSV4AttentionMetadata
 from minisgl.core import Context
 from minisgl.distributed import set_tp_info
 from minisgl.kernel import deepseek_v4 as dsv4_kernel
@@ -73,7 +74,7 @@ def _reset_globals(*, tp_rank: int = 0, tp_size: int = 1) -> None:
     set_tp_info(tp_rank, tp_size)
 
 
-def test_reference_fp8_linear_preserves_loaded_scale(monkeypatch):
+def test_fp8_linear_requires_prepared_release_weight_cache():
     _reset_globals()
     linear = DSV4Linear(
         128,
@@ -81,16 +82,8 @@ def test_reference_fp8_linear_preserves_loaded_scale(monkeypatch):
         weight_dtype=dsv4_kernel.fp8_dtype(),
         scale_dtype=dsv4_kernel.e8m0_dtype(),
     )
-    captured = {}
-
-    def fake_quantized_linear(x, weight, scale, **kwargs):
-        captured["scale"] = scale
-        return torch.zeros((*x.shape[:-1], weight.shape[0]), dtype=x.dtype)
-
-    monkeypatch.setattr(dsv4_kernel, "quantized_linear_ref", fake_quantized_linear)
-    linear.forward(torch.zeros(1, 128, dtype=torch.bfloat16))
-
-    assert captured["scale"] is linear.weight_scale_inv
+    with pytest.raises(RuntimeError, match="prepared BF16 weight cache"):
+        linear.forward(torch.zeros(1, 128, dtype=torch.bfloat16))
 
 
 def test_cached_bf16_small_gemm_uses_linear(monkeypatch):
@@ -156,24 +149,16 @@ def _install_dsv4_context(cfg: ModelConfig, *, max_len: int) -> Context:
     return ctx
 
 
-def test_dsv4_attention_swa_store_out_loc_translates_independent_lifecycle():
+def test_dsv4_attention_swa_store_out_loc_uses_prepared_metadata():
     full_locs = torch.tensor([34004, -1], dtype=torch.int32)
-    translated_locs = torch.tensor([900, -1], dtype=torch.int64)
+    translated_locs = torch.tensor([900, -1], dtype=torch.int32)
+    metadata = object.__new__(DSV4AttentionMetadata)
+    metadata.core_attn_metadata = SimpleNamespace(swa_out_loc=translated_locs)
+    batch = SimpleNamespace(attn_metadata=metadata, out_loc=full_locs)
 
-    class FakeKVCache:
-        swa_independent_lifecycle_enabled = True
+    out = DSV4Attention._swa_store_out_loc(batch)
 
-        def translate_full_locs_to_swa_locs(self, locs):
-            assert locs is full_locs
-            return translated_locs
-
-    out = DSV4Attention._swa_store_out_loc(
-        SimpleNamespace(kvcache=FakeKVCache()),
-        full_locs,
-    )
-
-    assert out.dtype is full_locs.dtype
-    assert out.device == full_locs.device
+    assert torch.equal(out, translated_locs)
     assert out.tolist() == [900, -1]
 
 
@@ -444,7 +429,7 @@ def test_deepseek_v4_vllm_runner_sums_routed_and_shared_before_late_reduce(monke
 
     fake_comm = FakeComm()
     moe._comm = fake_comm
-    calls: list[tuple[str, bool]] = []
+    calls: list[str] = []
     seen_plans: list[dsv4_kernel.DSV4MoEExecutionPlan] = []
 
     def fake_gate_forward(*args, **kwargs):
@@ -454,15 +439,15 @@ def test_deepseek_v4_vllm_runner_sums_routed_and_shared_before_late_reduce(monke
             torch.zeros(hidden.shape[0], 1, dtype=torch.long),
         )
 
-    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+    def fake_experts_forward(hidden, weights, indices, *, moe_plan=None):
         del weights, indices
-        calls.append(("routed", reduce))
+        calls.append("routed")
         assert moe_plan is not None
         seen_plans.append(moe_plan)
         return torch.full_like(hidden, 1.25)
 
-    def fake_shared_forward(hidden, *, reduce=True):
-        calls.append(("shared", reduce))
+    def fake_shared_forward(hidden):
+        calls.append("shared")
         return torch.full_like(hidden, 2.75)
 
     moe.gate.forward = fake_gate_forward
@@ -473,7 +458,7 @@ def test_deepseek_v4_vllm_runner_sums_routed_and_shared_before_late_reduce(monke
     input_ids = torch.zeros(2, 1, dtype=torch.long)
     out = moe.forward(hidden, input_ids)
 
-    assert calls == [("routed", False), ("shared", False)]
+    assert calls == ["routed", "shared"]
     assert len(seen_plans) == 1
     assert seen_plans[0].tokens == 2
     assert seen_plans[0].route_plan.route_count == 2
@@ -507,14 +492,12 @@ def test_deepseek_v4_vllm_runner_reduce_once_bf16_opt_in(monkeypatch):
             torch.zeros(hidden.shape[0], 1, dtype=torch.long),
         )
 
-    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+    def fake_experts_forward(hidden, weights, indices, *, moe_plan=None):
         del weights, indices
-        assert reduce is False
         assert moe_plan is not None
         return torch.full_like(hidden, 1.25)
 
-    def fake_shared_forward(hidden, *, reduce=True):
-        assert reduce is False
+    def fake_shared_forward(hidden):
         return torch.full_like(hidden, 2.75)
 
     moe.gate.forward = fake_gate_forward
@@ -545,9 +528,8 @@ def test_deepseek_v4_vllm_runner_routed_only_path(monkeypatch):
             torch.zeros(hidden.shape[0], 1, dtype=torch.long),
         )
 
-    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+    def fake_experts_forward(hidden, weights, indices, *, moe_plan=None):
         del weights, indices
-        assert reduce is False
         assert moe_plan is not None
         return torch.full_like(hidden, 5.0)
 
@@ -573,14 +555,12 @@ def test_deepseek_v4_vllm_runner_shared_only_effect(monkeypatch):
             torch.zeros(hidden.shape[0], 1, dtype=torch.long),
         )
 
-    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+    def fake_experts_forward(hidden, weights, indices, *, moe_plan=None):
         del weights, indices
-        assert reduce is False
         assert moe_plan is not None
         return torch.zeros_like(hidden)
 
-    def fake_shared_forward(hidden, *, reduce=True):
-        assert reduce is False
+    def fake_shared_forward(hidden):
         return torch.full_like(hidden, 7.0)
 
     moe.gate.forward = fake_gate_forward
@@ -604,9 +584,8 @@ def test_deepseek_v4_vllm_runner_hash_routing_uses_input_ids(monkeypatch):
     moe.topk.tid2eid[4, 0] = 0
     seen_indices: list[torch.Tensor] = []
 
-    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+    def fake_experts_forward(hidden, weights, indices, *, moe_plan=None):
         del weights
-        assert reduce is False
         assert moe_plan is not None
         seen_indices.append(indices.clone())
         return torch.zeros_like(hidden)
@@ -629,9 +608,8 @@ def test_deepseek_v4_vllm_runner_correction_bias_routing(monkeypatch):
     moe.gate.e_score_correction_bias.copy_(torch.tensor([0.0, 4.0]))
     seen_indices: list[torch.Tensor] = []
 
-    def fake_experts_forward(hidden, weights, indices, *, reduce=True, moe_plan=None):
+    def fake_experts_forward(hidden, weights, indices, *, moe_plan=None):
         del weights
-        assert reduce is False
         assert moe_plan is not None
         seen_indices.append(indices.clone())
         return torch.zeros_like(hidden)
@@ -646,7 +624,7 @@ def test_deepseek_v4_vllm_runner_correction_bias_routing(monkeypatch):
     assert seen_indices[0].tolist() == [[1], [1]]
 
 
-def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
+def test_shared_experts_bf16_weight_cache_drives_release_path(monkeypatch):
     _reset_globals()
     _clear_dsv4_sm80_env(monkeypatch)
     cfg = _tiny_dsv4_config()
@@ -673,18 +651,22 @@ def test_shared_experts_bf16_weight_cache_matches_generic_path(monkeypatch):
             torch.ones_like(shared.down_proj.weight_scale_inv.float()).to(dsv4_kernel.e8m0_dtype())
         )
 
-    hidden = torch.randn(3, cfg.hidden_size, dtype=torch.bfloat16)
-    gate_up = shared.gate_up_proj.forward(hidden)
-    gate, up = gate_up.chunk(2, dim=-1)
-    expected_hidden = dsv4_kernel.silu_and_mul_clamp_fallback(
-        gate,
-        up,
-        swiglu_limit=shared.swiglu_limit,
-    ).to(up.dtype)
-    expected = shared.down_proj.forward(expected_hidden, reduce=False)
+    monkeypatch.setattr(dsv4_kernel, "quantize_fp8_activation", lambda x, **kwargs: x)
+    monkeypatch.setattr(
+        dsv4_kernel,
+        "silu_and_mul_clamp",
+        lambda gate, up, **kwargs: F.silu(gate.float()).mul(up.float()).to(up.dtype),
+    )
 
     reports = shared.prepare_bf16_weight_cache()
-    actual = shared.forward(hidden, reduce=False)
+    hidden = torch.randn(3, cfg.hidden_size, dtype=torch.bfloat16)
+    gate_up_weight = getattr(shared.gate_up_proj, shared._gate_up_bf16_weight_cache_name)
+    down_weight = getattr(shared.down_proj, shared._down_bf16_weight_cache_name)
+    gate_up = F.linear(hidden, gate_up_weight)
+    gate, up = gate_up.chunk(2, dim=-1)
+    expected_hidden = F.silu(gate.float()).mul(up.float()).to(up.dtype)
+    expected = F.linear(expected_hidden, down_weight)
+    actual = shared.forward(hidden)
 
     assert {report["owner"] for report in reports} == {
         "layer0.shared_experts.gate_up_proj",

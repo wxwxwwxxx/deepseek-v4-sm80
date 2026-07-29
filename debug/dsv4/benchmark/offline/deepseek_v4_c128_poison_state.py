@@ -8,9 +8,7 @@ import json
 from pathlib import Path
 
 import torch
-
-from minisgl.kernel.deepseek_v4 import c128_online_pool_and_update_fallback
-
+from minisgl.kernel.deepseek_v4 import c128_online_pool_and_update
 
 RATIO = 128
 HEAD_DIM = 8
@@ -101,7 +99,7 @@ def _run_rows(
     slot: int,
 ) -> torch.Tensor:
     table_indices = torch.full_like(positions, slot)
-    return c128_online_pool_and_update_fallback(
+    return c128_online_pool_and_update(
         projected_rows,
         state,
         ape,
@@ -155,9 +153,7 @@ def _run_partitioned_group(
         )
         phase = (start + end) % RATIO
         valid_rows = RATIO if phase == 0 else phase
-        actual_valid = state[
-            slot * RATIO : slot * RATIO + valid_rows
-        ]
+        actual_valid = state[slot * RATIO : slot * RATIO + valid_rows]
         expected_valid = expected_state[:valid_rows]
         _assert_exact(f"{label}/valid_partial_rows_at_{start + end}", actual_valid, expected_valid)
         if phase == 0:
@@ -291,7 +287,7 @@ def _run_concurrent_slots_and_dummy(
     mixed_projected = torch.stack([projected[127], projected[512]])
     mixed_positions = torch.tensor([127, 0], device=state.device, dtype=torch.int32)
     mixed_tables = torch.tensor([0, 2], device=state.device, dtype=torch.int32)
-    mixed_output = c128_online_pool_and_update_fallback(
+    mixed_output = c128_online_pool_and_update(
         mixed_projected,
         state,
         ape,
