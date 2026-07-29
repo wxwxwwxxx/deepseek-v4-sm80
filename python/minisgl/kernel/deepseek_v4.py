@@ -18,8 +18,6 @@ WeightKind = Literal["bf16", "fp8", "fp4"]
 
 DSV4_SM80_MOE_EXPERT_BACKEND_MARLIN_WNA16 = "marlin_wna16"
 DSV4_INDEXER_MAX_LOGITS_MB_DEFAULT = 512
-
-
 DSV4_MARLIN_WNA16_RELEASE_ERROR = (
     "Marlin WNA16 release preset has released raw routed expert weights; "
     "the required prepacked Marlin cache is unavailable in this Engine."
@@ -146,14 +144,112 @@ def dsv4_triton_available() -> bool:
     return bool(cap.is_sm80 and cap.triton_available)
 
 
-def warmup_indexer_fp8_backend(device: torch.device) -> None:
+@lru_cache(maxsize=1)
+def _local_dsv4_c4_indexer_rmsnorm_module():
+    return load_jit(
+        "dsv4_c4_indexer_rmsnorm_bf16",
+        cuda_files=["dsv4_c4_indexer_rmsnorm_bf16.cu"],
+        cuda_wrappers=[
+            (
+                "rmsnorm_bf16",
+                "DSV4C4IndexerRMSNormBF16Kernel::run",
+            ),
+        ],
+        extra_cuda_cflags=[
+            "-gencode=arch=compute_80,code=sm_80",
+        ],
+    )
+
+
+def _c4_indexer_rmsnorm_bf16_native(
+    kv: torch.Tensor,
+    norm_weight: torch.Tensor,
+    loc: torch.Tensor,
+    *,
+    rms_norm_eps: float,
+) -> bool:
+    if (
+        not detect_dsv4_kernel_capabilities().is_sm80
+        or kv.ndim != 2
+        or kv.shape[-1] != 128
+        or kv.dtype is not torch.bfloat16
+        or norm_weight.shape != (128,)
+        or norm_weight.dtype is not torch.float32
+        or loc.shape != (kv.shape[0],)
+        or loc.dtype is not torch.int64
+        or not kv.is_cuda
+        or not norm_weight.is_cuda
+        or not loc.is_cuda
+        or not kv.is_contiguous()
+        or not norm_weight.is_contiguous()
+        or not loc.is_contiguous()
+    ):
+        return False
+    _local_dsv4_c4_indexer_rmsnorm_module().rmsnorm_bf16(
+        kv,
+        norm_weight,
+        loc,
+        float(rms_norm_eps),
+    )
+    return True
+
+
+def warmup_indexer_fp8_backend(
+    device: torch.device,
+    *,
+    base: float,
+    original_seq_len: int,
+    factor: float,
+    beta_fast: int,
+    beta_slow: int,
+    page_size: int,
+) -> None:
     if not dsv4_triton_available():
         return
-    if torch.device(device).type != "cuda":
+    cuda_device = torch.device(device)
+    if cuda_device.type != "cuda":
         return
     warmup = getattr(_triton_dsv4_ops(), "warmup_indexer_fp8_lut", None)
     if callable(warmup):
-        warmup(device)
+        warmup(cuda_device)
+    # Compile and launch the exact three-stage C4 publication cluster before
+    # any CUDA graph capture. All tensors are disposable warmup fixtures, and
+    # the one valid row matches the production RoPE/page specialization.
+    kv = torch.zeros((1, 128), dtype=torch.bfloat16, device=cuda_device)
+    positions = torch.zeros((1,), dtype=torch.int64, device=cuda_device)
+    loc = torch.zeros((1,), dtype=torch.int64, device=cuda_device)
+    norm_weight = torch.ones((128,), dtype=torch.float32, device=cuda_device)
+    packed_cache = torch.zeros(
+        (1, int(page_size) * (128 + 4)),
+        dtype=torch.uint8,
+        device=cuda_device,
+    )
+    if not _c4_indexer_rmsnorm_bf16_native(
+        kv,
+        norm_weight,
+        loc,
+        rms_norm_eps=1e-6,
+    ):
+        raise RuntimeError("Failed to warm the native C4 indexer RMSNorm stage.")
+    if not _triton_dsv4_ops().indexer_rotary_tail_valid(
+        kv,
+        positions,
+        loc,
+        rotary_dim=64,
+        base=float(base),
+        original_seq_len=int(original_seq_len),
+        factor=float(factor),
+        beta_fast=int(beta_fast),
+        beta_slow=int(beta_slow),
+    ):
+        raise RuntimeError("Failed to warm the C4 indexer RoPE stage.")
+    if not _triton_dsv4_ops().indexer_hadamard_fp8_paged_store(
+        kv,
+        loc,
+        packed_cache,
+        page_size=int(page_size),
+    ):
+        raise RuntimeError("Failed to warm the C4 indexer Hadamard/QAT/store stage.")
 
 
 def moe_route_dispatch_bf16_marlin_wna16(
@@ -3448,6 +3544,68 @@ def compress_norm_rope_store_fallback(
         raise ValueError(
             f"DSV4 compressed cache dim mismatch: cache dim={cache.shape[-1]} kv dim={dim}"
         )
+
+    if (
+        cache_type == "indexer"
+        and apply_hadamard
+        and norm_weight is not None
+        and positions_flat is not None
+        and hasattr(kvcache, "has_indexer_fp8_paged_cache")
+        and kvcache.has_indexer_fp8_paged_cache()
+        and flat.is_cuda
+        and detect_dsv4_kernel_capabilities().is_sm80
+    ):
+        if not dsv4_triton_available():
+            raise RuntimeError(
+                "The qualified SM80 C4 indexer publication ABI requires Triton."
+            )
+        packed_cache = kvcache.indexer_fp8_paged_cache(layer_id)
+        page_size = int(kvcache.indexer_fp8_page_size)
+        try:
+            norm_weight_fp32 = norm_weight.to(
+                device=flat.device,
+                dtype=torch.float32,
+            ).contiguous()
+            rms_accepted = _c4_indexer_rmsnorm_bf16_native(
+                flat,
+                norm_weight_fp32,
+                loc_flat,
+                rms_norm_eps=float(rms_norm_eps),
+            )
+            if not rms_accepted:
+                raise RuntimeError(
+                    "The qualified SM80 C4 indexer RMSNorm stage rejected its ABI."
+                )
+            rope_accepted = _triton_dsv4_ops().indexer_rotary_tail_valid(
+                flat,
+                positions_flat,
+                loc_flat,
+                rotary_dim=rotary_dim,
+                base=base,
+                original_seq_len=original_seq_len,
+                factor=factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+            )
+            store_accepted = (
+                rope_accepted
+                and _triton_dsv4_ops().indexer_hadamard_fp8_paged_store(
+                    flat,
+                    loc_flat,
+                    packed_cache,
+                    page_size=page_size,
+                )
+            )
+            if not store_accepted:
+                raise RuntimeError(
+                    "C4 indexer publication partially launched but the "
+                    "native RoPE/Hadamard/store cluster rejected its ABI."
+                )
+            return
+        except Exception as exc:
+            raise RuntimeError(
+                "DSV4 fused C4 indexer publication cluster failed after ABI selection."
+            ) from exc
 
     if (
         dsv4_triton_available()

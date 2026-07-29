@@ -1602,6 +1602,109 @@ def _indexer_fp8_paged_quant_store_kernel(
 
 
 @triton.jit
+def _hadamard_128_stage(
+    data,
+    BLOCKS: tl.constexpr,
+    STEP: tl.constexpr,
+):
+    butterfly = tl.reshape(data, (BLOCKS, 2, STEP))
+    butterfly = tl.permute(butterfly, (0, 2, 1))
+    left, right = tl.split(butterfly)
+    butterfly = tl.join(left + right, left - right)
+    butterfly = tl.permute(butterfly, (0, 2, 1))
+    return tl.reshape(butterfly, (128,))
+
+
+@triton.jit
+def _indexer_rotary_tail_valid_kernel(
+    x_ptr,
+    positions_ptr,
+    loc_ptr,
+    log_base: tl.constexpr,
+    use_scaling: tl.constexpr,
+    factor: tl.constexpr,
+    low: tl.constexpr,
+    high: tl.constexpr,
+    scale_denom: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    loc = tl.load(loc_ptr + row).to(tl.int64)
+    if loc < 0:
+        return
+
+    dim: tl.constexpr = 128
+    rotary_dim: tl.constexpr = 64
+    pair_offsets = tl.arange(0, rotary_dim // 2)
+    position = tl.load(positions_ptr + row).to(tl.float32)
+    inv_freq = tl.exp(-((2.0 * pair_offsets.to(tl.float32)) / rotary_dim) * log_base)
+    if use_scaling:
+        ramp = (pair_offsets.to(tl.float32) - low) / scale_denom
+        ramp = tl.minimum(tl.maximum(ramp, 0.0), 1.0)
+        smooth = 1.0 - ramp
+        inv_freq = inv_freq / factor * (1.0 - smooth) + inv_freq * smooth
+
+    theta = position * inv_freq
+    theta = (
+        theta
+        - tl.floor((theta + 3.141592653589793) / 6.283185307179586)
+        * 6.283185307179586
+    )
+    cos = tl.cos(theta)
+    sin = tl.sin(theta)
+    tail = dim - rotary_dim
+    a_offsets = row * dim + tail + pair_offsets * 2
+    b_offsets = a_offsets + 1
+    real = tl.load(x_ptr + a_offsets).to(tl.float32)
+    imag = tl.load(x_ptr + b_offsets).to(tl.float32)
+    tl.store(x_ptr + a_offsets, real * cos - imag * sin)
+    tl.store(x_ptr + b_offsets, real * sin + imag * cos)
+
+
+@triton.jit
+def _indexer_hadamard_fp8_paged_store_kernel(
+    kv_ptr,
+    loc_ptr,
+    cache_ptr,
+    page_size: tl.constexpr,
+    page_bytes: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    loc = tl.load(loc_ptr + row).to(tl.int64)
+    if loc < 0:
+        return
+
+    dim: tl.constexpr = 128
+    offsets = tl.arange(0, dim)
+    row_base = row * dim
+    data = tl.load(kv_ptr + row_base + offsets).to(tl.float32)
+    data = _hadamard_128_stage(data, BLOCKS=64, STEP=1)
+    data = _hadamard_128_stage(data, BLOCKS=32, STEP=2)
+    data = _hadamard_128_stage(data, BLOCKS=16, STEP=4)
+    data = _hadamard_128_stage(data, BLOCKS=8, STEP=8)
+    data = _hadamard_128_stage(data, BLOCKS=4, STEP=16)
+    data = _hadamard_128_stage(data, BLOCKS=2, STEP=32)
+    data = _hadamard_128_stage(data, BLOCKS=1, STEP=64)
+    data *= 0.08838834764831845
+    data = data.to(tl.bfloat16).to(tl.float32)
+    tl.store(kv_ptr + row_base + offsets, data)
+
+    absmax = tl.maximum(tl.max(tl.abs(data), axis=0), 1e-4)
+    exponent = tl.ceil(tl.log2(absmax / 448.0))
+    inv_scale = tl.exp2(-exponent)
+    encoded = _encode_e4m3fn_sw(tl.clamp(data * inv_scale, -448.0, 448.0))
+
+    page = loc // page_size
+    page_offset = loc - page * page_size
+    page_base = cache_ptr + page * page_bytes
+    value_ptr = page_base + page_offset * dim
+    scale_ptr = (page_base + page_size * dim + page_offset * 4).to(
+        tl.pointer_type(tl.float32)
+    )
+    tl.store(value_ptr + offsets, encoded)
+    tl.store(scale_ptr, tl.exp2(exponent))
+
+
+@triton.jit
 def _fp8_activation_quantize_kernel(
     x_ptr,
     out_ptr,
@@ -4156,6 +4259,97 @@ def indexer_fp8_paged_quant_store(
     return True
 
 
+def indexer_rotary_tail_valid(
+    kv: torch.Tensor,
+    positions: torch.Tensor,
+    loc: torch.Tensor,
+    *,
+    rotary_dim: int,
+    base: float,
+    original_seq_len: int,
+    factor: float,
+    beta_fast: int,
+    beta_slow: int,
+) -> bool:
+    if (
+        kv.ndim != 2
+        or kv.shape[-1] != 128
+        or kv.dtype is not torch.bfloat16
+        or positions.shape != (kv.shape[0],)
+        or positions.dtype not in (torch.int32, torch.int64)
+        or loc.shape != (kv.shape[0],)
+        or loc.dtype is not torch.int64
+        or rotary_dim != 64
+        or not kv.is_cuda
+        or not positions.is_cuda
+        or not loc.is_cuda
+        or not kv.is_contiguous()
+        or not positions.is_contiguous()
+        or not loc.is_contiguous()
+    ):
+        return False
+    if kv.numel() == 0:
+        return True
+    use_scaling, low, high = _rope_scaling(
+        rotary_dim=rotary_dim,
+        base=base,
+        original_seq_len=original_seq_len,
+        beta_fast=beta_fast,
+        beta_slow=beta_slow,
+    )
+    _indexer_rotary_tail_valid_kernel[(kv.shape[0],)](
+        kv,
+        positions,
+        loc,
+        log_base=math.log(base),
+        use_scaling=use_scaling,
+        factor=float(factor),
+        low=low,
+        high=high,
+        scale_denom=max(high - low, 1),
+        num_warps=1,
+    )
+    return True
+
+
+def indexer_hadamard_fp8_paged_store(
+    kv: torch.Tensor,
+    loc: torch.Tensor,
+    cache: torch.Tensor,
+    *,
+    page_size: int,
+) -> bool:
+    if (
+        kv.ndim != 2
+        or kv.shape[-1] != 128
+        or kv.dtype is not torch.bfloat16
+        or loc.shape != (kv.shape[0],)
+        or loc.dtype is not torch.int64
+        or cache.ndim != 2
+        or cache.dtype is not torch.uint8
+        or page_size <= 0
+        or cache.shape[-1] != page_size * (128 + 4)
+        or not kv.is_cuda
+        or not loc.is_cuda
+        or not cache.is_cuda
+        or not kv.is_contiguous()
+        or not loc.is_contiguous()
+        or not cache.is_contiguous()
+    ):
+        return False
+    if kv.numel() == 0:
+        return True
+    _indexer_hadamard_fp8_paged_store_kernel[(kv.shape[0],)](
+        kv,
+        loc,
+        cache,
+        page_size=int(page_size),
+        page_bytes=int(cache.shape[-1]),
+        num_warps=4,
+    )
+    return True
+
+
 def fp8_activation_quantize(
     x: torch.Tensor,
     *,
@@ -4798,6 +4992,8 @@ __all__ = [
     "indexer_fp8_paged_logits",
     "indexer_fp8_paged_quant_store",
     "indexer_fp8_quantize_fold",
+    "indexer_hadamard_fp8_paged_store",
+    "indexer_rotary_tail_valid",
     "remap_indexer_topk_locs",
     "copy_masked_compressed_locs",
     "copy_component_write_locs_for_replay",

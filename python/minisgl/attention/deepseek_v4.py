@@ -228,7 +228,15 @@ class DSV4AttentionBackend(BaseAttnBackend):
             "max_width": 0,
             "max_surface_bytes": 0,
         }
-        dsv4_kernel.warmup_indexer_fp8_backend(self.device)
+        dsv4_kernel.warmup_indexer_fp8_backend(
+            self.device,
+            base=float(config.compress_rope_theta or config.rotary_config.base),
+            original_seq_len=int(config.original_seq_len),
+            factor=float(config.rope_factor),
+            beta_fast=int(config.beta_fast),
+            beta_slow=int(config.beta_slow),
+            page_size=int(self.kvcache.indexer_fp8_page_size),
+        )
 
     @property
     def capture_compressed_locs_in_graph(self) -> bool:
