@@ -230,6 +230,7 @@ class Scenario:
             return self.shared_prefix_len + self.suffix_len
         if self.kind in {
             "prefix_partial_hit_reuse",
+            "prefix_cached_fork_reuse",
             "prefix_multi_sustained",
             "prefix_eviction_pressure",
         }:
@@ -767,6 +768,36 @@ TARGET08_SCENARIOS: tuple[Scenario, ...] = (
             "TARGET08.10 partial-hit workload: one 257-token warm request retains "
             "one page, then seven 769-token requests reuse that page and prefill "
             "the remaining suffix."
+        ),
+    ),
+    Scenario(
+        name="target16_4_prefix_cached512_fork256",
+        kind="prefix_cached_fork_reuse",
+        batch_size=2,
+        prompt_len=513,
+        decode_len=1,
+        repeats=1,
+        warmup_repeats=0,
+        shared_prefix_len=256,
+        suffix_len=264,
+        description=(
+            "TARGET 16.4 integration: cache 512 aligned tokens from a 513-token "
+            "warm request, then fork exactly at 256 and cross p=259/p=263."
+        ),
+    ),
+    Scenario(
+        name="target16_4_prefix_cached768_fork512",
+        kind="prefix_cached_fork_reuse",
+        batch_size=2,
+        prompt_len=769,
+        decode_len=1,
+        repeats=1,
+        warmup_repeats=0,
+        shared_prefix_len=512,
+        suffix_len=520,
+        description=(
+            "TARGET 16.4 integration: cache 768 aligned tokens from a 769-token "
+            "warm request, then fork exactly at 512 and cross p=515/p=519."
         ),
     ),
     Scenario(
@@ -2410,6 +2441,36 @@ def build_workload(
             )
             prompts.append(warm_prefix + suffix)
             output_lens.append(scenario.decode_len)
+    elif scenario.kind == "prefix_cached_fork_reuse":
+        fork_len = scenario.shared_prefix_len
+        branch_len = scenario.suffix_len
+        if not (0 < fork_len < branch_len <= scenario.prompt_len):
+            raise ValueError(
+                "prefix_cached_fork_reuse requires "
+                "0 < shared_prefix_len < suffix_len <= prompt_len"
+            )
+        warm_prompt = _random_tokens(
+            rng,
+            scenario.prompt_len,
+            vocab_size,
+            token_id_range=token_id_range,
+        )
+        # Keep the two TARGET 16.4 fork scenarios disjoint when selected in
+        # the same long-lived benchmark process; otherwise their identical
+        # RNG seed would let the later warm request hit the earlier scenario.
+        marker_limit = min(vocab_size - 1, token_id_range)
+        marker = max(10, marker_limit - fork_len // 256)
+        warm_prompt[: min(2, len(warm_prompt))] = [marker] * min(2, len(warm_prompt))
+        branch_suffix = _random_tokens(
+            rng,
+            branch_len - fork_len,
+            vocab_size,
+            token_id_range=token_id_range,
+        )
+        prompts.append(warm_prompt)
+        output_lens.append(scenario.decode_len)
+        prompts.append(warm_prompt[:fork_len] + branch_suffix)
+        output_lens.append(scenario.decode_len)
     elif scenario.kind == "prefix_mixed_hit_miss":
         warm_prompt = _random_tokens(
             rng,
@@ -4140,6 +4201,7 @@ def _generation_parts(
             "shared_prefix_reuse",
             "prefix_full_hit_reuse",
             "prefix_partial_hit_reuse",
+            "prefix_cached_fork_reuse",
             "prefix_mixed_hit_miss",
         }
         and len(prompts) > 1

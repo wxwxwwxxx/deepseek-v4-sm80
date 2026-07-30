@@ -580,7 +580,7 @@ class RadixPrefixCache(BasePrefixCache):
 
     def _dsv4_node_has_independent_state(self, node: RadixTreeNode) -> bool:
         handles = node._dsv4_component_pages
-        return bool(handles is not None and handles.has_required_checkpoint_pages)
+        return bool(handles is not None and handles.has_required_c4_recovery_pages)
 
     def _dsv4_node_has_live_tail(self, node: RadixTreeNode) -> bool:
         return bool(node._dsv4_swa_pages is not None and node._dsv4_swa_pages.has_live_tail)

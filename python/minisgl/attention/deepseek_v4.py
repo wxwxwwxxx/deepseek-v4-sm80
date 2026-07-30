@@ -478,6 +478,15 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 if component == "indexer"
                 else self.kvcache.attention_c4_checkpoint(layer_id)
             )
+            component_page_table = (
+                core.c4_indexer_page_table
+                if component == "indexer"
+                else core.c4_page_table
+            )
+            if component_page_table is None:
+                raise RuntimeError(
+                    f"DSV4 C4 {component} producer requires its component page table"
+                )
             return dsv4_kernel.c4_online_pool_and_update(
                 projected,
                 state_pool.kv_score_buffer.kv_score,
@@ -485,12 +494,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 compressor.ape,
                 core.positions[:rows],
                 core.req_table_indices[:rows],
-                core.raw_out_loc[:rows],
-                get_global_ctx().page_table,
-                self.kvcache.c4_checkpoint_page_mapping(
-                    4,
-                    component=component,
-                ),
+                component_page_table[:rows],
                 page_size=self.page_size,
             )
         return dsv4_kernel.c128_online_pool_and_update(

@@ -15,7 +15,8 @@ RING_SIZE = 8
 LIVE_SLOTS = 2
 SEQUENCE_SLOTS = LIVE_SLOTS + 1
 PHYSICAL_PAGES = 4
-MAX_LOGICAL_TOKENS = 528
+LOGICAL_PAGES = 4
+MAX_LOGICAL_TOKENS = LOGICAL_PAGES * PAGE_SIZE
 
 
 def _poison(
@@ -128,25 +129,60 @@ class ProductionFixture:
             self.poison_family,
             device=self.device,
         )
-        self.ctx_page_table = torch.full(
+        # Test-only raw locations make the tombstoned precondition explicit.
+        # They are intentionally absent from the production producer ABI.
+        self.raw_page_table = torch.full(
             (SEQUENCE_SLOTS, MAX_LOGICAL_TOKENS),
             -1,
             dtype=torch.int64,
             device=self.device,
         )
-        positions = torch.arange(
-            MAX_LOGICAL_TOKENS,
+        self.raw_page_table[0].copy_(
+            torch.arange(
+                MAX_LOGICAL_TOKENS,
+                dtype=torch.int64,
+                device=self.device,
+            )
+        )
+        self.component_page_table = torch.full(
+            (SEQUENCE_SLOTS, LOGICAL_PAGES),
+            -1,
             dtype=torch.int64,
             device=self.device,
         )
-        self.ctx_page_table[0].copy_(positions)
-        self.ctx_page_table[1, :PAGE_SIZE].copy_(positions[:PAGE_SIZE])
-        self.ctx_page_table[1, PAGE_SIZE:].copy_(2 * PAGE_SIZE + positions[PAGE_SIZE:] - PAGE_SIZE)
-        self.checkpoint_page_mapping = torch.arange(
-            PHYSICAL_PAGES,
-            dtype=torch.int64,
-            device=self.device,
+        self.component_page_table[0].copy_(
+            torch.arange(
+                LOGICAL_PAGES,
+                dtype=torch.int64,
+                device=self.device,
+            )
         )
+        self.component_page_table[1].copy_(
+            torch.arange(
+                LOGICAL_PAGES,
+                dtype=torch.int64,
+                device=self.device,
+            )
+        )
+
+    def configure_fork(self, fork: int, *, tombstone_raw: bool) -> None:
+        shared_pages = fork // PAGE_SIZE
+        self.component_page_table[1].fill_(-1)
+        self.component_page_table[1, :shared_pages].copy_(
+            self.component_page_table[0, :shared_pages]
+        )
+        self.component_page_table[1, shared_pages] = PHYSICAL_PAGES - 1
+        self.raw_page_table[1].copy_(self.raw_page_table[0])
+        if tombstone_raw:
+            self.raw_page_table[1, :fork].fill_(-1)
+        if not bool(torch.all(self.component_page_table[1, :shared_pages] >= 0)):
+            raise AssertionError("fork lost a retained C4 component page")
+
+    def retained_component_pages(self, fork: int) -> list[int]:
+        return self.component_page_table[1, : fork // PAGE_SIZE].cpu().tolist()
+
+    def raw_prefix_is_tombstoned(self, fork: int) -> bool:
+        return bool(torch.all(self.raw_page_table[1, :fork] == -1))
 
     def poison_sequence_slot(self, slot: int) -> None:
         start = slot * RING_SIZE
@@ -165,13 +201,14 @@ class ProductionFixture:
         positions: torch.Tensor,
         *,
         table_idx: int,
-        raw_out_loc: torch.Tensor | None = None,
     ) -> torch.Tensor:
         positions = positions.to(device=self.device, dtype=torch.int64)
         rows = projected.index_select(0, positions)
         table_indices = torch.full_like(positions, table_idx)
-        if raw_out_loc is None:
-            raw_out_loc = positions
+        component_page_table = self.component_page_table.index_select(
+            0,
+            table_indices.to(torch.long),
+        ).contiguous()
         return c4_online_pool_and_update(
             rows.contiguous(),
             self.sequence_state,
@@ -179,9 +216,7 @@ class ProductionFixture:
             ape,
             positions.contiguous(),
             table_indices,
-            raw_out_loc.to(device=self.device, dtype=torch.int64).contiguous(),
-            self.ctx_page_table,
-            self.checkpoint_page_mapping,
+            component_page_table,
             page_size=PAGE_SIZE,
         )
 
@@ -218,7 +253,6 @@ def _run_partitioned(
     pattern: tuple[int, ...],
     *,
     table_idx: int = 0,
-    physical_page: int | None = None,
     label: str,
 ) -> list[int]:
     checked: list[int] = []
@@ -230,15 +264,11 @@ def _run_partitioned(
             dtype=torch.int64,
             device=fixture.device,
         )
-        raw_out_loc = None
-        if physical_page is not None:
-            raw_out_loc = physical_page * PAGE_SIZE + positions - start
         output = fixture.run(
             projected,
             ape,
             positions,
             table_idx=table_idx,
-            raw_out_loc=raw_out_loc,
         )
         checked.extend(
             _check_outputs(
@@ -310,49 +340,117 @@ def _run_component(
             )
         )
 
-    # Page-aligned prefix hits. Prefix publication uses the production fused
-    # store path; the new sequence generation starts from poison.
-    for prefix_len, outputs in ((256, [259, 263]), (512, [515, 519])):
+    # Partial-prefix branches retain component pages while historical raw
+    # locations are tombstoned. Prefix publication and recovery both use the
+    # production fused kernels.
+    contract_cases: list[dict[str, object]] = []
+    for cached_len, fork, outputs in (
+        (512, 256, [259, 263]),
+        (768, 512, [515, 519]),
+    ):
         projected, prefix_ape = _fixture(
-            prefix_len + 8,
+            cached_len + 8,
             head_dim,
-            400 + prefix_len + head_dim,
+            400 + cached_len + head_dim,
             device=device,
         )
-        fixture = ProductionFixture(head_dim, poison_family, device)
-        _run_partitioned(
-            fixture,
-            projected,
-            prefix_ape,
-            0,
-            prefix_len,
-            (prefix_len,),
-            label=f"{component}/{poison_family}/publish-{prefix_len}",
-        )
-        checkpoint_page = prefix_len // PAGE_SIZE - 1
-        checkpoint_tail = fixture.checkpoint[
-            checkpoint_page * RATIO : (checkpoint_page + 1) * RATIO
-        ]
-        if not bool(torch.isfinite(checkpoint_tail).all()):
-            raise AssertionError(
-                f"{component}/{poison_family}: prefix {prefix_len} did not "
-                "publish four finite compact rows"
+        branch_outputs: dict[str, torch.Tensor] = {}
+        checkpoint_before: torch.Tensor | None = None
+        retained_pages: list[int] = []
+        for raw_mode in ("live", "tombstoned"):
+            fixture = ProductionFixture(head_dim, poison_family, device)
+            publish_positions = torch.arange(
+                cached_len,
+                dtype=torch.int64,
+                device=device,
             )
-        fixture.poison_sequence_slot(0)
-        prefix_checked = _run_partitioned(
-            fixture,
-            projected,
-            prefix_ape,
-            prefix_len,
-            prefix_len + 8,
-            (2, 1, 5),
-            label=f"{component}/{poison_family}/hit-{prefix_len}",
-        )
+            fixture.run(
+                projected,
+                prefix_ape,
+                publish_positions,
+                table_idx=0,
+            )
+            fixture.configure_fork(
+                fork,
+                tombstone_raw=raw_mode == "tombstoned",
+            )
+            checkpoint_page = int(fixture.component_page_table[1, fork // PAGE_SIZE - 1])
+            checkpoint_slice = slice(
+                checkpoint_page * RATIO,
+                (checkpoint_page + 1) * RATIO,
+            )
+            published = fixture.checkpoint[checkpoint_slice].clone()
+            expected_checkpoint = torch.cat(
+                (
+                    projected[fork - RATIO : fork, :head_dim],
+                    projected[fork - RATIO : fork, 2 * head_dim : 3 * head_dim],
+                ),
+                dim=1,
+            )
+            if not torch.equal(published, expected_checkpoint):
+                raise AssertionError(
+                    f"{component}/{poison_family}: cached={cached_len}, fork={fork} "
+                    "did not publish the exact component-indexed checkpoint"
+                )
+            fixture.poison_sequence_slot(1)
+            positions = torch.arange(
+                fork,
+                fork + 8,
+                dtype=torch.int64,
+                device=device,
+            )
+            output = fixture.run(
+                projected,
+                prefix_ape,
+                positions,
+                table_idx=1,
+            )
+            prefix_checked = _check_outputs(
+                projected,
+                prefix_ape,
+                positions,
+                output,
+                label=(
+                    f"{component}/{poison_family}/cached-{cached_len}/"
+                    f"fork-{fork}/{raw_mode}"
+                ),
+            )
+            if not torch.equal(fixture.checkpoint[checkpoint_slice], published):
+                raise AssertionError(
+                    f"{component}/{poison_family}: immutable prefix checkpoint changed"
+                )
+            if raw_mode == "tombstoned" and not fixture.raw_prefix_is_tombstoned(fork):
+                raise AssertionError("historical raw prefix was not tombstoned")
+            branch_outputs[raw_mode] = output
+            checkpoint_before = published
+            retained_pages = fixture.retained_component_pages(fork)
         if prefix_checked != outputs:
             raise AssertionError(
-                f"unexpected checked outputs for prefix {prefix_len}: {prefix_checked}"
+                f"unexpected checked outputs for cached={cached_len}, fork={fork}: "
+                f"{prefix_checked}"
             )
+        if not torch.equal(branch_outputs["live"], branch_outputs["tombstoned"]):
+            raise AssertionError(
+                f"{component}/{poison_family}: live and tombstoned raw pages diverged"
+            )
+        assert checkpoint_before is not None
         checked.extend(prefix_checked)
+        contract_cases.append(
+            {
+                "cached_prefix": cached_len,
+                "fork": fork,
+                "checked_outputs": prefix_checked,
+                "publisher_component_pages": list(range(cached_len // PAGE_SIZE)),
+                "retained_component_pages": retained_pages,
+                "branch_component_pages": (
+                    retained_pages + [PHYSICAL_PAGES - 1]
+                ),
+                "checkpoint_component_page": retained_pages[-1],
+                "raw_prefix_tombstoned": True,
+                "live_tombstoned_bitwise_identical": True,
+                "checkpoint_immutable": True,
+            }
+        )
 
     # Two live slots share one immutable prefix checkpoint while their suffix
     # sequence rings and physical output pages diverge.
@@ -388,7 +486,6 @@ def _run_component(
             concurrent_ape,
             position,
             table_idx=0,
-            raw_out_loc=position,
         )
         checked.extend(
             _check_outputs(
@@ -404,7 +501,6 @@ def _run_component(
             concurrent_ape,
             position,
             table_idx=1,
-            raw_out_loc=2 * PAGE_SIZE + position - PAGE_SIZE,
         )
         checked.extend(
             _check_outputs(
@@ -427,7 +523,6 @@ def _run_component(
         dummy_ape,
         dummy_positions,
         table_idx=LIVE_SLOTS,
-        raw_out_loc=torch.full_like(dummy_positions, -1),
     )
     if not _equal_with_nan(
         fixture.sequence_state[: LIVE_SLOTS * RING_SIZE],
@@ -443,6 +538,7 @@ def _run_component(
         "poison": poison_family,
         "checked_boundary_outputs": len(checked),
         "required_prefix_outputs": [pos for pos in checked if pos in (259, 263, 515, 519)],
+        "component_page_contract_cases": contract_cases,
         "status": "pass",
     }
 
@@ -474,7 +570,9 @@ def run_production_poison() -> dict[str, object]:
             "live": LIVE_SLOTS,
             "graph_dummy": 1,
         },
-        "checkpoint_layout": "[page, four tail rows, kv_left + score_left]",
+        "checkpoint_layout": "[C4 component page, four tail rows, kv_left + score_left]",
+        "checkpoint_addressing": "component_page_table[row, logical_full_page]",
+        "raw_page_inputs_to_producer": 0,
         "phase_metadata_required": False,
         "candidate": "A",
         "producer_kernel_launches_per_call": 2,

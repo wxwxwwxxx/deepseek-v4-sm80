@@ -35,7 +35,10 @@ def _producer_call(
     positions = positions.to(device=fixture.device, dtype=torch.int64).contiguous()
     rows = projected.index_select(0, positions).contiguous()
     table_indices = torch.zeros_like(positions)
-    raw_out_loc = positions.clone()
+    component_page_table = fixture.component_page_table.index_select(
+        0,
+        table_indices.to(torch.long),
+    ).contiguous()
     return c4_online_pool_and_update(
         rows,
         fixture.sequence_state,
@@ -43,9 +46,7 @@ def _producer_call(
         ape,
         positions,
         table_indices,
-        raw_out_loc,
-        fixture.ctx_page_table,
-        fixture.checkpoint_page_mapping,
+        component_page_table,
         page_size=256,
     )
 
@@ -61,7 +62,10 @@ def _profile_producer(
     positions = positions.to(device=fixture.device, dtype=torch.int64).contiguous()
     rows = projected.index_select(0, positions).contiguous()
     table_indices = torch.zeros_like(positions)
-    raw_out_loc = positions.clone()
+    component_page_table = fixture.component_page_table.index_select(
+        0,
+        table_indices.to(torch.long),
+    ).contiguous()
     torch.cuda.synchronize(fixture.device)
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -73,9 +77,7 @@ def _profile_producer(
             ape,
             positions,
             table_indices,
-            raw_out_loc,
-            fixture.ctx_page_table,
-            fixture.checkpoint_page_mapping,
+            component_page_table,
             page_size=256,
         )
         torch.cuda.synchronize(fixture.device)

@@ -2423,8 +2423,7 @@ def _c4_online_pool_kernel(
     ape_ptr,
     positions_ptr,
     table_indices_ptr,
-    ctx_page_table_ptr,
-    checkpoint_page_mapping_ptr,
+    component_page_table_ptr,
     output_ptr,
     rows: tl.constexpr,
     head_dim: tl.constexpr,
@@ -2432,9 +2431,9 @@ def _c4_online_pool_kernel(
     sequence_state_stride0: tl.constexpr,
     checkpoint_stride0: tl.constexpr,
     sequence_state_slots: tl.constexpr,
-    ctx_page_table_stride0: tl.constexpr,
-    ctx_page_table_width: tl.constexpr,
-    checkpoint_page_mapping_width: tl.constexpr,
+    checkpoint_pages: tl.constexpr,
+    component_page_table_stride0: tl.constexpr,
+    component_page_table_width: tl.constexpr,
     page_size: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ) -> None:
@@ -2497,26 +2496,23 @@ def _c4_online_pool_kernel(
         )
 
         use_checkpoint = (source_slot < 4) & (logical_pos // page_size != pos // page_size)
-        full_loc = tl.load(
-            ctx_page_table_ptr + table_idx * ctx_page_table_stride0 + logical_pos,
+        logical_page = logical_pos // page_size
+        component_page = tl.load(
+            component_page_table_ptr
+            + row * component_page_table_stride0
+            + logical_page,
             mask=use_checkpoint
-            & (table_idx >= 0)
             & (logical_pos >= 0)
-            & (logical_pos < ctx_page_table_width),
+            & (logical_page >= 0)
+            & (logical_page < component_page_table_width),
             other=-1,
         )
-        full_page = full_loc // page_size
-        checkpoint_page = tl.load(
-            checkpoint_page_mapping_ptr + full_page,
-            mask=use_checkpoint
-            & (full_loc >= 0)
-            & (full_page >= 0)
-            & (full_page < checkpoint_page_mapping_width),
-            other=-1,
-        )
-        checkpoint_loc = checkpoint_page * 4 + (logical_pos % 4)
+        checkpoint_loc = component_page * 4 + (logical_pos % 4)
         checkpoint_persistent = (
-            use_checkpoint & (logical_pos >= 0) & (full_loc >= 0) & (checkpoint_page >= 0)
+            use_checkpoint
+            & (logical_pos >= 0)
+            & (component_page >= 0)
+            & (component_page < checkpoint_pages)
         )
         sequence_loc = table_idx * 8 + (logical_pos % 8)
         sequence_persistent = (
@@ -2634,10 +2630,9 @@ def _c4_online_pool_kernel(
 @triton.jit
 def _c4_online_state_store_kernel(
     projected_ptr,
-    raw_out_loc_ptr,
     positions_ptr,
     table_indices_ptr,
-    checkpoint_page_mapping_ptr,
+    component_page_table_ptr,
     sequence_state_ptr,
     checkpoint_ptr,
     rows: tl.constexpr,
@@ -2645,7 +2640,9 @@ def _c4_online_state_store_kernel(
     sequence_state_stride0: tl.constexpr,
     checkpoint_stride0: tl.constexpr,
     sequence_state_slots: tl.constexpr,
-    checkpoint_page_mapping_width: tl.constexpr,
+    checkpoint_pages: tl.constexpr,
+    component_page_table_stride0: tl.constexpr,
+    component_page_table_width: tl.constexpr,
     page_size: tl.constexpr,
     head_dim: tl.constexpr,
     width: tl.constexpr,
@@ -2684,14 +2681,17 @@ def _c4_online_state_store_kernel(
 
     # Publication is fused into the same store launch. Only a full page's
     # final four rows write the immutable checkpoint, so there are no aliases.
-    full_loc = tl.load(raw_out_loc_ptr + row)
-    full_page = full_loc // page_size
-    checkpoint_page = tl.load(
-        checkpoint_page_mapping_ptr + full_page,
-        mask=(full_loc >= 0) & (full_page >= 0) & (full_page < checkpoint_page_mapping_width),
+    logical_page = pos // page_size
+    component_page = tl.load(
+        component_page_table_ptr
+        + row * component_page_table_stride0
+        + logical_page,
+        mask=(pos >= 0)
+        & (logical_page >= 0)
+        & (logical_page < component_page_table_width),
         other=-1,
     )
-    checkpoint_loc = checkpoint_page * 4 + (full_loc % 4)
+    checkpoint_loc = component_page * 4 + (pos % 4)
     checkpoint_offsets = offsets
     projected_offsets = tl.where(
         checkpoint_offsets < head_dim,
@@ -2699,8 +2699,9 @@ def _c4_online_state_store_kernel(
         checkpoint_offsets + head_dim,
     )
     checkpoint_valid = (
-        (checkpoint_page >= 0)
-        & ((full_loc % page_size) >= (page_size - 4))
+        (component_page >= 0)
+        & (component_page < checkpoint_pages)
+        & ((pos % page_size) >= (page_size - 4))
         & (checkpoint_offsets < 2 * head_dim)
     )
     checkpoint_value = tl.load(
@@ -2722,9 +2723,7 @@ def c4_online_pool_and_update(
     ape: torch.Tensor,
     positions: torch.Tensor,
     table_indices: torch.Tensor,
-    raw_out_loc: torch.Tensor,
-    ctx_page_table: torch.Tensor,
-    checkpoint_page_mapping: torch.Tensor,
+    component_page_table: torch.Tensor,
     *,
     page_size: int,
 ) -> torch.Tensor | None:
@@ -2744,9 +2743,7 @@ def c4_online_pool_and_update(
         ape,
         positions,
         table_indices,
-        raw_out_loc,
-        ctx_page_table,
-        checkpoint_page_mapping,
+        component_page_table,
     )
     if (
         projected.ndim != 2
@@ -2774,9 +2771,8 @@ def c4_online_pool_and_update(
     if (
         positions.numel() != rows
         or table_indices.numel() != rows
-        or raw_out_loc.numel() != rows
-        or ctx_page_table.ndim != 2
-        or checkpoint_page_mapping.ndim != 1
+        or component_page_table.ndim != 2
+        or component_page_table.shape[0] < rows
     ):
         return None
 
@@ -2792,8 +2788,7 @@ def c4_online_pool_and_update(
         ape,
         positions,
         table_indices,
-        ctx_page_table,
-        checkpoint_page_mapping,
+        component_page_table,
         output,
         rows=rows,
         head_dim=head_dim,
@@ -2801,9 +2796,9 @@ def c4_online_pool_and_update(
         sequence_state_stride0=sequence_state.stride(0),
         checkpoint_stride0=checkpoint.stride(0),
         sequence_state_slots=sequence_state.shape[0] // 8,
-        ctx_page_table_stride0=ctx_page_table.stride(0),
-        ctx_page_table_width=ctx_page_table.shape[1],
-        checkpoint_page_mapping_width=checkpoint_page_mapping.numel(),
+        checkpoint_pages=checkpoint.shape[0] // 4,
+        component_page_table_stride0=component_page_table.stride(0),
+        component_page_table_width=component_page_table.shape[1],
         page_size=int(page_size),
         BLOCK_D=block_d,
         num_warps=4,
@@ -2812,10 +2807,9 @@ def c4_online_pool_and_update(
     block = 256
     _c4_online_state_store_kernel[(rows, triton.cdiv(width, block))](
         projected,
-        raw_out_loc,
         positions,
         table_indices,
-        checkpoint_page_mapping,
+        component_page_table,
         sequence_state,
         checkpoint,
         rows=rows,
@@ -2823,7 +2817,9 @@ def c4_online_pool_and_update(
         sequence_state_stride0=sequence_state.stride(0),
         checkpoint_stride0=checkpoint.stride(0),
         sequence_state_slots=sequence_state.shape[0] // 8,
-        checkpoint_page_mapping_width=checkpoint_page_mapping.numel(),
+        checkpoint_pages=checkpoint.shape[0] // 4,
+        component_page_table_stride0=component_page_table.stride(0),
+        component_page_table_width=component_page_table.shape[1],
         page_size=int(page_size),
         head_dim=head_dim,
         width=width,

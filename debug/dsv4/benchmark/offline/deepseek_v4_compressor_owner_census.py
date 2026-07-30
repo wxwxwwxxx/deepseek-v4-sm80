@@ -95,7 +95,12 @@ def _c4_debug_plan_pool_kernel(
     page_size: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ) -> None:
-    """Exact copy of Mini's C4 reduction, indexed through a debug plan."""
+    """Debug-only legacy raw-address counterfactual, never a production import.
+
+    This intentionally preserves the removed raw-page/mapping ABI so the
+    census can compare the production component-page path against historical
+    evidence. Production callers launch ``c4_online_pool_and_update`` below.
+    """
 
     plan_slot = tl.program_id(0)
     d = tl.program_id(1) * BLOCK_D + tl.arange(0, BLOCK_D)
@@ -301,8 +306,9 @@ class Fixture:
     positions: torch.Tensor
     table_indices: torch.Tensor
     raw_out_loc: torch.Tensor
-    ctx_page_table: torch.Tensor | None
-    checkpoint_page_mapping: torch.Tensor | None
+    component_page_table: torch.Tensor | None
+    legacy_ctx_page_table: torch.Tensor | None
+    legacy_checkpoint_page_mapping: torch.Tensor | None
 
     @property
     def ratio(self) -> int:
@@ -484,35 +490,49 @@ def make_fixture(
             raw_out_loc,
             None,
             None,
+            None,
         )
 
-    raw_pages = max(math.ceil(max(rows, 1) / PAGE_SIZE), 1)
+    max_position = int(positions.max().item()) + 1 if rows else 1
+    component_pages = max(math.ceil(max_position / PAGE_SIZE), 1)
     checkpoint = torch.randn(
-        raw_pages * 4,
+        component_pages * 4,
         2 * head_dim,
         dtype=torch.float32,
         device=device,
         generator=generator,
     )
-    checkpoint_mapping = torch.arange(
-        raw_pages,
+    legacy_checkpoint_mapping = torch.arange(
+        component_pages,
         dtype=torch.int32,
         device=device,
     )
-    max_position = int(positions.max().item()) + 1 if rows else 1
     table_width = max_position if parity else min(max(max_position, 1), 1024)
-    ctx = torch.full(
+    legacy_ctx = torch.full(
         (slots, table_width),
         -1,
         dtype=torch.int32,
         device=device,
     )
     if table_width:
-        ctx[:, : min(table_width, PAGE_SIZE)] = torch.arange(
-            min(table_width, PAGE_SIZE),
+        # Legacy evidence needs a fully live raw table to remain a valid
+        # counterfactual for the component-page producer. Tombstoned raw pages
+        # are covered separately by the production poison contract.
+        legacy_ctx[:] = torch.arange(
+            table_width,
             dtype=torch.int32,
             device=device,
         )
+    component_table = (
+        torch.arange(
+            component_pages,
+            dtype=torch.int32,
+            device=device,
+        )
+        .view(1, component_pages)
+        .expand(rows, component_pages)
+        .contiguous()
+    )
     return Fixture(
         component,
         pattern,
@@ -524,15 +544,15 @@ def make_fixture(
         positions.contiguous(),
         table_indices.contiguous(),
         raw_out_loc,
-        ctx.contiguous(),
-        checkpoint_mapping,
+        component_table,
+        legacy_ctx.contiguous(),
+        legacy_checkpoint_mapping,
     )
 
 
 def _launch_c4_pool(fixture: Fixture, output: torch.Tensor) -> None:
     assert fixture.checkpoint is not None
-    assert fixture.ctx_page_table is not None
-    assert fixture.checkpoint_page_mapping is not None
+    assert fixture.component_page_table is not None
     head_dim = fixture.head_dim
     block_d = min(triton.next_power_of_2(head_dim), 256)
     dsv4_triton._c4_online_pool_kernel[(fixture.rows, triton.cdiv(head_dim, block_d))](
@@ -542,8 +562,7 @@ def _launch_c4_pool(fixture: Fixture, output: torch.Tensor) -> None:
         fixture.ape,
         fixture.positions,
         fixture.table_indices,
-        fixture.ctx_page_table,
-        fixture.checkpoint_page_mapping,
+        fixture.component_page_table,
         output,
         rows=fixture.rows,
         head_dim=head_dim,
@@ -551,9 +570,9 @@ def _launch_c4_pool(fixture: Fixture, output: torch.Tensor) -> None:
         sequence_state_stride0=fixture.sequence_state.stride(0),
         checkpoint_stride0=fixture.checkpoint.stride(0),
         sequence_state_slots=fixture.sequence_state.shape[0] // 8,
-        ctx_page_table_stride0=fixture.ctx_page_table.stride(0),
-        ctx_page_table_width=fixture.ctx_page_table.shape[1],
-        checkpoint_page_mapping_width=fixture.checkpoint_page_mapping.numel(),
+        checkpoint_pages=fixture.checkpoint.shape[0] // 4,
+        component_page_table_stride0=fixture.component_page_table.stride(0),
+        component_page_table_width=fixture.component_page_table.shape[1],
         page_size=PAGE_SIZE,
         BLOCK_D=block_d,
         num_warps=4,
@@ -562,15 +581,14 @@ def _launch_c4_pool(fixture: Fixture, output: torch.Tensor) -> None:
 
 def _launch_c4_state(fixture: Fixture) -> None:
     assert fixture.checkpoint is not None
-    assert fixture.checkpoint_page_mapping is not None
+    assert fixture.component_page_table is not None
     width = fixture.projected.shape[1]
     block = 256
     dsv4_triton._c4_online_state_store_kernel[(fixture.rows, triton.cdiv(width, block))](
         fixture.projected,
-        fixture.raw_out_loc,
         fixture.positions,
         fixture.table_indices,
-        fixture.checkpoint_page_mapping,
+        fixture.component_page_table,
         fixture.sequence_state,
         fixture.checkpoint,
         rows=fixture.rows,
@@ -578,7 +596,9 @@ def _launch_c4_state(fixture: Fixture) -> None:
         sequence_state_stride0=fixture.sequence_state.stride(0),
         checkpoint_stride0=fixture.checkpoint.stride(0),
         sequence_state_slots=fixture.sequence_state.shape[0] // 8,
-        checkpoint_page_mapping_width=fixture.checkpoint_page_mapping.numel(),
+        checkpoint_pages=fixture.checkpoint.shape[0] // 4,
+        component_page_table_stride0=fixture.component_page_table.stride(0),
+        component_page_table_width=fixture.component_page_table.shape[1],
         page_size=PAGE_SIZE,
         head_dim=fixture.head_dim,
         width=width,
@@ -634,8 +654,8 @@ def _launch_plan_pool(
     if plan.numel() == 0:
         return
     assert fixture.checkpoint is not None
-    assert fixture.ctx_page_table is not None
-    assert fixture.checkpoint_page_mapping is not None
+    assert fixture.legacy_ctx_page_table is not None
+    assert fixture.legacy_checkpoint_page_mapping is not None
     head_dim = fixture.head_dim
     block_d = min(triton.next_power_of_2(head_dim), 256)
     _c4_debug_plan_pool_kernel[(plan.numel(), triton.cdiv(head_dim, block_d))](
@@ -645,8 +665,8 @@ def _launch_plan_pool(
         fixture.ape,
         fixture.positions,
         fixture.table_indices,
-        fixture.ctx_page_table,
-        fixture.checkpoint_page_mapping,
+        fixture.legacy_ctx_page_table,
+        fixture.legacy_checkpoint_page_mapping,
         plan,
         output,
         plan_entries=plan.numel(),
@@ -656,9 +676,9 @@ def _launch_plan_pool(
         sequence_state_stride0=fixture.sequence_state.stride(0),
         checkpoint_stride0=fixture.checkpoint.stride(0),
         sequence_state_slots=fixture.sequence_state.shape[0] // 8,
-        ctx_page_table_stride0=fixture.ctx_page_table.stride(0),
-        ctx_page_table_width=fixture.ctx_page_table.shape[1],
-        checkpoint_page_mapping_width=fixture.checkpoint_page_mapping.numel(),
+        ctx_page_table_stride0=fixture.legacy_ctx_page_table.stride(0),
+        ctx_page_table_width=fixture.legacy_ctx_page_table.shape[1],
+        checkpoint_page_mapping_width=fixture.legacy_checkpoint_page_mapping.numel(),
         page_size=PAGE_SIZE,
         BLOCK_D=block_d,
         num_warps=4,

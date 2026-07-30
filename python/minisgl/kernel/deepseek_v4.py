@@ -558,9 +558,7 @@ def c4_online_pool_and_update(
     ape: torch.Tensor,
     positions: torch.Tensor,
     table_indices: torch.Tensor,
-    raw_out_loc: torch.Tensor,
-    ctx_page_table: torch.Tensor,
-    checkpoint_page_mapping: torch.Tensor,
+    component_page_table: torch.Tensor,
     *,
     page_size: int,
 ) -> torch.Tensor:
@@ -575,9 +573,7 @@ def c4_online_pool_and_update(
         ape,
         positions,
         table_indices,
-        raw_out_loc,
-        ctx_page_table,
-        checkpoint_page_mapping,
+        component_page_table,
         page_size=int(page_size),
     )
     if output is None:

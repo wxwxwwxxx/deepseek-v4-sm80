@@ -228,17 +228,20 @@ class DSV4ComponentPageHandles:
     c4_pages: torch.Tensor | None = None
     c128_pages: torch.Tensor | None = None
     c4_indexer_pages: torch.Tensor | None = None
-    c4_checkpoint_pages: torch.Tensor | None = None
-    c4_indexer_checkpoint_pages: torch.Tensor | None = None
 
     @property
     def num_pages(self) -> int:
         return div_ceil(self.length, self.page_size) if self.length else 0
 
     @property
-    def has_required_checkpoint_pages(self) -> bool:
-        return (self.c4_pages is None or self.c4_checkpoint_pages is not None) and (
-            self.c4_indexer_pages is None or self.c4_indexer_checkpoint_pages is not None
+    def has_required_c4_recovery_pages(self) -> bool:
+        if self.c4_pages is None and self.c4_indexer_pages is None:
+            return True
+        return (
+            self.c4_pages is not None
+            and self.c4_indexer_pages is not None
+            and self.c4_pages.numel() == self.num_pages
+            and self.c4_indexer_pages.numel() == self.num_pages
         )
 
     def slice_tokens(self, start: int, end: int) -> DSV4ComponentPageHandles:
@@ -266,8 +269,6 @@ class DSV4ComponentPageHandles:
             c4_pages=_slice(self.c4_pages),
             c128_pages=_slice(self.c128_pages),
             c4_indexer_pages=_slice(self.c4_indexer_pages),
-            c4_checkpoint_pages=_slice(self.c4_checkpoint_pages),
-            c4_indexer_checkpoint_pages=_slice(self.c4_indexer_checkpoint_pages),
         )
 
     @staticmethod
@@ -294,8 +295,6 @@ class DSV4ComponentPageHandles:
             c4_pages=_cat("c4_pages"),
             c128_pages=_cat("c128_pages"),
             c4_indexer_pages=_cat("c4_indexer_pages"),
-            c4_checkpoint_pages=_cat("c4_checkpoint_pages"),
-            c4_indexer_checkpoint_pages=_cat("c4_indexer_checkpoint_pages"),
         )
 
 
@@ -384,8 +383,9 @@ class DeepSeekV4KVCache(BaseKVCachePool):
     The scheduler owns a single full-token page table.  This pool derives all
     DSV4 component slots from that namespace and tracks page-level allocation
     with refcounts. Completed C4/C128/indexer buffers and compact immutable C4
-    checkpoints follow full-page/radix ownership. Mutable C4 and C128 working
-    state is independently owned by stable request slots.
+    checkpoints share the corresponding C4 component page IDs and
+    full-page/radix lifetime. Mutable C4 and C128 working state is independently
+    owned by stable request slots.
     """
 
     C4_STATE_RING_SIZE = 8
@@ -436,7 +436,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._c128_slots = div_ceil(self._num_tokens, 128)
         self._c4_component_page_size = max(div_ceil(page_size, 4), 1)
         self._c128_component_page_size = max(div_ceil(page_size, 128), 1)
-        self._c4_checkpoint_page_size = self.C4_CHECKPOINT_ROWS
         self._c4_component_pages = div_ceil(self._c4_slots, self._c4_component_page_size)
         self._c128_component_pages = div_ceil(
             self._c128_slots,
@@ -447,6 +446,17 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._normal_layer_count = sum(m.compress_ratio == 0 for m in self._layer_mapping)
         self._c4_layer_count = sum(m.compress_ratio == 4 for m in self._layer_mapping)
         self._c128_layer_count = sum(m.compress_ratio == 128 for m in self._layer_mapping)
+        if self._c4_layer_count and (
+            page_size % 4 != 0
+            or self._num_tokens % 4 != 0
+            or self._c4_slots != self._num_tokens // 4
+            or self._c4_component_page_size != page_size // 4
+            or self._c4_component_pages != self._num_pages
+        ):
+            raise ValueError(
+                "DSV4 C4 checkpoint ownership requires exactly one C4 component "
+                "page per full page"
+            )
 
         self._swa_tail_pages_per_req = max(div_ceil(self._window_size, page_size), 1)
         if swa_num_pages is not None:
@@ -532,12 +542,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         self._c4_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
         self._c128_refcount = torch.zeros(self._c128_slots, dtype=torch.int16, device=device)
         self._c4_indexer_refcount = torch.zeros(self._c4_slots, dtype=torch.int16, device=device)
-        self._c4_checkpoint_refcount = torch.zeros(
-            self._num_pages * self._c4_checkpoint_page_size,
-            dtype=torch.int16,
-            device=device,
-        )
-        self._c4_indexer_checkpoint_refcount = torch.zeros_like(self._c4_checkpoint_refcount)
         self._full_to_c4_page = torch.full(
             (self._num_pages,),
             -1,
@@ -546,14 +550,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         )
         self._full_to_c128_page = torch.full_like(self._full_to_c4_page, -1)
         self._full_to_c4_indexer_page = torch.full_like(self._full_to_c4_page, -1)
-        self._full_to_c4_checkpoint_page = torch.full_like(
-            self._full_to_c4_page,
-            -1,
-        )
-        self._full_to_c4_indexer_checkpoint_page = torch.full_like(
-            self._full_to_c4_page,
-            -1,
-        )
         self._free_c4_pages = torch.arange(
             self._c4_component_pages,
             dtype=torch.int32,
@@ -566,16 +562,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         )
         self._free_c4_indexer_pages = torch.arange(
             self._c4_component_pages,
-            dtype=torch.int32,
-            device=device,
-        )
-        self._free_c4_checkpoint_pages = torch.arange(
-            self._num_pages,
-            dtype=torch.int32,
-            device=device,
-        )
-        self._free_c4_indexer_checkpoint_pages = torch.arange(
-            self._num_pages,
             dtype=torch.int32,
             device=device,
         )
@@ -607,13 +593,13 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                     device=device,
                 )
                 self._c4_checkpoint_pools[mapping.layer_id] = DSV4C4CheckpointPool(
-                    num_pages=self._num_pages,
+                    num_pages=self._c4_component_pages,
                     head_dim=self._head_dim,
                     dtype=self._policy.compress_state_dtype,
                     device=device,
                 )
                 self._c4_indexer_checkpoint_pools[mapping.layer_id] = DSV4C4CheckpointPool(
-                    num_pages=self._num_pages,
+                    num_pages=self._c4_component_pages,
                     head_dim=self._index_head_dim,
                     dtype=self._policy.compress_state_dtype,
                     device=device,
@@ -672,6 +658,30 @@ class DeepSeekV4KVCache(BaseKVCachePool):
     def allocation_counts(self) -> DSV4AllocationCounts:
         tail_refcount = self._swa_page_refcount[: self._swa_dummy_page]
         swa_pages = int(torch.count_nonzero(tail_refcount > 0).item())
+        c4_pages = (
+            int(
+                torch.count_nonzero(
+                    self._c4_refcount.view(
+                        self._c4_component_pages,
+                        self._c4_component_page_size,
+                    )[:, 0]
+                ).item()
+            )
+            if self._c4_layer_count
+            else 0
+        )
+        c4_indexer_pages = (
+            int(
+                torch.count_nonzero(
+                    self._c4_indexer_refcount.view(
+                        self._c4_component_pages,
+                        self._c4_component_page_size,
+                    )[:, 0]
+                ).item()
+            )
+            if self._c4_layer_count
+            else 0
+        )
         return DSV4AllocationCounts(
             full_slots=int(torch.count_nonzero(self._full_refcount).item()),
             swa_slots=swa_pages * self._page_size,
@@ -690,14 +700,10 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 else 0
             ),
             c4_checkpoint_slots=(
-                int(torch.count_nonzero(self._c4_checkpoint_refcount).item())
-                if self._c4_layer_count
-                else 0
+                c4_pages * self.C4_CHECKPOINT_ROWS
             ),
             c4_indexer_checkpoint_slots=(
-                int(torch.count_nonzero(self._c4_indexer_checkpoint_refcount).item())
-                if self._c4_layer_count
-                else 0
+                c4_indexer_pages * self.C4_CHECKPOINT_ROWS
             ),
         )
 
@@ -950,22 +956,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         pool = self._indexer_compress_state_pools[layer_id]
         assert pool is not None, f"Layer {layer_id} has no indexer compress state."
         return pool
-
-    def c4_checkpoint_page_mapping(
-        self,
-        ratio: Literal[4],
-        *,
-        component: Literal["attention", "indexer"] = "attention",
-    ) -> torch.Tensor:
-        """Return the scheduler-owned full-page -> compact-checkpoint map."""
-
-        if ratio != 4:
-            raise ValueError("Only C4 has a page-owned compact checkpoint")
-        return (
-            self._full_to_c4_indexer_checkpoint_page
-            if component == "indexer"
-            else self._full_to_c4_checkpoint_page
-        )
 
     def component_cache(self, layer_id: int) -> torch.Tensor:
         mapping = self.get_layer_mapping(layer_id)
@@ -1345,16 +1335,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 self._c4_layer_count > 0,
                 "C4 indexer",
             ),
-            c4_checkpoint_pages=_gather(
-                self._full_to_c4_checkpoint_page,
-                self._c4_layer_count > 0,
-                "C4 checkpoint",
-            ),
-            c4_indexer_checkpoint_pages=_gather(
-                self._full_to_c4_indexer_checkpoint_page,
-                self._c4_layer_count > 0,
-                "C4 indexer checkpoint",
-            ),
         )
 
     def component_pages_from_full_page_starts(
@@ -1452,22 +1432,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                 free_attr="_free_c4_indexer_pages",
                 name="C4 indexer",
             )
-        if handles.c4_checkpoint_pages is not None:
-            self._free_component_pages(
-                handles.c4_checkpoint_pages,
-                refcount=self._c4_checkpoint_refcount,
-                page_size=self._c4_checkpoint_page_size,
-                free_attr="_free_c4_checkpoint_pages",
-                name="C4 checkpoint",
-            )
-        if handles.c4_indexer_checkpoint_pages is not None:
-            self._free_component_pages(
-                handles.c4_indexer_checkpoint_pages,
-                refcount=self._c4_indexer_checkpoint_refcount,
-                page_size=self._c4_checkpoint_page_size,
-                free_attr="_free_c4_indexer_checkpoint_pages",
-                name="C4 indexer checkpoint",
-            )
 
     def release_swa_page_handles(
         self,
@@ -1526,8 +1490,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         if self._c4_layer_count:
             counts.append(int(self._free_c4_pages.numel()))
             counts.append(int(self._free_c4_indexer_pages.numel()))
-            counts.append(int(self._free_c4_checkpoint_pages.numel()))
-            counts.append(int(self._free_c4_indexer_checkpoint_pages.numel()))
         if self._c128_layer_count:
             counts.append(int(self._free_c128_pages.numel()))
         return min(counts) if counts else self._num_pages
@@ -1633,8 +1595,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             torch.any(self._full_to_c4_page[full_pages] >= 0)
             or torch.any(self._full_to_c128_page[full_pages] >= 0)
             or torch.any(self._full_to_c4_indexer_page[full_pages] >= 0)
-            or torch.any(self._full_to_c4_checkpoint_page[full_pages] >= 0)
-            or torch.any(self._full_to_c4_indexer_checkpoint_page[full_pages] >= 0)
         ):
             raise RuntimeError("DSV4 component allocation found stale full-to-component mapping")
 
@@ -1662,30 +1622,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             self._full_to_c4_indexer_page[full_pages] = indexer_pages
             if "component" in clear_modes:
                 self._clear_c4_indexer_component_locs(indexer_locs, indexer_pages)
-
-            c4_checkpoint_pages = self._alloc_component_pages(
-                "_free_c4_checkpoint_pages",
-                count,
-                "C4 checkpoint",
-            )
-            c4_checkpoint_locs = self._component_locs_from_pages(
-                c4_checkpoint_pages,
-                page_size=self._c4_checkpoint_page_size,
-            )
-            self._c4_checkpoint_refcount[c4_checkpoint_locs] += 1
-            self._full_to_c4_checkpoint_page[full_pages] = c4_checkpoint_pages
-
-            indexer_checkpoint_pages = self._alloc_component_pages(
-                "_free_c4_indexer_checkpoint_pages",
-                count,
-                "C4 indexer checkpoint",
-            )
-            indexer_checkpoint_locs = self._component_locs_from_pages(
-                indexer_checkpoint_pages,
-                page_size=self._c4_checkpoint_page_size,
-            )
-            self._c4_indexer_checkpoint_refcount[indexer_checkpoint_locs] += 1
-            self._full_to_c4_indexer_checkpoint_page[full_pages] = indexer_checkpoint_pages
 
         if self._c128_layer_count:
             c128_pages = self._alloc_component_pages("_free_c128_pages", count, "C128")
@@ -1730,24 +1666,12 @@ class DeepSeekV4KVCache(BaseKVCachePool):
                         if self._c4_layer_count
                         else None
                     ),
-                    c4_checkpoint_pages=(
-                        self._full_to_c4_checkpoint_page[full_pages].clone()
-                        if self._c4_layer_count
-                        else None
-                    ),
-                    c4_indexer_checkpoint_pages=(
-                        self._full_to_c4_indexer_checkpoint_page[full_pages].clone()
-                        if self._c4_layer_count
-                        else None
-                    ),
                 )
             )
 
         self._full_to_c4_page[full_pages] = -1
         self._full_to_c128_page[full_pages] = -1
         self._full_to_c4_indexer_page[full_pages] = -1
-        self._full_to_c4_checkpoint_page[full_pages] = -1
-        self._full_to_c4_indexer_checkpoint_page[full_pages] = -1
 
     def _release_swa_pages_for_full_pages(
         self,
@@ -1860,8 +1784,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             ("C4", self._c4_refcount),
             ("C128", self._c128_refcount),
             ("C4 indexer", self._c4_indexer_refcount),
-            ("C4 checkpoint", self._c4_checkpoint_refcount),
-            ("C4 indexer checkpoint", self._c4_indexer_checkpoint_refcount),
         ):
             if torch.any(refcount < 0):
                 raise RuntimeError(f"DSV4 KV cache has negative {name} refcounts")
@@ -1898,12 +1820,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             ("C4", self._free_c4_pages, self._c4_component_pages),
             ("C128", self._free_c128_pages, self._c128_component_pages),
             ("C4 indexer", self._free_c4_indexer_pages, self._c4_component_pages),
-            ("C4 checkpoint", self._free_c4_checkpoint_pages, self._num_pages),
-            (
-                "C4 indexer checkpoint",
-                self._free_c4_indexer_checkpoint_pages,
-                self._num_pages,
-            ),
         ):
             if pages.numel() == 0:
                 continue

@@ -259,7 +259,7 @@ def test_dsv4_explicit_graph_disabled_mode_needs_no_capture_surfaces():
 
 def test_dsv4_masked_compressed_store_ignores_negative_locs():
     cfg = _tiny_dsv4_config([4])
-    ctx = _install_context(cfg, page_size=1, table_bases=[0], max_len=16)
+    ctx = _install_context(cfg, page_size=4, table_bases=[0], max_len=16)
     cache = ctx.kv_cache.c4_cache(0)
     cache.zero_()
     kv = torch.tensor([[11.0] + [0.0] * 7, [22.0] + [0.0] * 7], dtype=cache.dtype)

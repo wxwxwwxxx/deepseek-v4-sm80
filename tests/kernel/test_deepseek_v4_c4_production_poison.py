@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 SCRIPT = (
     Path(__file__).resolve().parents[2]
     / "debug/dsv4/benchmark/offline/deepseek_v4_c4_production_poison.py"
@@ -33,9 +32,24 @@ def test_c4_production_candidate_a_poison_matrix():
     assert result["candidate"] == "A"
     assert result["phase_metadata_required"] is False
     assert result["separate_restore_or_materialization_launches"] == 0
+    assert result["raw_page_inputs_to_producer"] == 0
+    assert result["checkpoint_addressing"] == (
+        "component_page_table[row, logical_full_page]"
+    )
     assert len(result["cases"]) == 4
     for case in result["cases"]:
         assert case["status"] == "pass"
+        assert len(case["component_page_contract_cases"]) == 2
+        for contract in case["component_page_contract_cases"]:
+            assert contract["raw_prefix_tombstoned"]
+            assert contract["live_tombstoned_bitwise_identical"]
+            assert contract["checkpoint_immutable"]
+            assert contract["checkpoint_component_page"] == (
+                contract["retained_component_pages"][-1]
+            )
+            assert contract["branch_component_pages"][:-1] == (
+                contract["retained_component_pages"]
+            )
         assert case["required_prefix_outputs"] == [
             259,
             263,

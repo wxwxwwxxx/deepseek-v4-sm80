@@ -215,6 +215,14 @@ def test_deepseek_v4_pool_factory_defaults_to_bf16_and_maps_layers():
     assert pool.attention_compress_state(2).kv_score_buffer.kv_score.dtype is torch.float32
 
 
+def test_deepseek_v4_c4_requires_one_component_page_per_full_page():
+    with pytest.raises(
+        ValueError,
+        match="exactly one C4 component page per full page",
+    ):
+        _make_dsv4_pool([4], num_pages=8, page_size=1)
+
+
 def test_deepseek_v4_memory_estimator_excludes_fixed_sequence_state():
     cfg = _tiny_dsv4_config([4, 128, 0])
 
@@ -662,9 +670,17 @@ def test_dsv4_component_loc_ownership_releases_full_head_without_stale_component
     component_pages = handle.get_dsv4_component_pages()
     assert component_pages is not None
     retained_c4_pages = component_pages.c4_pages.clone()
-    retained_c4_checkpoint_pages = component_pages.c4_checkpoint_pages.clone()
+    retained_c4_indexer_pages = component_pages.c4_indexer_pages.clone()
     assert retained_c4_pages.tolist() == [0, 1]
-    assert retained_c4_checkpoint_pages.tolist() == [0, 1]
+    assert retained_c4_indexer_pages.tolist() == [0, 1]
+    assert component_pages.has_required_c4_recovery_pages
+    assert not hasattr(component_pages, "c4_checkpoint_pages")
+    left = component_pages.slice_tokens(0, page_size)
+    right = component_pages.slice_tokens(page_size, 2 * page_size)
+    joined = type(component_pages).concat([left, right])
+    assert joined is not None
+    assert torch.equal(joined.c4_pages, component_pages.c4_pages)
+    assert torch.equal(joined.c4_indexer_pages, component_pages.c4_indexer_pages)
 
     cm.free_slots = torch.sort(cm.free_slots).values
     reuse = _allocate_req_with_ids(cm, 2, torch.arange(64, dtype=torch.int32) + 10_000)
@@ -677,7 +693,8 @@ def test_dsv4_component_loc_ownership_releases_full_head_without_stale_component
     assert reused_components is not None
     assert reused_components.c4_pages[0].item() not in retained_c4_pages.tolist()
     assert (
-        reused_components.c4_checkpoint_pages[0].item() not in retained_c4_checkpoint_pages.tolist()
+        reused_components.c4_indexer_pages[0].item()
+        not in retained_c4_indexer_pages.tolist()
     )
     _finish_req(cm, reuse)
     cm.check_integrity()
@@ -686,7 +703,7 @@ def test_dsv4_component_loc_ownership_releases_full_head_without_stale_component
     pool.assert_no_leak()
 
 
-def test_dsv4_component_loc_ownership_retains_checkpoint_but_keeps_swa_safe_boundary():
+def test_dsv4_component_loc_ownership_implies_checkpoint_and_keeps_swa_safe_boundary():
     page_size = 128
     num_pages = 4
     pool = _make_dsv4_pool(
@@ -710,10 +727,11 @@ def test_dsv4_component_loc_ownership_retains_checkpoint_but_keeps_swa_safe_boun
     assert hit.cached_len == 2 * page_size
     handles = hit.get_dsv4_component_pages()
     assert handles is not None
-    assert handles.has_required_checkpoint_pages
-    assert handles.c4_checkpoint_pages.tolist() == [0, 1]
+    assert handles.has_required_c4_recovery_pages
+    assert handles.c4_pages.tolist() == [0, 1]
     assert not hasattr(handles, "c128_state_pages")
-    assert handles.c4_indexer_checkpoint_pages.tolist() == [0, 1]
+    assert handles.c4_indexer_pages.tolist() == [0, 1]
+    assert not hasattr(handles, "c4_indexer_checkpoint_pages")
 
     _evict_all_prefix(cm, pool, page_size)
     pool.assert_no_leak()
@@ -752,7 +770,7 @@ def test_dsv4_swa_independent_lifecycle_tombstones_swa_without_component_invalid
     assert torch.all(matched[page_size:] >= 0)
     component_pages = handle.get_dsv4_component_pages()
     swa_pages = handle.get_dsv4_swa_pages()
-    assert component_pages is not None and component_pages.has_required_checkpoint_pages
+    assert component_pages is not None and component_pages.has_required_c4_recovery_pages
     assert swa_pages is not None and swa_pages.swa_pages is not None
     assert swa_pages.swa_pages.tolist()[0] >= 0
     assert swa_pages.swa_pages.tolist()[1] >= 0
