@@ -2088,7 +2088,7 @@ OPERATOR_REFERENCE_COUNTER_NAMES = {
     "quantized_linear_ref",
     "silu_and_mul_clamp_fallback",
     "store_compressed_fallback",
-    "store_indexer_fallback",
+    "store_indexer_bf16_reference",
     "store_swa_fallback",
     "topk_transform_512_fallback",
     "topk_transform_512_full_fallback",
@@ -2126,7 +2126,7 @@ BOTTLENECK_COUNTER_GROUPS: dict[str, tuple[str, ...]] = {
         "compress_norm_rope_store_fallback",
         "k_norm_rope_cache_fallback",
         "store_compressed_fallback",
-        "store_indexer_fallback",
+        "store_indexer_bf16_reference",
         "store_swa_fallback",
     ),
     "metadata construction": (

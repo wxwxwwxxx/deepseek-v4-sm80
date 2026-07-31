@@ -480,11 +480,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             dtype=self._dtype,
             device=device,
         )
-        self._c4_indexer_buffer = torch.empty(
-            (self._c4_layer_count, self._c4_slots, self._index_head_dim),
-            dtype=self._dtype,
-            device=device,
-        )
         self._use_indexer_fp8_cache = _indexer_fp8_cache_enabled()
         self._c4_indexer_fp8_page_size = max(page_size // 4, 1)
         self._c4_indexer_fp8_num_pages = div_ceil(self._c4_slots, self._c4_indexer_fp8_page_size)
@@ -722,11 +717,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         mapping = self.get_layer_mapping(layer_id)
         assert mapping.c128_layer_id is not None, f"Layer {layer_id} is not a C128 layer."
         return self._c128_buffer[mapping.c128_layer_id]
-
-    def indexer_cache(self, layer_id: int) -> torch.Tensor:
-        mapping = self.get_layer_mapping(layer_id)
-        assert mapping.indexer_layer_id is not None, f"Layer {layer_id} has no C4 indexer."
-        return self._c4_indexer_buffer[mapping.indexer_layer_id]
 
     def has_indexer_fp8_cache(self) -> bool:
         return self._c4_indexer_fp8_paged_cache is not None
@@ -1016,13 +1006,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         cache = self.component_cache(layer_id)
         cache[loc.long()] = kv.reshape(-1, self._head_dim).to(self._dtype)
 
-    def store_indexer(self, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
-        if kv.numel() == 0:
-            return
-        self.indexer_cache(layer_id)[loc.long()] = kv.reshape(-1, self._index_head_dim).to(
-            self._dtype
-        )
-
     def _clear_full_locs(self, locs: torch.Tensor) -> None:
         locs = self.translate_full_locs_to_swa_locs(locs)
         locs = self._sanitize_locs(locs, self._swa_num_tokens)
@@ -1048,7 +1031,6 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         locs = self._sanitize_locs(locs, self._c4_slots)
         if locs.numel() == 0:
             return
-        self._c4_indexer_buffer.index_fill_(1, locs, 0)
         if self._c4_indexer_fp8_paged_cache is not None:
             if pages is None:
                 pages = torch.unique(locs // max(self._c4_indexer_fp8_page_size, 1))
@@ -1169,10 +1151,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
         swa_bytes = self._num_layers * swa_tokens * self._head_dim * dtype_size
         c4_bytes = self._c4_layer_count * c4_slots * self._head_dim * dtype_size
         c128_bytes = self._c128_layer_count * c128_slots * self._head_dim * dtype_size
-        c4_indexer_bytes = (
-            self._c4_layer_count * c4_indexer_slots * self._index_head_dim * dtype_size
-        )
-        c4_indexer_fp8_bytes = (
+        c4_indexer_packed_bytes = (
             self._c4_layer_count * c4_indexer_slots * (self._index_head_dim + 4)
             if self._use_indexer_fp8_cache
             else 0
@@ -1197,8 +1176,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             swa_bytes
             + c4_bytes
             + c128_bytes
-            + c4_indexer_bytes
-            + c4_indexer_fp8_bytes
+            + c4_indexer_packed_bytes
             + c4_checkpoint_bytes
             + c4_indexer_checkpoint_bytes
         )
@@ -1216,8 +1194,7 @@ class DeepSeekV4KVCache(BaseKVCachePool):
             "legacy_swa_bytes": legacy_swa_bytes,
             "c4_bytes": c4_bytes,
             "c128_bytes": c128_bytes,
-            "c4_indexer_bytes": c4_indexer_bytes,
-            "c4_indexer_fp8_bytes": c4_indexer_fp8_bytes,
+            "c4_indexer_packed_bytes": c4_indexer_packed_bytes,
             "c4_checkpoint_bytes": c4_checkpoint_bytes,
             "c4_indexer_checkpoint_bytes": c4_indexer_checkpoint_bytes,
             "c4_sequence_state_bytes": self.c4_sequence_state_bytes,
@@ -1925,8 +1902,7 @@ def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) ->
     swa_bytes = model_config.num_layers * page_size * head_dim * dtype_size
     c4_bytes = compressed_bytes(c4_layers, head_dim, 4)
     c128_bytes = compressed_bytes(c128_layers, head_dim, 128)
-    indexer_bytes = compressed_bytes(c4_layers, index_head_dim, 4)
-    indexer_fp8_extra_bytes = (
+    indexer_packed_bytes = (
         div_ceil(c4_layers * page_size * (index_head_dim + 4), 4)
         if _indexer_fp8_cache_enabled()
         else 0
@@ -1941,8 +1917,7 @@ def estimate_deepseek_v4_kvcache_bytes_per_page(model_config, page_size: int) ->
         swa_bytes
         + c4_bytes
         + c128_bytes
-        + indexer_bytes
-        + indexer_fp8_extra_bytes
+        + indexer_packed_bytes
         + c4_checkpoint_bytes
         + c4_indexer_checkpoint_bytes
     )

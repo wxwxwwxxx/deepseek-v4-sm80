@@ -1575,23 +1575,14 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
     class FakeCompressedCache:
         def __init__(self) -> None:
             self.compressed = torch.zeros(12, 8, dtype=torch.bfloat16)
-            self.indexer = torch.zeros(12, 4, dtype=torch.bfloat16)
 
         def component_cache(self, layer_id: int) -> torch.Tensor:
             assert layer_id == 0
             return self.compressed
 
-        def indexer_cache(self, layer_id: int) -> torch.Tensor:
-            assert layer_id == 0
-            return self.indexer
-
         def store_compressed(self, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
             assert layer_id == 0
             self.compressed[loc.long()] = kv.reshape(-1, 8).to(self.compressed.dtype)
-
-        def store_indexer(self, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
-            assert layer_id == 0
-            self.indexer[loc.long()] = kv.reshape(-1, 4).to(self.indexer.dtype)
 
     compressed_kv = torch.randn(4, 8, dtype=torch.float32)
     compressed_weight = torch.linspace(0.75, 1.5, 8, dtype=torch.float32)
@@ -1641,18 +1632,17 @@ def test_dsv4_local_reference_wrappers_preserve_shape_dtype_and_values():
         rotary_dim=2,
         base=10000.0,
     )
-    expected_indexer_cache = FakeCompressedCache()
-    expected_indexer_cache.indexer[indexer_loc.long()] = expected_indexer_kv.to(
-        expected_indexer_cache.indexer.dtype
+    expected_indexer_cache = torch.zeros(12, 4, dtype=torch.bfloat16)
+    expected_indexer_cache[indexer_loc.long()] = expected_indexer_kv.to(
+        expected_indexer_cache.dtype
     )
-    actual_indexer_cache = FakeCompressedCache()
-    dsv4_reference.store_indexer_fallback(
+    actual_indexer_cache = torch.zeros_like(expected_indexer_cache)
+    dsv4_reference.store_indexer_bf16_reference(
         actual_indexer_cache,
-        0,
         expected_indexer_kv,
         indexer_loc,
     )
-    assert torch.equal(actual_indexer_cache.indexer, expected_indexer_cache.indexer)
+    assert torch.equal(actual_indexer_cache, expected_indexer_cache)
 
     scores = torch.tensor(
         [

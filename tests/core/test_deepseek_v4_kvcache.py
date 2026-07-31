@@ -196,7 +196,10 @@ def test_deepseek_v4_pool_factory_defaults_to_bf16_and_maps_layers():
     assert pool.swa_cache(0).shape == (32, 8)
     assert pool.c4_cache(1).shape == (8, 8)
     assert pool.c128_cache(2).shape == (1, 8)
-    assert pool.indexer_cache(1).shape == (8, 4)
+    assert pool.indexer_fp8_paged_cache(1).shape == (8, 8)
+    assert not hasattr(pool, "_c4_indexer_buffer")
+    assert not hasattr(pool, "indexer_cache")
+    assert not hasattr(pool, "store_indexer")
     assert pool.attention_compress_state(1).last_dim == 32
     assert pool.indexer_compress_state(1).last_dim == 16
     assert pool.attention_compress_state(1).kv_score_buffer.kv_score.shape == (
@@ -232,7 +235,7 @@ def test_deepseek_v4_memory_estimator_excludes_fixed_sequence_state():
             page_size=1,
             tp_size=1,
         )
-        == 441
+        == 439
     )
     assert estimate_c4_sequence_state_bytes(cfg, 2) == 4608
 
@@ -445,7 +448,7 @@ def test_dsv4_radix_all_reusable_boundaries_are_128_aligned_and_do_not_own_c128_
     pool.release_c128_sequence_slot(0, 20)
 
 
-def test_deepseek_v4_release_has_indexer_fp8_side_cache():
+def test_deepseek_v4_release_has_packed_indexer_cache_only():
     fp8_pool = _make_dsv4_pool([4], num_pages=4, page_size=4)
     values, scales = fp8_pool.indexer_fp8_cache(0)
 
@@ -454,7 +457,14 @@ def test_deepseek_v4_release_has_indexer_fp8_side_cache():
     assert scales.shape == (4, 4)
     assert values.dtype is torch.uint8
     assert scales.dtype is torch.uint8
-    assert fp8_pool.indexer_cache(0).dtype is torch.bfloat16
+    assert fp8_pool.indexer_fp8_paged_cache(0).dtype is torch.uint8
+    assert not hasattr(fp8_pool, "_c4_indexer_buffer")
+    assert not hasattr(fp8_pool, "indexer_cache")
+    assert not hasattr(fp8_pool, "store_indexer")
+    retained = fp8_pool.estimate_prefix_retention(4)
+    assert retained["c4_indexer_packed_bytes"] == 8
+    assert "c4_indexer_bytes" not in retained
+    assert "c4_indexer_fp8_bytes" not in retained
 
 
 def test_deepseek_v4_allocated_page_clear_uses_component_release_policy():
@@ -471,7 +481,6 @@ def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_sl
     pool.swa_cache(2).fill_(3)
     pool.c4_cache(0).fill_(4)
     pool.c128_cache(1).fill_(5)
-    pool.indexer_cache(0).fill_(6)
     fp8_paged = pool.indexer_fp8_paged_cache(0)
     fp8_values, fp8_scales = pool.indexer_fp8_cache(0)
     fp8_paged.fill_(10)
@@ -489,8 +498,6 @@ def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_sl
     assert torch.all(pool.swa_cache(2) == 3)
     assert torch.all(pool.c4_cache(0)[:64] == 0)
     assert torch.all(pool.c4_cache(0)[64:] == 4)
-    assert torch.all(pool.indexer_cache(0)[:64] == 0)
-    assert torch.all(pool.indexer_cache(0)[64:] == 6)
     assert torch.all(pool.c128_cache(1)[:2] == 0)
     assert torch.all(pool.c128_cache(1)[2:] == 5)
     assert torch.all(fp8_paged[0] == 0)
@@ -504,7 +511,7 @@ def test_deepseek_v4_allocated_page_component_clear_resets_only_new_component_sl
     assert torch.all(c128_state == 8)
 
 
-def test_deepseek_v4_pool_can_write_and_read_all_cache_components():
+def test_deepseek_v4_pool_can_write_and_read_attention_cache_components():
     pool = _make_dsv4_pool([0, 4, 128], num_pages=8, page_size=4)
     pool.on_pages_allocated(torch.tensor([0], dtype=torch.int32), page_size=4)
 
@@ -518,10 +525,6 @@ def test_deepseek_v4_pool_can_write_and_read_all_cache_components():
     c4_kv = torch.full((2, 8), 2.0, dtype=torch.bfloat16)
     pool.store_compressed(1, c4_kv, c4_loc)
     assert torch.equal(pool.c4_cache(1)[c4_loc.long()], c4_kv)
-
-    index_kv = torch.full((2, 4), 3.0, dtype=torch.bfloat16)
-    pool.store_indexer(1, index_kv, c4_loc)
-    assert torch.equal(pool.indexer_cache(1)[c4_loc.long()], index_kv)
 
     c128_loc = torch.tensor([0], dtype=torch.int32)
     c128_kv = torch.full((1, 8), 4.0, dtype=torch.bfloat16)

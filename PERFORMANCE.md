@@ -41,10 +41,10 @@ cost of startup time and KV-cache capacity.
 
 | Configuration | Max running / graph M | Physical graph memory | KV tokens |
 | --- | ---: | ---: | ---: |
-| `long_context_m8` | 8 | 0.95 GiB | 5,523,200 |
-| `low_m64` | 64 | 1.57 GiB | 4,758,016 |
-| `default_m128` | 128 | 2.50 GiB | 3,904,256 |
-| `high_m256` | 256 | 4.41 GiB | 2,196,992 |
+| `long_context_m8` | 8 | 0.95 GiB | 6,461,952 |
+| `low_m64` | 64 | 1.57 GiB | 5,566,464 |
+| `default_m128` | 128 | 2.50 GiB | 4,567,808 |
+| `high_m256` | 256 | 4.41 GiB | 2,570,496 |
 
 The default covers decode batches through M=128. M64 trades some graph coverage
 for additional KV capacity, while M256 trades capacity for high-concurrency

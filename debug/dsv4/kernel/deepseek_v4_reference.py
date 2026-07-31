@@ -1762,11 +1762,16 @@ def store_compressed_fallback(
         kvcache.store_compressed(layer_id, kv.reshape(-1, kv.shape[-1])[valid], loc_flat[valid])
 
 
-def store_indexer_fallback(kvcache, layer_id: int, kv: torch.Tensor, loc: torch.Tensor) -> None:
+def store_indexer_bf16_reference(
+    cache: torch.Tensor,
+    kv: torch.Tensor,
+    loc: torch.Tensor,
+) -> None:
+    """Store into an explicit debug-owned BF16 indexer reference tensor."""
     loc_flat = loc.reshape(-1)
     if dsv4_triton_available():
         try:
-            if _triton_dsv4_ops().store_cache(kvcache.indexer_cache(layer_id), kv, loc):
+            if _triton_dsv4_ops().store_cache(cache, kv, loc):
                 return
         except Exception:
             pass
@@ -1776,7 +1781,9 @@ def store_indexer_fallback(kvcache, layer_id: int, kv: torch.Tensor, loc: torch.
         )
     valid = loc_flat >= 0
     if bool(torch.any(valid)):
-        kvcache.store_indexer(layer_id, kv.reshape(-1, kv.shape[-1])[valid], loc_flat[valid])
+        cache[loc_flat[valid].to(device=cache.device)] = kv.reshape(-1, kv.shape[-1])[
+            valid
+        ].to(cache.dtype)
 
 
 def store_indexer_fp8_cache_fallback(
@@ -1920,14 +1927,6 @@ def copy_masked_compressed_locs_fallback(
     )
 
 
-def _compressed_store_cache(kvcache, layer_id: int, cache_type: str) -> torch.Tensor:
-    if cache_type == "compressed":
-        return kvcache.component_cache(layer_id)
-    if cache_type == "indexer":
-        return kvcache.indexer_cache(layer_id)
-    raise ValueError(f"Unsupported DSV4 compressed cache_type: {cache_type}")
-
-
 def compress_norm_rope_store_fallback(
     kvcache,
     layer_id: int,
@@ -1945,6 +1944,7 @@ def compress_norm_rope_store_fallback(
     beta_slow: int = 1,
     cache_type: Literal["compressed", "indexer"] = "compressed",
     apply_hadamard: bool = False,
+    indexer_bf16_reference_cache: torch.Tensor | None = None,
 ) -> None:
     if (norm_weight is None) != (rms_norm_eps is None):
         raise ValueError(
@@ -1957,7 +1957,12 @@ def compress_norm_rope_store_fallback(
         if cache_type == "compressed":
             store_compressed_fallback(kvcache, layer_id, kv, loc)
         else:
-            store_indexer_fallback(kvcache, layer_id, kv, loc)
+            if indexer_bf16_reference_cache is None:
+                raise ValueError(
+                    "A BF16 indexer reference store requires an explicit "
+                    "debug-owned indexer_bf16_reference_cache tensor."
+                )
+            store_indexer_bf16_reference(indexer_bf16_reference_cache, kv, loc)
         return
 
     dim = kv.shape[-1]
@@ -1984,8 +1989,8 @@ def compress_norm_rope_store_fallback(
             f"got weight={norm_weight.numel()} dim={dim}"
         )
 
-    cache = _compressed_store_cache(kvcache, layer_id, cache_type)
-    if cache.shape[-1] != dim:
+    cache = kvcache.component_cache(layer_id) if cache_type == "compressed" else None
+    if cache is not None and cache.shape[-1] != dim:
         raise ValueError(
             f"DSV4 compressed cache dim mismatch: cache dim={cache.shape[-1]} kv dim={dim}"
         )
@@ -2051,6 +2056,7 @@ def compress_norm_rope_store_fallback(
         and positions_flat is not None
         and cache_type != "indexer"
     ):
+        assert cache is not None
         try:
             if _triton_dsv4_ops().compress_norm_rope_store_bf16(
                 flat,
@@ -2094,6 +2100,7 @@ def compress_norm_rope_store_fallback(
         return
 
     if dsv4_triton_available():
+        assert cache is not None
         try:
             if _triton_dsv4_ops().store_cache(cache, flat, loc_flat):
                 return
@@ -2104,6 +2111,7 @@ def compress_norm_rope_store_fallback(
 
     valid = loc_flat >= 0
     if bool(torch.any(valid)):
+        assert cache is not None
         cache[loc_flat[valid].to(device=cache.device)] = flat[valid].to(cache.dtype)
 
 
@@ -2144,7 +2152,7 @@ __all__ = [
     "rms_norm_fallback",
     "silu_and_mul_clamp_fallback",
     "store_compressed_fallback",
-    "store_indexer_fallback",
+    "store_indexer_bf16_reference",
     "store_indexer_fp8_cache_fallback",
     "store_swa_fallback",
     "topk_transform_512_full_fallback",

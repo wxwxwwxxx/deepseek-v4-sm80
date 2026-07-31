@@ -347,12 +347,6 @@ class FakeCompressedCache:
 
 class FakeIndexerCache:
     def __init__(self, rows: int, dim: int, device: torch.device) -> None:
-        self._bf16 = torch.empty(
-            max(rows, 1),
-            dim,
-            dtype=torch.bfloat16,
-            device=device,
-        )
         self._page_size = 64
         pages = max(math.ceil(max(rows, 1) / self._page_size), 1)
         self._packed = torch.empty(
@@ -361,10 +355,6 @@ class FakeIndexerCache:
             dtype=torch.uint8,
             device=device,
         )
-
-    def indexer_cache(self, layer_id: int) -> torch.Tensor:
-        assert layer_id == 0
-        return self._bf16
 
     def has_indexer_fp8_cache(self) -> bool:
         return True
@@ -1050,7 +1040,6 @@ def _publication_cache(rows: int, loc: torch.Tensor) -> FakeIndexerCache:
         int(loc[valid].max().item()) + 1 if bool(torch.any(valid)) else 1,
     )
     cache = FakeIndexerCache(slots, 128, loc.device)
-    cache._bf16.fill_(-3)
     cache._packed.fill_(0xA5)
     return cache
 

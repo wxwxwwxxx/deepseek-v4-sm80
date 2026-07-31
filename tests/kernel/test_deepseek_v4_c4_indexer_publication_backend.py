@@ -29,12 +29,6 @@ PRODUCTION_MAX_POSITION = 1048576
 class _FakeIndexerCache:
     def __init__(self, slots: int, *, canary: int = 0xA5) -> None:
         self._page_size = 64
-        self._bf16 = torch.empty(
-            max(slots, 1),
-            128,
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
         self._packed = torch.full(
             (
                 max(math.ceil(max(slots, 1) / self._page_size), 1),
@@ -44,10 +38,6 @@ class _FakeIndexerCache:
             dtype=torch.uint8,
             device="cuda",
         )
-
-    def indexer_cache(self, layer_id: int) -> torch.Tensor:
-        assert layer_id == 0
-        return self._bf16
 
     def has_indexer_fp8_cache(self) -> bool:
         return True
