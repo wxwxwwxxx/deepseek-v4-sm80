@@ -165,7 +165,7 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         help=(
             "The model's requested maximum context length, including prompt and generated "
             "tokens. Defaults to max_position_embeddings from the model config.json. "
-            "The effective limit may be lower when constrained by KV-cache capacity or RoPE."
+            "Keep this value within the model's supported context window."
         ),
     )
 

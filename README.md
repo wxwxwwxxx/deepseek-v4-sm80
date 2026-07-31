@@ -153,7 +153,7 @@ another workload or Ampere system:
 | `--enable-reasoning-sampler-contract` | Enforces CHAT, THINKING, and ANSWER states during sampling. | Prevents premature EOS while reasoning and blocks repeated or misplaced reasoning delimiters after the answer begins; useful for long `max` reasoning and disabled by default. |
 | `--max-running-requests N` | Maximum number of simultaneously active request slots. | Higher values allow more concurrency but increase request metadata and independent SWA reservation. |
 | `--cuda-graph-max-bs N` | Largest decode batch captured by CUDA Graph. | Larger values cover higher active M but consume more graph memory, reduce KV capacity, and increase startup time. Batches above this value remain legal and run eagerly. |
-| `--context-length N` | Maximum prompt plus generated tokens for one sequence, overriding the model config. | Larger values widen request/page tables; actual admission is still limited by available KV capacity. |
+| `--context-length N` | Maximum prompt plus generated tokens for one sequence, overriding the model config. | Larger values widen request/page tables; keep the value within the model's supported 1M context window. |
 | `--memory-ratio R` | Fraction of GPU memory made available to the runtime capacity planner. | Raising it can provide more KV pages but leaves less safety headroom for allocations outside the planned budget. |
 | `--max-prefill-length N` | Total token budget processed by one chunked-prefill forward. | The resident scheduler shares it across active prefills; larger budgets may improve efficiency but increase activation/workspace peaks. |
 

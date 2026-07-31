@@ -48,9 +48,7 @@ cost of startup time and KV-cache capacity.
 
 The default covers decode batches through M=128. M64 trades some graph coverage
 for additional KV capacity, while M256 trades capacity for high-concurrency
-graph replay. M8 is the promoted long-context configuration. Effective context
-length is bounded by this KV capacity even though the model configuration
-permits up to 1M tokens.
+graph replay. M8 is the promoted long-context configuration.
 
 ## Long Context
 
