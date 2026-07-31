@@ -1708,13 +1708,15 @@ class DSV4AttentionBackend(BaseAttnBackend):
         component_page_table: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         width = max(self.index_topk, 1)
-        raw = torch.full((lengths.numel(), width), -1, dtype=torch.int32, device=self.device)
-        for row, length in enumerate(lengths.tolist()):
-            if length <= 0:
-                continue
-            start = max(0, int(length) - self.index_topk)
-            values = torch.arange(start, int(length), dtype=torch.int32, device=self.device)
-            raw[row, : values.numel()] = values
+        offsets = torch.arange(width, dtype=torch.int32, device=self.device)
+        counts = lengths.clamp(min=0, max=width)
+        starts = (lengths - width).clamp_min(0)
+        values = starts[:, None] + offsets[None, :]
+        raw = torch.where(
+            offsets[None, :] < counts[:, None],
+            values,
+            torch.full_like(values, -1),
+        )
         full = self._compressed_raw_to_full_locs(table_indices, raw, ratio)
         if component_page_table is None:
             page = torch.where(full >= 0, full.div(ratio, rounding_mode="floor"), full)

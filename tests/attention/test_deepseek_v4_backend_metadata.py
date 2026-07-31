@@ -271,6 +271,45 @@ def test_dsv4_masked_compressed_store_ignores_negative_locs():
     assert cache[-1, 0].item() == pytest.approx(0.0)
 
 
+def test_dsv4_sparse_compressed_indices_vectorized_tail_is_exact():
+    cfg = _tiny_dsv4_config([4])
+    ctx = _install_context(
+        cfg,
+        page_size=4,
+        table_bases=[0, 32, 64, 96, 128],
+        max_len=32,
+    )
+    backend = ctx.attn_backend
+    table_indices = torch.arange(5, dtype=torch.int32)
+    lengths = torch.arange(5, dtype=torch.int32)
+
+    raw, page, full = backend._make_sparse_compressed_indices(
+        table_indices,
+        lengths,
+        4,
+    )
+
+    expected_raw = [
+        [-1, -1],
+        [0, -1],
+        [0, 1],
+        [1, 2],
+        [2, 3],
+    ]
+    assert raw.shape == page.shape == full.shape == (5, 64)
+    assert raw.dtype == page.dtype == full.dtype == torch.int32
+    assert raw[:, :2].tolist() == expected_raw
+    assert torch.all(raw[:, 2:] == -1)
+    for row, expected in enumerate(expected_raw):
+        base = row * 32
+        expected_full = [base + value * 4 + 3 if value >= 0 else -1 for value in expected]
+        expected_page = [value // 4 if value >= 0 else -1 for value in expected_full]
+        assert full[row, :2].tolist() == expected_full
+        assert page[row, :2].tolist() == expected_page
+    assert torch.all(full[:, 2:] == -1)
+    assert torch.all(page[:, 2:] == -1)
+
+
 def test_dsv4_indexer_select_updates_c4_sparse_metadata(monkeypatch):
     cfg = _tiny_dsv4_config([4])
     ctx = _install_context(cfg, page_size=4, table_bases=[0], max_len=16)

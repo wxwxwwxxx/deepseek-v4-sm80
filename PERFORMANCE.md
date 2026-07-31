@@ -56,8 +56,8 @@ permits up to 1M tokens.
 
 | Recipe/workload | TTFT | Prefill tok/s | Decode tok/s | Peak allocated/rank | Result |
 | --- | ---: | ---: | ---: | ---: | --- |
-| M8, 512-Ki prompt + 8 output, BS8 | 5,132.41 s | 835.63 | 168.48 | 71.95 GiB | Passed: 512 resident BS8 prefill forwards, decode M8 |
-| M8, exact 1-Mi total/request, BS4 | 10,346.82 s | 410.42 | 73.04 | 72.32 GiB | Passed: 512 resident BS4 prefill forwards, decode M4 |
+| M8, 512-Ki prompt + 8 output, BS8 | 5,562.27 s | 758.97 | 179.71 | 71.94 GiB | Passed: 512 resident BS8 prefill forwards, 7 decode M8 graph replays |
+| M8, exact 1-Mi total/request, BS4 | 9,869.62 s | 425.97 | 78.32 | 72.31 GiB | Passed: 512 resident BS4 prefill forwards, 7 decode M4 graph replays |
 
 Long-context numbers are single-run capability smokes on the stated platform,
 not latency guarantees. Prompts differed at token zero, saved prefill tokens
