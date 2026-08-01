@@ -18,21 +18,22 @@ system with eight 80GB GPUs.
 Performance rows are current, closed, single-wave offline workloads: all
 requests fit simultaneously, and each request produces 1,024 output tokens.
 Every published configuration keeps maximum running requests equal to maximum
-captured M. Results are single-run reference measurements rather than
-guarantees for other sm80 systems.
+captured M. The P1K M128 and M256 rows are medians of three complete macro
+repeats; the remaining rows are single-run reference measurements. Results are
+not guarantees for other sm80 systems.
 
 ## Throughput
 
 | Configuration | Max running / graph M | Active M | Prompt/request | Requests/s | Output tok/s | Prefill tok/s | Decode tok/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `long_context_m8` | 8 | 8 | 1K | 0.2503 | 256.29 | 3,225.57 | 305.16 |
-| `long_context_m8` | 8 | 8 | 4K | 0.1936 | 198.25 | 3,348.49 | 284.98 |
-| `low_m64` | 64 | 64 | 1K | 0.7155 | 732.64 | 4,353.23 | 984.60 |
-| `low_m64` | 64 | 64 | 4K | 0.3876 | 396.93 | 3,555.71 | 865.93 |
-| `default_m128` | 128 | 128 | 1K | 0.8295 | 849.44 | 4,409.16 | 1,189.50 |
-| `default_m128` | 128 | 128 | 4K | 0.4187 | 428.75 | 3,586.80 | 1,016.41 |
-| `high_m256` | 256 | 256 | 1K | 0.9086 | 930.37 | 4,508.60 | 1,341.18 |
-| `high_m256` | 256 | 254 | 4K | 0.4489 | 459.66 | 3,665.04 | 1,170.26 |
+| `long_context_m8` | 8 | 8 | 1K | 0.2698 | 276.30 | 1,987.01 | 362.60 |
+| `long_context_m8` | 8 | 8 | 4K | 0.2110 | 216.08 | 2,556.49 | 360.00 |
+| `low_m64` | 64 | 64 | 1K | 0.9708 | 994.12 | 3,028.56 | 1,745.31 |
+| `low_m64` | 64 | 64 | 4K | 0.4713 | 482.59 | 3,024.79 | 1,740.50 |
+| `default_m128` | 128 | 128 | 1K | 1.2784 | 1,309.05 | 4,880.63 | 2,487.78 |
+| `default_m128` | 128 | 128 | 4K | 0.5044 | 516.55 | 3,394.67 | 2,444.44 |
+| `high_m256` | 256 | 256 | 1K | 1.2979 | 1,329.03 | 4,449.96 | 3,143.95 |
+| `high_m256` | 256 | 256 | 4K | 0.4890 | 500.73 | 3,589.89 | 3,043.86 |
 
 ## CUDA Graph And KV Capacity
 
@@ -41,14 +42,17 @@ cost of startup time and KV-cache capacity.
 
 | Configuration | Max running / graph M | Physical graph memory | KV tokens |
 | --- | ---: | ---: | ---: |
-| `long_context_m8` | 8 | 0.95 GiB | 6,461,952 |
-| `low_m64` | 64 | 1.57 GiB | 5,566,464 |
-| `default_m128` | 128 | 2.50 GiB | 4,567,808 |
-| `high_m256` | 256 | 4.41 GiB | 2,570,496 |
+| `long_context_m8` | 8 | 1.07 GiB | 6,411,008 |
+| `low_m64` | 64 | 2.29 GiB | 5,485,824 |
+| `default_m128` | 128 | 3.60 GiB | 4,453,376 |
+| `high_m256` | 256 | 6.48 GiB | 2,387,968 |
 
-The default covers decode batches through M=128. M64 trades some graph coverage
-for additional KV capacity, while M256 trades capacity for high-concurrency
-graph replay. M8 is the promoted long-context configuration.
+Graph-supported decode uses a 32K primary graph and automatically falls back to
+a 1M-wide graph for longer materialized contexts; context width does not force
+a supported M to eager execution. The default covers decode batches through
+M=128. M64 trades some graph coverage for additional KV capacity, while M256
+trades capacity for high-concurrency graph replay. M8 is the promoted
+long-context configuration.
 
 ## Long Context
 

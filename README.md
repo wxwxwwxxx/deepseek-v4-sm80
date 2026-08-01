@@ -124,10 +124,10 @@ with 8x A100-SXM4-80GB GPUs:
 
 | Configuration | Max running / graph M | KV capacity (tokens) | Intended use |
 | --- | ---: | ---: | --- |
-| `default_m128` (default) | 128 | 4,567,808 | General serving with balanced graph coverage and KV capacity. |
-| `low_m64` | 64 | 5,566,464 | More KV capacity for low-concurrency serving. |
-| `high_m256` | 256 | 2,570,496 | Higher-throughput serving with graph replay through M=256. |
-| `long_context_m8` | 8 | 6,461,952 | Recommended long-context serving; validated at 512-Ki BS8 and exact 1-Mi-total BS4. |
+| `default_m128` (default) | 128 | 4,453,376 | General serving with balanced graph coverage and KV capacity. |
+| `low_m64` | 64 | 5,485,824 | More KV capacity for low-concurrency serving. |
+| `high_m256` | 256 | 2,387,968 | Higher-throughput serving with graph replay through M=256. |
+| `long_context_m8` | 8 | 6,411,008 | Recommended long-context serving; validated at 512-Ki BS8 and exact 1-Mi-total BS4. |
 
 These recipes use page size 256, a total prefill-forward budget of 8,192
 tokens, and memory ratio 0.9 unless explicitly overridden. The resident
