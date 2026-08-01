@@ -176,6 +176,8 @@ def run_text_smoke(args: argparse.Namespace) -> int:
 
     rank, world_size, init_method = _distributed_info(args)
     prompts = args.prompt or list(DEFAULT_PROMPTS)
+    if args.prompt_repeat > 1:
+        prompts = [(" " + prompt) * args.prompt_repeat for prompt in prompts]
     if args.effort_matrix:
         prompt_entries = [
             (prompts[0], "chat", None),
@@ -298,6 +300,7 @@ def run_text_smoke(args: argparse.Namespace) -> int:
                 "max_running_req": args.max_running_req or max(len(prompt_entries), 1),
                 "max_extend_tokens": args.max_extend_tokens,
                 "max_tokens": args.max_tokens,
+                "prompt_repeat": args.prompt_repeat,
                 "effort_matrix": args.effort_matrix,
                 "reasoning_effort": args.reasoning_effort,
                 "reasoning_sampler_contract_enabled": (
@@ -349,6 +352,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-running-req", type=int, default=None)
     parser.add_argument("--max-extend-tokens", type=int, default=4096)
     parser.add_argument("--max-tokens", type=int, default=32)
+    parser.add_argument(
+        "--prompt-repeat",
+        type=int,
+        default=1,
+        help="Debug-only multiplier for constructing an above-cap natural-text prompt.",
+    )
     parser.add_argument("--disable-pynccl", action="store_true")
     parser.add_argument("--disable-cuda-graph", action="store_true")
     parser.add_argument("--enable-reasoning-sampler-contract", action="store_true")
@@ -370,6 +379,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("token and sequence limits must be positive")
     if args.max_running_req is not None and args.max_running_req <= 0:
         parser.error("--max-running-req must be positive")
+    if args.prompt_repeat <= 0:
+        parser.error("--prompt-repeat must be positive")
     return args
 
 

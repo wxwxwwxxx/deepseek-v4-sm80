@@ -164,8 +164,12 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self.index_topk = int(config.index_topk or 512)
         self.softmax_scale = config.head_dim**-0.5
         self.capture: DSV4AttentionMetadata | None = None
+        self.captures: dict[str, DSV4AttentionMetadata] = {}
+        self.capture_context_widths: dict[str, int] = {}
+        self.capture_context_class: str | None = None
         self.capture_bs: List[int] = []
         self.max_graph_bs = 0
+        self.capture_context_width = 0
         self._capture_graph_inputs_bound = False
         self._component_page_table_cache_width = 0
         self._component_page_table_cache_rows = 0
@@ -217,6 +221,76 @@ class DSV4AttentionBackend(BaseAttnBackend):
 
     def c128_prefill_one_surface_status(self) -> dict[str, int | str]:
         return dict(self._c128_prefill_one_surface_status)
+
+    def graph_replay_context_width(self, batch: Batch) -> int:
+        """Return the eager-equivalent maximum real-row sequence width.
+
+        Eager metadata sizes its full/component tables from ``req.device_len``.
+        That value remains authoritative across radix hits, restored component
+        checkpoints, and independent SWA eviction because those ownership
+        mechanisms change physical mappings, not the request's logical row
+        length.  Graph padding rows are intentionally excluded.
+        """
+
+        return max(
+            (max(int(getattr(req, "device_len", 0)), 0) for req in batch.reqs),
+            default=0,
+        )
+
+    def capture_surface_dimensions(self) -> dict[str, list[int] | None]:
+        if self.capture is None:
+            return {}
+        return self._capture_surface_dimensions(self.capture)
+
+    def _capture_surface_dimensions(
+        self,
+        capture: DSV4AttentionMetadata,
+    ) -> dict[str, list[int] | None]:
+        core = capture.core_metadata
+
+        def shape(tensor: torch.Tensor | None) -> list[int] | None:
+            return None if tensor is None else list(tensor.shape)
+
+        return {
+            "page_table": shape(core.page_table),
+            "c4_page_table": shape(core.c4_page_table),
+            "c128_page_table": shape(core.c128_page_table),
+            "c4_indexer_page_table": shape(core.c4_indexer_page_table),
+            "swa_page_indices": shape(core.swa_page_indices),
+            "c4_sparse_indices": shape(core.c4_sparse_page_indices),
+            "c128_indices": shape(core.c128_page_indices),
+        }
+
+    def capture_surface_dimensions_by_context_class(
+        self,
+    ) -> dict[str, dict[str, list[int] | None]]:
+        return {
+            name: self._capture_surface_dimensions(capture)
+            for name, capture in self.captures.items()
+        }
+
+    @staticmethod
+    def _capture_metadata_nbytes(capture: DSV4AttentionMetadata) -> int:
+        seen: set[int] = set()
+
+        def visit(value: object) -> int:
+            if isinstance(value, torch.Tensor):
+                identity = id(value)
+                if identity in seen:
+                    return 0
+                seen.add(identity)
+                return int(value.numel() * value.element_size())
+            if hasattr(value, "__dict__"):
+                return sum(visit(item) for item in vars(value).values())
+            return 0
+
+        return visit(capture)
+
+    def capture_surface_bytes_by_context_class(self) -> dict[str, int]:
+        return {
+            name: self._capture_metadata_nbytes(capture)
+            for name, capture in self.captures.items()
+        }
 
     def get_layer_compress_ratio(self, layer_id: int) -> DSV4CompressRatio:
         return self.kvcache.get_layer_mapping(layer_id).compress_ratio
@@ -275,10 +349,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
             return False
         if not batch.is_decode:
             return False
-        if self.capture is None:
+        capture = self._select_capture_for_batch(batch)
+        if capture is None:
             return False
         padded_size = int(getattr(batch, "padded_size", batch.size))
         if padded_size <= 0 or padded_size not in self.capture_bs:
+            return False
+        if self.graph_replay_context_width(batch) > self.capture_context_width:
             return False
         return True
 
@@ -684,8 +761,29 @@ class DSV4AttentionBackend(BaseAttnBackend):
             current[:rows].copy_(lens[:rows])
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
+        """Initialize one compatibility capture surface for focused tests."""
+
+        self.init_capture_graph_classes(
+            context_classes={"default": max_seq_len},
+            bs_list=bs_list,
+        )
+
+    def init_capture_graph_classes(
+        self,
+        *,
+        context_classes: dict[str, int],
+        bs_list: List[int],
+    ) -> None:
         self.capture_bs = sorted(bs_list)
         self.max_graph_bs = max(bs_list) if bs_list else 0
+        self.captures = {}
+        self.capture_context_widths = {
+            str(name): max(int(width), 0)
+            for name, width in context_classes.items()
+        }
+        self.capture_context_class = None
+        self.capture = None
+        self.capture_context_width = 0
         self._capture_graph_inputs_bound = False
         self._prep_metadata_in_graph_requested = True
         self._prep_metadata_in_graph = False
@@ -694,7 +792,52 @@ class DSV4AttentionBackend(BaseAttnBackend):
             if self._prep_metadata_in_graph_requested:
                 self._prep_metadata_in_graph_unsupported_reason = "cuda_graph_disabled"
             return
-        self.capture = self._empty_decode_metadata(self.max_graph_bs, max_seq_len)
+        self.captures = {
+            name: self._empty_decode_metadata(self.max_graph_bs, width)
+            for name, width in self.capture_context_widths.items()
+        }
+        first_name = next(iter(self.captures))
+        self.select_capture_graph_context(first_name)
+
+    def select_capture_graph_context(self, context_class: str) -> None:
+        try:
+            capture = self.captures[str(context_class)]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Unknown DSV4 CUDA graph context class {context_class!r}; "
+                f"captured={list(self.captures)}."
+            ) from exc
+        self.capture_context_class = str(context_class)
+        self.capture = capture
+        self.capture_context_width = int(
+            self.capture_context_widths[self.capture_context_class]
+        )
+        if self._capture_graph_inputs_bound:
+            self._prep_metadata_in_graph = self._compute_prep_metadata_in_graph_supported(
+                capture.core_metadata
+            )
+
+    def _select_capture_for_batch(
+        self,
+        batch: Batch,
+    ) -> DSV4AttentionMetadata | None:
+        if not self.captures:
+            return None
+        requested = getattr(batch, "graph_context_class", None)
+        if requested is None:
+            width = self.graph_replay_context_width(batch)
+            requested = next(
+                (
+                    name
+                    for name, limit in self.capture_context_widths.items()
+                    if width <= int(limit)
+                ),
+                None,
+            )
+        if requested is None or str(requested) not in self.captures:
+            return None
+        self.select_capture_graph_context(str(requested))
+        return self.capture
 
     def prepare_for_capture(self, batch: Batch) -> None:
         assert self.capture is not None
@@ -710,20 +853,27 @@ class DSV4AttentionBackend(BaseAttnBackend):
         positions: torch.Tensor,
     ) -> None:
         del input_ids
-        if self.capture is None:
+        if not self.captures:
             return
-        core = self.capture.core_metadata
-        if out_loc.shape != core.raw_out_loc.shape or positions.shape != core.positions.shape:
-            self._capture_graph_inputs_bound = False
-            return
-        core.raw_out_loc = out_loc
-        core.positions = positions
-        if self.capture.c4_compress_metadata is not None:
-            self.capture.c4_compress_metadata.positions = positions
-        if self.capture.c128_compress_metadata is not None:
-            self.capture.c128_compress_metadata.positions = positions
+        for capture in self.captures.values():
+            core = capture.core_metadata
+            if out_loc.shape != core.raw_out_loc.shape or positions.shape != core.positions.shape:
+                self._capture_graph_inputs_bound = False
+                return
+        for capture in self.captures.values():
+            core = capture.core_metadata
+            core.raw_out_loc = out_loc
+            core.positions = positions
+            if capture.c4_compress_metadata is not None:
+                capture.c4_compress_metadata.positions = positions
+            if capture.c128_compress_metadata is not None:
+                capture.c128_compress_metadata.positions = positions
         self._capture_graph_inputs_bound = True
-        self._prep_metadata_in_graph = self._compute_prep_metadata_in_graph_supported(core)
+        supported = [
+            self._compute_prep_metadata_in_graph_supported(capture.core_metadata)
+            for capture in self.captures.values()
+        ]
+        self._prep_metadata_in_graph = all(supported)
 
     def stage_capture_metadata_for_graph(self, batch: Batch) -> None:
         if self.capture is None or getattr(batch, "attn_metadata", None) is not self.capture:
@@ -737,7 +887,11 @@ class DSV4AttentionBackend(BaseAttnBackend):
         self._stage_prep_metadata_in_graph(batch)
 
     def prepare_for_replay(self, batch: Batch) -> None:
-        assert self.capture is not None
+        capture = self._select_capture_for_batch(batch)
+        if capture is None:
+            raise RuntimeError(
+                "CUDA graph replay could not select a captured DSV4 context class."
+            )
         metadata = batch.attn_metadata
         if isinstance(metadata, DSV4RawDecodeGraphMetadata):
             self._copy_raw_decode_graph_metadata_for_replay(
@@ -745,7 +899,7 @@ class DSV4AttentionBackend(BaseAttnBackend):
                 batch.padded_size,
             )
             return
-        if metadata is self.capture:
+        if metadata is capture:
             return
         raise RuntimeError(
             f"CUDA graph replay requires raw in-graph DSV4 metadata; got {type(metadata).__name__}."
@@ -758,6 +912,13 @@ class DSV4AttentionBackend(BaseAttnBackend):
     ) -> None:
         assert self.capture is not None
         dst_core = self.capture.core_metadata
+        if int(src.max_seqlen_k) > int(self.capture_context_width):
+            raise RuntimeError(
+                "DSV4 graph replay metadata exceeds the captured context width: "
+                f"eager_metadata_width={int(src.max_seqlen_k)}, "
+                f"capture_context_width={int(self.capture_context_width)}. "
+                "The batch must be routed to eager decode before replay."
+            )
         current = self._current_swa_ownership_version()
         if int(src.swa_ownership_version) != current:
             raise RuntimeError(

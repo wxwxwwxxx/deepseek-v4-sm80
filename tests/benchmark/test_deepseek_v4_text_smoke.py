@@ -21,6 +21,13 @@ def test_defaults_are_canonical_optimized_tp8():
     assert args.tensor_parallel_size == 8
     assert args.page_size == 256
     assert args.max_tokens == 32
+    assert args.prompt_repeat == 1
+
+
+def test_debug_long_prompt_multiplier_is_positive():
+    assert smoke.parse_args(["--prompt-repeat", "3"]).prompt_repeat == 3
+    with pytest.raises(SystemExit):
+        smoke.parse_args(["--prompt-repeat", "0"])
 
 
 def test_removed_runtime_selector_is_rejected():

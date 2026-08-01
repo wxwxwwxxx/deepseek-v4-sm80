@@ -257,6 +257,168 @@ def test_dsv4_explicit_graph_disabled_mode_needs_no_capture_surfaces():
     assert backend.prep_metadata_in_graph_unsupported_reason == "cuda_graph_disabled"
 
 
+@pytest.mark.parametrize(
+    "capture_width,expected_table_width,expected_c128_width",
+    [
+        (127, 1, 64),
+        (128, 1, 64),
+        (129, 1, 64),
+        (255, 1, 64),
+        (256, 1, 64),
+        (257, 2, 64),
+        (16_383, 64, 128),
+        (16_384, 64, 128),
+        (16_385, 65, 192),
+    ],
+)
+def test_dsv4_capture_surface_dimensions_are_exact_at_structural_boundaries(
+    capture_width,
+    expected_table_width,
+    expected_c128_width,
+):
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=256, table_bases=[0], max_len=512)
+    backend = ctx.attn_backend
+
+    backend.init_capture_graph(max_seq_len=capture_width, bs_list=[1, 2])
+    dimensions = backend.capture_surface_dimensions()
+
+    assert dimensions["page_table"] == [2, expected_table_width]
+    assert dimensions["c4_page_table"] == [2, expected_table_width]
+    assert dimensions["c128_page_table"] == [2, expected_table_width]
+    assert dimensions["c4_indexer_page_table"] == [2, expected_table_width]
+    assert dimensions["c128_indices"] == [2, expected_c128_width]
+
+
+def test_dsv4_dual_capture_surfaces_coexist_with_exact_release_widths():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=256, table_bases=[0], max_len=512)
+    backend = ctx.attn_backend
+
+    backend.init_capture_graph_classes(
+        context_classes={"short": 32 * 1024, "wide": 1 << 20},
+        bs_list=[1, 2, 4, 8],
+    )
+    dimensions = backend.capture_surface_dimensions_by_context_class()
+    surface_bytes = backend.capture_surface_bytes_by_context_class()
+
+    assert list(backend.captures) == ["short", "wide"]
+    assert backend.captures["short"] is not backend.captures["wide"]
+    assert dimensions["short"]["page_table"] == [8, 128]
+    assert dimensions["wide"]["page_table"] == [8, 4096]
+    assert dimensions["short"]["c128_indices"] == [8, 256]
+    assert dimensions["wide"]["c128_indices"] == [8, 8192]
+    assert surface_bytes["wide"] > surface_bytes["short"] > 0
+    assert backend.captures["short"].core_metadata.page_table.data_ptr() != (
+        backend.captures["wide"].core_metadata.page_table.data_ptr()
+    )
+    assert backend.captures["short"].core_metadata.page_table.data_ptr() != (
+        ctx.page_table.data_ptr()
+    )
+
+
+def test_dsv4_dual_capture_reuses_graph_input_addresses_but_not_metadata_surfaces():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=256, table_bases=[0], max_len=512)
+    backend = ctx.attn_backend
+    backend.init_capture_graph_classes(
+        context_classes={"short": 256, "wide": 512},
+        bs_list=[1],
+    )
+    out_loc = torch.zeros(1, dtype=torch.int32)
+    positions = torch.zeros(1, dtype=torch.int32)
+
+    backend.bind_capture_graph_inputs(
+        input_ids=torch.zeros(1, dtype=torch.int32),
+        out_loc=out_loc,
+        positions=positions,
+    )
+
+    short_core = backend.captures["short"].core_metadata
+    wide_core = backend.captures["wide"].core_metadata
+    assert short_core.raw_out_loc.data_ptr() == wide_core.raw_out_loc.data_ptr()
+    assert short_core.positions.data_ptr() == wide_core.positions.data_ptr()
+    assert short_core.page_table.data_ptr() != wide_core.page_table.data_ptr()
+    assert backend.kvcache is ctx.kv_cache
+
+
+def test_dsv4_dual_capture_replay_selects_wide_without_clipping_real_width():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=256, table_bases=[0], max_len=512)
+    backend = ctx.attn_backend
+    backend.init_capture_graph_classes(
+        context_classes={"short": 256, "wide": 512},
+        bs_list=[1],
+    )
+    req = _req(0, 0, 257, cached_len=256)
+    batch = _prepare_decode_batch([req])
+    batch.graph_context_class = "wide"
+    raw = backend._build_raw_decode_graph_metadata(batch)
+    batch.attn_metadata = raw
+
+    backend.prepare_for_replay(batch)
+
+    assert backend.capture_context_class == "wide"
+    assert backend.capture is backend.captures["wide"]
+    assert backend.captures["wide"].core_metadata.max_seqlen_k == 257
+    assert backend.captures["wide"].core_metadata.req_seq_lens.tolist() == [257]
+    assert backend.captures["short"].core_metadata.req_seq_lens.tolist() == [1]
+
+
+def test_dsv4_graph_metadata_eligibility_uses_real_rows_before_padding():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=256, table_bases=[0, 512], max_len=512)
+    backend = ctx.attn_backend
+    real = _req(0, 0, 256, cached_len=255)
+    padding = _req(-1, 1, 511, cached_len=510)
+    batch = _prepare_decode_batch([real])
+    batch.padded_reqs = [real, padding]
+
+    assert backend.graph_replay_context_width(batch) == 256
+
+
+def test_dsv4_wide_transition_stays_eager_authoritative_across_ownership_state():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=256, table_bases=[0], max_len=512)
+    backend = ctx.attn_backend
+    req = _req(0, 0, 32_769, cached_len=32_768)
+    req.max_device_len = 32_897
+    req.output_len = 64
+    req.swa_evicted_seqlen = 32_257
+    req.cache_handle = SimpleNamespace(
+        get_dsv4_component_pages=lambda: SimpleNamespace()
+    )
+    batch = Batch(reqs=[req], phase="decode")
+    batch.padded_reqs = [req]
+
+    assert backend._graph_replay_materialized_seq_len_values(batch, 1) == [32_769]
+    assert backend.graph_replay_context_width(batch) == 32_769
+
+    # A radix miss, component-handle replacement, or independent SWA eviction
+    # can change physical ownership without changing eager's logical row width.
+    req.cached_len = 0
+    req.cache_handle = None
+    req.swa_evicted_seqlen = 32_513
+    assert backend.graph_replay_context_width(batch) == 32_769
+
+
+def test_dsv4_raw_graph_metadata_is_rejected_before_over_cap_replay():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=256, table_bases=[0, 512], max_len=512)
+    backend = ctx.attn_backend
+    backend.init_capture_graph(max_seq_len=256, bs_list=[2])
+    backend._prep_metadata_in_graph = True
+    padding = _req(-1, 1, 511, cached_len=510)
+
+    at_cap = _prepare_decode_batch([_req(0, 0, 256, cached_len=255)])
+    at_cap.padded_reqs = [*at_cap.reqs, padding]
+    assert backend._should_prepare_raw_decode_metadata_in_graph(at_cap)
+
+    over_cap = _prepare_decode_batch([_req(0, 0, 257, cached_len=256)])
+    over_cap.padded_reqs = [*over_cap.reqs, padding]
+    assert not backend._should_prepare_raw_decode_metadata_in_graph(over_cap)
+
+
 def test_dsv4_masked_compressed_store_ignores_negative_locs():
     cfg = _tiny_dsv4_config([4])
     ctx = _install_context(cfg, page_size=4, table_bases=[0], max_len=16)
@@ -1017,3 +1179,29 @@ def test_dsv4_raw_graph_metadata_copy_uses_source_swa_version_for_guard():
     raw.swa_ownership_version = current - 1
     with pytest.raises(RuntimeError, match="raw graph metadata ownership version is stale"):
         backend._copy_raw_decode_graph_metadata_for_replay(raw, rows=1)
+
+
+def test_dsv4_wide_transition_rejects_stale_swa_without_touching_short_surface():
+    cfg = _tiny_dsv4_config([4, 128])
+    ctx = _install_context(cfg, page_size=4, table_bases=[0], max_len=16)
+    backend = ctx.attn_backend
+    backend.init_capture_graph_classes(
+        context_classes={"short": 4, "wide": 16},
+        bs_list=[1],
+    )
+    short_version = backend.captures["short"].core_metadata.swa_ownership_version
+    req = _req(41, 0, 5, cached_len=4)
+    batch = _prepare_decode_batch([req])
+    batch.graph_context_class = "wide"
+    raw = backend._build_raw_decode_graph_metadata(batch)
+    raw.swa_ownership_version -= 1
+    batch.attn_metadata = raw
+
+    with pytest.raises(RuntimeError, match="raw graph metadata ownership version is stale"):
+        backend.prepare_for_replay(batch)
+
+    assert backend.capture_context_class == "wide"
+    assert (
+        backend.captures["short"].core_metadata.swa_ownership_version
+        == short_version
+    )

@@ -4,7 +4,7 @@ import gc
 import time
 import traceback
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Dict, Literal
 
 import torch
 from minisgl.core import Batch, Req, get_global_ctx
@@ -18,6 +18,20 @@ if TYPE_CHECKING:
     from minisgl.reasoning import ReasoningTokenIds
 
 logger = init_logger(__name__)
+
+GraphContextClassName = Literal["short", "wide"]
+
+
+@dataclass(frozen=True)
+class GraphContextClass:
+    name: GraphContextClassName
+    max_context_width: int
+
+
+@dataclass(frozen=True)
+class GraphKey:
+    padded_m: int
+    context_class: GraphContextClassName
 
 
 @dataclass
@@ -123,6 +137,7 @@ class GraphRunner:
         resolved_graph_bs: tuple[int, ...],
         graph_policy_report: dict[str, object],
         max_seq_len: int,
+        graph_context_cap: int,
         vocab_size: int,
         dummy_req: Req,
         capture_greedy_sample: bool = False,
@@ -139,6 +154,16 @@ class GraphRunner:
         self.capture_greedy_sample = capture_greedy_sample
         self.reasoning_token_ids = reasoning_token_ids
         self.exact_bs_only = False
+        self.model_context_limit = max(int(max_seq_len), 0)
+        self.graph_context_cap = min(
+            max(int(graph_context_cap), 1),
+            max(self.model_context_limit, 1),
+        )
+        self.context_classes = (
+            GraphContextClass("short", self.graph_context_cap),
+            GraphContextClass("wide", self.model_context_limit),
+        )
+        self._last_replay_context_class: GraphContextClassName | None = None
         self.capture_status = {
             "enabled": bool(cuda_graph_bs),
             "bucket_policy": graph_policy_report,
@@ -146,6 +171,14 @@ class GraphRunner:
             "requested_bs": list(self.graph_bs_list),
             "captured_bs": [],
             "capture_greedy_sample": bool(capture_greedy_sample),
+            "model_context_limit": int(self.model_context_limit),
+            "resolved_graph_context_cap": int(self.graph_context_cap),
+            "graph_context_classes": {
+                context_class.name: int(context_class.max_context_width)
+                for context_class in self.context_classes
+            },
+            "captured_surface_dimensions": {},
+            "captured_surface_bytes_by_context_class": {},
             "reasoning_sampler_contract_enabled": reasoning_token_ids is not None,
             "reasoning_state_buffer_bytes": 0,
             "capture_elapsed_s": None,
@@ -161,17 +194,29 @@ class GraphRunner:
             "capture_buffer_bytes": None,
             "capture_graph_pool_reuse_enabled": False,
             "capture_graph_pool_reuse_anchor_bs": None,
+            "capture_graph_pool_identity": None,
+            "graph_executable_count": 0,
             "post_kv_model_cache_prepare_stage": None,
             "post_kv_model_cache_prepare_report": {},
             "capture_by_batch_size": {},
+            "capture_by_graph_key": {},
+            "capture_by_context_class": {},
             "replay_count": 0,
             "replay_count_by_batch_size": {},
             "replay_count_by_padded_size": {},
+            "replay_count_by_graph_key": {},
+            "max_observed_width_by_context_class": {"short": 0, "wide": 0},
+            "short_to_wide_transition_count": 0,
             "greedy_sample_replay_count": 0,
             "greedy_sample_replay_count_by_batch_size": {},
             "replay_input_copy_bytes": 0,
             "eager_decode_count": 0,
             "eager_decode_count_by_batch_size": {},
+            "unsupported_m_eager_count": 0,
+            "unsupported_m_eager_count_by_batch_size": {},
+            "context_overflow_eager_count": 0,
+            "context_overflow_eager_count_by_batch_size": {},
+            "max_observed_rejected_model_context_length": 0,
             "error": None,
         }
         try:
@@ -188,20 +233,62 @@ class GraphRunner:
             raise
 
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
-        self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
+        self.graph_map: Dict[GraphKey, torch.cuda.CUDAGraph] = {}
         if self.max_graph_bs == 0:
             self._prepare_post_kv_model_caches(model, stage="post_kv_allocation_graph_disabled")
             return logger.info_rank0("CUDA graph is disabled.")
 
-        self.attn_backend.init_capture_graph(max_seq_len=max_seq_len, bs_list=self.graph_bs_list)
+        init_capture_graph_classes = getattr(
+            self.attn_backend,
+            "init_capture_graph_classes",
+            None,
+        )
+        if callable(init_capture_graph_classes):
+            init_capture_graph_classes(
+                context_classes={
+                    context_class.name: context_class.max_context_width
+                    for context_class in self.context_classes
+                },
+                bs_list=self.graph_bs_list,
+            )
+        else:
+            self.attn_backend.init_capture_graph(
+                max_seq_len=self.model_context_limit,
+                bs_list=self.graph_bs_list,
+            )
+        capture_surface_dimensions = getattr(
+            self.attn_backend,
+            "capture_surface_dimensions_by_context_class",
+            None,
+        )
+        if not callable(capture_surface_dimensions):
+            capture_surface_dimensions = getattr(
+                self.attn_backend,
+                "capture_surface_dimensions",
+                None,
+            )
+        if callable(capture_surface_dimensions):
+            self.capture_status["captured_surface_dimensions"] = (
+                capture_surface_dimensions()
+            )
+        capture_surface_bytes = getattr(
+            self.attn_backend,
+            "capture_surface_bytes_by_context_class",
+            None,
+        )
+        if callable(capture_surface_bytes):
+            self.capture_status["captured_surface_bytes_by_context_class"] = (
+                capture_surface_bytes()
+            )
 
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
 
         logger.info_rank0(
-            f"Capturing {len(self.graph_bs_list)} CUDA graph buckets "
-            f"through M={max(self.graph_bs_list)}."
+            f"Capturing {len(self.graph_bs_list) * len(self.context_classes)} CUDA graphs "
+            f"for {len(self.graph_bs_list)} M buckets through M={max(self.graph_bs_list)} "
+            "and context classes short/wide."
         )
         free_memory = get_free_memory(self.device)
         capture_start_free_memory = free_memory
@@ -264,16 +351,44 @@ class GraphRunner:
                 "CUDA graph requires a bound DSV4 in-graph metadata staging entrypoint."
             )
 
+        graph_keys = [
+            GraphKey(bs, context_class.name)
+            for context_class in self.context_classes
+            for bs in sorted(self.graph_bs_list, reverse=True)
+        ]
         pbar = tqdm(
-            sorted(self.graph_bs_list, reverse=True),
+            graph_keys,
             desc="Preparing for capturing CUDA graphs...",
-            unit="batch",
+            unit="graph",
             disable=not get_tp_info().is_primary(),  # disable for non-primary ranks
         )
         pool = None
-        for bs in pbar:
+        current_context_class: GraphContextClassName | None = None
+        class_start_free_memory = 0
+        class_start_s = 0.0
+        class_start_allocated = 0
+        class_start_reserved = 0
+        select_capture_graph_context = getattr(
+            self.attn_backend,
+            "select_capture_graph_context",
+            None,
+        )
+        for graph_key_index, graph_key in enumerate(pbar):
+            bs = graph_key.padded_m
+            context_class = graph_key.context_class
+            if context_class != current_context_class:
+                current_context_class = context_class
+                class_start_free_memory = get_free_memory(self.device)
+                class_start_s = time.perf_counter()
+                class_start_allocated = torch.cuda.memory_allocated(self.device)
+                class_start_reserved = torch.cuda.memory_reserved(self.device)
+            if callable(select_capture_graph_context):
+                select_capture_graph_context(context_class)
             free_memory = get_free_memory(self.device)
-            pbar.desc = f"Capturing graphs: bs = {bs:<3} | avail_mem = {mem_GB(free_memory)}"
+            pbar.desc = (
+                f"Capturing graphs: class = {context_class:<5} | bs = {bs:<3} "
+                f"| avail_mem = {mem_GB(free_memory)}"
+            )
             pbar.refresh()
             bs_start_free_memory = free_memory
             bs_start_s = time.perf_counter()
@@ -285,6 +400,8 @@ class GraphRunner:
             self.attn_backend.prepare_for_capture(batch)
             self.buffer.set_batch(batch)
             with get_global_ctx().forward_batch(batch):
+                torch.cuda.synchronize(self.device)
+                warmup_start_s = time.perf_counter()
                 if stage_capture_metadata is not None:
                     stage_capture_metadata(batch)
                 self.buffer.logits[:bs] = model.forward()
@@ -302,6 +419,9 @@ class GraphRunner:
                     self.buffer.next_tokens[:bs] = torch.argmax(self.buffer.logits[:bs], dim=-1).to(
                         torch.int32
                     )
+                torch.cuda.synchronize(self.device)
+                warmup_and_jit_elapsed_s = time.perf_counter() - warmup_start_s
+                graph_record_start_s = time.perf_counter()
                 with torch.cuda.graph(graph, pool=pool, stream=self.stream):
                     if stage_capture_metadata is not None:
                         stage_capture_metadata(batch)
@@ -320,19 +440,27 @@ class GraphRunner:
                         self.buffer.next_tokens[:bs] = torch.argmax(
                             self.buffer.logits[:bs], dim=-1
                         ).to(torch.int32)
+                torch.cuda.synchronize(self.device)
+                graph_record_elapsed_s = time.perf_counter() - graph_record_start_s
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
                 self.capture_status["capture_graph_pool_reuse_anchor_bs"] = int(bs)
+                self.capture_status["capture_graph_pool_identity"] = repr(pool)
             else:
                 self.capture_status["capture_graph_pool_reuse_enabled"] = True
-            self.graph_map[bs] = graph
-            self.capture_status["captured_bs"].append(bs)
+            self.graph_map[graph_key] = graph
+            if bs not in self.capture_status["captured_bs"]:
+                self.capture_status["captured_bs"].append(bs)
+            self.capture_status["graph_executable_count"] = len(self.graph_map)
             torch.cuda.synchronize(self.device)
             bs_end_free_memory = get_free_memory(self.device)
             bs_end_allocated = torch.cuda.memory_allocated(self.device)
             bs_end_reserved = torch.cuda.memory_reserved(self.device)
-            self.capture_status["capture_by_batch_size"][str(bs)] = {
+            key_name = self._graph_key_name(graph_key)
+            key_report = {
                 "elapsed_s": time.perf_counter() - bs_start_s,
+                "warmup_and_jit_elapsed_s": warmup_and_jit_elapsed_s,
+                "graph_record_elapsed_s": graph_record_elapsed_s,
                 "free_memory_before_bytes": int(bs_start_free_memory),
                 "free_memory_after_bytes": int(bs_end_free_memory),
                 "memory_delta_bytes": int(bs_start_free_memory - bs_end_free_memory),
@@ -343,6 +471,29 @@ class GraphRunner:
                 "memory_reserved_after_bytes": int(bs_end_reserved),
                 "memory_reserved_delta_bytes": int(bs_end_reserved - bs_start_reserved),
             }
+            self.capture_status["capture_by_graph_key"][key_name] = key_report
+            if context_class == "short":
+                self.capture_status["capture_by_batch_size"][str(bs)] = dict(key_report)
+
+            next_context_class = (
+                graph_keys[graph_key_index + 1].context_class
+                if graph_key_index + 1 < len(graph_keys)
+                else None
+            )
+            if next_context_class != context_class:
+                self.capture_status["capture_by_context_class"][context_class] = {
+                    "elapsed_s": time.perf_counter() - class_start_s,
+                    "free_memory_before_bytes": int(class_start_free_memory),
+                    "free_memory_after_bytes": int(bs_end_free_memory),
+                    "memory_delta_bytes": int(class_start_free_memory - bs_end_free_memory),
+                    "memory_allocated_before_bytes": int(class_start_allocated),
+                    "memory_allocated_after_bytes": int(bs_end_allocated),
+                    "memory_allocated_delta_bytes": int(bs_end_allocated - class_start_allocated),
+                    "memory_reserved_before_bytes": int(class_start_reserved),
+                    "memory_reserved_after_bytes": int(bs_end_reserved),
+                    "memory_reserved_delta_bytes": int(bs_end_reserved - class_start_reserved),
+                    "graph_executable_count": len(self.graph_bs_list),
+                }
 
         free_memory = get_free_memory(self.device)
         self.capture_status["capture_elapsed_s"] = time.perf_counter() - capture_start_s
@@ -371,15 +522,52 @@ class GraphRunner:
         self.capture_status["post_kv_model_cache_prepare_report"] = report
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
+        if not self._supports_cuda_graph_shape(batch):
+            return False
+        return self._context_class_for_batch(batch) is not None
+
+    def _supports_cuda_graph_shape(self, batch: Batch) -> bool:
         if not batch.is_decode or batch.size > self.max_graph_bs:
             return False
-        if self.exact_bs_only and batch.size not in self.graph_map:
+        if self.exact_bs_only and batch.size not in self.graph_bs_list:
             return False
         return True
 
-    def _increment_status_counter(self, name: str, key: int) -> None:
+    def _batch_context_width(self, batch: Batch) -> int:
+        get_width = getattr(
+            getattr(self, "attn_backend", None),
+            "graph_replay_context_width",
+            None,
+        )
+        if callable(get_width):
+            return max(int(get_width(batch)), 0)
+        return max(
+            (max(int(getattr(req, "device_len", 0)), 0) for req in batch.reqs),
+            default=0,
+        )
+
+    def _context_class_for_batch(self, batch: Batch) -> GraphContextClass | None:
+        width = self._batch_context_width(batch)
+        context_classes = getattr(self, "context_classes", None)
+        if context_classes is None:
+            short_cap = int(getattr(self, "graph_context_cap", 0))
+            model_limit = int(getattr(self, "model_context_limit", short_cap))
+            context_classes = (
+                GraphContextClass("short", short_cap),
+                GraphContextClass("wide", model_limit),
+            )
+        for context_class in context_classes:
+            if width <= int(context_class.max_context_width):
+                return context_class
+        return None
+
+    @staticmethod
+    def _graph_key_name(graph_key: GraphKey) -> str:
+        return f"M{int(graph_key.padded_m)}:{graph_key.context_class}"
+
+    def _increment_status_counter(self, name: str, key: int | str) -> None:
         counter = self.capture_status[name]
-        str_key = str(int(key))
+        str_key = str(key)
         counter[str_key] = int(counter.get(str_key, 0)) + 1
 
     def record_eager_decode(self, batch: Batch) -> None:
@@ -389,11 +577,47 @@ class GraphRunner:
             int(self.capture_status["eager_decode_count"]) + 1
         )
         self._increment_status_counter("eager_decode_count_by_batch_size", batch.size)
+        if not self._supports_cuda_graph_shape(batch):
+            if self.graph_bs_list:
+                self.capture_status["unsupported_m_eager_count"] = (
+                    int(self.capture_status["unsupported_m_eager_count"]) + 1
+                )
+                self._increment_status_counter(
+                    "unsupported_m_eager_count_by_batch_size",
+                    batch.size,
+                )
+            return
+        width = self._batch_context_width(batch)
+        context_class = self._context_class_for_batch(batch)
+        model_limit = int(getattr(self, "model_context_limit", 0))
+        if context_class is None:
+            self.capture_status["max_observed_rejected_model_context_length"] = max(
+                int(self.capture_status["max_observed_rejected_model_context_length"]),
+                int(width),
+            )
+            return
+        # A graph-supported M and an admitted model-width batch must never
+        # arrive here. Keep an explicit invariant counter for release reports.
+        self.capture_status["context_overflow_eager_count"] = (
+            int(self.capture_status["context_overflow_eager_count"]) + 1
+        )
+        self._increment_status_counter(
+            "context_overflow_eager_count_by_batch_size",
+            batch.size,
+        )
+        raise RuntimeError(
+            "Graph-supported decode was routed eager despite fitting a context class: "
+            f"batch_size={batch.size}, width={width}, model_context_limit={model_limit}, "
+            f"context_class={context_class.name}."
+        )
 
     def _replay_to_buffer(self, batch: Batch) -> None:
         assert self.can_use_cuda_graph(batch)
         copied_bytes = self.buffer.copy_from(batch)
-        g = self.graph_map[batch.padded_size]
+        context_class = self._context_class_for_batch(batch)
+        assert context_class is not None
+        graph_key = GraphKey(batch.padded_size, context_class.name)
+        g = self.graph_map[graph_key]
         self.attn_backend.prepare_for_replay(batch)
         try:
             g.replay()
@@ -408,6 +632,21 @@ class GraphRunner:
         )
         self._increment_status_counter("replay_count_by_batch_size", batch.size)
         self._increment_status_counter("replay_count_by_padded_size", batch.padded_size)
+        self._increment_status_counter(
+            "replay_count_by_graph_key",
+            self._graph_key_name(graph_key),
+        )
+        width = self._batch_context_width(batch)
+        max_widths = self.capture_status["max_observed_width_by_context_class"]
+        max_widths[context_class.name] = max(
+            int(max_widths.get(context_class.name, 0)),
+            int(width),
+        )
+        if self._last_replay_context_class == "short" and context_class.name == "wide":
+            self.capture_status["short_to_wide_transition_count"] = (
+                int(self.capture_status["short_to_wide_transition_count"]) + 1
+            )
+        self._last_replay_context_class = context_class.name
 
     def replay(self, batch: Batch) -> torch.Tensor:
         self._replay_to_buffer(batch)
@@ -427,6 +666,9 @@ class GraphRunner:
         return self.buffer.next_tokens[: batch.size]
 
     def pad_batch(self, batch: Batch) -> None:
+        context_class = self._context_class_for_batch(batch)
+        if context_class is not None:
+            batch.graph_context_class = context_class.name
         padded_size = (  # choose the first available batch size
             next(bs for bs in self.graph_bs_list if bs >= batch.size)
             if self.can_use_cuda_graph(batch)

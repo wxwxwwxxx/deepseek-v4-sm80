@@ -65,8 +65,46 @@ def test_deepseek_v4_release_defaults_make_llm_path_recipe_free(monkeypatch):
     assert DSV4_RELEASE.marlin_release_timing == "before_kv_alloc"
     assert DSV4_RELEASE.clear_allocated_page_scope == "component"
     assert DSV4_RELEASE.pynccl_max_buffer_bytes == 32 * 1024 * 1024
+    assert DSV4_RELEASE.cuda_graph_context_cap == 32 * 1024
     assert DSV4_RELEASE.release_raw_expert_weights is True
     assert DSV4_RELEASE.marlin_prebuild is True
+
+
+@pytest.mark.parametrize(
+    "model_context_limit,expected",
+    [
+        (1, 1),
+        (16_383, 16_383),
+        (16_384, 16_384),
+        (16_385, 16_385),
+        (32_767, 32_767),
+        (32_768, 32_768),
+        (32_769, 32_768),
+        (1_048_576, 32_768),
+    ],
+)
+def test_dsv4_graph_context_cap_never_changes_model_limit(
+    model_context_limit, expected
+):
+    assert (
+        engine_module.resolve_dsv4_graph_context_cap(model_context_limit)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "model_context_limit,expected",
+    [
+        (32_768, (32_768, 32_768)),
+        (32_769, (32_768, 32_769)),
+        (1_048_576, (32_768, 1_048_576)),
+    ],
+)
+def test_dsv4_graph_context_widths_are_exactly_short_and_model_limit(
+    model_context_limit,
+    expected,
+):
+    assert engine_module.resolve_dsv4_graph_context_widths(model_context_limit) == expected
 
 
 @pytest.mark.parametrize("page_size", [1, 64, 128, 512])

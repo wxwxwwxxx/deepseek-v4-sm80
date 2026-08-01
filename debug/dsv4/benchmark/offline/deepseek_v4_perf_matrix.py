@@ -2767,6 +2767,7 @@ def make_benchmark_llm_class():
             self.bench_initial_requests = 0
             self.bench_arrival_after_decode_batches = 0
             self.bench_peak_live_full_pages = 0
+            self._bench_profiled_decode_ms: set[int] = set()
             super().__init__(*args, **kwargs)
 
         def offline_receive_msg(self, blocking: bool = False) -> list[BaseBackendMsg]:
@@ -2901,6 +2902,19 @@ def make_benchmark_llm_class():
                 )
             graph_before = copy.deepcopy(getattr(self.engine.graph_runner, "capture_status", {}))
             torch.cuda.synchronize(self.device)
+            replay_memory_audit = (
+                os.environ.get("MINISGL_DSV4_REPLAY_MEMORY_AUDIT", "")
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
+                and bool(batch.is_decode)
+            )
+            replay_memory_before = None
+            if replay_memory_audit:
+                replay_memory_before = {
+                    "allocated_bytes": int(torch.cuda.memory_allocated(self.device)),
+                    "reserved_bytes": int(torch.cuda.memory_reserved(self.device)),
+                }
             long_prefill_timing = os.environ.get(
                 "MINISGL_DSV4_LONG_PREFILL_TIMING", ""
             ).strip().lower() in {"1", "true", "yes", "on"} and bool(batch.is_prefill)
@@ -2926,6 +2940,22 @@ def make_benchmark_llm_class():
                 }
                 committed_context = max((int(req.device_len) for req in batch.reqs), default=0)
                 profiler_checkpoint = committed_context in profiler_contexts
+            raw_profiler_decode_ms = os.environ.get(
+                "MINISGL_DSV4_DECODE_PROFILER_ACTIVE_M", ""
+            ).strip()
+            if raw_profiler_decode_ms and batch.is_decode:
+                profiler_decode_ms = {
+                    int(value.strip())
+                    for value in raw_profiler_decode_ms.split(",")
+                    if value.strip()
+                }
+                active_m = int(batch.size)
+                if (
+                    active_m in profiler_decode_ms
+                    and active_m not in self._bench_profiled_decode_ms
+                ):
+                    profiler_checkpoint = True
+                    self._bench_profiled_decode_ms.add(active_m)
             if profiler_checkpoint:
                 torch.cuda.profiler.start()
             with torch.cuda.nvtx.range(range_name):
@@ -2957,6 +2987,23 @@ def make_benchmark_llm_class():
                     "graph_eager_delta": eager_delta,
                 }
             )
+            if replay_memory_audit:
+                replay_memory_after = {
+                    "allocated_bytes": int(torch.cuda.memory_allocated(self.device)),
+                    "reserved_bytes": int(torch.cuda.memory_reserved(self.device)),
+                }
+                info["replay_memory"] = {
+                    "before": replay_memory_before,
+                    "after": replay_memory_after,
+                    "allocated_delta_bytes": (
+                        replay_memory_after["allocated_bytes"]
+                        - replay_memory_before["allocated_bytes"]
+                    ),
+                    "reserved_delta_bytes": (
+                        replay_memory_after["reserved_bytes"]
+                        - replay_memory_before["reserved_bytes"]
+                    ),
+                }
             if long_prefill_timing:
                 free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
                 allocated = int(torch.cuda.memory_allocated(self.device))
@@ -3939,7 +3986,12 @@ def _dict_counter_delta(
         value = int(after_counter.get(item_key, 0)) - int(before_counter.get(item_key, 0))
         if value:
             delta[str(item_key)] = value
-    return dict(sorted(delta.items(), key=lambda item: int(item[0])))
+
+    def sort_key(item: tuple[str, int]) -> tuple[int, int | str]:
+        key = item[0]
+        return (0, int(key)) if key.isdigit() else (1, key)
+
+    return dict(sorted(delta.items(), key=sort_key))
 
 
 def _replay_timing_bucket_delta(
@@ -4012,6 +4064,10 @@ def _graph_status_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
         "greedy_sample_replay_count",
         "replay_input_copy_bytes",
         "eager_decode_count",
+        "eager_decode_context_cap_overflow_count",
+        "unsupported_m_eager_count",
+        "context_overflow_eager_count",
+        "short_to_wide_transition_count",
     ):
         status[key] = _counter_delta(before, after, key)
     for key in (
@@ -4019,6 +4075,10 @@ def _graph_status_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
         "replay_count_by_padded_size",
         "greedy_sample_replay_count_by_batch_size",
         "eager_decode_count_by_batch_size",
+        "eager_decode_context_cap_overflow_count_by_batch_size",
+        "replay_count_by_graph_key",
+        "unsupported_m_eager_count_by_batch_size",
+        "context_overflow_eager_count_by_batch_size",
     ):
         status[key] = _dict_counter_delta(before, after, key)
     if "replay_timing" in after:

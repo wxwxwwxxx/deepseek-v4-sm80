@@ -16,6 +16,7 @@ class DSV4ReleaseConfig:
     marlin_release_timing: Literal["before_kv_alloc"]
     clear_allocated_page_scope: Literal["component"]
     pynccl_max_buffer_bytes: int
+    cuda_graph_context_cap: int
     release_raw_expert_weights: bool
     marlin_prebuild: bool
     marlin_capacity_credit: bool
@@ -25,6 +26,7 @@ DSV4_RELEASE = DSV4ReleaseConfig(
     marlin_release_timing="before_kv_alloc",
     clear_allocated_page_scope="component",
     pynccl_max_buffer_bytes=32 * 1024 * 1024,
+    cuda_graph_context_cap=32 * 1024,
     release_raw_expert_weights=True,
     marlin_prebuild=True,
     marlin_capacity_credit=True,

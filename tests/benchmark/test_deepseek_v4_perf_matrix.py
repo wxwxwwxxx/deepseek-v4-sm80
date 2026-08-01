@@ -332,3 +332,34 @@ def test_terminal_eos_accounting_depends_on_finish_reason(finish_reason, expecte
         )
         is expected
     )
+
+
+def test_graph_status_delta_includes_dual_width_route_counters():
+    before = {
+        "replay_count": 7,
+        "replay_count_by_graph_key": {"M1:short": 7},
+        "unsupported_m_eager_count": 1,
+        "unsupported_m_eager_count_by_batch_size": {"9": 1},
+        "context_overflow_eager_count": 0,
+        "context_overflow_eager_count_by_batch_size": {},
+        "short_to_wide_transition_count": 2,
+    }
+    after = {
+        "replay_count": 10,
+        "replay_count_by_graph_key": {"M1:short": 7, "M4:wide": 3},
+        "unsupported_m_eager_count": 2,
+        "unsupported_m_eager_count_by_batch_size": {"9": 1, "17": 1},
+        "context_overflow_eager_count": 0,
+        "context_overflow_eager_count_by_batch_size": {},
+        "short_to_wide_transition_count": 3,
+    }
+
+    delta = perf._graph_status_delta(before, after)
+
+    assert delta["replay_count"] == 3
+    assert delta["replay_count_by_graph_key"] == {"M4:wide": 3}
+    assert delta["unsupported_m_eager_count"] == 1
+    assert delta["unsupported_m_eager_count_by_batch_size"] == {"17": 1}
+    assert delta["context_overflow_eager_count"] == 0
+    assert delta["context_overflow_eager_count_by_batch_size"] == {}
+    assert delta["short_to_wide_transition_count"] == 1

@@ -53,6 +53,20 @@ _GENERIC_DEFAULT_MAX_EXTEND_TOKENS = 8192
 _DSV4_SM80_DEFAULT_MAX_EXTEND_TOKENS = 8192
 
 
+def resolve_dsv4_graph_context_cap(model_context_limit: int) -> int:
+    """Resolve the immutable short decode-graph width without changing the model."""
+
+    model_limit = max(int(model_context_limit), 1)
+    return min(int(DSV4_RELEASE.cuda_graph_context_cap), model_limit)
+
+
+def resolve_dsv4_graph_context_widths(model_context_limit: int) -> tuple[int, int]:
+    """Return exactly the short (32K) and wide (model-limit) graph classes."""
+
+    model_limit = max(int(model_context_limit), 1)
+    return resolve_dsv4_graph_context_cap(model_limit), model_limit
+
+
 def validate_dsv4_device_capability(capability: tuple[int, int]) -> bool:
     """Validate the minimum device contract and report whether it is qualified."""
 
@@ -252,6 +266,7 @@ class Engine:
             resolved_graph_bs=self.cuda_graph_policy.resolved_bs,
             graph_policy_report=self.cuda_graph_policy.to_report(),
             max_seq_len=aligned_max_seq_len,
+            graph_context_cap=resolve_dsv4_graph_context_cap(aligned_max_seq_len),
             vocab_size=config.model_config.vocab_size,
             dummy_req=self.dummy_req,
             capture_greedy_sample=config.cuda_graph_capture_greedy_sample,
@@ -423,6 +438,13 @@ class Engine:
             "weights_and_transformed_cache_bytes": int(model_memory),
             "request_page_table_bytes": int(request_table_bytes),
             "request_page_table_width": int(requested_width),
+            "resolved_graph_context_cap": resolve_dsv4_graph_context_cap(
+                int(config.max_seq_len)
+            ),
+            "resolved_graph_context_classes": {
+                "short": resolve_dsv4_graph_context_widths(int(config.max_seq_len))[0],
+                "wide": resolve_dsv4_graph_context_widths(int(config.max_seq_len))[1],
+            },
             "non_graph_activation_allowance_bytes": int(non_graph_activation_allowance_bytes),
             "unrequested_device_headroom_bytes": int(old_free_memory - requested_device_budget),
             "graph_memory": self.graph_memory_estimate.to_report(),
@@ -462,9 +484,11 @@ class Engine:
             estimate = empty_graph_memory_estimate(graph_bs)
             self.graph_memory_estimate_elapsed_s = time.perf_counter() - started
             return estimate
+        graph_context_widths = resolve_dsv4_graph_context_widths(int(config.max_seq_len))
         estimate = estimate_dsv4_sm80_graph_memory(
             graph_bs,
-            metadata_width=int(config.max_seq_len),
+            metadata_width=max(graph_context_widths),
+            metadata_widths=graph_context_widths,
             page_size=int(config.page_size),
             capture_greedy_sample=bool(config.cuda_graph_capture_greedy_sample),
             reasoning_sampler_contract_enabled=(config.reasoning_sampler_contract_enabled),
@@ -486,7 +510,8 @@ class Engine:
             "Reserving CUDA graph memory before KV planning: "
             f"estimate={mem_GB(estimate.estimate_bytes)}, "
             f"safety_margin={mem_GB(estimate.safety_margin_bytes)}, "
-            f"buckets={list(estimate.graph_bs)}, metadata_width={estimate.metadata_width}"
+            f"buckets={list(estimate.graph_bs)}, "
+            f"metadata_widths={list(estimate.metadata_widths)}"
         )
         self.graph_memory_estimate_elapsed_s = time.perf_counter() - started
         return estimate
@@ -865,6 +890,7 @@ def _adjust_config(config: EngineConfig):
             "Resolved DeepSeek V4 runtime parameters: "
             f"page_size={config.page_size}, max_running_req={config.max_running_req}, "
             f"cuda_graph_max_bs={config.cuda_graph_max_bs}, "
+            "cuda_graph_context_classes=(short=32768, wide=model_context_limit), "
             f"max_prefill_tokens={config.max_extend_tokens}, communication={communication}."
         )
         reasoning_contract_enabled = bool(
